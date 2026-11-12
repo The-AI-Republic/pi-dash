@@ -12,9 +12,6 @@ from rest_framework.exceptions import AuthenticationFailed
 
 # Module imports
 from pi_dash.db.models import APIToken
-from pi_dash.runner.models import MachineToken
-from pi_dash.runner.services.permissions import is_workspace_member
-from pi_dash.runner.services.tokens import hash_token
 
 
 class APIKeyAuthentication(authentication.BaseAuthentication):
@@ -45,21 +42,15 @@ class APIKeyAuthentication(authentication.BaseAuthentication):
         return (api_token.user, api_token.token)
 
     def validate_machine_token(self, request, token):
-        token_hash = hash_token(token)
+        # Same checks as the runner-plane auth (revoked, 60-day idle expiry,
+        # revoked machine, membership), renewing the expiry on use; this
+        # surface keeps its generic message.
+        from pi_dash.runner.authentication import resolve_machine_token
+
         try:
-            machine_token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(
-                token_hash=token_hash
-            )
-        except MachineToken.DoesNotExist:
+            machine_token = resolve_machine_token(token)
+        except AuthenticationFailed:
             raise AuthenticationFailed("Given API token is not valid")
-        if machine_token.revoked_at is not None:
-            raise AuthenticationFailed("Given API token is not valid")
-        if machine_token.dev_machine_id is not None and machine_token.dev_machine.revoked_at is not None:
-            raise AuthenticationFailed("Given API token is not valid")
-        if not is_workspace_member(machine_token.user, machine_token.workspace_id):
-            machine_token.revoke()
-            raise AuthenticationFailed("Given API token is not valid")
-        MachineToken.objects.filter(pk=machine_token.pk).update(last_used_at=timezone.now())
         request.auth_machine_token = machine_token
         return (machine_token.user, token)
 

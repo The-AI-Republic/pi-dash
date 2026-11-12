@@ -199,28 +199,37 @@ pub async fn require_workspace_admin(
     method: &str,
     path: &str,
 ) -> Result<(), Denial> {
-    let membership: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL
-           AND w.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{workspace_members, workspaces};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // The gate read needs the role row inside a live workspace (the
+    // decorator's `workspace__slug` traversal): both tables live.
+    let membership: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let gate = gates::gate_for(method, path).ok_or(Denial::ServerError)?;
     let facts = AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
         is_workspace_member: membership.is_some(),
-        has_allowed_workspace_role: matches!(membership, Some((20,))),
+        has_allowed_workspace_role: matches!(membership, Some(20)),
         is_creator: false,
         has_allowed_project_role: false,
         is_project_member: false,
-        is_workspace_admin: matches!(membership, Some((20,))),
+        is_workspace_admin: matches!(membership, Some(20)),
     };
     match gates::decide_gate(&gate.gate, &gates::tenant_context(slug), &facts) {
         gates::GateOutcome::Allow => Ok(()),
@@ -231,7 +240,8 @@ pub async fn require_workspace_admin(
 /// `Workspace.objects.get(slug=slug)` (`webhook/base.py:23`): the live
 /// row's id, or the 404 branch when the slug names nothing.
 pub async fn workspace_id_or_404(pool: &PgPool, slug: &str) -> Result<Uuid, Denial> {
-    pidash_db::app_integrations::fetch_workspace_id_by_slug(pool, slug)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::NotFound)

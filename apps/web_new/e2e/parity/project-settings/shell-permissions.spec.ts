@@ -13,9 +13,10 @@
 // Observed behavior notes (the inventory rows carry them at update
 // time): the sidebar groups tabs under General, Features, Work structure
 // and Execution and hides whole groups a role cannot use (no disabled
-// placeholders); the current tab carries the selected highlight on
-// slash-form addresses, while the equivalent no-slash deep link renders
-// with nothing marked (bug NEWFRONT-396); narrow screens swap the fixed
+// placeholders); the current tab carries the selected highlight (on the
+// old app only on slash-form addresses — the equivalent no-slash deep
+// link renders with nothing marked, bug NEWFRONT-396, fixed on web_new);
+// narrow screens swap the fixed
 // sidebar for a drawer trigger; the bare settings/projects path forwards
 // to the first joined project while a member of nothing sees a guidance
 // view whose action opens creation; unknown ids render the "Project not
@@ -123,8 +124,9 @@ test(
 
     await test.step("admin sees all four groups with every tab", async () => {
       // Slash-form address, the form the sidebar links themselves use;
-      // the no-slash form renders identically but marks nothing active
-      // (bug: NEWFRONT-396, pinned by the next scenario).
+      // the no-slash form renders identically and, on web_new, marks the
+      // tab too (on the old app it marks nothing — bug NEWFRONT-396,
+      // pinned by the next scenario).
       await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, "/");
       expect(await driver.settingsShellGroups()).toEqual(["General", "Features", "Work structure", "Execution"]);
       expect(await driver.settingsShellItems()).toEqual(driver.target === "web_new" ? ADMIN_ITEMS_NEW : ADMIN_ITEMS);
@@ -159,19 +161,26 @@ test(
 );
 
 test(
-  specTitle(["PSET-001"], "bug: NEWFRONT-396 no-slash deep links render with no sidebar highlight"),
+  specTitle(
+    ["PSET-001"],
+    "no-slash deep links highlight the tab on web_new, render unmarked on the old app (bug NEWFRONT-396)"
+  ),
   { tag: specTags(["PSET-001"]) },
   async ({ driver, seed }) => {
     const session = await signInSession(seed.email, seed.password);
     await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
-    // The tabs render at no-slash addresses (see PSET-003) but the
-    // sidebar marks nothing active: the old active check requires the
-    // trailing slash. Intended: the current tab highlights in both forms.
-    for (const href of ["", "/members"]) {
+    // The tabs render at no-slash addresses (see PSET-003). The old
+    // active check requires the trailing slash, so the old app marks
+    // nothing; web_new highlights the current tab in both slash forms
+    // (NEWFRONT-396).
+    for (const [href, label] of [
+      ["", "General"],
+      ["/members", "Members"],
+    ] as const) {
       await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, href);
       expect(await driver.settingsShellDeniedVisible()).toBe(false);
       expect(await driver.settingsShellRestrictionVisible()).toBe(false);
-      expect(await driver.settingsShellActiveItem()).toBe(null);
+      expect(await driver.settingsShellActiveItem()).toBe(driver.target === "web_new" ? label : null);
     }
     const facts = await serverProjects(seed.workspaceSlug, session);
     expect(facts.some((row) => row.id === seed.projectId)).toBe(true);

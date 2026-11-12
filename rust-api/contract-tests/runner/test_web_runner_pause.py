@@ -292,3 +292,8 @@ def test_executor_options_report_paused_local_runner(
     options = {row["kind"]: row for row in response.json()["agent_executor_options"]}
     assert options["local_runner"]["available"] is False
     assert options["local_runner"]["reason_code"] == "local_runner_paused"
+    # Only local_runner is selectable (built_engine_as_runner §6); the
+    # legacy executors are still returned, marked deprecated.
+    assert options["cloud_agent"]["deprecated"] is True
+    assert options["local_runner"]["deprecated"] is False
+    assert options["managed_runner"]["deprecated"] is True

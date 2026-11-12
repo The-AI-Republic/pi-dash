@@ -81,8 +81,7 @@
 //!   it in its own unit ("row-locked read", PIDASHCONV-592); it is not
 //!   one of this issue's five units.
 //! * Machine-delete / runner-delete flows — handlers-D (PIDASHCONV-593)
-//!   reuses [`scoped_machine_read_sql`] + the M4 probes (the delete
-//!   read is text-identical to `_scoped_machine`'s unlocked read).
+//!   reads through [`machine_gate`] + the M4 probe functions (SeaORM).
 //! * Response bodies (`workspace is required`, `not found`, …) —
 //!   handlers-B/C/D own every status + body; the guard→error mapping
 //!   is documented on each builder but no body const lives here.
@@ -169,9 +168,15 @@
 //! only `strip()` parity in [`request_workspace_id`]).
 
 use pidash_compat::py::py_strip;
-use pidash_db::app_project::models::project as project_cols;
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
+use pidash_db::entity::{
+    agent_run, dev_machine, machine_session, machine_token, pod, projects, runner,
+    runner_live_state, workspace_members, workspaces,
+};
+use pidash_db::runner_enroll::columns::{dev_machine as dm_cols, pod as pod_cols};
+use sea_orm::sea_query::{Expr, Func, Query};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType,
+    QueryFilter, QueryOrder, QuerySelect, RelationDef, RelationTrait, Select,
 };
 use uuid::Uuid;
 
@@ -224,143 +229,17 @@ fn qualified(table: &str, columns: &[&str]) -> String {
 // M1. Control-online subquery
 // ---------------------------------------------------------------------------
 
-/// M1 — control-online `Exists` fragment (`runners.py:52-59`), shared
-/// by the M3 list and the M5 serialize (both bind it as `$12`/`$13`).
-///
-/// `Exists(MachineSession where dev_machine = OuterRef(pk), active,
-/// last_seen_at >= cutoff)`: Django aliases the table `U0`, renders
-/// the `OuterRef("pk")` in parens, binds the `SELECT 1` constant
-/// (`one`) and the cutoff (`cutoff`), and appends `LIMIT 1`.
-pub fn control_online_fragment(one: usize, cutoff: usize) -> String {
-    format!(
-        "EXISTS(SELECT ${one} AS \"a\" FROM \"{MACHINE_SESSION_TABLE}\" U0 \
-         WHERE (U0.\"dev_machine_id\" = (\"dev_machine\".\"id\") \
-         AND U0.\"last_seen_at\" >= ${cutoff} AND U0.\"revoked_at\" IS NULL) \
-         LIMIT 1) AS \"control_online\""
-    )
-}
-
 // ---------------------------------------------------------------------------
 // M2/M3. Machine list + annotations
 // ---------------------------------------------------------------------------
-
-/// M3 — dev-machine list (`runners.py:73-125`).
-///
-/// `DevMachine.objects.filter(Q(id__in=M2a) | Q(id__in=M2b), owner,
-/// visibility=PRIVATE)` annotated with `runner_count` /
-/// `online_runner_count` / `last_heartbeat_at` (all `FILTER`ed on the
-/// workspace+owner+private predicate; the online count additionally
-/// requires `revoked_at IS NULL` + `status IN ('online','busy')`) and
-/// [`control_online_fragment`], ordered `-last_seen_at, -created_at`
-/// (NULL `last_seen_at` sorts FIRST under `DESC` — the Postgres
-/// default, ported as the bare `ORDER BY`, not spelled out).
-///
-/// The M2 id probes nest as `IN`-subqueries (QUIRK above): the runner
-/// leg filters `workspace, owner, visibility=0, dev_machine NOT NULL`,
-/// the token leg `workspace, user, dev_machine NOT NULL`.
-///
-/// Binds `$1`-`$20`: three annotation triples
-/// (`owner, visibility, workspace`; the online triple carries
-/// `online=$7, busy=$8`), the `Exists` constant (`$12`) + cutoff
-/// (`$13`), the M2a triple (`$14`-`$16`), the M2b pair (`$17`-`$18`),
-/// the outer `owner` (`$19`) + `visibility` (`$20`).
-///
-/// Guards (handlers map these): missing `?workspace=` → 400
-/// `workspace is required`; non-member → 403 `forbidden`.
-pub fn machine_list_sql() -> String {
-    let exists = control_online_fragment(12, 13);
-    format!(
-        "SELECT {}, \
-         COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $1 \
-         AND \"runner\".\"visibility\" = $2 AND \"runner\".\"workspace_id\" = $3)) AS \"runner_count\", \
-         COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $4 \
-         AND \"runner\".\"visibility\" = $5 AND \"runner\".\"workspace_id\" = $6 \
-         AND \"runner\".\"revoked_at\" IS NULL AND \"runner\".\"status\" IN ($7, $8))) AS \"online_runner_count\", \
-         MAX(\"runner\".\"last_heartbeat_at\") FILTER (WHERE (\"runner\".\"owner_id\" = $9 \
-         AND \"runner\".\"visibility\" = $10 AND \"runner\".\"workspace_id\" = $11)) AS \"last_heartbeat_at\", \
-         {exists} \
-         FROM \"dev_machine\" LEFT OUTER JOIN \"runner\" ON (\"dev_machine\".\"id\" = \"runner\".\"dev_machine_id\") \
-         WHERE ((\"dev_machine\".\"id\" IN (SELECT DISTINCT U0.\"dev_machine_id\" FROM \"runner\" U0 \
-         WHERE (U0.\"dev_machine_id\" IS NOT NULL AND U0.\"owner_id\" = $14 \
-         AND U0.\"visibility\" = $15 AND U0.\"workspace_id\" = $16)) \
-         OR \"dev_machine\".\"id\" IN (SELECT DISTINCT U0.\"dev_machine_id\" FROM \"machine_token\" U0 \
-         WHERE (U0.\"dev_machine_id\" IS NOT NULL AND U0.\"user_id\" = $17 \
-         AND U0.\"workspace_id\" = $18))) \
-         AND \"dev_machine\".\"owner_id\" = $19 AND \"dev_machine\".\"visibility\" = $20) \
-         GROUP BY \"dev_machine\".\"id\" \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // M4. Scope probes
 // ---------------------------------------------------------------------------
 
-/// M4a — machine-scope runner probe (`runners.py:136-141`).
-///
-/// `Runner.objects.filter(workspace, owner, visibility=PRIVATE,
-/// dev_machine=machine).exists()`: `SELECT $1 AS "a" … LIMIT 1` with
-/// ordering cleared. `$1` is the constant `1`, then `$2` machine id,
-/// `$3` owner id, `$4` visibility (`0`), `$5` workspace id (Q-sorted).
-pub fn machine_scope_runner_probe_sql() -> String {
-    "SELECT $1 AS \"a\" FROM \"runner\" \
-     WHERE (\"runner\".\"dev_machine_id\" = $2 AND \"runner\".\"owner_id\" = $3 \
-     AND \"runner\".\"visibility\" = $4 AND \"runner\".\"workspace_id\" = $5) \
-     LIMIT 1"
-        .to_string()
-}
-
-/// M4b — machine-scope token probe (`runners.py:142-146`).
-///
-/// `MachineToken.objects.filter(workspace, user,
-/// dev_machine=machine).exists()`. `$1` is the constant `1`, then
-/// `$2` machine id, `$3` user id, `$4` workspace id (Q-sorted).
-pub fn machine_scope_token_probe_sql() -> String {
-    format!(
-        "SELECT $1 AS \"a\" FROM \"{}\" \
-         WHERE (\"{}\".\"dev_machine_id\" = $2 \
-         AND \"{}\".\"user_id\" = $3 \
-         AND \"{}\".\"workspace_id\" = $4) \
-         LIMIT 1",
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // M5. Single-machine serialize
 // ---------------------------------------------------------------------------
-
-/// M5 — single-machine serialize re-read (`runners.py:150-170`).
-///
-/// The M3 annotations over `DevMachine.objects.filter(pk)` +
-/// `.first()` (keeps `Meta.ordering`, adds `LIMIT 1`). Binds `$1`-`$13`
-/// exactly as [`machine_list_sql`]; `$14` is the machine pk.
-///
-/// When the row vanished, the view serializes the UNANNOTATED
-/// instance (QUIRK-m5-fallback) — handlers own that branch.
-pub fn machine_serialize_sql() -> String {
-    let exists = control_online_fragment(12, 13);
-    format!(
-        "SELECT {}, \
-         COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $1 \
-         AND \"runner\".\"visibility\" = $2 AND \"runner\".\"workspace_id\" = $3)) AS \"runner_count\", \
-         COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $4 \
-         AND \"runner\".\"visibility\" = $5 AND \"runner\".\"workspace_id\" = $6 \
-         AND \"runner\".\"revoked_at\" IS NULL AND \"runner\".\"status\" IN ($7, $8))) AS \"online_runner_count\", \
-         MAX(\"runner\".\"last_heartbeat_at\") FILTER (WHERE (\"runner\".\"owner_id\" = $9 \
-         AND \"runner\".\"visibility\" = $10 AND \"runner\".\"workspace_id\" = $11)) AS \"last_heartbeat_at\", \
-         {exists} \
-         FROM \"dev_machine\" LEFT OUTER JOIN \"runner\" ON (\"dev_machine\".\"id\" = \"runner\".\"dev_machine_id\") \
-         WHERE \"dev_machine\".\"id\" = $14 \
-         GROUP BY \"dev_machine\".\"id\" \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC LIMIT 1",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // M6/M7. Machine revoke/rotate writes
@@ -406,107 +285,9 @@ pub fn machine_revoke_sql() -> String {
 // moved to `crate::domain::tokens::revoke_tokens_for_dev_machine`
 // (PIDASHCONV-1520), whose test carries the pin.
 
-/// M6 — locked active-runner list (`runners.py:199`).
-///
-/// `list(Runner.objects.select_for_update().filter(dev_machine,
-/// revoked_at__isnull=True))`: full rows, `Meta.ordering` kept, NO
-/// `LIMIT` (a list, not `.first()`), `FOR UPDATE`. `$1` = machine id.
-/// Handlers then emit revoke frames BEFORE the per-runner cascade
-/// (services-C) — order pinned there, not here.
-pub fn machine_runners_locked_list_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" \
-         WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-         ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-         FOR UPDATE",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// M7 — active-runner id list (`runners.py:239-241`).
-///
-/// `Runner.objects.filter(dev_machine,
-/// revoked_at__isnull=True).values_list("pk", flat=True)`:
-/// bare ids, `Meta.ordering` kept, no `LIMIT`. `$1` = machine id.
-/// Per id the handler emits a revoke frame + closes the session;
-/// the runner ROWS are untouched (QUIRK-rotate-keeps-runners).
-///
-/// Guards: revoked machine → 409 `dev_machine_revoked` (checked
-/// BEFORE this read, `:231-235`).
-pub fn machine_runner_ids_sql() -> String {
-    "SELECT \"runner\".\"id\" FROM \"runner\" \
-     WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-     ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC"
-        .to_string()
-}
-
 // ---------------------------------------------------------------------------
 // R1. Runner list
 // ---------------------------------------------------------------------------
-
-/// R1 — runner list (`runners.py:302-333`).
-///
-/// `Runner.objects.filter(workspace_id)` +
-/// `runner_visible_to_user_q` (`owner_id = $2 AND visibility = $3`;
-/// the anonymous `pk__isnull` branch never reaches this SQL — the view
-/// is `IsAuthenticated`, and the kernel denies anon by fact) +
-/// `select_related("pod__project", "dev_machine")` +
-/// `order_by("-updated_at")`, then in call order: `?pod=` equality
-/// (`pod`), the bundled exclusion (`exclude_bundled`, rendered as
-/// `NOT (provisioning = $N)`), `?project=` equality on the joined pod
-/// (`project`, reusing the select_related join — no new `JOIN`).
-///
-/// Flags: `pod` = `?pod=<uuid>` present (no existence check — an
-/// unknown pod yields `[]`); `exclude_bundled` = `!`[`include_bundled`]
-/// of the raw query value; `project` = `?project=<uuid>` present.
-/// `$1`-`$3` are always `workspace, owner, visibility`; each active
-/// filter appends the next `$N` in call order.
-///
-/// Join order follows QUIRK-join-order (`project` → `pod, projects,
-/// dev_machine`; `pod` without `project` → `pod, dev_machine,
-/// projects`; otherwise `dev_machine, pod, projects`); the select
-/// list never moves (runner, dev_machine, pod, projects).
-///
-/// Guards: missing `?workspace=` → 400; non-member → 403.
-pub fn runner_list_sql(pod: bool, exclude_bundled: bool, project: bool) -> String {
-    let joins = if project {
-        "INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-         INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-         LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\")"
-    } else if pod {
-        "INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-         LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-         INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\")"
-    } else {
-        "LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-         INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-         INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\")"
-    };
-    let mut where_ = String::from(
-        "\"runner\".\"workspace_id\" = $1 AND \"runner\".\"owner_id\" = $2 \
-         AND \"runner\".\"visibility\" = $3",
-    );
-    let mut next = 4;
-    if pod {
-        where_.push_str(&format!(" AND \"runner\".\"pod_id\" = ${next}"));
-        next += 1;
-    }
-    if exclude_bundled {
-        where_.push_str(&format!(" AND NOT (\"runner\".\"provisioning\" = ${next})"));
-        next += 1;
-    }
-    if project {
-        where_.push_str(&format!(" AND \"pod\".\"project_id\" = ${next}"));
-    }
-    format!(
-        "SELECT {}, {}, {}, {} FROM \"runner\" {joins} \
-         WHERE ({where_}) ORDER BY \"runner\".\"updated_at\" DESC",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-        qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-        qualified(project_cols::TABLE, project_cols::COLUMNS),
-    )
-}
 
 /// R1 — the `include_bundled` flag (`runners.py:326`).
 ///
@@ -520,27 +301,6 @@ pub fn include_bundled(raw: Option<&str>) -> bool {
 // ---------------------------------------------------------------------------
 // R2. Runner detail read + _get_runner tri-state
 // ---------------------------------------------------------------------------
-
-/// R2 — runner detail read (`runners.py:342-345`, `_get_runner`).
-///
-/// `Runner.objects.select_related("pod__project",
-/// "dev_machine").filter(pk).first()`: the R1 select/join shape
-/// without the project join reorder, single-`WHERE` (no parens),
-/// `Meta.ordering` + `LIMIT 1`. `$1` = runner id.
-pub fn runner_detail_sql() -> String {
-    format!(
-        "SELECT {}, {}, {}, {} FROM \"runner\" \
-         LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-         INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-         INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-         WHERE \"runner\".\"id\" = $1 \
-         ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-        qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-        qualified(project_cols::TABLE, project_cols::COLUMNS),
-    )
-}
 
 /// `_get_runner` outcome (`runners.py:342-352`): `None` (missing row
 /// OR row the caller may not view — existence is not leaked) → 404
@@ -599,27 +359,6 @@ pub fn pod_locked_read_sql() -> String {
     )
 }
 
-/// R3 — busy-guard probe (`runners.py:409-412`).
-///
-/// Runs ONLY for a real move ([`is_real_move`]).
-/// `AgentRun.objects.filter(Q(runner=runner) | Q(pinned_runner=runner),
-/// status__in=NON_TERMINAL_STATUSES).exists()`: `$1` is the constant
-/// `1`, the runner id binds TWICE (`$2`/`$3`, one per `OR` leg), then
-/// the eight [`NON_TERMINAL_STATUSES`] as `$4`-`$11` in tuple order.
-///
-/// True → 409 `runner_busy` (`runner has an in-flight or queued run;
-/// wait for it to finish or cancel it first`). Unpinned queued runs
-/// in the pod do NOT block (no runner/pinned link to this runner).
-pub fn runner_busy_guard_sql() -> String {
-    format!(
-        "SELECT $1 AS \"a\" FROM \"{AGENT_RUN_TABLE}\" \
-         WHERE ((\"{AGENT_RUN_TABLE}\".\"runner_id\" = $2 \
-         OR \"{AGENT_RUN_TABLE}\".\"pinned_runner_id\" = $3) \
-         AND \"{AGENT_RUN_TABLE}\".\"status\" IN ($4, $5, $6, $7, $8, $9, $10, $11)) \
-         LIMIT 1"
-    )
-}
-
 /// R3 — the real-move check (`runners.py:409`): only re-sending a
 /// DIFFERENT pod id runs the busy-guard; re-sending the current pod
 /// is a no-op (still saved, still 200).
@@ -634,34 +373,6 @@ pub fn is_real_move(new_pod_id: &Uuid, current_pod_id: &Uuid) -> bool {
 /// QUIRK-set-ordered-update-fields); [`runner_patch_sql`] emits all
 /// three variants in Django model order.
 pub const RUNNER_PATCH_UPDATABLE: &[&str] = &["name", "pod"];
-
-/// R3 — patch write (`runners.py:422, 424`).
-///
-/// `runner.save(update_fields=set)` in model order (`pod_id`, `name`,
-/// `updated_at`): `with_pod && with_name` → `$1` pod, `$2` name,
-/// `$3` now, `$4` id; pod-only → `$1` pod, `$2` now, `$3` id;
-/// name-only → `$1` name, `$2` now, `$3` id. The `(false, false)`
-/// shape (`updated_at`-only) is what Django would emit for
-/// `update_fields=["updated_at"]`; the view never calls it (no save
-/// runs when the body carries neither key).
-pub fn runner_patch_sql(with_pod: bool, with_name: bool) -> String {
-    let mut sets = Vec::with_capacity(3);
-    let mut next = 1;
-    if with_pod {
-        sets.push(format!("\"pod_id\" = ${next}"));
-        next += 1;
-    }
-    if with_name {
-        sets.push(format!("\"name\" = ${next}"));
-        next += 1;
-    }
-    sets.push(format!("\"updated_at\" = ${next}"));
-    next += 1;
-    format!(
-        "UPDATE \"runner\" SET {} WHERE \"runner\".\"id\" = ${next}",
-        sets.join(", ")
-    )
-}
 
 /// R3 — rename normalization (`runners.py:373`):
 /// `(request.data.get("name") or "").strip()`. Empty result → 400
@@ -690,25 +401,734 @@ pub fn request_workspace_id(data_workspace: Option<&str>, query_workspace: Optio
     py_strip(picked).to_string()
 }
 
-/// `_scoped_machine` read (`machine_commands.py:63-73`).
-///
-/// `DevMachine.objects.filter(pk).first()`: full row, `Meta.ordering`,
-/// `LIMIT 1` — UNLOCKED (unlike [`machine_locked_read_sql`]). `$1` =
-/// machine id. Miss or out-of-scope (M4 probes) → 404 `not found`;
-/// `revoked_at` set → 409 `dev_machine_revoked`. The delete endpoint
-/// (`runners.py:281`) runs this same read before its service call.
-pub fn scoped_machine_read_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC \
-         LIMIT 1",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
+// ---------------------------------------------------------------------------
+// SeaORM gate reads (the delete / machine-command gates)
+// ---------------------------------------------------------------------------
+
+/// The runner facts the delete gate reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct RunnerGateRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub visibility: i16,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The [`runner_detail_sql`] read reduced to the gate columns: the
+/// `select_related("pod__project")` INNER JOINs stay (they drop a runner
+/// whose pod or project row is gone), as do `Meta.ordering` and `LIMIT 1`.
+pub fn runner_gate_query(runner_id: Uuid) -> Select<runner::Entity> {
+    // The entities omit runner -> pod (see entity/mod.rs).
+    let to_pod: RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::Visibility,
+            runner::Column::RevokedAt,
+        ])
+        .join(JoinType::InnerJoin, to_pod)
+        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+}
+
+pub async fn runner_gate(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Option<RunnerGateRow>, DbErr> {
+    runner_gate_query(runner_id)
+        .into_model::<RunnerGateRow>()
+        .one(db)
+        .await
+}
+
+/// The machine facts the scope gates read.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct MachineGateRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub visibility: i16,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `_scoped_machine`'s read (`machine_commands.py:63-73`,
+/// `DevMachine.objects.filter(pk).first()`) reduced to the gate columns:
+/// unlocked, `Meta.ordering`, `LIMIT 1`.
+pub async fn machine_gate(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Option<MachineGateRow>, DbErr> {
+    dev_machine::Entity::find()
+        .select_only()
+        .columns([
+            dev_machine::Column::Id,
+            dev_machine::Column::OwnerId,
+            dev_machine::Column::Visibility,
+            dev_machine::Column::RevokedAt,
+        ])
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .into_model::<MachineGateRow>()
+        .one(db)
+        .await
+}
+
+/// M4a ([`machine_scope_runner_probe_sql`]): a private runner of this
+/// owner on the machine in the workspace exists.
+pub async fn machine_scope_runner_exists(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    owner_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Visibility.eq(0i16))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// M4b ([`machine_scope_token_probe_sql`]): a token of this user for the
+/// machine in the workspace exists (revoked tokens count).
+pub async fn machine_scope_token_exists(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = machine_token::Entity::find()
+        .select_only()
+        .column(machine_token::Column::Id)
+        .filter(machine_token::Column::DevMachineId.eq(machine_id))
+        .filter(machine_token::Column::UserId.eq(user_id))
+        .filter(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// `workspace_role` (`core/permissions.py:37-45`): the caller's active,
+/// live membership role (`-created_at`, `.first()`).
+pub async fn workspace_role(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<i16>, DbErr> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// `Workspace.objects.filter(pk=ws).first()` (`machine_commands.py:105`):
+/// the live workspace's slug.
+pub async fn workspace_slug(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+) -> Result<Option<String>, DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Id.eq(workspace_id))
+        .order_by_desc(workspaces::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// `Project.objects.filter(workspace_id=ws, identifier=id).exists()`
+/// (`machine_commands.py:108`), manager scope applied.
+pub async fn project_identifier_exists(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    identifier: &str,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM machine / runner reads (M1-M3, R1-R3)
+// ---------------------------------------------------------------------------
+
+/// One M3 list row: the serialized machine columns plus the four
+/// annotations (#2910 engine state).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct MachineListRow {
+    pub id: Uuid,
+    pub host_label: String,
+    pub label: String,
+    pub visibility: i16,
+    pub provisioning: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub engine_state: serde_json::Value,
+    pub engine_state_reported_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub merged_into_id: Option<Uuid>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub runner_count: i64,
+    pub online_runner_count: i64,
+    pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub control_online: bool,
+}
+
+/// M3 (`runners.py:73-125`, [`machine_list_sql`]): the owner's private
+/// machines with a private runner or a token in the workspace, annotated
+/// over the joined runners, newest-seen first. Django's
+/// `COUNT(...) FILTER (WHERE p)` is written `COUNT(CASE WHEN p THEN x END)`
+/// (aggregates skip NULL, so the values are identical); M1
+/// `control_online` is an `EXISTS` over the live sessions seen since
+/// `cutoff`.
+pub fn machine_list_query(
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    visibility: i16,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Select<dev_machine::Entity> {
+    let runner_machines = Query::select()
+        .distinct()
+        .column(runner::Column::DevMachineId)
+        .from(runner::Entity)
+        .and_where(runner::Column::DevMachineId.is_not_null())
+        .and_where(runner::Column::OwnerId.eq(owner_id))
+        .and_where(runner::Column::Visibility.eq(visibility))
+        .and_where(runner::Column::WorkspaceId.eq(workspace_id))
+        .to_owned();
+    let token_machines = Query::select()
+        .distinct()
+        .column(machine_token::Column::DevMachineId)
+        .from(machine_token::Entity)
+        .and_where(machine_token::Column::DevMachineId.is_not_null())
+        .and_where(machine_token::Column::UserId.eq(owner_id))
+        .and_where(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .to_owned();
+    annotated_machines(owner_id, workspace_id, visibility, cutoff)
+        .filter(
+            Condition::any()
+                .add(dev_machine::Column::Id.in_subquery(runner_machines))
+                .add(dev_machine::Column::Id.in_subquery(token_machines)),
+        )
+        .filter(dev_machine::Column::OwnerId.eq(owner_id))
+        .filter(dev_machine::Column::Visibility.eq(visibility))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+}
+
+/// M5 (`runners.py:150-170`, `machine_serialize_sql`): the M3
+/// annotations over one machine by pk, `Meta.ordering`, first.
+pub async fn machine_serialize(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    visibility: i16,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<MachineListRow>, DbErr> {
+    annotated_machines(owner_id, workspace_id, visibility, cutoff)
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .into_model::<MachineListRow>()
+        .one(db)
+        .await
+}
+
+/// The M3/M5 select: machine columns, the runner annotations (over the
+/// owner's private runners in the workspace) and M1 `control_online`,
+/// grouped by machine.
+fn annotated_machines(
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    visibility: i16,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Select<dev_machine::Entity> {
+    let in_scope = || {
+        Condition::all()
+            .add(runner::Column::OwnerId.eq(owner_id))
+            .add(runner::Column::Visibility.eq(visibility))
+            .add(runner::Column::WorkspaceId.eq(workspace_id))
+    };
+    let runner_col = |column: runner::Column| Expr::col((runner::Entity, column));
+    let online = in_scope()
+        .add(runner::Column::RevokedAt.is_null())
+        .add(runner::Column::Status.is_in(["online", "busy"]));
+    let control_online = Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from(machine_session::Entity)
+            .and_where(
+                Expr::col((
+                    machine_session::Entity,
+                    machine_session::Column::DevMachineId,
+                ))
+                .equals((dev_machine::Entity, dev_machine::Column::Id)),
+            )
+            .and_where(machine_session::Column::LastSeenAt.gte(cutoff))
+            .and_where(machine_session::Column::RevokedAt.is_null())
+            .limit(1)
+            .to_owned(),
+    );
+    let runners: RelationDef = dev_machine::Entity::belongs_to(runner::Entity)
+        .from(dev_machine::Column::Id)
+        .to(runner::Column::DevMachineId)
+        .into();
+    dev_machine::Entity::find()
+        .select_only()
+        .columns([
+            dev_machine::Column::Id,
+            dev_machine::Column::HostLabel,
+            dev_machine::Column::Label,
+            dev_machine::Column::Visibility,
+            dev_machine::Column::Provisioning,
+            dev_machine::Column::EnginePausedByOwner,
+            dev_machine::Column::EngineAutoPauseReason,
+            dev_machine::Column::EngineTeamRuns,
+            dev_machine::Column::EngineSignInState,
+            dev_machine::Column::EngineCredentialExpiresAt,
+            dev_machine::Column::EngineState,
+            dev_machine::Column::EngineStateReportedAt,
+            dev_machine::Column::MergedIntoId,
+            dev_machine::Column::LastSeenAt,
+            dev_machine::Column::RevokedAt,
+            dev_machine::Column::CreatedAt,
+            dev_machine::Column::UpdatedAt,
+        ])
+        .expr_as(
+            Func::count_distinct(Expr::case(in_scope(), runner_col(runner::Column::Id))),
+            "runner_count",
+        )
+        .expr_as(
+            Func::count_distinct(Expr::case(online, runner_col(runner::Column::Id))),
+            "online_runner_count",
+        )
+        .expr_as(
+            Func::max(Expr::case(
+                in_scope(),
+                runner_col(runner::Column::LastHeartbeatAt),
+            )),
+            "last_heartbeat_at",
+        )
+        .expr_as(control_online, "control_online")
+        .join(JoinType::LeftJoin, runners)
+        .group_by(dev_machine::Column::Id)
+}
+
+pub async fn machine_list(
+    db: &impl ConnectionTrait,
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    visibility: i16,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<MachineListRow>, DbErr> {
+    machine_list_query(owner_id, workspace_id, visibility, cutoff)
+        .into_model::<MachineListRow>()
+        .all(db)
+        .await
+}
+
+/// One R1/R2 row: the runner's serialized columns, its dev-machine mini
+/// (NULL when the `LEFT JOIN` misses: legacy enrollments with no
+/// machine), its pod and the pod's project identifier (#2910 engine
+/// dispatch + mini engine trio).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct RunnerJoinRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub dev_machine_id: Option<Uuid>,
+    pub pod_id: Uuid,
+    pub name: String,
+    pub host_label: String,
+    pub provisioning: String,
+    pub pod_dispatch: String,
+    pub visibility: i16,
+    pub enrolled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub capabilities: serde_json::Value,
+    pub status: String,
+    pub os: String,
+    pub arch: String,
+    pub runner_version: String,
+    pub dev_metadata: serde_json::Value,
+    pub protocol_version: i32,
+    pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked_reason: String,
+    pub paused_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub paused_by_id: Option<Uuid>,
+    pub dm_id: Option<Uuid>,
+    pub dm_host_label: Option<String>,
+    pub dm_label: Option<String>,
+    pub dm_engine_paused_by_owner: Option<bool>,
+    pub dm_engine_auto_pause_reason: Option<String>,
+    pub dm_engine_team_runs: Option<bool>,
+    pub dm_engine_sign_in_state: Option<String>,
+    pub dm_engine_credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub pod_workspace_id: Uuid,
+    pub pod_project_id: Uuid,
+    pub pod_name: String,
+    pub pod_description: String,
+    pub pod_created_by_id: Option<Uuid>,
+    pub pod_is_default: bool,
+    pub pod_created_at: chrono::DateTime<chrono::Utc>,
+    pub pod_updated_at: chrono::DateTime<chrono::Utc>,
+    pub project_identifier: String,
+}
+
+/// The R1/R2 select (`select_related("pod__project", "dev_machine")`):
+/// runner, LEFT JOIN dev_machine, INNER JOIN pod and project.
+fn runner_join_query() -> Select<runner::Entity> {
+    let to_machine: RelationDef = runner::Entity::belongs_to(dev_machine::Entity)
+        .from(runner::Column::DevMachineId)
+        .to(dev_machine::Column::Id)
+        .into();
+    let to_pod: RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::DevMachineId,
+            runner::Column::PodId,
+            runner::Column::Name,
+            runner::Column::HostLabel,
+            runner::Column::Provisioning,
+            runner::Column::PodDispatch,
+            runner::Column::Visibility,
+            runner::Column::EnrolledAt,
+            runner::Column::Capabilities,
+            runner::Column::Status,
+            runner::Column::Os,
+            runner::Column::Arch,
+            runner::Column::RunnerVersion,
+            runner::Column::DevMetadata,
+            runner::Column::ProtocolVersion,
+            runner::Column::LastHeartbeatAt,
+            runner::Column::CreatedAt,
+            runner::Column::UpdatedAt,
+            runner::Column::RevokedAt,
+            runner::Column::RevokedReason,
+            runner::Column::PausedAt,
+            runner::Column::PausedById,
+        ])
+        .column_as(dev_machine::Column::Id, "dm_id")
+        .column_as(dev_machine::Column::HostLabel, "dm_host_label")
+        .column_as(dev_machine::Column::Label, "dm_label")
+        .column_as(
+            dev_machine::Column::EnginePausedByOwner,
+            "dm_engine_paused_by_owner",
+        )
+        .column_as(
+            dev_machine::Column::EngineAutoPauseReason,
+            "dm_engine_auto_pause_reason",
+        )
+        .column_as(dev_machine::Column::EngineTeamRuns, "dm_engine_team_runs")
+        .column_as(
+            dev_machine::Column::EngineSignInState,
+            "dm_engine_sign_in_state",
+        )
+        .column_as(
+            dev_machine::Column::EngineCredentialExpiresAt,
+            "dm_engine_credential_expires_at",
+        )
+        .column_as(pod::Column::WorkspaceId, "pod_workspace_id")
+        .column_as(pod::Column::ProjectId, "pod_project_id")
+        .column_as(pod::Column::Name, "pod_name")
+        .column_as(pod::Column::Description, "pod_description")
+        .column_as(pod::Column::CreatedById, "pod_created_by_id")
+        .column_as(pod::Column::IsDefault, "pod_is_default")
+        .column_as(pod::Column::CreatedAt, "pod_created_at")
+        .column_as(pod::Column::UpdatedAt, "pod_updated_at")
+        .column_as(projects::Column::Identifier, "project_identifier")
+        .join(JoinType::LeftJoin, to_machine)
+        .join(JoinType::InnerJoin, to_pod)
+        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
+}
+
+/// R1 (`runners.py:289-333`, [`runner_list_sql`]): the caller's private
+/// runners in the workspace, `?pod=` / bundled exclusion / `?project=`
+/// in call order, `-updated_at`.
+pub fn runner_list_query(
+    workspace_id: Uuid,
+    owner_id: Uuid,
+    visibility: i16,
+    pod_id: Option<Uuid>,
+    exclude_provisioning: Option<&str>,
+    project_id: Option<Uuid>,
+) -> Select<runner::Entity> {
+    let mut query = runner_join_query()
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Visibility.eq(visibility));
+    if let Some(pod_id) = pod_id {
+        query = query.filter(runner::Column::PodId.eq(pod_id));
+    }
+    if let Some(provisioning) = exclude_provisioning {
+        query = query.filter(runner::Column::Provisioning.ne(provisioning));
+    }
+    if let Some(project_id) = project_id {
+        query = query.filter(pod::Column::ProjectId.eq(project_id));
+    }
+    query.order_by_desc(runner::Column::UpdatedAt)
+}
+
+pub async fn runner_list(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    owner_id: Uuid,
+    visibility: i16,
+    pod_id: Option<Uuid>,
+    exclude_provisioning: Option<&str>,
+    project_id: Option<Uuid>,
+) -> Result<Vec<RunnerJoinRow>, DbErr> {
+    runner_list_query(
+        workspace_id,
+        owner_id,
+        visibility,
+        pod_id,
+        exclude_provisioning,
+        project_id,
     )
+    .into_model::<RunnerJoinRow>()
+    .all(db)
+    .await
+}
+
+/// R2 (`runners.py:342-345`, [`runner_detail_sql`]): one runner by id,
+/// `Meta.ordering`, first.
+pub async fn runner_detail(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Option<RunnerJoinRow>, DbErr> {
+    runner_join_query()
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .into_model::<RunnerJoinRow>()
+        .one(db)
+        .await
+}
+
+/// R3 busy guard (`runners.py:409-412`, [`runner_busy_guard_sql`]): a
+/// non-terminal run on, or pinned to, the runner.
+pub async fn runner_is_busy(db: &impl ConnectionTrait, runner_id: Uuid) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(
+            Condition::any()
+                .add(agent_run::Column::RunnerId.eq(runner_id))
+                .add(agent_run::Column::PinnedRunnerId.eq(runner_id)),
+        )
+        .filter(agent_run::Column::Status.is_in(NON_TERMINAL_STATUSES.iter().copied()))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// R3 write (`runners.py:422, 424`, [`runner_patch_sql`]):
+/// `runner.save(update_fields=...)` for the changed pod / name /
+/// `pod_dispatch` (#2903) plus `updated_at`.
+pub async fn patch_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+    pod_id: Option<Uuid>,
+    name: Option<&str>,
+    pod_dispatch: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    let mut update = runner::Entity::update_many();
+    if let Some(pod_id) = pod_id {
+        update = update.col_expr(runner::Column::PodId, Expr::value(pod_id));
+    }
+    if let Some(name) = name {
+        update = update.col_expr(runner::Column::Name, Expr::value(name));
+    }
+    if let Some(pod_dispatch) = pod_dispatch {
+        update = update.col_expr(runner::Column::PodDispatch, Expr::value(pod_dispatch));
+    }
+    update
+        .col_expr(runner::Column::UpdatedAt, Expr::value(now))
+        .filter(runner::Column::Id.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// The reverse one-to-one `runner.live_state` (`models.py:1504-1558`).
+pub async fn runner_live_state(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Option<runner_live_state::Model>, DbErr> {
+    runner_live_state::Entity::find_by_id(runner_id)
+        .one(db)
+        .await
+}
+
+/// The M6 locked machine row the revoke / rotate views read.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct LockedMachineRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub host_label: String,
+    pub label: String,
+    pub visibility: i16,
+    pub provisioning: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub engine_state: serde_json::Value,
+    pub engine_state_reported_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub merged_into_id: Option<Uuid>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// M6 ([`machine_locked_read_sql`]): the machine by id, `Meta.ordering`,
+/// first, `FOR UPDATE`.
+pub async fn lock_machine(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Option<LockedMachineRow>, DbErr> {
+    dev_machine::Entity::find()
+        .select_only()
+        .columns([
+            dev_machine::Column::Id,
+            dev_machine::Column::OwnerId,
+            dev_machine::Column::HostLabel,
+            dev_machine::Column::Label,
+            dev_machine::Column::Visibility,
+            dev_machine::Column::Provisioning,
+            dev_machine::Column::EnginePausedByOwner,
+            dev_machine::Column::EngineAutoPauseReason,
+            dev_machine::Column::EngineTeamRuns,
+            dev_machine::Column::EngineSignInState,
+            dev_machine::Column::EngineCredentialExpiresAt,
+            dev_machine::Column::EngineState,
+            dev_machine::Column::EngineStateReportedAt,
+            dev_machine::Column::MergedIntoId,
+            dev_machine::Column::LastSeenAt,
+            dev_machine::Column::RevokedAt,
+            dev_machine::Column::CreatedAt,
+            dev_machine::Column::UpdatedAt,
+        ])
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .lock_exclusive()
+        .into_model::<LockedMachineRow>()
+        .one(db)
+        .await
+}
+
+/// `DevMachine.revoke()` (`runners.py:186-190`): stamp `revoked_at` and
+/// `updated_at`.
+pub async fn revoke_machine(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    revoked_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    dev_machine::Entity::update_many()
+        .col_expr(dev_machine::Column::RevokedAt, Expr::value(revoked_at))
+        .col_expr(dev_machine::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+fn live_machine_runners(machine_id: Uuid) -> Select<runner::Entity> {
+    runner::Entity::find()
+        .select_only()
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(runner::Column::RevokedAt.is_null())
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+}
+
+/// The machine revoke's locked runner list (`runners.py:192-205`,
+/// [`machine_runners_locked_list_sql`]): `(id, revoked_at)` of the
+/// machine's unrevoked runners, `FOR UPDATE`.
+#[allow(clippy::type_complexity)]
+pub async fn lock_live_machine_runners(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)>, DbErr> {
+    live_machine_runners(machine_id)
+        .columns([runner::Column::Id, runner::Column::RevokedAt])
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// The machine rotate's runner ids (`runners.py:229-231`,
+/// [`machine_runner_ids_sql`]): unlocked.
+pub async fn live_machine_runner_ids(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    live_machine_runners(machine_id)
+        .column(runner::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::app_project::models::project as project_cols;
+    use pidash_db::runner_enroll::columns::{machine_token as mt_cols, runner as r_cols};
 
     const FIXTURE_SQL: &str =
         include_str!("../../../../../fixtures/runner_enroll/queries/machines_runners.sql");
@@ -784,6 +1204,15 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -798,6 +1227,7 @@ mod tests {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",
@@ -914,157 +1344,11 @@ mod tests {
 
     // -- M1 --
 
-    #[test]
-    fn m1_exists_shape_is_django_exact() {
-        assert_eq!(
-            control_online_fragment(12, 13),
-            "EXISTS(SELECT $12 AS \"a\" FROM \"machine_session\" U0 \
-             WHERE (U0.\"dev_machine_id\" = (\"dev_machine\".\"id\") \
-             AND U0.\"last_seen_at\" >= $13 AND U0.\"revoked_at\" IS NULL) \
-             LIMIT 1) AS \"control_online\"",
-        );
-        // Numbering is positional: other slots render the same shape.
-        assert!(control_online_fragment(1, 2).contains("SELECT $1 AS \"a\""));
-        assert!(control_online_fragment(1, 2).contains(">= $2"));
-        for fragment in [
-            fixture_fragment("EXISTS("),
-            fixture_fragment("FROM \"machine_session\""),
-            fixture_fragment("AS \"control_online\""),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-            fixture_fragment("\"last_seen_at\" >="),
-        ] {
-            assert_builder_contains(&control_online_fragment(12, 13), &fragment);
-        }
-    }
-
     // -- M3 --
-
-    #[test]
-    fn m3_list_emits_annotations_subqueries_order() {
-        let sql = machine_list_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"dev_machine\" LEFT OUTER JOIN \"runner\" \
-             ON (\"dev_machine\".\"id\" = \"runner\".\"dev_machine_id\") \
-             WHERE ((\"dev_machine\".\"id\" IN (SELECT DISTINCT U0.\"dev_machine_id\" FROM \"runner\" U0 \
-             WHERE (U0.\"dev_machine_id\" IS NOT NULL AND U0.\"owner_id\" = $14 \
-             AND U0.\"visibility\" = $15 AND U0.\"workspace_id\" = $16)) \
-             OR \"dev_machine\".\"id\" IN (SELECT DISTINCT U0.\"dev_machine_id\" FROM \"machine_token\" U0 \
-             WHERE (U0.\"dev_machine_id\" IS NOT NULL AND U0.\"user_id\" = $17 \
-             AND U0.\"workspace_id\" = $18))) \
-             AND \"dev_machine\".\"owner_id\" = $19 AND \"dev_machine\".\"visibility\" = $20) \
-             GROUP BY \"dev_machine\".\"id\" \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC",
-        );
-        let expected = format!(
-            "{}, \
-             COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $1 \
-             AND \"runner\".\"visibility\" = $2 AND \"runner\".\"workspace_id\" = $3)) AS \"runner_count\", \
-             COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $4 \
-             AND \"runner\".\"visibility\" = $5 AND \"runner\".\"workspace_id\" = $6 \
-             AND \"runner\".\"revoked_at\" IS NULL AND \"runner\".\"status\" IN ($7, $8))) AS \"online_runner_count\", \
-             MAX(\"runner\".\"last_heartbeat_at\") FILTER (WHERE (\"runner\".\"owner_id\" = $9 \
-             AND \"runner\".\"visibility\" = $10 AND \"runner\".\"workspace_id\" = $11)) AS \"last_heartbeat_at\", \
-             {}",
-            expected_list("dev_machine", MACHINE_COLS),
-            control_online_fragment(12, 13),
-        );
-        assert_eq!(list, expected);
-        // NULL last_seen_at sorts FIRST under bare DESC (rows.json
-        // M3_ordering): the port is the bare ORDER BY, no NULLS clause.
-        assert!(!sql.contains("NULLS"));
-        // Nested probes carry no ORDER BY of their own.
-        assert_eq!(sql.matches("ORDER BY").count(), 1);
-        for fragment in [
-            fixture_fragment("COUNT(DISTINCT"),
-            fixture_fragment("FILTER ("),
-            fixture_fragment("AS \"runner_count\""),
-            fixture_fragment("AS \"online_runner_count\""),
-            fixture_fragment("AS \"last_heartbeat_at\""),
-            fixture_fragment("\"status\" IN ("),
-            fixture_fragment("LEFT OUTER JOIN \"runner\""),
-            fixture_fragment("GROUP BY"),
-            fixture_fragment("\"dev_machine_id\" FROM \"runner\""),
-            fixture_fragment("\"dev_machine_id\" IS NOT NULL"),
-            fixture_fragment("\"visibility\" = "),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
 
     // -- M4 --
 
-    #[test]
-    fn m4_probes_are_exists_with_cleared_ordering() {
-        assert_eq!(
-            machine_scope_runner_probe_sql(),
-            "SELECT $1 AS \"a\" FROM \"runner\" \
-             WHERE (\"runner\".\"dev_machine_id\" = $2 AND \"runner\".\"owner_id\" = $3 \
-             AND \"runner\".\"visibility\" = $4 AND \"runner\".\"workspace_id\" = $5) \
-             LIMIT 1",
-        );
-        assert_eq!(
-            machine_scope_token_probe_sql(),
-            "SELECT $1 AS \"a\" FROM \"machine_token\" \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-             AND \"machine_token\".\"user_id\" = $3 \
-             AND \"machine_token\".\"workspace_id\" = $4) \
-             LIMIT 1",
-        );
-        assert!(!machine_scope_runner_probe_sql().contains("ORDER BY"));
-        assert!(!machine_scope_token_probe_sql().contains("ORDER BY"));
-        for fragment in [
-            fixture_fragment("FROM \"runner\""),
-            fixture_fragment("\"workspace_id\" = "),
-            fixture_fragment("\"owner_id\" = "),
-        ] {
-            assert_builder_contains(&machine_scope_runner_probe_sql(), &fragment);
-        }
-        for fragment in [
-            fixture_fragment("FROM \"machine_token\""),
-            fixture_fragment("\"user_id\" = "),
-        ] {
-            assert_builder_contains(&machine_scope_token_probe_sql(), &fragment);
-        }
-    }
-
     // -- M5 --
-
-    #[test]
-    fn m5_serialize_is_m3_annotations_over_pk_first() {
-        let sql = machine_serialize_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"dev_machine\" LEFT OUTER JOIN \"runner\" \
-             ON (\"dev_machine\".\"id\" = \"runner\".\"dev_machine_id\") \
-             WHERE \"dev_machine\".\"id\" = $14 \
-             GROUP BY \"dev_machine\".\"id\" \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC LIMIT 1",
-        );
-        // Same annotations as M3, same $1-$13 numbering.
-        let m3_list = assert_suffix(
-            &machine_list_sql(),
-            "FROM \"dev_machine\" LEFT OUTER JOIN \"runner\" \
-             ON (\"dev_machine\".\"id\" = \"runner\".\"dev_machine_id\") \
-             WHERE ((\"dev_machine\".\"id\" IN (SELECT DISTINCT U0.\"dev_machine_id\" FROM \"runner\" U0 \
-             WHERE (U0.\"dev_machine_id\" IS NOT NULL AND U0.\"owner_id\" = $14 \
-             AND U0.\"visibility\" = $15 AND U0.\"workspace_id\" = $16)) \
-             OR \"dev_machine\".\"id\" IN (SELECT DISTINCT U0.\"dev_machine_id\" FROM \"machine_token\" U0 \
-             WHERE (U0.\"dev_machine_id\" IS NOT NULL AND U0.\"user_id\" = $17 \
-             AND U0.\"workspace_id\" = $18))) \
-             AND \"dev_machine\".\"owner_id\" = $19 AND \"dev_machine\".\"visibility\" = $20) \
-             GROUP BY \"dev_machine\".\"id\" \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC",
-        );
-        assert_eq!(list, m3_list);
-        for fragment in [
-            fixture_fragment("AS \"runner_count\""),
-            fixture_fragment("AS \"control_online\""),
-            fixture_fragment("LIMIT 1"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
 
     // -- M6/M7 --
 
@@ -1107,167 +1391,7 @@ mod tests {
     // `crate::domain::tokens`; runners.py:198 and :238 still run the
     // identical call through `revoke_tokens_for_dev_machine`.)
 
-    #[test]
-    fn m6_locked_runner_list_has_no_limit() {
-        let sql = machine_runners_locked_list_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"runner\" \
-             WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-             ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-             FOR UPDATE",
-        );
-        assert_eq!(list, expected_list("runner", RUNNER_COLS));
-        assert!(!sql.contains("LIMIT"));
-        for fragment in [
-            fixture_fragment("FROM \"runner\" WHERE"),
-            fixture_fragment("FOR UPDATE"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn m7_runner_ids_are_bare_ids_without_lock() {
-        assert_eq!(
-            machine_runner_ids_sql(),
-            "SELECT \"runner\".\"id\" FROM \"runner\" \
-             WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-             ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC",
-        );
-        // No lock, no LIMIT, and no runner UPDATE anywhere in M7
-        // (QUIRK-rotate-keeps-runners).
-        assert!(!machine_runner_ids_sql().contains("FOR UPDATE"));
-        assert!(!machine_runner_ids_sql().contains("LIMIT"));
-        for fragment in [
-            fixture_fragment("\"id\" FROM \"runner\""),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-        ] {
-            assert_builder_contains(&machine_runner_ids_sql(), &fragment);
-        }
-    }
-
     // -- R1 --
-
-    fn r1_select_list() -> String {
-        format!(
-            "{}, {}, {}, {}",
-            expected_list("runner", RUNNER_COLS),
-            expected_list("dev_machine", MACHINE_COLS),
-            expected_list("pod", POD_COLS),
-            expected_list("projects", project_cols::COLUMNS),
-        )
-    }
-
-    #[test]
-    fn r1_base_select_joins_where_order() {
-        let sql = runner_list_sql(false, false, false);
-        let list = assert_suffix(
-            &sql,
-            "FROM \"runner\" \
-             LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-             INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-             WHERE (\"runner\".\"workspace_id\" = $1 AND \"runner\".\"owner_id\" = $2 \
-             AND \"runner\".\"visibility\" = $3) \
-             ORDER BY \"runner\".\"updated_at\" DESC",
-        );
-        assert_eq!(list, r1_select_list());
-        // The pod join carries NO manager scope (select_related never
-        // does — `"projects"."deleted_at"` in the select list is just a
-        // column, not a guard).
-        assert!(!sql.contains("deleted_at\" IS NULL"));
-        for fragment in [
-            fixture_fragment("FROM \"runner\""),
-            fixture_fragment("INNER JOIN \"pod\""),
-            fixture_fragment("INNER JOIN \"projects\""),
-            fixture_fragment("LEFT OUTER JOIN \"dev_machine\""),
-            fixture_fragment("\"workspace_id\" = "),
-            fixture_fragment("\"owner_id\" = "),
-            fixture_fragment("\"visibility\" = "),
-            fixture_fragment("\"updated_at\" DESC"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn r1_filters_append_in_call_order_with_collapsing_binds() {
-        // Pod only: $4.
-        let pod = runner_list_sql(true, false, false);
-        assert!(pod.contains(
-            "AND \"runner\".\"visibility\" = $3 AND \"runner\".\"pod_id\" = $4) \
-             ORDER BY \"runner\".\"updated_at\" DESC"
-        ));
-        // Bundled exclusion only: $4, as NOT (=).
-        let excl = runner_list_sql(false, true, false);
-        assert!(excl.contains(
-            "AND \"runner\".\"visibility\" = $3 AND NOT (\"runner\".\"provisioning\" = $4)) \
-             ORDER BY \"runner\".\"updated_at\" DESC"
-        ));
-        assert!(!excl.contains("<>"));
-        // Project only: $4 on the JOINED pod table, joins reorder.
-        let proj = runner_list_sql(false, false, true);
-        assert!(proj.contains(
-            "FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-             LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-             WHERE (\"runner\".\"workspace_id\" = $1 AND \"runner\".\"owner_id\" = $2 \
-             AND \"runner\".\"visibility\" = $3 AND \"pod\".\"project_id\" = $4) \
-             ORDER BY \"runner\".\"updated_at\" DESC"
-        ));
-        // Select list never moves, whatever the joins do.
-        assert_eq!(
-            assert_suffix(&proj, &proj[proj.find("FROM ").unwrap()..]),
-            r1_select_list()
-        );
-        // Full combo: $4/$5/$6 in source call order.
-        let full = runner_list_sql(true, true, true);
-        assert!(full.contains(
-            "AND \"runner\".\"pod_id\" = $4 AND NOT (\"runner\".\"provisioning\" = $5) \
-             AND \"pod\".\"project_id\" = $6) ORDER BY \"runner\".\"updated_at\" DESC"
-        ));
-        assert!(full.contains("INNER JOIN \"pod\" ON"));
-        // No new JOIN for the project filter (reuses select_related).
-        assert_eq!(full.matches("JOIN").count(), 3);
-        for fragment in [
-            fixture_fragment("\"pod_id\" = "),
-            fixture_fragment("\"provisioning\""),
-            fixture_fragment("\"project_id\" = "),
-        ] {
-            assert_builder_contains(&full, &fragment);
-        }
-    }
-
-    #[test]
-    fn r1_join_order_follows_filter_combo() {
-        // QUIRK-join-order truth table (fresh compiles; the bundled
-        // exclusion never reorders).
-        let dev_first = "FROM \"runner\" LEFT OUTER JOIN \"dev_machine\" \
-             ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-             INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             INNER JOIN \"projects\"";
-        let pod_dev_proj = "FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-             INNER JOIN \"projects\"";
-        let pod_proj_dev =
-            "FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-             LEFT OUTER JOIN \"dev_machine\"";
-        for excl in [false, true] {
-            for (pod, proj, expected) in [
-                (false, false, dev_first),
-                (true, false, pod_dev_proj),
-                (false, true, pod_proj_dev),
-                (true, true, pod_proj_dev),
-            ] {
-                let sql = runner_list_sql(pod, excl, proj);
-                assert!(sql.contains(expected), "{sql}");
-                // Same three joins, only the order moves.
-                assert_eq!(sql.matches("JOIN").count(), 3, "{sql}");
-            }
-        }
-    }
 
     #[test]
     fn include_bundled_matches_exact_strings_only() {
@@ -1293,24 +1417,6 @@ mod tests {
     }
 
     // -- R2 --
-
-    #[test]
-    fn r2_detail_is_r1_shape_over_pk_first() {
-        let sql = runner_detail_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"runner\" \
-             LEFT OUTER JOIN \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") \
-             INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-             WHERE \"runner\".\"id\" = $1 \
-             ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1",
-        );
-        assert_eq!(list, r1_select_list());
-        for fragment in [fixture_fragment("\"id\" = $1"), fixture_fragment("LIMIT 1")] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
 
     #[test]
     fn detail_outcome_follows_get_runner_order() {
@@ -1348,82 +1454,11 @@ mod tests {
     }
 
     #[test]
-    fn r3_busy_guard_binds_runner_twice_then_statuses() {
-        assert_eq!(
-            runner_busy_guard_sql(),
-            "SELECT $1 AS \"a\" FROM \"agent_run\" \
-             WHERE ((\"agent_run\".\"runner_id\" = $2 OR \"agent_run\".\"pinned_runner_id\" = $3) \
-             AND \"agent_run\".\"status\" IN ($4, $5, $6, $7, $8, $9, $10, $11)) \
-             LIMIT 1",
-        );
-        assert!(!runner_busy_guard_sql().contains("ORDER BY"));
-        for fragment in [
-            fixture_fragment("FROM \"agent_run\""),
-            fixture_fragment("\"runner_id\" = "),
-            fixture_fragment("\"pinned_runner_id\" = "),
-            fixture_fragment("\"status\" IN ("),
-        ] {
-            assert_builder_contains(&runner_busy_guard_sql(), &fragment);
-        }
-        // rows.json pins the guard matrix: pinned+queued blocks, same-pod
-        // and terminal runs do not.
-        let rows: serde_json::Value = serde_json::from_str(FIXTURE_ROWS).unwrap();
-        assert!(rows["R3_busy_guard"]["pinned_blocked"]
-            .as_str()
-            .unwrap()
-            .contains("pinned_runner"));
-        let not_blocked = rows["R3_busy_guard"]["not_blocked"].as_array().unwrap();
-        assert!(not_blocked
-            .iter()
-            .any(|v| v.as_str().unwrap().contains("same-pod")));
-    }
-
-    #[test]
     fn real_move_is_pod_inequality() {
         let a = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
         let b = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
         assert!(is_real_move(&a, &b));
         assert!(!is_real_move(&a, &a));
-    }
-
-    #[test]
-    fn r3_patch_variants_emit_model_order_set() {
-        assert_eq!(RUNNER_PATCH_UPDATABLE, &["name", "pod"]);
-        assert_eq!(
-            runner_patch_sql(true, true),
-            "UPDATE \"runner\" SET \"pod_id\" = $1, \"name\" = $2, \"updated_at\" = $3 \
-             WHERE \"runner\".\"id\" = $4",
-        );
-        assert_eq!(
-            runner_patch_sql(true, false),
-            "UPDATE \"runner\" SET \"pod_id\" = $1, \"updated_at\" = $2 \
-             WHERE \"runner\".\"id\" = $3",
-        );
-        assert_eq!(
-            runner_patch_sql(false, true),
-            "UPDATE \"runner\" SET \"name\" = $1, \"updated_at\" = $2 \
-             WHERE \"runner\".\"id\" = $3",
-        );
-        for sql in [
-            runner_patch_sql(true, true),
-            runner_patch_sql(true, false),
-            runner_patch_sql(false, true),
-        ] {
-            for fragment in [
-                fixture_fragment("UPDATE \"runner\" SET "),
-                fixture_fragment("\"updated_at\" = "),
-            ] {
-                assert_builder_contains(&sql, &fragment);
-            }
-        }
-        assert_builder_contains(
-            &runner_patch_sql(true, false),
-            &fixture_fragment("\"pod_id\" = "),
-        );
-        assert_builder_contains(
-            &runner_patch_sql(false, true),
-            &fixture_fragment("\"name\" = "),
-        );
     }
 
     #[test]
@@ -1459,48 +1494,426 @@ mod tests {
         assert_eq!(request_workspace_id(Some(""), Some("")), "");
     }
 
-    #[test]
-    fn scoped_machine_read_is_unlocked_first() {
-        let sql = scoped_machine_read_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC \
-             LIMIT 1",
-        );
-        assert_eq!(list, expected_list("dev_machine", MACHINE_COLS));
-        // Text-identical to the M6 locked read minus the lock (the
-        // fixture records this read as prose — "machine by PK (NO
-        // lock)" — so the pin is structural, not a fixture needle).
-        assert!(!sql.contains("FOR UPDATE"));
-        assert_eq!(
-            sql,
-            machine_locked_read_sql().replace(" LIMIT 1 FOR UPDATE", " LIMIT 1")
-        );
-    }
-
     // -- rows.json shape --
 
-    #[test]
-    fn fixture_rows_shape_is_as_documented() {
-        let rows: serde_json::Value = serde_json::from_str(FIXTURE_ROWS).unwrap();
-        assert_eq!(rows["fixture_id"], "D13-F5");
-        // M3_ordering: never-checked-in machines sort FIRST via the bare
-        // DESC default — builders must not spell NULLS out.
-        assert!(rows["M3_ordering"]
-            .as_str()
-            .unwrap()
-            .contains("NULLS FIRST"));
-        assert!(!machine_list_sql().contains("NULLS"));
-        assert!(!machine_serialize_sql().contains("NULLS"));
-        // The example row carries exactly the three annotation keys.
-        for key in ["runner_count", "online_runner_count", "last_heartbeat_at"] {
-            assert!(rows["M3_example_row"].get(key).is_some(), "{key}");
-            assert!(
-                machine_list_sql().contains(&format!("AS \"{key}\"")),
-                "{key}"
-            );
+    /// The SeaORM gate reads against constraint-free temp copies of their
+    /// tables on one sqlx transaction (`TxConn`): the runner gate keeps
+    /// the pod/project INNER JOINs, the probes match only in scope.
+    #[tokio::test]
+    async fn live_gate_reads() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "runner",
+            "pod",
+            "projects",
+            "dev_machine",
+            "machine_token",
+            "workspace_members",
+            "workspaces",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
         }
-        assert!(rows["M3_example_row"].get("control_online").is_some());
+        let (user, ws, project, pod_id, orphan_pod, machine, runner_id, orphan) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO projects (id, identifier, workspace_id) VALUES ('{project}', 'PRJ', '{ws}')"),
+            format!("INSERT INTO pod (id, project_id) VALUES ('{pod_id}', '{project}')"),
+            format!(
+                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, dev_machine_id, visibility, created_at) \
+                 VALUES ('{runner_id}', '{user}', '{ws}', '{pod_id}', '{machine}', 0, now()), \
+                 ('{orphan}', '{user}', '{ws}', '{orphan_pod}', NULL, 0, now())"
+            ),
+            format!("INSERT INTO dev_machine (id, owner_id, visibility, revoked_at, created_at) VALUES ('{machine}', '{user}', 0, now(), now())"),
+            format!("INSERT INTO machine_token (id, dev_machine_id, user_id, workspace_id) VALUES (gen_random_uuid(), '{machine}', '{user}', '{ws}')"),
+            format!(
+                "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, created_at) VALUES \
+                 (gen_random_uuid(), '{ws}', '{user}', 20, true, now()), \
+                 (gen_random_uuid(), '{ws}', '{user}', 5, true, now() - interval '1 day')"
+            ),
+            format!("INSERT INTO workspaces (id, slug, created_at) VALUES ('{ws}', 'ws-gate', now())"),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let gate = runner_gate(&conn, runner_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (gate.owner_id, gate.workspace_id, gate.visibility),
+            (user, ws, 0)
+        );
+        // Pod row missing: the INNER JOIN drops the runner.
+        assert_eq!(runner_gate(&conn, orphan).await.expect("read"), None);
+        let machine_row = machine_gate(&conn, machine)
+            .await
+            .expect("read")
+            .expect("row");
+        assert!(machine_row.revoked_at.is_some());
+        assert!(machine_scope_runner_exists(&conn, machine, user, ws)
+            .await
+            .expect("probe"));
+        assert!(
+            !machine_scope_runner_exists(&conn, machine, Uuid::new_v4(), ws)
+                .await
+                .expect("probe")
+        );
+        assert!(machine_scope_token_exists(&conn, machine, user, ws)
+            .await
+            .expect("probe"));
+        assert!(
+            !machine_scope_token_exists(&conn, machine, user, Uuid::new_v4())
+                .await
+                .expect("probe")
+        );
+        // Newest membership wins (`-created_at`).
+        assert_eq!(
+            workspace_role(&conn, ws, user).await.expect("role"),
+            Some(20)
+        );
+        assert_eq!(
+            workspace_slug(&conn, ws).await.expect("slug").as_deref(),
+            Some("ws-gate")
+        );
+        assert!(project_identifier_exists(&conn, ws, "PRJ")
+            .await
+            .expect("probe"));
+        assert!(!project_identifier_exists(&conn, ws, "NOPE")
+            .await
+            .expect("probe"));
+    }
+
+    /// M3 annotations, R1/R2 joins, the busy guard, the patch and the live
+    /// state against constraint-free temp tables on one transaction.
+    #[tokio::test]
+    async fn live_machine_and_runner_reads() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "dev_machine",
+            "runner",
+            "machine_token",
+            "machine_session",
+            "pod",
+            "projects",
+            "agent_run",
+            "runner_live_state",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        // `GROUP BY dev_machine.id` relies on the primary key (functional
+        // dependency), as on the real table.
+        sqlx::query("ALTER TABLE dev_machine ADD PRIMARY KEY (id)")
+            .execute(&mut *tx)
+            .await
+            .expect("pk");
+        let (me, ws, other_ws) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (m1, m2, m3, pod_id, project) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (r1, r2, r3) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let runner_row = |id: Uuid,
+                          machine: Option<Uuid>,
+                          workspace: Uuid,
+                          status: &str,
+                          beat: &str| {
+            let machine = machine.map_or("NULL".to_owned(), |m| format!("'{m}'"));
+            format!(
+                "INSERT INTO runner (id, owner_id, workspace_id, dev_machine_id, pod_id, name, host_label, \
+                 provisioning, visibility, capabilities, status, os, arch, runner_version, dev_metadata, \
+                 protocol_version, last_heartbeat_at, created_at, updated_at, revoked_reason) VALUES \
+                 ('{id}', '{me}', '{workspace}', {machine}, '{pod_id}', 'r-{status}', 'h', 'manual', 0, \
+                 '[]', '{status}', '', '', '', '{{}}', 1, {beat}, now(), now() - interval '{n} min', '')",
+                n = if status == "online" { 1 } else { 5 },
+            )
+        };
+        for sql in [
+            format!(
+                "INSERT INTO dev_machine (id, owner_id, host_label, label, visibility, provisioning, last_seen_at, created_at, updated_at) VALUES \
+                 ('{m1}', '{me}', 'one', 'One', 0, 'manual', now(), now(), now()), \
+                 ('{m2}', '{me}', 'two', 'Two', 0, 'manual', NULL, now(), now()), \
+                 ('{m3}', '{me}', 'three', 'Three', 0, 'manual', now(), now(), now())"
+            ),
+            runner_row(r1, Some(m1), ws, "online", "now()"),
+            runner_row(r2, Some(m1), ws, "offline", "now() - interval '1 hour'"),
+            // A runner in another workspace: joined, but outside every annotation.
+            runner_row(r3, Some(m1), other_ws, "online", "now() + interval '1 hour'"),
+            format!("INSERT INTO machine_token (id, dev_machine_id, user_id, workspace_id) VALUES (gen_random_uuid(), '{m2}', '{me}', '{ws}')"),
+            format!("INSERT INTO machine_session (id, dev_machine_id, last_seen_at, revoked_at) VALUES (gen_random_uuid(), '{m1}', now(), NULL)"),
+            format!(
+                "INSERT INTO pod (id, workspace_id, project_id, name, description, is_default, created_at, updated_at) \
+                 VALUES ('{pod_id}', '{ws}', '{project}', 'main', '', true, now(), now())"
+            ),
+            format!("INSERT INTO projects (id, identifier) VALUES ('{project}', 'MGR')"),
+            format!(
+                "INSERT INTO runner_live_state (runner_id, usage, updated_at, turn_count) \
+                 VALUES ('{r1}', '{{}}', now(), 3)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(CONTROL_PRESENCE_WINDOW_SECS);
+        let machines = machine_list(&conn, me, ws, 0, cutoff).await.expect("M3");
+        // m3 has no runner and no token in the workspace; m2 (NULL
+        // last_seen_at) sorts first under DESC.
+        assert_eq!(
+            machines.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![m2, m1]
+        );
+        let one = &machines[1];
+        assert_eq!((one.runner_count, one.online_runner_count), (2, 1));
+        assert!(one.control_online);
+        let beat = one.last_heartbeat_at.expect("beat");
+        assert!(
+            beat <= chrono::Utc::now() + chrono::Duration::minutes(1),
+            "{beat}"
+        );
+        let two = &machines[0];
+        assert_eq!(
+            (
+                two.runner_count,
+                two.online_runner_count,
+                two.control_online
+            ),
+            (0, 0, false)
+        );
+        assert_eq!(two.last_heartbeat_at, None);
+
+        let listed = runner_list(
+            &conn,
+            ws,
+            me,
+            0,
+            None,
+            Some("desktop_bundled"),
+            Some(project),
+        )
+        .await
+        .expect("R1");
+        // -updated_at: r1 (1 min ago) before r2 (5 min ago).
+        assert_eq!(
+            listed.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![r1, r2]
+        );
+        assert_eq!(
+            (
+                listed[0].dm_label.as_deref(),
+                listed[0].pod_name.as_str(),
+                listed[0].project_identifier.as_str()
+            ),
+            (Some("One"), "main", "MGR")
+        );
+        assert!(runner_list(&conn, ws, me, 0, None, Some("manual"), None)
+            .await
+            .expect("R1")
+            .is_empty());
+        let detail = runner_detail(&conn, r2).await.expect("R2").expect("row");
+        assert_eq!(
+            (detail.name.as_str(), detail.pod_is_default),
+            ("r-offline", true)
+        );
+
+        assert!(!runner_is_busy(&conn, r1).await.expect("busy"));
+        conn.execute_unprepared(&format!(
+            "INSERT INTO agent_run (id, pinned_runner_id, status) VALUES (gen_random_uuid(), '{r1}', '{}')",
+            NON_TERMINAL_STATUSES[0]
+        ))
+        .await
+        .expect("seed");
+        assert!(runner_is_busy(&conn, r1).await.expect("busy"));
+        patch_runner(&conn, r2, None, Some("renamed"), None, chrono::Utc::now())
+            .await
+            .expect("patch");
+        assert_eq!(
+            runner_detail(&conn, r2)
+                .await
+                .expect("R2")
+                .expect("row")
+                .name,
+            "renamed"
+        );
+        let live = runner_live_state(&conn, r1)
+            .await
+            .expect("live")
+            .expect("row");
+        assert_eq!(live.turn_count, Some(3));
+        assert!(runner_live_state(&conn, r2).await.expect("live").is_none());
+    }
+
+    /// The teardown statements: M6 lock, revoke stamp, the live-runner
+    /// lists, M5 against M3 on the same data, and the E3-E5 refresh reads
+    /// and writes.
+    #[tokio::test]
+    async fn live_teardown_statements() {
+        use crate::runner_enroll::queries::enroll_reads;
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "dev_machine",
+            "runner",
+            "machine_token",
+            "machine_session",
+            "workspaces",
+            "runner_force_refresh",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        sqlx::query("ALTER TABLE dev_machine ADD PRIMARY KEY (id)")
+            .execute(&mut *tx)
+            .await
+            .expect("pk");
+        let (me, ws, machine, live, gone) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!(
+                "INSERT INTO dev_machine (id, owner_id, host_label, label, visibility, provisioning, created_at, updated_at) \
+                 VALUES ('{machine}', '{me}', 'h', 'H', 0, 'manual', now(), now())"
+            ),
+            format!(
+                "INSERT INTO runner (id, owner_id, workspace_id, dev_machine_id, visibility, status, \
+                 refresh_token_hash, refresh_token_generation, previous_refresh_token_hash, created_at, revoked_at) VALUES \
+                 ('{live}', '{me}', '{ws}', '{machine}', 0, 'online', 'cur', 4, 'prev', now(), NULL), \
+                 ('{gone}', '{me}', '{ws}', '{machine}', 0, 'revoked', '', 0, '', now(), now())"
+            ),
+            format!("INSERT INTO workspaces (id) VALUES ('{ws}')"),
+            format!("INSERT INTO runner_force_refresh (runner_id, min_rtg) VALUES ('{live}', 9)"),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let locked = lock_machine(&conn, machine)
+            .await
+            .expect("M6")
+            .expect("row");
+        assert_eq!((locked.owner_id, locked.revoked_at), (me, None));
+        assert_eq!(
+            lock_live_machine_runners(&conn, machine)
+                .await
+                .expect("runners"),
+            vec![(live, None)]
+        );
+        assert_eq!(
+            live_machine_runner_ids(&conn, machine).await.expect("ids"),
+            vec![live]
+        );
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(CONTROL_PRESENCE_WINDOW_SECS);
+        let listed = machine_list(&conn, me, ws, 0, cutoff).await.expect("M3");
+        let single = machine_serialize(&conn, machine, me, ws, 0, cutoff)
+            .await
+            .expect("M5")
+            .expect("row");
+        assert_eq!(listed, vec![single.clone()]);
+        assert_eq!((single.runner_count, single.online_runner_count), (2, 1));
+        let now = chrono::Utc::now();
+        revoke_machine(&conn, machine, now, now)
+            .await
+            .expect("revoke");
+        assert!(lock_machine(&conn, machine)
+            .await
+            .expect("M6")
+            .expect("row")
+            .revoked_at
+            .is_some());
+        assert!(enroll_reads::dev_machine_is_revoked(&conn, machine)
+            .await
+            .expect("E4"));
+
+        let refresh = enroll_reads::refresh_locked_runner(&conn, live)
+            .await
+            .expect("E3")
+            .expect("row");
+        assert_eq!(
+            (
+                refresh.refresh_token_hash.as_str(),
+                refresh.refresh_token_generation,
+                refresh.previous_refresh_token_hash.as_str()
+            ),
+            ("cur", 4, "prev")
+        );
+        // No workspace row: the E3 INNER JOIN drops the runner.
+        let orphan = Uuid::new_v4();
+        conn.execute_unprepared(&format!(
+            "INSERT INTO runner (id, owner_id, workspace_id, created_at) VALUES ('{orphan}', '{me}', '{}', now())",
+            Uuid::new_v4()
+        ))
+        .await
+        .expect("seed");
+        assert_eq!(
+            enroll_reads::refresh_locked_runner(&conn, orphan)
+                .await
+                .expect("E3"),
+            None
+        );
+        assert!(enroll_reads::refresh_locked_runner(&conn, gone)
+            .await
+            .expect("E3")
+            .is_some());
+        enroll_reads::rotate_refresh_token(&conn, live, "new", "fp", 5, "cur")
+            .await
+            .expect("E5");
+        let rotated = enroll_reads::refresh_locked_runner(&conn, live)
+            .await
+            .expect("E3")
+            .expect("row");
+        assert_eq!(
+            (
+                rotated.refresh_token_hash.as_str(),
+                rotated.refresh_token_generation,
+                rotated.previous_refresh_token_hash.as_str()
+            ),
+            ("new", 5, "cur")
+        );
+        enroll_reads::clear_force_refresh(&conn, live)
+            .await
+            .expect("clear");
+        let left: Option<i32> = conn
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "SELECT 1 FROM runner_force_refresh",
+            ))
+            .await
+            .expect("probe")
+            .map(|_| 1);
+        assert_eq!(left, None);
     }
 }

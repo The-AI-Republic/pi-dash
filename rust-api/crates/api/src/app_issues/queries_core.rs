@@ -3,9 +3,10 @@
 //! Retrieve / sub-issue / relation+link / archive read querysets (D-26 queries-A).
 //!
 //! Ports the annotated read querysets behind the issue detail, sub-issue,
-//! relation, link and archive endpoints to SQL text, extending pilot-2's
-//! api-crate query pattern (`super::annotation_selects` / `super::base_where`,
-//! [`Binder`] `$n` binds). Each builder returns a fragment or a complete
+//! relation, link and archive endpoints. Every builder is SeaORM / sea-query
+//! (relations and links since batch 2g, sub-issues and archive retrieve since
+//! Batch L2, which moved the old text builders to the `reads_oracle`
+//! differential oracle). Each builder returns an expression or a complete
 //! statement the handler executes; handlers own auth gates, filter stacks,
 //! ordering variants, pagination and response shaping.
 //!
@@ -59,7 +60,7 @@
 //!    `GROUP BY` drops the model's default ordering. Ported without order.
 //! 5. Sub-issue `.values(27)` renders concrete columns in call order, then
 //!    annotations in `annotate()` order — so `module_ids` (called third)
-//!    selects after `label_ids`/`assignee_ids`. [`sub_issues_selects`]
+//!    selects after `label_ids`/`assignee_ids`. [`sub_issues_select`]
 //!    keeps Django's render order.
 //! 6. Explicit `deleted_at__isnull` guards on sub-issue/archive-cycle and
 //!    sub-issue arrays double the manager's guard (`deleted_at IS NULL AND
@@ -76,312 +77,321 @@
 //! (`resolve_gate`, `@allow_permission`), rich + legacy filter stacks
 //! (`complex_filter`, `legacy_sql`), ordering variants (`ordering.rs`,
 //! `order_key`), pagination envelopes (`render.rs`, groupers), the archive
-//! grouped-count path (uses [`archive_count_filter_sql`] plus pilot-2's
+//! grouped-count path (uses `list_engine::archive_issue_set` plus pilot-2's
 //! grouped paginator), serializer shapes and `handle_exception` bodies.
 //! Queryset-adjacent constants handlers need (`.values()` key orders, the
 //! `IN`-list bucket table, default orders) ARE in scope and marked.
 
-use super::Binder;
+use pidash_db::entity::{
+    issue_assignees, issue_labels, issue_links, issue_relations, issue_subscribers, issue_types,
+    issues, module_issues, modules, project_members, projects, states, users, workspaces,
+};
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::extension::postgres::PgFunc;
+use sea_orm::sea_query::{Alias, Condition, Expr, Func, Order, Query, SelectStatement, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, IdenStatic, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select,
+};
+use uuid::Uuid;
+
+use super::list_engine::{
+    a, attachment_count, col, cycle_id_subquery, id_array, label_ids, link_count, select_one_from,
+    sub, sub_issues_count,
+};
 
 // ---------------------------------------------------------------------------
 // Shared column lists (Django concrete-field order, live-compiled)
 // ---------------------------------------------------------------------------
+//
+// sea-query since Batch L2: the lists are typed entity columns, selected
+// through [`select_fields`] under the statement's table alias. Output names
+// are the column names, or `<prefix><column>` where several tables share
+// one row, so every `row_to_json` key is unique by construction.
 
-/// All 34 concrete `issues` columns in Django's select order, qualified with
-/// the pilot-2 `issue` alias so these fragments compose with
-/// `complex_filter` / `legacy_sql` / `order_key` output.
-pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.created_by_id, \
-    issue.updated_by_id, issue.deleted_at, issue.id, issue.project_id, issue.workspace_id, \
-    issue.parent_id, issue.state_id, issue.point, issue.estimate_point_id, issue.name, \
-    issue.description_json, issue.description_html, issue.description_stripped, \
-    issue.description_binary, issue.priority, issue.complexity_score, issue.start_date, \
-    issue.target_date, issue.sequence_id, issue.sort_order, issue.completed_at, \
-    issue.archived_at, issue.is_draft, issue.external_source, issue.external_id, \
-    issue.type_id, issue.git_work_branch, issue.workpad, issue.created_via, \
-    issue.assigned_pod_id, issue.agent_executor";
+/// All 34 concrete `issues` columns in Django's select order.
+pub const ISSUE_FIELDS: [issues::Column; 35] = [
+    issues::Column::CreatedAt,
+    issues::Column::UpdatedAt,
+    issues::Column::CreatedById,
+    issues::Column::UpdatedById,
+    issues::Column::DeletedAt,
+    issues::Column::Id,
+    issues::Column::ProjectId,
+    issues::Column::WorkspaceId,
+    issues::Column::ParentId,
+    issues::Column::StateId,
+    issues::Column::Point,
+    issues::Column::EstimatePointId,
+    issues::Column::Name,
+    issues::Column::DescriptionJson,
+    issues::Column::DescriptionHtml,
+    issues::Column::DescriptionStripped,
+    issues::Column::DescriptionBinary,
+    issues::Column::Priority,
+    issues::Column::ComplexityScore,
+    issues::Column::StartDate,
+    issues::Column::TargetDate,
+    issues::Column::SequenceId,
+    issues::Column::SortOrder,
+    issues::Column::CompletedAt,
+    issues::Column::ArchivedAt,
+    issues::Column::IsDraft,
+    issues::Column::ExternalSource,
+    issues::Column::ExternalId,
+    issues::Column::TypeId,
+    issues::Column::GitWorkBranch,
+    issues::Column::Workpad,
+    issues::Column::CreatedVia,
+    issues::Column::AssignedPodId,
+    issues::Column::AssignedRunnerId,
+    issues::Column::AgentExecutor,
+];
 
 /// All 18 concrete `states` columns (`select_related("state")` order).
-/// `group`/`default` stay quoted: reserved words.
-pub const STATE_COLUMNS: &str = "state.created_at, state.updated_at, state.created_by_id, \
-    state.updated_by_id, state.deleted_at, state.id, state.project_id, state.workspace_id, \
-    state.name, state.description, state.color, state.slug, state.sequence, state.\"group\", \
-    state.is_triage, state.\"default\", state.external_source, state.external_id";
-
-/// All 11 concrete `issue_reactions` columns (prefetch base-table order).
-pub const ISSUE_REACTION_COLUMNS: &str = "issue_reactions.created_at, issue_reactions.updated_at, \
-    issue_reactions.created_by_id, issue_reactions.updated_by_id, issue_reactions.deleted_at, \
-    issue_reactions.id, issue_reactions.project_id, issue_reactions.workspace_id, \
-    issue_reactions.actor_id, issue_reactions.issue_id, issue_reactions.reaction";
-
-/// All 12 concrete `issue_links` columns (prefetch / list base-table order).
-pub const ISSUE_LINK_COLUMNS: &str = "issue_links.created_at, issue_links.updated_at, \
-    issue_links.created_by_id, issue_links.updated_by_id, issue_links.deleted_at, \
-    issue_links.id, issue_links.project_id, issue_links.workspace_id, issue_links.title, \
-    issue_links.url, issue_links.issue_id, issue_links.metadata";
-
-/// All 40 concrete `users` columns (`select_related("actor")` /
-/// `select_related("created_by")` order). The auth user has no `deleted_at`.
-pub const USER_COLUMNS: &str = "users.password, users.last_login, users.id, users.username, \
-    users.mobile_number, users.email, users.display_name, users.first_name, users.last_name, \
-    users.avatar, users.avatar_asset_id, users.cover_image, users.cover_image_asset_id, \
-    users.date_joined, users.created_at, users.updated_at, users.last_location, \
-    users.created_location, users.is_superuser, users.is_managed, users.is_password_expired, \
-    users.is_active, users.is_staff, users.is_email_verified, users.is_password_autoset, \
-    users.is_password_reset_required, users.token, users.last_active, users.last_login_time, \
-    users.last_logout_time, users.last_login_ip, users.last_logout_ip, users.last_login_medium, \
-    users.last_login_uagent, users.token_updated_at, users.is_bot, users.bot_type, \
-    users.user_timezone, users.is_email_valid, users.masked_at";
+pub const STATE_FIELDS: [states::Column; 18] = [
+    states::Column::CreatedAt,
+    states::Column::UpdatedAt,
+    states::Column::CreatedById,
+    states::Column::UpdatedById,
+    states::Column::DeletedAt,
+    states::Column::Id,
+    states::Column::ProjectId,
+    states::Column::WorkspaceId,
+    states::Column::Name,
+    states::Column::Description,
+    states::Column::Color,
+    states::Column::Slug,
+    states::Column::Sequence,
+    states::Column::Group,
+    states::Column::IsTriage,
+    states::Column::Default,
+    states::Column::ExternalSource,
+    states::Column::ExternalId,
+];
 
 /// All 46 concrete `projects` columns (`Project.objects.get` order).
-pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
-    projects.created_by_id, projects.updated_by_id, projects.deleted_at, projects.id, \
-    projects.name, projects.description, projects.description_text, projects.description_html, \
-    projects.network, projects.workspace_id, projects.identifier, projects.default_assignee_id, \
-    projects.project_lead_id, projects.emoji, projects.icon_prop, projects.module_view, \
-    projects.cycle_view, projects.issue_views_view, projects.page_view, projects.intake_view, \
-    projects.is_time_tracking_enabled, projects.is_issue_type_enabled, projects.is_default, \
-    projects.guest_view_all_features, projects.members_can_edit_states, projects.cover_image, \
-    projects.cover_image_asset_id, projects.estimate_id, projects.archive_in, projects.close_in, \
-    projects.logo_props, projects.default_state_id, projects.archived_at, projects.timezone, \
-    projects.external_source, projects.external_id, projects.repo_url, projects.base_branch, \
-    projects.agent_default_interval_seconds, projects.agent_default_max_ticks, \
-    projects.agent_review_default_interval_seconds, projects.agent_test_default_interval_seconds, \
-    projects.agent_ticking_enabled, projects.default_agent_executor";
+pub const PROJECT_FIELDS: [projects::Column; 46] = [
+    projects::Column::CreatedAt,
+    projects::Column::UpdatedAt,
+    projects::Column::CreatedById,
+    projects::Column::UpdatedById,
+    projects::Column::DeletedAt,
+    projects::Column::Id,
+    projects::Column::Name,
+    projects::Column::Description,
+    projects::Column::DescriptionText,
+    projects::Column::DescriptionHtml,
+    projects::Column::Network,
+    projects::Column::WorkspaceId,
+    projects::Column::Identifier,
+    projects::Column::DefaultAssigneeId,
+    projects::Column::ProjectLeadId,
+    projects::Column::Emoji,
+    projects::Column::IconProp,
+    projects::Column::ModuleView,
+    projects::Column::CycleView,
+    projects::Column::IssueViewsView,
+    projects::Column::PageView,
+    projects::Column::IntakeView,
+    projects::Column::IsTimeTrackingEnabled,
+    projects::Column::IsIssueTypeEnabled,
+    projects::Column::IsDefault,
+    projects::Column::GuestViewAllFeatures,
+    projects::Column::MembersCanEditStates,
+    projects::Column::CoverImage,
+    projects::Column::CoverImageAssetId,
+    projects::Column::EstimateId,
+    projects::Column::ArchiveIn,
+    projects::Column::CloseIn,
+    projects::Column::LogoProps,
+    projects::Column::DefaultStateId,
+    projects::Column::ArchivedAt,
+    projects::Column::Timezone,
+    projects::Column::ExternalSource,
+    projects::Column::ExternalId,
+    projects::Column::RepoUrl,
+    projects::Column::BaseBranch,
+    projects::Column::AgentDefaultIntervalSeconds,
+    projects::Column::AgentDefaultMaxTicks,
+    projects::Column::AgentReviewDefaultIntervalSeconds,
+    projects::Column::AgentTestDefaultIntervalSeconds,
+    projects::Column::AgentTickingEnabled,
+    projects::Column::DefaultAgentExecutor,
+];
 
-/// `issues` columns prefixed for a self-join alias (reaction-prefetch
-/// `select_related("issue")` renders the full issue row under the `issues`
-/// table name).
-pub const PREFETCH_ISSUE_COLUMNS: &str = "issues.created_at, issues.updated_at, \
-    issues.created_by_id, issues.updated_by_id, issues.deleted_at, issues.id, \
-    issues.project_id, issues.workspace_id, issues.parent_id, issues.state_id, issues.point, \
-    issues.estimate_point_id, issues.name, issues.description_json, issues.description_html, \
-    issues.description_stripped, issues.description_binary, issues.priority, \
-    issues.complexity_score, issues.start_date, issues.target_date, issues.sequence_id, \
-    issues.sort_order, issues.completed_at, issues.archived_at, issues.is_draft, \
-    issues.external_source, issues.external_id, issues.type_id, issues.git_work_branch, \
-    issues.workpad, issues.created_via, issues.assigned_pod_id, issues.agent_executor";
+/// Select `alias.column` for every column, named `<prefix><column>` (the
+/// bare column name when `prefix` is empty).
+pub fn select_fields<C>(
+    stmt: &mut SelectStatement,
+    alias: &'static str,
+    columns: &[C],
+    prefix: &str,
+) where
+    C: IdenStatic + Copy + 'static,
+{
+    for column in columns {
+        if prefix.is_empty() {
+            stmt.column((a(alias), *column));
+        } else {
+            stmt.expr_as(
+                col(alias, *column),
+                Alias::new(format!("{prefix}{}", column.as_str())),
+            );
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
-// Scalar annotations shared by retrieve / sub-issues / archive-list
+// Scalar annotations shared by sub-issues / identifier / archive retrieve
 // ---------------------------------------------------------------------------
+//
+// `cycle_id`, the `NULLIF(COUNT(*), 0)` counts and `label_ids` are the list
+// engine's (`list_engine::{cycle_id_subquery, link_count, attachment_count,
+// sub_issues_count, label_ids}`). The sub-issue count is the list engine's
+// unguarded form: Django never applies the joined state's manager, so a
+// soft-deleted triage state still excludes the child. The two arrays below
+// differ from the list engine's on purpose (see module docs): no joined-row
+// soft-delete guard on the member or module rows.
 
-/// `cycle_id` (`base.py:496`, `sub_issue.py:40-44`, `archive.py:63-67`).
-/// Same text as pilot-2's: Django's `ORDER BY created_at DESC` (model
-/// ordering) is dropped. The cycle write paths move links instead of stacking
-/// them (`app/views/cycle/issue.py` and `api/views/cycle.py` re-point existing
-/// links; drafts link brand-new issues), so at most one live row per issue
-/// exists and the order cannot change the result. (The partial unique covers
-/// `(cycle, issue)`, not `(issue)` alone — the single-row property comes from
-/// the move semantics, shared with pilot-2's merged list paths.)
-pub const CYCLE_ID_SELECT: &str = "(SELECT ci.cycle_id FROM cycle_issues ci \
-    WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id";
-
-/// `link_count` (`base.py:497-504`, `sub_issue.py:45-57`, `archive.py:68-75`,
-/// `relation.py:112-117` as dead code). `NULLIF(COUNT(*), 0)` reproduces
-/// Django's grouped `COUNT(id)` subquery, which yields no row — SQL `NULL` —
-/// when empty. `coalesce_zero` selects the sub-issue form (`COALESCE(..., 0)`).
-pub fn link_count_select(coalesce_zero: bool) -> String {
-    let inner = "(SELECT NULLIF(COUNT(*), 0) FROM issue_links il \
-        WHERE il.issue_id = issue.id AND il.deleted_at IS NULL)";
-    if coalesce_zero {
-        format!("COALESCE({inner}, 0) AS link_count")
-    } else {
-        format!("{inner} AS link_count")
-    }
+/// `COALESCE(<count>, 0)`: the sub-issue / identifier count form.
+pub fn coalesce_zero(count: SimpleExpr) -> SimpleExpr {
+    Func::coalesce([count, Expr::val(0).into()]).into()
 }
-
-/// `attachment_count` (`base.py:505-515`, `sub_issue.py:58-73`,
-/// `archive.py:76-86`). Same `NULLIF` equivalence as [`link_count_select`].
-pub fn attachment_count_select(coalesce_zero: bool) -> String {
-    let inner = "(SELECT NULLIF(COUNT(*), 0) FROM file_assets fa \
-        WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT' \
-        AND fa.deleted_at IS NULL)";
-    if coalesce_zero {
-        format!("COALESCE({inner}, 0) AS attachment_count")
-    } else {
-        format!("{inner} AS attachment_count")
-    }
-}
-
-/// `sub_issues_count` over the `issue_objects` manager scope
-/// (`base.py:516-523`, `sub_issue.py:74-86`, `archive.py:87-94`). Same shape
-/// as pilot-2's, minus the joined-`states` soft-delete guard Django never
-/// emits (see module docs): a soft-deleted triage state still excludes the
-/// child here, exactly as in Django.
-pub fn sub_issues_count_select(coalesce_zero: bool) -> String {
-    let inner = "(SELECT NULLIF(COUNT(*), 0) FROM issues c \
-        LEFT JOIN states cs ON cs.id = c.state_id \
-        JOIN projects cp ON cp.id = c.project_id \
-        WHERE c.parent_id = issue.id AND c.deleted_at IS NULL \
-        AND NOT (cs.\"group\" = 'triage' AND cs.\"group\" IS NOT NULL) \
-        AND c.archived_at IS NULL AND cp.archived_at IS NULL AND c.is_draft = FALSE)";
-    if coalesce_zero {
-        format!("COALESCE({inner}, 0) AS sub_issues_count")
-    } else {
-        format!("{inner} AS sub_issues_count")
-    }
-}
-
-/// `label_ids` (`base.py:525-533`, `sub_issue.py:88-98`). Same text as
-/// pilot-2's (pin-tested): manager soft-delete guard only.
-pub const LABEL_IDS_SELECT: &str =
-    "(SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[]) \
-    FROM issue_labels il WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS label_ids";
 
 /// `assignee_ids` with the active-member join (`base.py:534-545`,
-/// `sub_issue.py:99-113`). Faithful to Django: the `users` +
-/// `project_members` joins carry NO soft-delete guard (`filter()` joins never
-/// apply the related manager), unlike pilot-2's shared `EXISTS` form which
-/// adds `pm.deleted_at IS NULL`.
-pub const ASSIGNEE_IDS_ACTIVE_SELECT: &str =
-    "(SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[]) \
-    FROM issue_assignees ia \
-    JOIN users u ON u.id = ia.assignee_id \
-    JOIN project_members pm ON pm.member_id = u.id \
-    WHERE ia.issue_id = issue.id AND ia.deleted_at IS NULL AND pm.is_active) AS assignee_ids";
+/// `sub_issue.py:99-113`): `users` + `project_members` INNER joins with NO
+/// soft-delete guard and no project filter, `pm.is_active` only.
+pub fn assignee_ids_active() -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.expr(id_array(col("ia", issue_assignees::Column::AssigneeId)))
+        .from_as(issue_assignees::Entity, a("ia"))
+        .join_as(
+            JoinType::InnerJoin,
+            users::Entity,
+            a("u"),
+            col("u", users::Column::Id).equals((a("ia"), issue_assignees::Column::AssigneeId)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            project_members::Entity,
+            a("pm"),
+            col("pm", project_members::Column::MemberId).equals((a("u"), users::Column::Id)),
+        )
+        .and_where(
+            col("ia", issue_assignees::Column::IssueId).equals((a("issue"), issues::Column::Id)),
+        )
+        .and_where(col("ia", issue_assignees::Column::DeletedAt).is_null())
+        .and_where(col("pm", project_members::Column::IsActive).into());
+    sub(stmt)
+}
 
 /// `module_ids` with the archived-module guard (`base.py:546-558`,
-/// `sub_issue.py:114-129`). Faithful to Django: NO `modules.deleted_at`
-/// guard (pilot-2's shared form adds one).
-pub const MODULE_IDS_SELECT: &str =
-    "(SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[]) \
-    FROM module_issues mi JOIN modules m ON m.id = mi.module_id \
-    WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL \
-    AND m.archived_at IS NULL) AS module_ids";
+/// `sub_issue.py:114-129`): NO `modules.deleted_at` guard.
+pub fn module_ids_unarchived() -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.expr(id_array(col("mi", module_issues::Column::ModuleId)))
+        .from_as(module_issues::Entity, a("mi"))
+        .join_as(
+            JoinType::InnerJoin,
+            modules::Entity,
+            a("m"),
+            col("m", modules::Column::Id).equals((a("mi"), module_issues::Column::ModuleId)),
+        )
+        .and_where(
+            col("mi", module_issues::Column::IssueId).equals((a("issue"), issues::Column::Id)),
+        )
+        .and_where(col("mi", module_issues::Column::DeletedAt).is_null())
+        .and_where(col("m", modules::Column::ArchivedAt).is_null());
+    sub(stmt)
+}
 
 /// `is_subscribed` `Exists` (`base.py:571-580`, `archive.py:238-248`).
-/// Binds, in order: project id, subscriber id, workspace slug.
-pub fn is_subscribed_select(
-    binder: &mut Binder,
+pub fn is_subscribed(slug: &str, project_id: Uuid, user_id: Uuid) -> SimpleExpr {
+    let mut stmt = select_one_from(issue_subscribers::Entity, "s");
+    stmt.join_as(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        a("sw"),
+        col("sw", workspaces::Column::Id).equals((a("s"), issue_subscribers::Column::WorkspaceId)),
+    )
+    .and_where(col("s", issue_subscribers::Column::DeletedAt).is_null())
+    .and_where(
+        col("s", issue_subscribers::Column::IssueId).equals((a("issue"), issues::Column::Id)),
+    )
+    .and_where(col("s", issue_subscribers::Column::ProjectId).eq(project_id))
+    .and_where(col("s", issue_subscribers::Column::SubscriberId).eq(user_id))
+    .and_where(col("sw", workspaces::Column::Slug).eq(slug))
+    .limit(1);
+    Expr::exists(stmt)
+}
+
+/// `NOT (state."group" = 'triage' AND state."group" IS NOT NULL)`: the
+/// `IssueManager` triage exclusion as Django renders it.
+pub fn triage_excluded(state_alias: &'static str) -> SimpleExpr {
+    col(state_alias, states::Column::Group)
+        .eq("triage")
+        .and(col(state_alias, states::Column::Group).is_not_null())
+        .not()
+}
+
+/// `FROM issues AS issue LEFT JOIN states AS state JOIN projects AS project`
+/// plus the `issue_objects` manager scope: live, non-triage, non-archived
+/// (issue and project), non-draft.
+pub fn scoped_issues(stmt: &mut SelectStatement) {
+    stmt.from_as(issues::Entity, a("issue"))
+        .join_as(
+            JoinType::LeftJoin,
+            states::Entity,
+            a("state"),
+            col("state", states::Column::Id).equals((a("issue"), issues::Column::StateId)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            a("project"),
+            col("project", projects::Column::Id).equals((a("issue"), issues::Column::ProjectId)),
+        )
+        .and_where(col("issue", issues::Column::DeletedAt).is_null())
+        .and_where(triage_excluded("state"))
+        .and_where(col("issue", issues::Column::ArchivedAt).is_null())
+        .and_where(col("project", projects::Column::ArchivedAt).is_null())
+        .and_where(col("issue", issues::Column::IsDraft).eq(false));
+}
+
+/// `JOIN workspaces ON workspaces.id = issue.workspace_id` plus the slug
+/// filter.
+pub fn workspace_slug(stmt: &mut SelectStatement, slug: &str) {
+    stmt.join(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        Expr::col((workspaces::Entity, workspaces::Column::Id))
+            .equals((a("issue"), issues::Column::WorkspaceId)),
+    )
+    .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug));
+}
+
+/// Guest view gate (`base.py:593-601`): an active role-5 membership.
+/// Django's `.exists()` is `SELECT 1 ... LIMIT 1`; this reads one id.
+pub fn guest_view_select(
     slug: &str,
-    project_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let project = binder.bind_uuid(project_id);
-    let user = binder.bind_uuid(user_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "EXISTS(SELECT 1 AS a FROM issue_subscribers s \
-        JOIN workspaces sw ON sw.id = s.workspace_id \
-        WHERE s.deleted_at IS NULL AND s.issue_id = issue.id AND s.project_id = {project} \
-        AND s.subscriber_id = {user} AND sw.slug = {slug_holder} LIMIT 1) AS is_subscribed"
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Retrieve (base.py:486-620)
-// ---------------------------------------------------------------------------
-
-/// Full retrieve statement (`base.py:489-581`, `.first()` included): all issue
-/// columns, the seven annotations in `annotate()` order, `is_subscribed`,
-/// then the `select_related("state")` columns — Django's exact select order.
-/// `Issue.objects` (soft-delete only): triage/archived/draft rows ARE visible
-/// here, unlike on the `issue_objects` paths. Binds, in order: issue id,
-/// project id, workspace slug (outer `WHERE`), then the `is_subscribed`
-/// binds (project id, subscriber id, slug).
-pub fn retrieve_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let issue = binder.bind_uuid(issue_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let subscribed = is_subscribed_select(binder, slug, project_id, user_id);
-    let link = link_count_select(false);
-    let attachment = attachment_count_select(false);
-    let sub = sub_issues_count_select(false);
-    format!(
-        "SELECT {ISSUE_COLUMNS}, {CYCLE_ID_SELECT}, {link}, {attachment}, {sub}, \
-        {LABEL_IDS_SELECT}, {ASSIGNEE_IDS_ACTIVE_SELECT}, {MODULE_IDS_SELECT}, {subscribed}, \
-        {STATE_COLUMNS} \
-        FROM issues AS issue \
-        JOIN workspaces ON workspaces.id = issue.workspace_id \
-        LEFT JOIN states AS state ON state.id = issue.state_id \
-        WHERE issue.deleted_at IS NULL AND issue.id = {issue} \
-        AND issue.project_id = {project} AND workspaces.slug = {slug_holder} \
-        ORDER BY issue.created_at DESC LIMIT 1"
-    )
-}
-
-/// Reaction prefetch (`Prefetch("issue_reactions",
-/// IssueReaction.objects.select_related("issue", "actor"))`, `base.py:559-564`,
-/// shared with archive retrieve `:226-231`). Column order follows the MODEL
-/// field order (`actor` before `issue`), not the call order; both joins are
-/// `INNER` (non-null FKs). One bind per parent id, in order; the single-parent
-/// retrieve/archive calls pass exactly one.
-pub fn reaction_prefetch_sql(binder: &mut Binder, issue_ids: &[uuid::Uuid]) -> String {
-    let list = issue_ids
-        .iter()
-        .map(|id| binder.bind_uuid(*id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {ISSUE_REACTION_COLUMNS}, {USER_COLUMNS}, {PREFETCH_ISSUE_COLUMNS} \
-        FROM issue_reactions \
-        INNER JOIN issues ON issue_reactions.issue_id = issues.id \
-        INNER JOIN users ON issue_reactions.actor_id = users.id \
-        WHERE issue_reactions.deleted_at IS NULL AND issue_reactions.issue_id IN ({list}) \
-        ORDER BY issue_reactions.created_at DESC"
-    )
-}
-
-/// Link prefetch (`Prefetch("issue_link",
-/// IssueLink.objects.select_related("created_by"))`, `base.py:565-570`,
-/// shared with archive retrieve `:232-237`). `created_by` is nullable, so the
-/// users join is `LEFT OUTER`.
-pub fn link_prefetch_sql(binder: &mut Binder, issue_ids: &[uuid::Uuid]) -> String {
-    let list = issue_ids
-        .iter()
-        .map(|id| binder.bind_uuid(*id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {ISSUE_LINK_COLUMNS}, {USER_COLUMNS} \
-        FROM issue_links \
-        LEFT OUTER JOIN users ON issue_links.created_by_id = users.id \
-        WHERE issue_links.deleted_at IS NULL AND issue_links.issue_id IN ({list}) \
-        ORDER BY issue_links.created_at DESC"
-    )
-}
-
-/// `Project.objects.get(pk, workspace__slug)` (`base.py:487`). A pk lookup is
-/// unique, so the handler's single-row fetch matches Django's `.get()`
-/// (which reads up to `LIMIT 21` to detect multiples — unobservable on a
-/// unique pk). Binds: project id, workspace slug.
-pub fn project_get_sql(binder: &mut Binder, slug: &str, project_id: uuid::Uuid) -> String {
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT {PROJECT_COLUMNS} FROM projects \
-        INNER JOIN workspaces ON projects.workspace_id = workspaces.id \
-        WHERE projects.deleted_at IS NULL AND projects.id = {project} \
-        AND workspaces.slug = {slug_holder} \
-        ORDER BY projects.created_at DESC LIMIT 1"
-    )
-}
-
-/// Guest view gate `Exists` (`base.py:593-601`): an active role-5 membership.
-/// Django's `.exists()` renders `SELECT 1 ... LIMIT 1` with no `ORDER BY`.
-/// Binds, in order: user id, project id, workspace slug.
-pub fn guest_view_exists_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let user = binder.bind_uuid(user_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT 1 AS a FROM project_members \
-        INNER JOIN workspaces ON project_members.workspace_id = workspaces.id \
-        WHERE project_members.deleted_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} AND project_members.project_id = {project} \
-        AND project_members.role = 5 AND workspaces.slug = {slug_holder} LIMIT 1"
-    )
+    project_id: Uuid,
+    user_id: Uuid,
+) -> Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::Role.eq(5))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .limit(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +402,7 @@ pub fn guest_view_exists_sql(
 /// key order handlers render. Django's `.values()` dicts follow the SELECT
 /// order, not the call order: concrete columns in call order (`type_id`
 /// rides with them, after `parent_id`), then annotations in `annotate()`
-/// order (see [`sub_issues_selects`]). `estimate_point` / `created_by` /
+/// order (see [`sub_issues_select`]). `estimate_point` / `created_by` /
 /// `updated_by` select the `*_id` columns.
 pub const SUB_ISSUES_KEYS: &[&str] = &[
     "id",
@@ -424,58 +434,48 @@ pub const SUB_ISSUES_KEYS: &[&str] = &[
     "state_group",
 ];
 
-/// Sub-issue `.values(27)` select list in Django's RENDER order: concrete
-/// columns in call order (with `AS` aliases where the key differs), then
-/// annotations in `annotate()` order (`cycle_id`, `link_count`,
-/// `attachment_count`, `sub_issues_count`, `label_ids`, `assignee_ids`,
-/// `module_ids`), then the `state_group` `F()` reference. Counts coalesce to
-/// `0` on this path (unlike retrieve's `NULL`).
-pub fn sub_issues_selects() -> String {
-    let link = link_count_select(true);
-    let attachment = attachment_count_select(true);
-    let sub = sub_issues_count_select(true);
-    format!(
-        "issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at, \
-        issue.estimate_point_id AS estimate_point, issue.priority, issue.start_date, \
-        issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id, issue.type_id, \
-        issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
-        issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at, {CYCLE_ID_SELECT}, \
-        {link}, {attachment}, {sub}, {LABEL_IDS_SELECT}, {ASSIGNEE_IDS_ACTIVE_SELECT}, \
-        {MODULE_IDS_SELECT}, state.\"group\" AS state_group"
-    )
-}
-
-/// Sub-issue `FROM` + `WHERE`: the `issue_objects` manager scope plus
-/// `parent_id` and the workspace slug (`sub_issue.py:38-39`). The manager's
-/// triage exclusion shares the `state` join with `state_group`; the `project`
-/// join serves the archived-project exclusion. Binds: parent issue id,
-/// workspace slug.
-pub fn sub_issues_from_where(binder: &mut Binder, slug: &str, parent_id: uuid::Uuid) -> String {
-    let parent = binder.bind_uuid(parent_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "FROM issues AS issue \
-        LEFT JOIN states AS state ON state.id = issue.state_id \
-        JOIN projects AS project ON project.id = issue.project_id \
-        JOIN workspaces ON workspaces.id = issue.workspace_id \
-        WHERE issue.deleted_at IS NULL \
-        AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
-        AND issue.archived_at IS NULL AND project.archived_at IS NULL AND issue.is_draft = FALSE \
-        AND issue.parent_id = {parent} AND workspaces.slug = {slug_holder}"
-    )
-}
-
-/// Default sub-issue order: `order_issue_queryset(sub_issues, "-created_at")`
-/// echoes the param through (`ordering.rs`, pilot-2's).
-pub const SUB_ISSUES_DEFAULT_ORDER: &str = "ORDER BY issue.created_at DESC";
-
-/// Full default-order sub-issues statement (GET with no `order_by` override).
-/// Ordering variants and the `state_distribution` / `group_by` shaping are
-/// handler-owned (`ordering.rs`, `SUB_ISSUES_KEYS`).
-pub fn sub_issues_sql(binder: &mut Binder, slug: &str, parent_id: uuid::Uuid) -> String {
-    let selects = sub_issues_selects();
-    let from_where = sub_issues_from_where(binder, slug, parent_id);
-    format!("SELECT {selects} {from_where} {SUB_ISSUES_DEFAULT_ORDER}")
+/// Sub-issue `.values(27)` statement (`sub_issue.py:37-171`) without its
+/// `ORDER BY`: concrete columns in call order (aliased where the key
+/// differs), then the annotations in `annotate()` order (counts coalesced
+/// to `0`), then `state_group`; over the `issue_objects` scope, the parent
+/// and the workspace slug. Ordering is handler-owned.
+pub fn sub_issues_select(slug: &str, parent_id: Uuid) -> SelectStatement {
+    let mut stmt = Query::select();
+    let issue = |column: issues::Column| col("issue", column);
+    stmt.column((a("issue"), issues::Column::Id))
+        .column((a("issue"), issues::Column::Name))
+        .column((a("issue"), issues::Column::StateId))
+        .column((a("issue"), issues::Column::SortOrder))
+        .column((a("issue"), issues::Column::CompletedAt))
+        .expr_as(issue(issues::Column::EstimatePointId), a("estimate_point"))
+        .column((a("issue"), issues::Column::Priority))
+        .column((a("issue"), issues::Column::StartDate))
+        .column((a("issue"), issues::Column::TargetDate))
+        .column((a("issue"), issues::Column::SequenceId))
+        .column((a("issue"), issues::Column::ProjectId))
+        .column((a("issue"), issues::Column::ParentId))
+        .column((a("issue"), issues::Column::TypeId))
+        .column((a("issue"), issues::Column::CreatedAt))
+        .column((a("issue"), issues::Column::UpdatedAt))
+        .expr_as(issue(issues::Column::CreatedById), a("created_by"))
+        .expr_as(issue(issues::Column::UpdatedById), a("updated_by"))
+        .column((a("issue"), issues::Column::IsDraft))
+        .column((a("issue"), issues::Column::ArchivedAt))
+        .expr_as(cycle_id_subquery(), a("cycle_id"))
+        .expr_as(coalesce_zero(link_count(true)), a("link_count"))
+        .expr_as(coalesce_zero(attachment_count(true)), a("attachment_count"))
+        .expr_as(
+            coalesce_zero(sub_issues_count(true, false)),
+            a("sub_issues_count"),
+        )
+        .expr_as(label_ids(), a("label_ids"))
+        .expr_as(assignee_ids_active(), a("assignee_ids"))
+        .expr_as(module_ids_unarchived(), a("module_ids"))
+        .expr_as(col("state", states::Column::Group), a("state_group"));
+    scoped_issues(&mut stmt);
+    stmt.and_where(col("issue", issues::Column::ParentId).eq(parent_id));
+    workspace_slug(&mut stmt, slug);
+    stmt
 }
 
 // ---------------------------------------------------------------------------
@@ -588,38 +588,6 @@ pub const RELATION_BUCKETS: &[RelationBucket] = &[
     },
 ];
 
-/// One relation id-list statement (`relation.py:52-100`): `SELECT DISTINCT`
-/// the id column plus the ordering column, over the `(issue OR related)`
-/// scope with the workspace slug, side and type filters. The base
-/// queryset's `select_related` joins never reach SQL (unreferenced by a
-/// `values_list`). Binds, in order: issue id (OR left), issue id (OR right),
-/// workspace slug, issue id (side), relation type.
-pub fn relation_ids_sql(
-    binder: &mut Binder,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    ids: RelationIds,
-) -> String {
-    let left = binder.bind_uuid(issue_id);
-    let right = binder.bind_uuid(issue_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let side = binder.bind_uuid(issue_id);
-    let relation_type = binder.bind_string(ids.relation_type.to_owned());
-    format!(
-        "SELECT DISTINCT issue_relations.{column}, issue_relations.created_at \
-        FROM issue_relations \
-        INNER JOIN workspaces ON issue_relations.workspace_id = workspaces.id \
-        WHERE issue_relations.deleted_at IS NULL \
-        AND (issue_relations.issue_id = {left} OR issue_relations.related_issue_id = {right}) \
-        AND workspaces.slug = {slug_holder} \
-        AND issue_relations.{side_col} = {side} \
-        AND issue_relations.relation_type = {relation_type} \
-        ORDER BY issue_relations.created_at DESC",
-        column = ids.column,
-        side_col = ids.side,
-    )
-}
-
 /// The 14 bucket `.values()` keys in RENDER order (`relation.py:157-172`):
 /// concrete columns in call order, the two direct-`ArrayAgg` annotations in
 /// `annotate()` order, then the `relation_type` literal. `.values()` dicts —
@@ -641,226 +609,260 @@ pub const RELATION_ROW_FIELDS: &[&str] = &[
     "relation_type",
 ];
 
-/// Bucket select list for one `relation_type` literal (target queryset
-/// `relation.py:102-154`, keys `:157-172`). The label/assignee arrays aggregate
-/// DIRECTLY over `LEFT JOIN`ed link rows with `FILTER` (not the subquery
-/// form), which is why the bucket statement needs `GROUP BY issue.id`. The
-/// target queryset's `cycle_id`/count annotations are dead here —
-/// `.values(*fields)` never selects them — and are not emitted. Binds the
-/// label literal.
-pub fn relation_bucket_selects(binder: &mut Binder, label: &str) -> String {
-    let literal = binder.bind_string(label.to_owned());
-    format!(
-        "DISTINCT issue.id, issue.name, issue.state_id, issue.sort_order, issue.priority, \
-        issue.sequence_id, issue.project_id, issue.created_at, issue.updated_at, \
-        issue.created_by_id, issue.updated_by_id, \
-        COALESCE(ARRAY_AGG(DISTINCT issue_labels.label_id) \
-        FILTER (WHERE (NOT (issue_labels.label_id IS NULL) AND issue_labels.deleted_at IS NULL)), \
-        '{{}}'::uuid[]) AS label_ids, \
-        COALESCE(ARRAY_AGG(DISTINCT issue_assignees.assignee_id) \
-        FILTER (WHERE (NOT (issue_assignees.assignee_id IS NULL) AND project_members.is_active \
-        AND issue_assignees.deleted_at IS NULL)), '{{}}'::uuid[]) AS assignee_ids, \
-        {literal} AS relation_type"
-    )
-}
-
-/// Bucket `FROM`: manager-scope joins plus the array-aggregation `LEFT JOIN`s
-/// (`labels__id` / `assignees__id` traversal joins the link tables; the
-/// active-member predicate left-joins `users` + `project_members`). None of
-/// the joined tables carries a soft-delete guard — only the `FILTER` clauses
-/// and the outer `WHERE` do.
-pub const RELATION_BUCKET_FROM: &str = "FROM issues AS issue \
-    LEFT JOIN states AS state ON state.id = issue.state_id \
-    JOIN projects AS project ON project.id = issue.project_id \
-    JOIN workspaces ON workspaces.id = issue.workspace_id \
-    LEFT OUTER JOIN issue_labels ON issue.id = issue_labels.issue_id \
-    LEFT OUTER JOIN issue_assignees ON issue.id = issue_assignees.issue_id \
-    LEFT OUTER JOIN users ON issue_assignees.assignee_id = users.id \
-    LEFT OUTER JOIN project_members ON users.id = project_members.member_id";
-
-/// Bucket scope preamble: the `issue_objects` manager plus the workspace slug
-/// (`relation.py:102-103`). Binds the slug.
-pub fn relation_bucket_preamble(binder: &mut Binder, slug: &str) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "issue.deleted_at IS NULL \
-        AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
-        AND issue.archived_at IS NULL AND project.archived_at IS NULL AND issue.is_draft = FALSE \
-        AND workspaces.slug = {slug_holder}"
-    )
-}
-
-/// Full single-list bucket statement: preamble plus `id IN (<id-list>)`,
-/// grouped by the issue pk. No `ORDER BY` (bug 4). The id-list subquery drops
-/// its outer `ORDER BY` (and with it the ordering column) — subqueries never
-/// carry ordering.
-pub fn relation_bucket_sql(
-    binder: &mut Binder,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    bucket: RelationBucket,
-) -> String {
-    debug_assert_eq!(
-        bucket.ids.len(),
-        1,
-        "OR-ed buckets use relation_bucket_union_sql"
-    );
-    relation_bucket_union_sql(binder, slug, issue_id, bucket)
-}
-
-/// Full bucket statement for one or two id-lists. Django's `|` renders the
-/// two-branch form as `(preamble AND id IN A) OR (preamble AND id IN B)`;
-/// the preamble is conjunctive, so the factored `preamble AND (IN A OR IN B)`
-/// ported here matches row for row with half the text.
-pub fn relation_bucket_union_sql(
-    binder: &mut Binder,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    bucket: RelationBucket,
-) -> String {
-    let selects = relation_bucket_selects(binder, bucket.label);
-    let preamble = relation_bucket_preamble(binder, slug);
-    let mut branches = Vec::with_capacity(bucket.ids.len());
-    for ids in bucket.ids {
-        let left = binder.bind_uuid(issue_id);
-        let right = binder.bind_uuid(issue_id);
-        let slug_holder = binder.bind_string(slug.to_owned());
-        let side = binder.bind_uuid(issue_id);
-        let relation_type = binder.bind_string(ids.relation_type.to_owned());
-        branches.push(format!(
-            "issue.id IN (SELECT DISTINCT r.{column} FROM issue_relations r \
-            INNER JOIN workspaces rw ON rw.id = r.workspace_id \
-            WHERE r.deleted_at IS NULL AND (r.issue_id = {left} OR r.related_issue_id = {right}) \
-            AND rw.slug = {slug_holder} AND r.{side_col} = {side} \
-            AND r.relation_type = {relation_type})",
-            column = ids.column,
-            side_col = ids.side,
-        ));
+/// `issue_relations` column behind a [`RelationIds`] side or returned
+/// column (`issue_id` / `related_issue_id`).
+fn relation_column(name: &str) -> issue_relations::Column {
+    match name {
+        "issue_id" => issue_relations::Column::IssueId,
+        "related_issue_id" => issue_relations::Column::RelatedIssueId,
+        other => unreachable!("relation bucket column {other}"),
     }
-    let membership = branches.join(" OR ");
-    format!("SELECT {selects} {RELATION_BUCKET_FROM} WHERE {preamble} AND ({membership}) GROUP BY issue.id")
+}
+
+/// One relation id-list (`relation.py:52-100`) as an `IN` subquery:
+/// `SELECT DISTINCT <column>` over the `(issue OR related)` scope with the
+/// workspace slug (an aliased `workspaces` join), side and type filters.
+/// Subqueries carry no ordering, so the list's `-created_at` drops.
+fn relation_ids_subquery(slug: &str, issue_id: Uuid, ids: RelationIds) -> SelectStatement {
+    let rw = Alias::new("rw");
+    Query::select()
+        .distinct()
+        .column((issue_relations::Entity, relation_column(ids.column)))
+        .from(issue_relations::Entity)
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            rw.clone(),
+            Expr::col((rw.clone(), workspaces::Column::Id)).equals((
+                issue_relations::Entity,
+                issue_relations::Column::WorkspaceId,
+            )),
+        )
+        .and_where(
+            Expr::col((issue_relations::Entity, issue_relations::Column::DeletedAt)).is_null(),
+        )
+        .cond_where(
+            Condition::any()
+                .add(
+                    Expr::col((issue_relations::Entity, issue_relations::Column::IssueId))
+                        .eq(issue_id),
+                )
+                .add(
+                    Expr::col((
+                        issue_relations::Entity,
+                        issue_relations::Column::RelatedIssueId,
+                    ))
+                    .eq(issue_id),
+                ),
+        )
+        .and_where(Expr::col((rw, workspaces::Column::Slug)).eq(slug))
+        .and_where(Expr::col((issue_relations::Entity, relation_column(ids.side))).eq(issue_id))
+        .and_where(
+            Expr::col((
+                issue_relations::Entity,
+                issue_relations::Column::RelationType,
+            ))
+            .eq(ids.relation_type),
+        )
+        .to_owned()
+}
+
+/// `(SELECT ARRAY_AGG(DISTINCT <column>) FROM <query>)`, correlated on the
+/// outer `issues.id`.
+fn distinct_array(mut query: SelectStatement, column: SimpleExpr) -> SimpleExpr {
+    query.expr(PgFunc::array_agg_distinct(column));
+    SimpleExpr::SubQuery(None, Box::new(query.into_sub_query_statement()))
+}
+
+/// One relation bucket row (`relation.py:157-172`): the eleven concrete
+/// columns plus the two id-list annotations. The `relation_type` literal
+/// is the bucket label, rendered by the caller. An empty aggregate is SQL
+/// `NULL` (`None`), Django's `[]` default.
+#[derive(Debug, FromQueryResult)]
+pub struct RelationBucketRow {
+    pub id: Uuid,
+    pub name: String,
+    pub state_id: Option<Uuid>,
+    pub sort_order: f64,
+    pub priority: String,
+    pub sequence_id: i32,
+    pub project_id: Uuid,
+    pub created_at: DateTimeWithTimeZone,
+    pub updated_at: DateTimeWithTimeZone,
+    pub created_by_id: Option<Uuid>,
+    pub updated_by_id: Option<Uuid>,
+    pub label_ids: Option<Vec<Uuid>>,
+    pub assignee_ids: Option<Vec<Uuid>>,
+}
+
+/// One bucket statement (target queryset `relation.py:102-154`): the
+/// `issue_objects` manager plus the workspace slug, `id IN` one or two
+/// id-lists (Django's `|` of two conjunctive scopes, factored). The
+/// label/assignee `ArrayAgg(distinct, filter=...)` annotations are
+/// correlated subqueries with the same filters (live label links; live
+/// assignee links whose user has an active project membership in any
+/// project, as the unguarded `users` / `project_members` joins decide),
+/// so the outer row needs no `GROUP BY`. No `ORDER BY` (bug 4). The
+/// target queryset's `cycle_id` / count annotations never reach
+/// `.values(*fields)` and are not emitted.
+pub fn relation_bucket_select(
+    slug: &str,
+    issue_id: Uuid,
+    bucket: RelationBucket,
+) -> sea_orm::Select<issues::Entity> {
+    let outer_id = || Expr::col((issues::Entity, issues::Column::Id));
+    let label_ids = distinct_array(
+        Query::select()
+            .from(issue_labels::Entity)
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::IssueId)).eq(outer_id()),
+            )
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::LabelId)).is_not_null(),
+            )
+            .and_where(Expr::col((issue_labels::Entity, issue_labels::Column::DeletedAt)).is_null())
+            .to_owned(),
+        Expr::col((issue_labels::Entity, issue_labels::Column::LabelId)).into(),
+    );
+    let assignee_ids = distinct_array(
+        Query::select()
+            .from(issue_assignees::Entity)
+            .inner_join(
+                users::Entity,
+                Expr::col((users::Entity, users::Column::Id))
+                    .equals((issue_assignees::Entity, issue_assignees::Column::AssigneeId)),
+            )
+            .inner_join(
+                project_members::Entity,
+                Expr::col((project_members::Entity, project_members::Column::MemberId))
+                    .equals((users::Entity, users::Column::Id)),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::IssueId))
+                    .eq(outer_id()),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::AssigneeId))
+                    .is_not_null(),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::DeletedAt)).is_null(),
+            )
+            .to_owned(),
+        Expr::col((issue_assignees::Entity, issue_assignees::Column::AssigneeId)).into(),
+    );
+    let membership = bucket.ids.iter().fold(Condition::any(), |any, ids| {
+        any.add(outer_id().in_subquery(relation_ids_subquery(slug, issue_id, *ids)))
+    });
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::Name,
+            issues::Column::StateId,
+            issues::Column::SortOrder,
+            issues::Column::Priority,
+            issues::Column::SequenceId,
+            issues::Column::ProjectId,
+            issues::Column::CreatedAt,
+            issues::Column::UpdatedAt,
+            issues::Column::CreatedById,
+            issues::Column::UpdatedById,
+        ])
+        .expr_as(label_ids, "label_ids")
+        .expr_as(assignee_ids, "assignee_ids")
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Condition::all()
+                .add(states::Column::Group.eq("triage"))
+                .add(states::Column::Group.is_not_null())
+                .not(),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(membership)
 }
 
 // ---------------------------------------------------------------------------
 // Links (link.py:32-46)
 // ---------------------------------------------------------------------------
 
-/// Full link-list statement: all link columns, `DISTINCT` (the member join
-/// can fan out), newest first. The member join is unguarded (bug 7). Binds,
-/// in order: workspace slug, project id, issue id, user id.
-pub fn link_list_sql(
-    binder: &mut Binder,
+/// The link-list queryset (`link.py:26-35`): all link columns,
+/// `DISTINCT` (the member join can fan out), newest first. The member
+/// join is unguarded (bug 7): any active membership row of the actor in
+/// the project, soft-deleted or not.
+pub fn link_list_select(
     slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let project = binder.bind_uuid(project_id);
-    let issue = binder.bind_uuid(issue_id);
-    let user = binder.bind_uuid(user_id);
-    format!(
-        "SELECT DISTINCT {ISSUE_LINK_COLUMNS} \
-        FROM issue_links \
-        INNER JOIN workspaces ON issue_links.workspace_id = workspaces.id \
-        INNER JOIN projects ON issue_links.project_id = projects.id \
-        INNER JOIN project_members ON projects.id = project_members.project_id \
-        WHERE issue_links.deleted_at IS NULL AND workspaces.slug = {slug_holder} \
-        AND issue_links.project_id = {project} AND issue_links.issue_id = {issue} \
-        AND projects.archived_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} \
-        ORDER BY issue_links.created_at DESC"
-    )
+    project_id: Uuid,
+    issue_id: Uuid,
+    user_id: Uuid,
+) -> sea_orm::Select<issue_links::Entity> {
+    issue_links::Entity::find()
+        .distinct()
+        .join(JoinType::InnerJoin, issue_links::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, issue_links::Relation::Projects.def())
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Projects.def().rev(),
+        )
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_links::Column::ProjectId.eq(project_id))
+        .filter(issue_links::Column::IssueId.eq(issue_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .order_by_desc(issue_links::Column::CreatedAt)
 }
 
 // ---------------------------------------------------------------------------
 // Archive (archive.py:54-255)
 // ---------------------------------------------------------------------------
+//
+// The archive list / count / group statements are the list engine's
+// (`list_engine::archive_issue_set`); only the retrieve lives here.
 
-/// Archive scope joins: the nullable `type` FK left-joins `issue_types`; the
-/// slug filter inner-joins `workspaces`.
-pub const ARCHIVE_JOINS: &str = "FROM issues AS issue \
-    LEFT OUTER JOIN issue_types ON issue.type_id = issue_types.id \
-    JOIN workspaces ON workspaces.id = issue.workspace_id";
-
-/// Archive scope (`get_queryset`, `archive.py:98-104`): non-epic types
-/// (`type_id IS NULL OR NOT is_epic`), archived rows, this project, this
-/// workspace slug. `Issue.objects`, so triage states and drafts stay visible.
-/// Binds: project id, workspace slug.
-pub fn archive_scope_where(binder: &mut Binder, slug: &str, project_id: uuid::Uuid) -> String {
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "issue.deleted_at IS NULL AND (issue.type_id IS NULL OR NOT issue_types.is_epic) \
-        AND issue.archived_at IS NOT NULL AND issue.project_id = {project} \
-        AND workspaces.slug = {slug_holder}"
-    )
-}
-
-/// Archive-list select list: all issue columns plus the four `NULL`-count
-/// annotations (`apply_annotations`, `archive.py:61-96`). The assignee/label/
-/// module prefetches are separate queries (handler-owned, pilot-2 prefetch
-/// pattern); the grouped path adds grouper arrays via pilot-2's grouper.
-pub fn archive_list_selects() -> String {
-    let link = link_count_select(false);
-    let attachment = attachment_count_select(false);
-    let sub = sub_issues_count_select(false);
-    format!("{ISSUE_COLUMNS}, {CYCLE_ID_SELECT}, {link}, {attachment}, {sub}")
-}
-
-/// Archive-list default order (`order_issue_queryset(..., "-created_at")`
-/// passthrough, `archive.py:110-114`).
-pub const ARCHIVE_DEFAULT_ORDER: &str = "ORDER BY issue.created_at DESC";
-
-/// Full default archive-list statement before filter stacks: scope, optional
-/// `show_sub_issues=false` top-level filter (`archive.py:116`), default
-/// order. Rich + legacy filters splice into the `WHERE` via pilot-2's
-/// `complex_filter` / `legacy_sql`; grouping and pagination are handler-owned.
-pub fn archive_list_sql(
-    binder: &mut Binder,
+/// Archive retrieve (`archive.py:222-255`): all issue columns plus
+/// `is_subscribed`, NO count/array annotations, over the archive scope
+/// (non-epic type, archived, this project and workspace; `Issue.objects`,
+/// so triage states and drafts stay visible) and the pk.
+pub fn archive_retrieve_select(
     slug: &str,
-    project_id: uuid::Uuid,
-    show_sub_issues: bool,
-) -> String {
-    let selects = archive_list_selects();
-    let scope = archive_scope_where(binder, slug, project_id);
-    let top = if show_sub_issues {
-        String::new()
-    } else {
-        " AND issue.parent_id IS NULL".to_owned()
-    };
-    format!("SELECT {selects} {ARCHIVE_JOINS} WHERE {scope}{top} {ARCHIVE_DEFAULT_ORDER}")
-}
-
-/// Archive grouped-count predicate (`count_filter`, `archive.py:174-184`):
-/// intake rows in (1, -1, 2) or no intake row. Handlers join
-/// `LEFT JOIN intake_issues AS issue_intake ON issue_intake.issue_id =
-/// issue.id` (pilot-2's `filtered_set` intake join) and count with
-/// `Count("id", filter=...)`.
-pub const ARCHIVE_COUNT_FILTER: &str = "(issue_intake.status = 1 OR issue_intake.status = -1 \
-    OR issue_intake.status = 2 OR issue_intake.id IS NULL) \
-    AND issue.archived_at IS NULL AND issue.is_draft = FALSE";
-
-/// Full archive-retrieve statement (`archive.py:222-255`): the archive scope
-/// plus the pk, `is_subscribed`, and NO count/array annotations — unlike the
-/// main retrieve. Same reaction/link prefetches ([`reaction_prefetch_sql`],
-/// [`link_prefetch_sql`]). Binds, in order: project id, slug (scope), issue
-/// id, then the `is_subscribed` binds (project id, subscriber id, slug).
-pub fn archive_retrieve_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let scope = archive_scope_where(binder, slug, project_id);
-    let issue = binder.bind_uuid(issue_id);
-    let subscribed = is_subscribed_select(binder, slug, project_id, user_id);
-    format!(
-        "SELECT {ISSUE_COLUMNS}, {subscribed} {ARCHIVE_JOINS} \
-        WHERE {scope} AND issue.id = {issue} \
-        ORDER BY issue.created_at DESC LIMIT 1"
-    )
+    project_id: Uuid,
+    issue_id: Uuid,
+    user_id: Uuid,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    select_fields(&mut stmt, "issue", &ISSUE_FIELDS, "");
+    stmt.expr_as(is_subscribed(slug, project_id, user_id), a("is_subscribed"))
+        .from_as(issues::Entity, a("issue"))
+        .join(
+            JoinType::LeftJoin,
+            issue_types::Entity,
+            Expr::col((a("issue"), issues::Column::TypeId))
+                .equals((issue_types::Entity, issue_types::Column::Id)),
+        );
+    workspace_slug(&mut stmt, slug);
+    stmt.and_where(col("issue", issues::Column::DeletedAt).is_null())
+        .and_where(
+            col("issue", issues::Column::TypeId)
+                .is_null()
+                .or(Expr::col((issue_types::Entity, issue_types::Column::IsEpic)).not()),
+        )
+        .and_where(col("issue", issues::Column::ArchivedAt).is_not_null())
+        .and_where(col("issue", issues::Column::ProjectId).eq(project_id))
+        .and_where(col("issue", issues::Column::Id).eq(issue_id))
+        .order_by((a("issue"), issues::Column::CreatedAt), Order::Desc)
+        .limit(1);
+    stmt
 }
 
 #[cfg(test)]
@@ -872,135 +874,72 @@ mod tests {
     const ISSUE: uuid::Uuid = uuid::Uuid::from_u128(0x33333333_3333_3333_3333_333333333333);
     const USER: uuid::Uuid = uuid::Uuid::from_u128(0x22222222_2222_2222_2222_222222222222);
 
-    /// Collapse runs of whitespace so multi-line builders compare cleanly.
-    fn flat(sql: &str) -> String {
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    fn built(stmt: &SelectStatement) -> String {
+        stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder)
     }
 
-    // -- pilot-2 reuse pins --------------------------------------------------
+    // -- annotations ---------------------------------------------------------
 
     #[test]
-    fn shared_fragments_match_pilot2_helper() {
-        // The reused texts stay byte-identical to pilot-2's shared helper;
-        // any drift in either direction fails here, not in a gate run.
-        let helper = super::super::annotation_selects(true, None, true, true, false);
-        for fragment in [
-            CYCLE_ID_SELECT,
-            &link_count_select(false),
-            &attachment_count_select(false),
-            LABEL_IDS_SELECT,
-        ] {
-            let fragment = flat(fragment);
-            assert!(
-                flat(&helper).contains(&fragment),
-                "pilot-2 helper drifted from shared fragment: {fragment}"
-            );
-        }
-    }
-
-    #[test]
-    fn faithful_fragments_drop_pilot2_added_guards() {
+    fn faithful_arrays_drop_the_list_engine_guards() {
         // Live Django SQL carries no soft-delete guard on the joined member,
-        // module, or state rows; these builders match Django, not the helper.
-        assert!(!ASSIGNEE_IDS_ACTIVE_SELECT.contains("pm.deleted_at"));
-        assert!(!MODULE_IDS_SELECT.contains("m.deleted_at"));
-        assert!(!sub_issues_count_select(false).contains("cs.deleted_at"));
-        assert!(ASSIGNEE_IDS_ACTIVE_SELECT.contains("pm.is_active"));
-        assert!(MODULE_IDS_SELECT.contains("m.archived_at IS NULL"));
-    }
-
-    // -- retrieve ------------------------------------------------------------
-
-    #[test]
-    fn retrieve_selects_full_row_plus_annotations_plus_state() {
-        let mut binder = Binder::new();
-        let sql = retrieve_sql(&mut binder, SLUG, PROJECT, ISSUE, USER);
-        // Select order: issue columns, annotations in annotate() order,
-        // is_subscribed, then the select_related state columns.
-        let issue_pos = sql.find("issue.created_at").expect("issue cols");
-        let cycle_pos = sql.find("AS cycle_id").expect("cycle");
-        let link_pos = sql.find("AS link_count").expect("link");
-        let attach_pos = sql.find("AS attachment_count").expect("attach");
-        let sub_pos = sql.find("AS sub_issues_count").expect("sub");
-        let label_pos = sql.find("AS label_ids").expect("labels");
-        let assignee_pos = sql.find("AS assignee_ids").expect("assignees");
-        let module_pos = sql.find("AS module_ids").expect("modules");
-        let subscribed_pos = sql.find("AS is_subscribed").expect("subscribed");
-        let state_pos = sql.find("state.created_at").expect("state cols");
+        // module, or state rows; these builders match Django, not the list
+        // engine's shared forms.
+        let mut stmt = Query::select();
+        stmt.expr_as(assignee_ids_active(), a("assignee_ids"))
+            .expr_as(module_ids_unarchived(), a("module_ids"))
+            .expr_as(coalesce_zero(sub_issues_count(true, false)), a("n"));
+        let sql = built(&stmt);
+        assert!(!sql.contains(r#""pm"."deleted_at""#), "{sql}");
+        assert!(!sql.contains(r#""m"."deleted_at""#), "{sql}");
+        assert!(!sql.contains(r#""cs"."deleted_at""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "users" AS "u" ON "u"."id" = "ia"."assignee_id""#));
         assert!(
-            issue_pos < cycle_pos
-                && cycle_pos < link_pos
-                && link_pos < attach_pos
-                && attach_pos < sub_pos
-                && sub_pos < label_pos
-                && label_pos < assignee_pos
-                && assignee_pos < module_pos
-                && module_pos < subscribed_pos
-                && subscribed_pos < state_pos,
-            "retrieve select order wrong: {sql}"
+            sql.contains(r#"INNER JOIN "project_members" AS "pm" ON "pm"."member_id" = "u"."id""#)
         );
-        // Retrieve counts are NULL when zero (no Coalesce).
-        assert!(!sql.contains("COALESCE((SELECT NULLIF"));
-        // Issue.objects scope: soft-delete only, no triage/archived/draft guards
-        // on the OUTER query (the sub_issues_count subquery legitimately
-        // carries the child-scope triage guard).
-        let outer = sql
-            .split("FROM issues AS issue")
-            .nth(1)
-            .expect("outer query");
-        assert!(outer.contains("issue.deleted_at IS NULL"));
-        assert!(!outer.contains("triage"));
-        assert!(!outer.contains("issue.archived_at IS NULL"));
-        assert!(!outer.contains("issue.is_draft"));
-        assert!(sql.contains("LEFT JOIN states AS state ON state.id = issue.state_id"));
-        assert!(sql.ends_with("ORDER BY issue.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 6);
-    }
-
-    #[test]
-    fn retrieve_prefetches_match_django_shapes() {
-        let mut binder = Binder::new();
-        let reactions = reaction_prefetch_sql(&mut binder, &[ISSUE]);
-        // Model field order (actor, then issue), INNER joins, IN-list, ordered.
-        let users_pos = reactions.find("users.password").expect("actor cols");
-        let issues_pos = reactions.find("issues.created_at").expect("issue cols");
+        assert!(sql.contains(r#"AND "pm"."is_active""#), "{sql}");
+        assert!(sql.contains(r#""m"."archived_at" IS NULL"#));
         assert!(
-            users_pos < issues_pos,
-            "actor columns precede issue columns"
+            sql.contains("COALESCE((SELECT NULLIF(COUNT(*), 0)"),
+            "{sql}"
         );
-        assert!(reactions.contains("INNER JOIN issues ON issue_reactions.issue_id = issues.id"));
-        assert!(reactions.contains("INNER JOIN users ON issue_reactions.actor_id = users.id"));
-        assert!(reactions.contains("issue_reactions.issue_id IN ($1)"));
-        assert!(reactions.ends_with("ORDER BY issue_reactions.created_at DESC"));
-
-        let mut binder = Binder::new();
-        let links = link_prefetch_sql(&mut binder, &[ISSUE]);
-        // Nullable created_by: LEFT join.
-        assert!(links.contains("LEFT OUTER JOIN users ON issue_links.created_by_id = users.id"));
-        assert!(links.contains("issue_links.issue_id IN ($1)"));
-        assert!(links.ends_with("ORDER BY issue_links.created_at DESC"));
-        assert_eq!(binder.values().len(), 1);
-    }
-
-    #[test]
-    fn retrieve_gate_queries_are_scoped() {
-        let mut binder = Binder::new();
-        let project = project_get_sql(&mut binder, SLUG, PROJECT);
-        assert!(project.contains("projects.deleted_at IS NULL"));
-        assert!(project.contains("workspaces.slug = $2"));
-        assert_eq!(binder.values().len(), 2);
-
-        let mut binder = Binder::new();
-        let guest = guest_view_exists_sql(&mut binder, SLUG, PROJECT, USER);
-        assert!(guest.starts_with("SELECT 1 AS a"));
-        assert!(guest.contains("project_members.role = 5"));
-        assert!(guest.contains("project_members.is_active"));
-        assert!(!guest.contains("ORDER BY"));
-        assert!(guest.ends_with("LIMIT 1"));
-        assert_eq!(binder.values().len(), 3);
     }
 
     // -- sub-issues ----------------------------------------------------------
+
+    #[test]
+    fn sub_issues_select_renders_values_order_over_manager_scope() {
+        let sql = built(&sub_issues_select(SLUG, ISSUE));
+        let pos = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {sql}"))
+        };
+        assert!(
+            sql.starts_with(r#"SELECT "issue"."id", "issue"."name""#),
+            "{sql}"
+        );
+        assert!(pos(r#""issue"."parent_id""#) < pos(r#""issue"."type_id""#));
+        assert!(pos(r#""issue"."type_id""#) < pos(r#""issue"."created_at""#));
+        assert!(pos(r#"AS "cycle_id""#) < pos(r#"AS "link_count""#));
+        assert!(pos(r#"AS "sub_issues_count""#) < pos(r#"AS "label_ids""#));
+        assert!(pos(r#"AS "label_ids""#) < pos(r#"AS "assignee_ids""#));
+        assert!(pos(r#"AS "assignee_ids""#) < pos(r#"AS "module_ids""#));
+        assert!(pos(r#"AS "module_ids""#) < pos(r#"AS "state_group""#));
+        assert_eq!(
+            sql.matches("COALESCE((SELECT NULLIF(COUNT(*), 0)").count(),
+            3
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" AS "state" ON "state"."id" = "issue"."state_id""#)
+        );
+        assert!(sql.contains(r#"INNER JOIN "projects" AS "project""#));
+        assert!(sql.contains(r#"NOT ("state"."group" = 'triage' AND "state"."group" IS NOT NULL)"#));
+        assert!(sql.contains(r#""project"."archived_at" IS NULL"#));
+        assert!(sql.contains(r#""issue"."is_draft" = FALSE"#));
+        assert!(sql.contains(&format!(r#""issue"."parent_id" = '{ISSUE}'"#)));
+        assert!(sql.contains(r#""workspaces"."slug" = 'ws-slug'"#));
+        assert!(!sql.contains("ORDER BY"));
+    }
 
     #[test]
     fn sub_issues_keys_cover_all_27() {
@@ -1028,51 +967,6 @@ mod tests {
         assert!(pos("label_ids") < pos("assignee_ids"));
         assert!(pos("assignee_ids") < pos("module_ids"));
         assert!(pos("module_ids") < pos("state_group"));
-    }
-
-    #[test]
-    fn sub_issues_render_concrete_first_then_annotations() {
-        let selects = flat(&sub_issues_selects());
-        // Aliased keys.
-        assert!(selects.contains("issue.estimate_point_id AS estimate_point"));
-        assert!(selects.contains("issue.created_by_id AS created_by"));
-        assert!(selects.contains("issue.updated_by_id AS updated_by"));
-        // Render order: ... parent_id, created_at ... (concrete), then
-        // annotations in annotate() order — module_ids AFTER label/assignee.
-        let parent = selects.find("issue.parent_id,").expect("parent");
-        let typed = selects.find("issue.type_id,").expect("type");
-        let created = selects.find("issue.created_at,").expect("created");
-        let cycle = selects.find("AS cycle_id").expect("cycle");
-        let link = selects.find("AS link_count").expect("link");
-        let label = selects.find("AS label_ids").expect("labels");
-        let assignee = selects.find("AS assignee_ids").expect("assignees");
-        let module = selects.find("AS module_ids").expect("modules");
-        let group = selects.find("AS state_group").expect("group");
-        assert!(parent < typed && typed < created && created < cycle);
-        assert!(cycle < link && link < label && label < assignee && assignee < module);
-        assert!(module < group);
-        // Sub-issue counts coalesce to 0.
-        assert!(selects.contains("COALESCE((SELECT NULLIF(COUNT(*), 0)"));
-        assert_eq!(
-            selects
-                .matches("COALESCE((SELECT NULLIF(COUNT(*), 0)")
-                .count(),
-            3
-        );
-    }
-
-    #[test]
-    fn sub_issues_scope_is_manager_plus_parent_plus_slug() {
-        let mut binder = Binder::new();
-        let sql = sub_issues_sql(&mut binder, SLUG, ISSUE);
-        assert!(sql.contains("NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL)"));
-        assert!(sql.contains("issue.archived_at IS NULL"));
-        assert!(sql.contains("project.archived_at IS NULL"));
-        assert!(sql.contains("issue.is_draft = FALSE"));
-        assert!(sql.contains("issue.parent_id = $1"));
-        assert!(sql.contains("workspaces.slug = $2"));
-        assert!(sql.ends_with("ORDER BY issue.created_at DESC"));
-        assert_eq!(binder.values().len(), 2);
     }
 
     // -- relations -----------------------------------------------------------
@@ -1107,186 +1001,90 @@ mod tests {
     }
 
     #[test]
-    fn relation_ids_carry_ordering_column_and_scope() {
-        let ids = RelationIds {
-            column: "issue_id",
-            relation_type: "blocked_by",
-            side: "related_issue_id",
-        };
-        let mut binder = Binder::new();
-        let sql = relation_ids_sql(&mut binder, SLUG, ISSUE, ids);
+    fn relation_bucket_select_pins_scope_membership_and_aggregates() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = relation_bucket_select(SLUG, ISSUE, RELATION_BUCKETS[2]) // duplicate
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"LEFT JOIN "states""#));
+        assert!(sql.contains(r#"INNER JOIN "projects""#));
         assert!(
-            sql.contains("SELECT DISTINCT issue_relations.issue_id, issue_relations.created_at")
+            sql.contains(r#"NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)"#)
         );
+        assert!(sql.contains(r#""issues"."is_draft" = FALSE"#));
+        assert!(sql.contains(r#"ARRAY_AGG(DISTINCT "issue_labels"."label_id")"#));
+        assert!(sql.contains(r#"ARRAY_AGG(DISTINCT "issue_assignees"."assignee_id")"#));
+        assert!(sql.contains(r#""project_members"."is_active" = TRUE"#));
         assert!(sql
-            .contains("(issue_relations.issue_id = $1 OR issue_relations.related_issue_id = $2)"));
-        assert!(sql.contains("workspaces.slug = $3"));
-        assert!(sql.contains("issue_relations.related_issue_id = $4"));
-        assert!(sql.contains("issue_relations.relation_type = $5"));
-        assert!(sql.ends_with("ORDER BY issue_relations.created_at DESC"));
-        // Only the slug join survives a values_list; the base select_related
-        // joins (project, issue) never render.
-        assert!(!sql.contains("JOIN projects"));
-        assert!(!sql.contains("JOIN issues"));
-        assert_eq!(binder.values().len(), 5);
-    }
-
-    #[test]
-    fn relation_bucket_aggregates_over_joins_without_order() {
-        let bucket = RELATION_BUCKETS[0]; // blocking
-        let mut binder = Binder::new();
-        let sql = relation_bucket_sql(&mut binder, SLUG, ISSUE, bucket);
-        // Direct FILTER aggregates over LEFT joins + GROUP BY, no ORDER BY.
-        assert!(sql.contains("FILTER (WHERE (NOT (issue_labels.label_id IS NULL)"));
-        assert!(sql.contains("LEFT OUTER JOIN issue_assignees"));
-        assert!(sql.contains("LEFT OUTER JOIN project_members"));
-        assert!(sql.ends_with("GROUP BY issue.id"));
+            .contains(r#""issues"."id" IN (SELECT DISTINCT "issue_relations"."related_issue_id""#));
+        assert!(
+            sql.contains(r#" OR "issues"."id" IN (SELECT DISTINCT "issue_relations"."issue_id""#)
+        );
+        assert_eq!(sql.matches(r#""rw"."slug" = 'ws-slug'"#).count(), 2);
+        assert_eq!(sql.matches(r#""workspaces"."slug" = 'ws-slug'"#).count(), 1);
         assert!(!sql.contains("ORDER BY"));
-        assert!(sql.contains("issue.id IN (SELECT DISTINCT r.issue_id"));
-        // Dead target annotations are not emitted.
-        assert!(!sql.contains("AS cycle_id"));
-        assert!(!sql.contains("AS link_count"));
-        // created_by/updated_by select the raw id columns (dict keys renamed
-        // in Python, aliased by handlers from RELATION_ROW_FIELDS).
-        assert!(sql.contains("issue.created_by_id, issue.updated_by_id"));
-    }
-
-    #[test]
-    fn relation_or_buckets_factor_the_preamble() {
-        let bucket = RELATION_BUCKETS[2]; // duplicate
-        let mut binder = Binder::new();
-        let sql = relation_bucket_union_sql(&mut binder, SLUG, ISSUE, bucket);
-        assert!(sql.contains("r.related_issue_id"));
-        assert!(sql.contains(" OR issue.id IN (SELECT DISTINCT r.issue_id"));
-        assert!(sql.contains("$1 AS relation_type"));
-        // Single preamble, two membership branches (preamble binds
-        // workspaces.slug; branches bind rw.slug).
-        assert_eq!(sql.matches(".slug").count(), 3); // preamble + 2 branches
-        assert!(sql.ends_with("GROUP BY issue.id"));
+        assert!(!sql.contains("GROUP BY"));
+        assert!(sql.contains(r#"AS "label_ids""#));
+        assert!(sql.contains(r#"AS "assignee_ids""#));
     }
 
     // -- links ---------------------------------------------------------------
 
     #[test]
     fn link_list_joins_member_without_deleted_guard() {
-        let mut binder = Binder::new();
-        let sql = link_list_sql(&mut binder, SLUG, PROJECT, ISSUE, USER);
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = link_list_select(SLUG, PROJECT, ISSUE, USER)
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.starts_with("SELECT DISTINCT"));
-        assert!(sql.contains("INNER JOIN projects ON issue_links.project_id = projects.id"));
-        assert!(
-            sql.contains("INNER JOIN project_members ON projects.id = project_members.project_id")
-        );
-        assert!(sql.contains("projects.archived_at IS NULL"));
-        assert!(sql.contains("project_members.is_active"));
-        assert!(sql.contains("project_members.member_id = $4"));
-        // Bug 7: no project_members.deleted_at guard.
-        assert!(!sql.contains("project_members.deleted_at"));
-        assert!(sql.ends_with("ORDER BY issue_links.created_at DESC"));
-        assert_eq!(binder.values().len(), 4);
+        assert!(sql
+            .contains(r#"INNER JOIN "projects" ON "issue_links"."project_id" = "projects"."id""#));
+        assert!(sql.contains(
+            r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#
+        ));
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#));
+        assert!(sql.contains(r#""project_members"."is_active" = TRUE"#));
+        assert!(!sql.contains(r#""project_members"."deleted_at""#));
+        assert!(sql.ends_with(r#"ORDER BY "issue_links"."created_at" DESC"#));
     }
 
     // -- archive -------------------------------------------------------------
 
     #[test]
-    fn archive_scope_keeps_triage_and_drafts() {
-        let mut binder = Binder::new();
-        let sql = archive_list_sql(&mut binder, SLUG, PROJECT, true);
-        assert!(sql.contains("(issue.type_id IS NULL OR NOT issue_types.is_epic)"));
-        assert!(sql.contains("LEFT OUTER JOIN issue_types ON issue.type_id = issue_types.id"));
-        assert!(sql.contains("issue.archived_at IS NOT NULL"));
-        let outer = sql
-            .split("FROM issues AS issue")
-            .nth(1)
-            .expect("outer query");
-        assert!(!outer.contains("triage"));
-        assert!(!outer.contains("issue.is_draft"));
-        assert!(!outer.contains("parent_id IS NULL"));
-        assert!(sql.ends_with("ORDER BY issue.created_at DESC"));
-
-        let mut binder = Binder::new();
-        let top = archive_list_sql(&mut binder, SLUG, PROJECT, false);
-        assert!(top.contains("AND issue.parent_id IS NULL"));
-
-        assert!(ARCHIVE_COUNT_FILTER.contains("issue_intake.status = 1"));
-        assert!(ARCHIVE_COUNT_FILTER.contains("issue_intake.id IS NULL"));
-    }
-
-    #[test]
     fn archive_retrieve_has_subscribed_but_no_counts() {
-        let mut binder = Binder::new();
-        let sql = archive_retrieve_sql(&mut binder, SLUG, PROJECT, ISSUE, USER);
-        assert!(sql.contains("AS is_subscribed"));
-        assert!(!sql.contains("AS cycle_id"));
-        assert!(!sql.contains("AS link_count"));
-        assert!(!sql.contains("AS label_ids"));
-        assert!(sql.contains("issue.archived_at IS NOT NULL"));
-        assert!(sql.ends_with("ORDER BY issue.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 6);
+        let sql = built(&archive_retrieve_select(SLUG, PROJECT, ISSUE, USER));
+        assert!(sql.starts_with(r#"SELECT "issue"."created_at", "issue"."updated_at""#));
+        assert!(sql.contains(r#"AS "is_subscribed""#));
+        assert!(!sql.contains("link_count") && !sql.contains("label_ids"));
+        assert!(
+            sql.contains(r#"LEFT JOIN "issue_types" ON "issue"."type_id" = "issue_types"."id""#)
+        );
+        assert!(
+            sql.contains(r#"("issue"."type_id" IS NULL OR (NOT "issue_types"."is_epic"))"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issue"."archived_at" IS NOT NULL"#));
+        let scope = sql.rsplit(" WHERE ").next().expect("where");
+        assert!(
+            !scope.contains("triage") && !scope.contains("is_draft"),
+            "{scope}"
+        );
+        assert!(sql.contains(&format!(r#""s"."subscriber_id" = '{USER}'"#)));
+        assert!(sql.contains(r#""sw"."slug" = 'ws-slug'"#));
+        assert!(sql.ends_with(r#"ORDER BY "issue"."created_at" DESC LIMIT 1"#));
     }
 
-    // -- replay dump ---------------------------------------------------------
-
-    /// Print every statement for the FX-ISS-11 replay script
-    /// (`/tmp/replay-648/replay.py`): `@@ <name> @@`, the SQL, then `@@ binds:
-    /// <n> @@`. Not an assertion — the replay diffs this against live Django.
     #[test]
-    fn dump_statements_for_fixture_replay() {
-        let mut statements: Vec<(&str, String, usize)> = Vec::new();
-        macro_rules! dump {
-            ($name:expr, $call:expr) => {{
-                let mut binder = Binder::new();
-                let sql = $call(&mut binder);
-                statements.push(($name, sql, binder.values().len()));
-            }};
-        }
-        dump!("retrieve_main", |binder: &mut Binder| retrieve_sql(
-            binder, SLUG, PROJECT, ISSUE, USER
-        ));
-        dump!("retrieve_prefetch_reactions", |binder: &mut Binder| {
-            reaction_prefetch_sql(binder, &[ISSUE])
-        });
-        dump!("retrieve_prefetch_links", |binder: &mut Binder| {
-            link_prefetch_sql(binder, &[ISSUE])
-        });
-        dump!("retrieve_project_get", |binder: &mut Binder| {
-            project_get_sql(binder, SLUG, PROJECT)
-        });
-        dump!("retrieve_guest_exists", |binder: &mut Binder| {
-            guest_view_exists_sql(binder, SLUG, PROJECT, USER)
-        });
-        dump!("subissues_values", |binder: &mut Binder| {
-            sub_issues_sql(binder, SLUG, ISSUE)
-        });
-        dump!("relation_ids_blocking", |binder: &mut Binder| {
-            relation_ids_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[0].ids[0])
-        });
-        dump!("relation_ids_blocked_by", |binder: &mut Binder| {
-            relation_ids_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[1].ids[0])
-        });
-        dump!("relation_ids_duplicate", |binder: &mut Binder| {
-            relation_ids_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[2].ids[0])
-        });
-        dump!("relation_bucket_blocking", |binder: &mut Binder| {
-            relation_bucket_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[0])
-        });
-        dump!("relation_bucket_duplicate_union", |binder: &mut Binder| {
-            relation_bucket_union_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[2])
-        });
-        dump!("link_list", |binder: &mut Binder| {
-            link_list_sql(binder, SLUG, PROJECT, ISSUE, USER)
-        });
-        dump!("archive_base", |binder: &mut Binder| {
-            archive_list_sql(binder, SLUG, PROJECT, true)
-        });
-        dump!("archive_nosub", |binder: &mut Binder| {
-            archive_list_sql(binder, SLUG, PROJECT, false)
-        });
-        dump!("archive_retrieve", |binder: &mut Binder| {
-            archive_retrieve_sql(binder, SLUG, PROJECT, ISSUE, USER)
-        });
-        for (name, sql, binds) in &statements {
-            println!("@@ {name} @@\n{sql}\n@@ binds: {binds} @@");
-        }
-        println!("@@ count_filter @@\n{ARCHIVE_COUNT_FILTER}");
+    fn guest_gate_is_role_5_active_member() {
+        use sea_orm::QueryTrait;
+        let sql = guest_view_select(SLUG, PROJECT, USER)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""project_members"."role" = 5"#));
+        assert!(sql.contains(r#""project_members"."is_active" = TRUE"#));
+        assert!(sql.contains(r#""project_members"."deleted_at" IS NULL"#));
+        assert!(sql.contains(r#""workspaces"."slug" = 'ws-slug'"#));
+        assert!(!sql.contains("ORDER BY"));
+        assert!(sql.ends_with("LIMIT 1"));
     }
 }

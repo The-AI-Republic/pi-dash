@@ -252,9 +252,13 @@ def apply_run_resume_unavailable(
 ) -> None:
     """Re-queue a run whose pinned session disappeared.
 
-    Drops the runner / pin / assigned_at and clears the parent's
+    Drops the runner / assigned_at and clears the parent's
     ``thread_id`` so the next dispatch builds a fresh-session Assign.
     See legacy ``RunnerConsumer._handle_resume_unavailable``.
+
+    For a ``dedicated`` pin the pin and the kind are kept: the run is
+    the issue's, and the issue still names the runner (§9.3). For a
+    ``locality`` pin the pin is dropped, as before.
 
     Must be called inside ``transaction.atomic()`` because the fallback
     lookup takes a row lock.
@@ -269,21 +273,27 @@ def apply_run_resume_unavailable(
         )
     if run is None:
         return
+    from pi_dash.runner.models import PinKind
+
     run.status = AgentRunStatus.QUEUED
     run.runner = None
-    run.pinned_runner = None
+    if run.pin_kind != PinKind.DEDICATED:
+        run.pinned_runner = None
     run.assigned_at = None
     if run.parent_run is not None and run.parent_run.thread_id:
         run.parent_run.thread_id = ""
         run.parent_run.save(update_fields=["thread_id"])
-    run.save(
-        update_fields=[
-            "status",
-            "runner",
-            "pinned_runner",
-            "assigned_at",
-        ]
-    )
+    if run.pin_kind == PinKind.DEDICATED:
+        run.save(update_fields=["status", "runner", "assigned_at"])
+    else:
+        run.save(
+            update_fields=[
+                "status",
+                "runner",
+                "pinned_runner",
+                "assigned_at",
+            ]
+        )
 
     from pi_dash.runner.services.matcher import drain_pod_by_id
 

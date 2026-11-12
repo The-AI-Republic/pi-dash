@@ -131,6 +131,27 @@ describe("boardColumns", () => {
     ]);
   });
 
+  it("orders state columns by the explicit workflow order, not the envelope's (NEWPIDASH-46)", () => {
+    // States created out of workflow order: Done before Doing before Backlog.
+    const done = "823e4567-e89b-12d3-a456-426614174007";
+    const doing = "923e4567-e89b-12d3-a456-426614174008";
+    const backlog = "a23e4567-e89b-12d3-a456-426614174009";
+    const columns = boardColumns(
+      grouped({
+        [done]: { rows: [row()], total: 1 },
+        [doing]: { rows: [row()], total: 1 },
+        [backlog]: { rows: [row()], total: 1 },
+      }),
+      new Map([
+        [done, "Done"],
+        [doing, "Doing"],
+        [backlog, "Backlog"],
+      ]),
+      { dimension: "state", showEmpty: true, order: [backlog, doing, done] }
+    );
+    expect(columns.map((column) => column.key)).toEqual([backlog, doing, done]);
+  });
+
   it("drops zero-count columns when the empty-group flag is off", () => {
     const columns = boardColumns(
       grouped({ [LABEL]: { rows: [], total: 0 }, None: { rows: [row()], total: 1 } }),
@@ -271,6 +292,29 @@ describe("groupedBoard", () => {
     expect(board.columns[0]?.total).toBe(3);
     expect(board.lanes[0]?.cells[STATE]?.total).toBe(3);
   });
+
+  it("orders named state columns first with unknown keys after them and None last (NEWPIDASH-46)", () => {
+    const done = "823e4567-e89b-12d3-a456-426614174007";
+    const backlog = "a23e4567-e89b-12d3-a456-426614174009";
+    const board = groupedBoard(
+      grouped({
+        [done]: { rows: [row()], total: 1 },
+        stray: { rows: [row()], total: 1 },
+        [backlog]: { rows: [row()], total: 1 },
+        None: { rows: [row()], total: 1 },
+      }),
+      {
+        dimension: "state",
+        labels: new Map([
+          [done, "Done"],
+          [backlog, "Backlog"],
+        ]),
+        showEmpty: true,
+        order: [backlog, done],
+      }
+    );
+    expect(board.columns.map((column) => column.key)).toEqual([backlog, done, "stray", "None"]);
+  });
 });
 
 describe("sub-grouped lanes", () => {
@@ -288,6 +332,31 @@ describe("sub-grouped lanes", () => {
     expect(laneKeys(response, true)).toEqual([LABEL, "None"]);
     expect(laneTotal(response, "None")).toBe(3);
     expect(laneTotal(response, LABEL)).toBe(1);
+  });
+
+  it("orders state lanes by the explicit sub-order, not first appearance (NEWPIDASH-46)", () => {
+    const done = "823e4567-e89b-12d3-a456-426614174007";
+    const backlog = "a23e4567-e89b-12d3-a456-426614174009";
+    const board = subGroupedBoard(
+      subGrouped({
+        [STATE]: {
+          [done]: { rows: [row()], total: 1 },
+          [backlog]: { rows: [row()], total: 1 },
+        },
+      }),
+      {
+        groupDimension: "labels",
+        subDimension: "state",
+        groupLabels: labels,
+        subLabels: new Map([
+          [done, "Done"],
+          [backlog, "Backlog"],
+        ]),
+        showEmpty: true,
+        subOrder: [backlog, done],
+      }
+    );
+    expect(board.lanes.map((lane) => lane.key)).toEqual([backlog, done]);
   });
 
   it("hides lanes with no issues when show-empty is off", () => {

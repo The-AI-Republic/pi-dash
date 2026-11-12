@@ -10,6 +10,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   createRunnerOnMachine,
   getCreateRunnerStatus,
+  getModelCatalog,
   listDevMachines,
   listPods,
   listProjects,
@@ -60,6 +61,25 @@ export function podsForRunnerQueryOptions(
   });
 }
 
+/**
+ * The model catalog for the picker (NEWPIDASH-169): grouped rows in
+ * picker order. The form renders today's built-in list while this is
+ * pending and falls back to it when the call fails, so a missing
+ * endpoint never breaks enrolment.
+ */
+export function modelCatalogQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: ["runners", "model-catalog"],
+    queryFn: () => getModelCatalog(client),
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export function useRunnerModelCatalog(enabled: boolean) {
+  return useQuery({ ...modelCatalogQueryOptions(getAppClient()), enabled });
+}
+
 export function useAddRunnerMachines(workspaceSlug: string, workspaceId: string, enabled: boolean) {
   return useQuery({ ...machinesQueryOptions(getAppClient(), workspaceSlug, workspaceId), enabled });
 }
@@ -74,7 +94,10 @@ export function useAddRunnerPods(
   projectId: RunnersScope,
   enabled: boolean
 ) {
-  return useQuery({ ...podsForRunnerQueryOptions(getAppClient(), workspaceSlug, workspaceId, projectId), enabled });
+  return useQuery({
+    ...podsForRunnerQueryOptions(getAppClient(), workspaceSlug, workspaceId, projectId),
+    enabled,
+  });
 }
 
 /**

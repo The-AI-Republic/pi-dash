@@ -57,4 +57,3 @@ export function selectCreatableProjects(projects: readonly CreateProjectOption[]
 export function selectCreatableWorkItemProjects(projects: readonly CreateProjectLike[]): CreateProjectOption[] {
   return selectCreatableProjects(projects.map(toCreateProjectOption));
 }
-

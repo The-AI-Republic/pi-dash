@@ -9,6 +9,10 @@
 //! [`WriteTxn`]: super::txn::WriteTxn
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity::issue_relations;
+use pidash_db::orm_tx::into_sqlx;
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
 
 /// One `issue_relations` row: explicit audit (`bulk_create` callers pass
@@ -28,34 +32,39 @@ pub struct RelationRow<'a> {
     pub relation_type: &'a str,
 }
 
-const RELATE_INSERT_SQL: &str = "INSERT INTO \"issue_relations\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"related_issue_id\", \"relation_type\") VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10)";
+/// The entity row for one [`RelationRow`] (`deleted_at` NULL).
+fn active_row(v: &RelationRow<'_>) -> issue_relations::ActiveModel {
+    issue_relations::ActiveModel {
+        id: Set(v.id),
+        created_at: Set(v.created_at.fixed_offset()),
+        updated_at: Set(v.updated_at.fixed_offset()),
+        created_by_id: Set(v.created_by),
+        updated_by_id: Set(v.updated_by),
+        deleted_at: Set(None),
+        project_id: Set(v.project_id),
+        workspace_id: Set(v.workspace_id),
+        issue_id: Set(v.issue_id),
+        related_issue_id: Set(v.related_issue_id),
+        relation_type: Set(v.relation_type.to_owned()),
+    }
+}
 
-const RELATE_INSERT_OR_NOTHING_SQL: &str = "INSERT INTO \"issue_relations\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"project_id\", \"workspace_id\", \"issue_id\", \"related_issue_id\", \"relation_type\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING";
-
-const RELATION_SOFT_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4";
+/// `ON CONFLICT DO NOTHING` with no target: any unique violation (the
+/// partial same-direction index included) skips the row.
+fn do_nothing() -> OnConflict {
+    OnConflict::new().do_nothing().to_owned()
+}
 
 /// The relate create (`relations.py:196-207`, `relation.py` bulk): the
 /// bare `INSERT` — a concurrent same-direction pair raises 23505 off the
 /// partial unique index and the caller re-reads. The stored ends/type
 /// arrive pre-mapped (the 3- versus 4-member reverse sets stay
 /// caller-side, design D6).
-pub async fn relate_row<'e, E>(ex: E, v: &RelationRow<'_>) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(RELATE_INSERT_SQL)
-        .bind(v.id)
-        .bind(v.created_at)
-        .bind(v.updated_at)
-        .bind(v.created_by)
-        .bind(v.updated_by)
-        .bind(v.project_id)
-        .bind(v.workspace_id)
-        .bind(v.issue_id)
-        .bind(v.related_issue_id)
-        .bind(v.relation_type)
-        .execute(ex)
-        .await?;
+pub async fn relate_row(db: &impl ConnectionTrait, v: &RelationRow<'_>) -> Result<(), sqlx::Error> {
+    issue_relations::Entity::insert(active_row(v))
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
@@ -66,97 +75,77 @@ where
 /// [`relate_rows_or_nothing`] (a per-row loop would persist earlier
 /// rows past a mid-chunk FK failure, where the single statement
 /// writes nothing).
-pub async fn relate_row_or_nothing<'e, E>(ex: E, v: &RelationRow<'_>) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let done = sqlx::query(RELATE_INSERT_OR_NOTHING_SQL)
-        .bind(v.id)
-        .bind(v.created_at)
-        .bind(v.updated_at)
-        .bind(v.created_by)
-        .bind(v.updated_by)
-        .bind(v.project_id)
-        .bind(v.workspace_id)
-        .bind(v.issue_id)
-        .bind(v.related_issue_id)
-        .bind(v.relation_type)
-        .execute(ex)
-        .await?;
-    Ok(done.rows_affected() == 1)
+pub async fn relate_row_or_nothing(
+    db: &impl ConnectionTrait,
+    v: &RelationRow<'_>,
+) -> Result<bool, sqlx::Error> {
+    let inserted = issue_relations::Entity::insert(active_row(v))
+        .on_conflict(do_nothing())
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(inserted == 1)
 }
 
-/// One `bulk_create` chunk (`relation.py:235`, `batch_size=10`): the
-/// `UNNEST` multi-row `INSERT ... ON CONFLICT DO NOTHING` the app
-/// writer issued, moved verbatim. Single-statement chunk atomicity:
-/// an FK failure in the chunk writes nothing (earlier chunks persist,
-/// as Django's per-batch autocommit does). `relation_type`,
-/// audit and scope bind once from the first row — callers guarantee
-/// a homogeneous chunk (both batch writers share all five). Empty
-/// input issues no statement.
-pub async fn relate_rows_or_nothing<'e, E>(
-    ex: E,
+/// One `bulk_create` chunk (`relation.py:235`, `batch_size=10`): one
+/// multi-row `INSERT ... ON CONFLICT DO NOTHING`. Single-statement chunk
+/// atomicity: an FK failure in the chunk writes nothing (earlier chunks
+/// persist, as Django's per-batch autocommit does). `relation_type`,
+/// audit and scope come from the first row — callers guarantee a
+/// homogeneous chunk (both batch writers share all five). Empty input
+/// issues no statement.
+pub async fn relate_rows_or_nothing(
+    db: &impl ConnectionTrait,
     rows: &[RelationRow<'_>],
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let Some(first) = rows.first() else {
+) -> Result<(), sqlx::Error> {
+    let Some(insert) = relate_rows_insert(rows) else {
         return Ok(());
     };
-    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-    let created: Vec<DateTime<Utc>> = rows.iter().map(|row| row.created_at).collect();
-    let updated: Vec<DateTime<Utc>> = rows.iter().map(|row| row.updated_at).collect();
-    let issue_ids: Vec<Uuid> = rows.iter().map(|row| row.issue_id).collect();
-    let related_ids: Vec<Uuid> = rows.iter().map(|row| row.related_issue_id).collect();
-    sqlx::query(
-        "INSERT INTO issue_relations \
-         (id, created_at, updated_at, relation_type, issue_id, related_issue_id, \
-         created_by_id, updated_by_id, project_id, workspace_id) \
-         SELECT u.id, u.created_at, u.updated_at, $6, u.issue_id, u.related_id, \
-         $7, $8, $9, $10 \
-         FROM UNNEST($1::uuid[], $2::timestamptz[], $3::timestamptz[], \
-         $4::uuid[], $5::uuid[]) \
-         AS u(id, created_at, updated_at, issue_id, related_id) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&ids)
-    .bind(&created)
-    .bind(&updated)
-    .bind(&issue_ids)
-    .bind(&related_ids)
-    .bind(first.relation_type)
-    .bind(first.created_by)
-    .bind(first.updated_by)
-    .bind(first.project_id)
-    .bind(first.workspace_id)
-    .execute(ex)
-    .await?;
+    insert.exec_without_returning(db).await.map_err(into_sqlx)?;
     Ok(())
+}
+
+/// The chunk statement for [`relate_rows_or_nothing`]; `None` when empty.
+fn relate_rows_insert(
+    rows: &[RelationRow<'_>],
+) -> Option<sea_orm::Insert<issue_relations::ActiveModel>> {
+    let first = rows.first()?;
+    let models = rows.iter().map(|row| {
+        active_row(&RelationRow {
+            relation_type: first.relation_type,
+            created_by: first.created_by,
+            updated_by: first.updated_by,
+            project_id: first.project_id,
+            workspace_id: first.workspace_id,
+            ..*row
+        })
+    });
+    Some(issue_relations::Entity::insert_many(models).on_conflict(do_nothing()))
 }
 
 /// The unrelate soft delete (`relations.py:235-266`, `relation.py`): the
 /// full-save audit stamp (`deleted_at`, `updated_at`, `updated_by`).
 /// Returns affected rows (0 = already gone; the sweep/activity stay
 /// caller-side — the transactional agent-tool sweep must not move).
-pub async fn soft_delete_relation_row<'e, E>(
-    ex: E,
+pub async fn soft_delete_relation_row(
+    db: &impl ConnectionTrait,
     id: Uuid,
     deleted_by: Uuid,
     deleted_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let done = sqlx::query(RELATION_SOFT_DELETE_SQL)
-        .bind(deleted_at)
-        .bind(updated_at)
-        .bind(deleted_by)
-        .bind(id)
-        .execute(ex)
-        .await?;
-    Ok(done.rows_affected())
+) -> Result<u64, sqlx::Error> {
+    issue_relations::Entity::update_many()
+        .col_expr(issue_relations::Column::DeletedAt, Expr::value(deleted_at))
+        .col_expr(issue_relations::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(
+            issue_relations::Column::UpdatedById,
+            Expr::value(deleted_by),
+        )
+        .filter(issue_relations::Column::Id.eq(id))
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
 
 #[cfg(test)]
@@ -295,7 +284,11 @@ mod tests {
             related_issue_id: sibling.0,
             relation_type: "blocked_by",
         };
-        assert!(relate_row_or_nothing(&pool, &row).await.expect("first"));
+        assert!(
+            relate_row_or_nothing(&pidash_db::pool::sea_orm_connection(&pool), &row)
+                .await
+                .expect("first")
+        );
         let row2 = RelationRow {
             id: Uuid::new_v4(),
             created_at: now,
@@ -308,9 +301,15 @@ mod tests {
             related_issue_id: sibling.0,
             relation_type: "blocked_by",
         };
-        assert!(!relate_row_or_nothing(&pool, &row2).await.expect("second"));
+        assert!(
+            !relate_row_or_nothing(&pidash_db::pool::sea_orm_connection(&pool), &row2)
+                .await
+                .expect("second")
+        );
         // The bare insert surfaces 23505 for the caller's re-read.
-        let err = relate_row(&pool, &row2).await.expect_err("conflict");
+        let err = relate_row(&pidash_db::pool::sea_orm_connection(&pool), &row2)
+            .await
+            .expect_err("conflict");
         let code = match &err {
             sqlx::Error::Database(db) => db.code().map(|c| c.to_string()),
             other => panic!("unexpected {other:?}"),
@@ -334,7 +333,7 @@ mod tests {
         let now = Utc::now();
         let id = Uuid::new_v4();
         relate_row(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &RelationRow {
                 id,
                 created_at: now,
@@ -351,9 +350,15 @@ mod tests {
         .await
         .expect("relate");
         let stamp = Utc::now();
-        let affected = soft_delete_relation_row(&pool, id, actor, stamp, stamp)
-            .await
-            .expect("soft delete");
+        let affected = soft_delete_relation_row(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            id,
+            actor,
+            stamp,
+            stamp,
+        )
+        .await
+        .expect("soft delete");
         assert_eq!(affected, 1);
         let row: (Option<chrono::DateTime<Utc>>, Option<Uuid>) =
             sqlx::query_as("SELECT deleted_at, updated_by_id FROM issue_relations WHERE id = $1")
@@ -363,9 +368,15 @@ mod tests {
                 .expect("read relation");
         assert!(row.0.is_some());
         assert_eq!(row.1, Some(actor));
-        let again = soft_delete_relation_row(&pool, id, actor, stamp, stamp)
-            .await
-            .expect("repeat");
+        let again = soft_delete_relation_row(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            id,
+            actor,
+            stamp,
+            stamp,
+        )
+        .await
+        .expect("repeat");
         assert_eq!(again, 1);
     }
 
@@ -377,7 +388,7 @@ mod tests {
         let (actor, workspace_id, project_id, _) = seed_pair(&pool, "fk").await;
         let now = Utc::now();
         let err = relate_row(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &RelationRow {
                 id: Uuid::new_v4(),
                 created_at: now,
@@ -443,7 +454,9 @@ mod tests {
                 relation_type: "blocked_by",
             },
         ];
-        relate_rows_or_nothing(&pool, &bad).await.expect_err("fk");
+        relate_rows_or_nothing(&pidash_db::pool::sea_orm_connection(&pool), &bad)
+            .await
+            .expect_err("fk");
         let count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM issue_relations WHERE issue_id = $1 AND deleted_at IS NULL",
         )
@@ -465,8 +478,12 @@ mod tests {
             related_issue_id: sibling.0,
             relation_type: "blocked_by",
         }];
-        relate_rows_or_nothing(&pool, &good).await.expect("write");
-        relate_rows_or_nothing(&pool, &good).await.expect("repeat");
+        relate_rows_or_nothing(&pidash_db::pool::sea_orm_connection(&pool), &good)
+            .await
+            .expect("write");
+        relate_rows_or_nothing(&pidash_db::pool::sea_orm_connection(&pool), &good)
+            .await
+            .expect("repeat");
         let count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM issue_relations WHERE issue_id = $1 AND deleted_at IS NULL",
         )
@@ -475,6 +492,8 @@ mod tests {
         .await
         .expect("count");
         assert_eq!(count.0, 1);
-        relate_rows_or_nothing(&pool, &[]).await.expect("empty");
+        relate_rows_or_nothing(&pidash_db::pool::sea_orm_connection(&pool), &[])
+            .await
+            .expect("empty");
     }
 }

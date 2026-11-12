@@ -2,17 +2,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Page-export picture loading (parity/specs/exports.md §5, EXP-018): stack
-// assets resolve against the page origin and every picture is fetched to
+// assets resolve against the API origin and every picture is fetched to
 // bytes before the document renders, so uploaded rasters embed under full
 // fidelity. A picture that cannot load is skipped; the text still lands.
-import { fetchBytes } from "../../../core/api/index.js";
-import { platform } from "../../../core/platform/index.js";
+import { fetchPageBytes } from "../../../core/api/index.js";
 
 export type FetchExportImageBytes = (url: string) => Promise<Uint8Array>;
 
-/** Fetch one picture's bytes through the platform transport. */
+/**
+ * Fetch one picture's bytes through the page transport with credentials.
+ * Asset GETs answer with a redirect to presigned storage, which the
+ * native API transport refuses (off-origin redirect); the page transport
+ * follows it, as it already does for presigned uploads.
+ */
 export function browserFetchExportImageBytes(url: string): Promise<Uint8Array> {
-  return fetchBytes(url, platform.fetch);
+  return fetchPageBytes(url);
 }
 
 /** Decode an inline base64 picture, or null when it is not one. */
@@ -32,7 +36,7 @@ function decodeDataUrlImage(src: string): Uint8Array | null {
 
 /**
  * Load every picture, in order: inline pictures decode locally, anything
- * else resolves against the page origin and fetches. Unusable entries are
+ * else resolves against the API origin and fetches. Unusable entries are
  * skipped, never fatal.
  */
 export async function fetchExportImages(

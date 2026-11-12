@@ -31,14 +31,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::dispatch_execute::{
     InvokeError, ModelFailure, ModelInvocation, RawUsage, CODE_LLM_CONFIG_MISSING,
 };
 use pidash_services::assistant::llm::MSG_NO_PROVIDER;
-use pidash_services::dispatch::tools as plan;
+use pidash_services::extensions::RunModelKey;
 use pidash_types::dispatch::CloudAgentOutput;
 
 use super::agent::{run_loop, LoopConfig, LoopError};
@@ -89,22 +88,33 @@ pub async fn invoke(
         invocation.extra_toolsets.is_empty(),
         "CE resolves no extra toolsets"
     );
-    let creator = creator_of(&ctx.tools.pool, invocation.run_id).await?;
-    let row = crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(&ctx.tools.pool, creator)
-        .await
-        .map_err(|error| {
-            InvokeError::Failed(ModelFailure {
-                code: None,
-                message: error.to_string(),
-            })
-        })?;
-    let ciphertext = gate_row(row.as_ref()).map_err(InvokeError::Failed)?;
-    let api_key = ctx.keys.decrypted_key(ciphertext).map_err(|failure| {
-        InvokeError::Failed(ModelFailure {
-            code: failure.code,
-            message: failure.message,
-        })
-    })?;
+    // The lane credential: the BYOK ciphertext (the CE path — re-read
+    // and decrypted below, verbatim) or the seam-minted credential for
+    // overlay lanes (PIDASHCONV-1725), used as-is.
+    let api_key = match &invocation.key {
+        RunModelKey::ByokEncrypted(_) => {
+            let creator = creator_of(&ctx.tools.pool, invocation.run_id).await?;
+            let row = crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(
+                &ctx.tools.pool,
+                creator,
+            )
+            .await
+            .map_err(|error| {
+                InvokeError::Failed(ModelFailure {
+                    code: None,
+                    message: error.to_string(),
+                })
+            })?;
+            let ciphertext = gate_row(row.as_ref()).map_err(InvokeError::Failed)?;
+            ctx.keys.decrypted_key(ciphertext).map_err(|failure| {
+                InvokeError::Failed(ModelFailure {
+                    code: failure.code,
+                    message: failure.message,
+                })
+            })?
+        }
+        RunModelKey::Direct(key) => key.clone(),
+    };
     let lane = lane_for(&invocation.model, &api_key);
     let golden = golden();
     let mut wire_tools = Vec::new();
@@ -211,9 +221,14 @@ fn wire_tool(lane: &Lane, schema: &ToolSchema) -> WireTool {
 /// is the TOCTOU analog of the drive's `BindingGone`/`RefreshGone`:
 /// generic path, no code.
 async fn creator_of(pool: &sqlx::PgPool, run_id: Uuid) -> Result<Uuid, InvokeError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(plan::SCOPE_RUN_SQL)
-        .bind(run_id)
-        .fetch_optional(pool)
+    use pidash_db::entity::agent_run as run_entity;
+    use sea_orm::{EntityTrait, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = run_entity::Entity::find_by_id(run_id)
+        .select_only()
+        .column(run_entity::Column::CreatedById)
+        .into_tuple::<Uuid>()
+        .one(&db)
         .await
         .map_err(|error| {
             InvokeError::Failed(ModelFailure {
@@ -222,12 +237,7 @@ async fn creator_of(pool: &sqlx::PgPool, run_id: Uuid) -> Result<Uuid, InvokeErr
             })
         })?;
     match row {
-        Some(row) => row.try_get("created_by_id").map_err(|error| {
-            InvokeError::Failed(ModelFailure {
-                code: None,
-                message: error.to_string(),
-            })
-        }),
+        Some(creator_id) => Ok(creator_id),
         None => Err(InvokeError::Failed(ModelFailure {
             code: None,
             message: "AgentRun matching query does not exist.".to_owned(),

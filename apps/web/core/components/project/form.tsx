@@ -111,7 +111,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   // derived values
   const currentNetwork = NETWORK_CHOICES.find((n) => n.key === project?.network);
   const coverImage = watch("cover_image_url");
-  const cloudExecutorOption = project.agent_executor_options?.find((option) => option.kind === "cloud_agent");
   // The budget and cadence controls stay visible but inert while ticking is
   // off, so the configured policy is still readable at a glance.
   const isTickingEnabled = watch("agent_ticking_enabled") ?? true;
@@ -272,7 +271,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       logo_props: formData.logo_props,
       timezone: formData.timezone,
       base_branch: formData.base_branch ?? "",
-      default_agent_executor: formData.default_agent_executor ?? "local_runner",
       agent_ticking_enabled: formData.agent_ticking_enabled ?? true,
       agent_default_max_ticks: budget,
       agent_default_interval_seconds: cadenceSeconds,
@@ -529,47 +527,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               {errors?.base_branch?.message}
             </span>
           </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <h4 className="text-13">{t("Default AI execution target")}</h4>
-          <div className="flex items-start justify-between gap-4">
-            <p className="text-11 text-tertiary">
-              {t(
-                "Choose where this project's new runs execute. Pi Dash Agent requires the user's desktop app to remain open. Work items can override this default."
-              )}
-            </p>
-            <Controller
-              name="default_agent_executor"
-              control={control}
-              render={({ field: { value, onChange } }) => (
-                <select
-                  aria-label={t("Default AI execution target")}
-                  value={value ?? "local_runner"}
-                  onChange={(event) => onChange(event.target.value)}
-                  disabled={!isAdmin}
-                  className="rounded-md border border-subtle bg-surface-1 px-2 py-1 text-13"
-                >
-                  <option value="local_runner">{t("Local runner")}</option>
-                  <option value="cloud_agent" disabled={cloudExecutorOption?.available === false}>
-                    {t("Pi Dash Cloud Agent")}
-                  </option>
-                  <option
-                    value="managed_runner"
-                    disabled={
-                      !project.agent_executor_options?.some(
-                        (option) => option.kind === "managed_runner" && option.available
-                      )
-                    }
-                  >
-                    {t("Pi Dash Agent (desktop)")}
-                  </option>
-                </select>
-              )}
-            />
-          </div>
-          <p className="text-11 text-tertiary">
-            {t("Changing this affects new runs only. Existing and queued runs keep their original executor.")}
-          </p>
         </div>
         <div className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-4">

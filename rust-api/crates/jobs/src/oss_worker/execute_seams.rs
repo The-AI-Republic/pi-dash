@@ -18,9 +18,11 @@
 //!   while a Python worker lives, and a known switchover dependency
 //!   on PIDASHCONV-840 afterwards.
 //! * `normalize_usage`: the ported pure function, delegated.
-//! * `has_usable_llm_config` / `creator_llm_facts`: one mirrored row
-//!   read (`assistant_user_llm_config`, the `get_config` query) plus
-//!   the ported presence gate and SSRF check.
+//! * `has_usable_llm_config` / `resolve_model_for_run`: one mirrored row
+//!   read (`assistant_user_llm_config`, the `get_config` query) plus the
+//!   SSRF re-check, answered through the installed assistant seam
+//!   (PIDASHCONV-1725) — CE keeps the BYOK path, the overlay routes
+//!   the creator's selected connection.
 //! * `invoke_model`: the live model runtime
 //!   ([`model_runtime`][crate::oss_worker::model_runtime], PIDASHCONV-866): the
 //!   pydantic-ai `Agent.run` port over the Anthropic +
@@ -31,24 +33,30 @@
 #![forbid(unsafe_code)]
 
 use crate::dispatch_execute::{
-    CreatorLlmFacts, ExecuteSeams, FinalizeCall, InvokeError, ModelInvocation, RawUsage, SeamError,
+    ExecuteSeams, FinalizeCall, InvokeError, ModelInvocation, RawUsage, ResolveError, SeamError,
 };
-use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use pidash_services::extensions::{AssistantModelSeam, ExecuteModelInputs};
 
 /// Live execute seams over the worker's primary pool.
 ///
 /// `block_private_urls` is `ASSISTANT_BLOCK_PRIVATE_URLS`
 /// (`CloudAgentSettings::block_private_urls`): the SSRF gate input.
 /// `invoke` carries the model runtime's static inputs (tool context +
-/// key resolver).
+/// key resolver). `assistant` is the installed assistant model-provider
+/// seam (`OssWorkerCtx::assistant_seam` — the CE default on OSS, the
+/// cloud overlay's OpenHub/Codex/BYOK routing on the hosted build,
+/// PIDASHCONV-1725): the execute gate and model resolution consult it
+/// exactly as Django consults `ee/assistant/model_provider.py`.
 #[derive(Clone)]
 pub struct LiveExecuteSeams {
     pool: PgPool,
     block_private_urls: bool,
     invoke: crate::oss_worker::model_runtime::invoke::InvokeCtx,
+    assistant: std::sync::Arc<dyn AssistantModelSeam>,
 }
 
 impl LiveExecuteSeams {
@@ -56,12 +64,31 @@ impl LiveExecuteSeams {
         pool: PgPool,
         block_private_urls: bool,
         invoke: crate::oss_worker::model_runtime::invoke::InvokeCtx,
+        assistant: std::sync::Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
             block_private_urls,
             invoke,
+            assistant,
         }
+    }
+
+    /// The creator's BYOK row as [`ExecuteModelInputs`]: the mirrored
+    /// `get_config` read plus the execution-time SSRF re-check
+    /// (`llm.py:78-84`). A missing row yields key-less inputs, which the
+    /// resolve gates map to `llm_config_missing`, exactly like the
+    /// source's `cfg is None` arm. The installed assistant seam takes
+    /// these inputs: CE resolves them through the BYOK gates; the
+    /// overlay routes the user's selected connection instead.
+    async fn execute_model_inputs(
+        &self,
+        creator_id: Uuid,
+    ) -> Result<ExecuteModelInputs, SeamError> {
+        let row = Self::llm_row(&self.pool, creator_id)
+            .await
+            .map_err(|error| SeamError(error.to_string()))?;
+        Ok(inputs_from_row(row.as_ref(), self.block_private_urls))
     }
 
     /// Mirror of `get_config` (`llm.py:67-68`): the creator's BYOK row,
@@ -72,13 +99,21 @@ impl LiveExecuteSeams {
         pool: &PgPool,
         creator_id: Uuid,
     ) -> Result<Option<LlmRow>, sqlx::Error> {
-        sqlx::query_as::<_, LlmRow>(
-            "SELECT provider_kind, base_url, model_name, api_key_encrypted \
-             FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
-        )
-        .bind(creator_id)
-        .fetch_optional(pool)
-        .await
+        use pidash_db::entity::assistant_user_llm_config as cfg_entity;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let row: Option<cfg_entity::Model> = cfg_entity::Entity::find()
+            .filter(cfg_entity::Column::UserId.eq(creator_id))
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
+        Ok(row.map(|model| LlmRow {
+            provider_kind: model.provider_kind,
+            base_url: model.base_url,
+            model_name: model.model_name,
+            api_key_encrypted: model.api_key_encrypted,
+        }))
     }
 }
 
@@ -90,6 +125,38 @@ pub(crate) struct LlmRow {
     pub(crate) base_url: String,
     pub(crate) model_name: String,
     pub(crate) api_key_encrypted: Option<Vec<u8>>,
+}
+
+/// One read row as [`ExecuteModelInputs`] (pure, so it stays unit
+/// testable without a database): the caller's BYOK reads plus the
+/// execution-time SSRF re-check (`llm.py:78-84`). A missing row yields
+/// key-less inputs, which the resolve gates map to
+/// `llm_config_missing`, exactly like the source's `cfg is None` arm.
+fn inputs_from_row(row: Option<&LlmRow>, block_private_urls: bool) -> ExecuteModelInputs {
+    let Some(row) = row else {
+        return ExecuteModelInputs {
+            has_api_key: false,
+            model_name: String::new(),
+            provider_kind: String::new(),
+            base_url: String::new(),
+            base_url_blocked: false,
+            api_key_encrypted: None,
+        };
+    };
+    let blocked = !row.base_url.is_empty()
+        && pidash_services::assistant::ssrf::is_blocked(
+            &row.base_url,
+            block_private_urls,
+            &pidash_services::assistant::ssrf::SystemResolver,
+        );
+    ExecuteModelInputs {
+        has_api_key: row.has_api_key(),
+        model_name: row.model_name.clone(),
+        provider_kind: row.provider_kind.clone(),
+        base_url: row.base_url.clone(),
+        base_url_blocked: blocked,
+        api_key_encrypted: row.api_key_encrypted.clone(),
+    }
 }
 
 impl LlmRow {
@@ -164,87 +231,191 @@ impl ExecuteSeams for LiveExecuteSeams {
             .begin()
             .await
             .map_err(|error| SeamError(error.to_string()))?;
-        let lock_sql =
-            finalization::lock_run_for_finalize_sql(false, call.expected_status.is_some());
-        let mut lock = sqlx::query(&lock_sql).bind(call.run_id);
-        for status in TERMINAL_RUN_STATUSES {
-            lock = lock.bind(status.value());
-        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        use pidash_db::entity::{agent_run as run_entity, agent_run_event as ev_entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        let seam_err = |error: sea_orm::DbErr| SeamError(error.to_string());
+        let mut lock_query = run_entity::Entity::find_by_id(call.run_id)
+            .filter(
+                run_entity::Column::Status.is_not_in(
+                    TERMINAL_RUN_STATUSES
+                        .iter()
+                        .map(|s| s.value())
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .lock_exclusive();
         if let Some(expected) = call.expected_status {
-            lock = lock.bind(expected);
+            lock_query = lock_query.filter(run_entity::Column::Status.eq(expected));
         }
-        let locked = lock
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| SeamError(error.to_string()))?;
+        let locked = lock_query.one(&conn).await.map_err(seam_err)?;
         let Some(locked) = locked else {
             tx.commit()
                 .await
                 .map_err(|error| SeamError(error.to_string()))?;
             return Ok(false);
         };
-        let stored_payload: Option<Value> = locked
-            .try_get("done_payload")
-            .map_err(|error| SeamError(error.to_string()))?;
         finalization::apply_done_payload_merge(
             &mut values,
-            stored_payload.as_ref().unwrap_or(&Value::Null),
+            locked.done_payload.as_ref().unwrap_or(&Value::Null),
         );
-        let update_sql = finalization::finalize_update_sql(&values);
-        let mut update = sqlx::query(&update_sql);
+        // The `error_details` clause merges into the locked row's bag
+        // in Rust (the SQL version did it server-side; same tx, same
+        // row, no extra read).
+        let merged_error_details = finalization::error_details_patch(&values).map(|patch| {
+            let mut merged = locked
+                .error_details
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            if let Some(patch) = patch.as_object() {
+                for (key, value) in patch {
+                    let key = key.as_str();
+                    let truthy = match value {
+                        Value::Null => false,
+                        Value::Bool(flag) => *flag,
+                        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+                        Value::String(text) => !text.is_empty(),
+                        Value::Array(items) => !items.is_empty(),
+                        Value::Object(map) => !map.is_empty(),
+                    };
+                    if truthy {
+                        merged.insert(key.to_owned(), value.clone());
+                    } else {
+                        merged.remove(key);
+                    }
+                }
+            }
+            Value::Object(merged)
+        });
+        let now = chrono::Utc::now();
+        let mut update = run_entity::Entity::update_many();
         for clause in &values.clauses {
-            update = match &clause.value {
-                pidash_services::runner_runs::SetValue::Null => match clause.column {
-                    "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
-                        update.bind(None::<DateTime<Utc>>)
+            update = match clause.column {
+                "status" => update.col_expr(
+                    run_entity::Column::Status,
+                    sea_orm::sea_query::Expr::value(match &clause.value {
+                        pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
+                        _ => return Err(SeamError("status finalize clause".to_owned())),
+                    }),
+                ),
+                "ended_at" => update.col_expr(
+                    run_entity::Column::EndedAt,
+                    sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(
+                        now,
+                    )),
+                ),
+                "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
+                    match clause.column {
+                        "terminal_hooks_applied_at" => update.col_expr(
+                            run_entity::Column::TerminalHooksAppliedAt,
+                            sea_orm::sea_query::Expr::value(
+                                None::<sea_orm::prelude::DateTimeWithTimeZone>,
+                            ),
+                        ),
+                        _ => update.col_expr(
+                            run_entity::Column::TerminalCapacityReleasedAt,
+                            sea_orm::sea_query::Expr::value(
+                                None::<sea_orm::prelude::DateTimeWithTimeZone>,
+                            ),
+                        ),
                     }
-                    _ => {
-                        return Err(SeamError("null finalize column".to_owned()));
+                }
+                // `error_code` / `error` are folded into `error_details`
+                // (`ERROR_DETAILS_COLUMN`); `refusal_category` is a
+                // generated column. Only `llm_model` is an own column.
+                "error_code" | "error" => update,
+                "refusal_category" | "llm_model" => {
+                    let text = match &clause.value {
+                        pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
+                        pidash_services::runner_runs::SetValue::Null => String::new(),
+                        _ => return Err(SeamError("text finalize clause".to_owned())),
+                    };
+                    match clause.column {
+                        "refusal_category" => update.col_expr(
+                            run_entity::Column::RefusalCategory,
+                            sea_orm::sea_query::Expr::value(text),
+                        ),
+                        _ => update.col_expr(
+                            run_entity::Column::LlmModel,
+                            sea_orm::sea_query::Expr::value(text),
+                        ),
                     }
+                }
+                "done_payload" | "usage" => match (&clause.value, clause.column) {
+                    (pidash_services::runner_runs::SetValue::Json(value), "done_payload") => update
+                        .col_expr(
+                            run_entity::Column::DonePayload,
+                            sea_orm::sea_query::Expr::value(value.clone()),
+                        ),
+                    (pidash_services::runner_runs::SetValue::Json(value), "usage") => update
+                        .col_expr(
+                            run_entity::Column::Usage,
+                            sea_orm::sea_query::Expr::value(value.clone()),
+                        ),
+                    _ => return Err(SeamError("json finalize clause".to_owned())),
                 },
-                pidash_services::runner_runs::SetValue::Now => update.bind(Utc::now()),
-                pidash_services::runner_runs::SetValue::Text(text) => update.bind(text.clone()),
-                pidash_services::runner_runs::SetValue::Json(value) => update.bind(value.clone()),
+                "error_details" => update.col_expr(
+                    run_entity::Column::ErrorDetails,
+                    sea_orm::sea_query::Expr::value(
+                        merged_error_details
+                            .clone()
+                            .unwrap_or_else(|| Value::Object(Default::default())),
+                    ),
+                ),
+                unknown => {
+                    return Err(SeamError(format!(
+                        "finalize_agent_run: unmapped finalize column {unknown}"
+                    )))
+                }
             };
         }
         update
-            .bind(call.run_id)
-            .execute(&mut *tx)
+            .filter(run_entity::Column::Id.eq(call.run_id))
+            .exec(&conn)
             .await
-            .map_err(|error| SeamError(error.to_string()))?;
-        let executor_kind: String = locked
-            .try_get("executor_kind")
-            .map_err(|error| SeamError(error.to_string()))?;
-        if AgentExecutorKind::from_value(&executor_kind) == Some(AgentExecutorKind::CloudAgent) {
-            let exists = sqlx::query(finalization::terminal_event_exists_sql())
-                .bind(call.run_id)
-                .bind("terminal")
-                .fetch_optional(&mut *tx)
+            .map_err(seam_err)?;
+        if AgentExecutorKind::from_value(&locked.executor_kind)
+            == Some(AgentExecutorKind::CloudAgent)
+        {
+            let exists = ev_entity::Entity::find()
+                .filter(ev_entity::Column::AgentRunId.eq(call.run_id))
+                .filter(ev_entity::Column::Kind.eq("terminal"))
+                .select_only()
+                .column(ev_entity::Column::Id)
+                .into_tuple::<i64>()
+                .one(&conn)
                 .await
-                .map_err(|error| SeamError(error.to_string()))?
+                .map_err(seam_err)?
                 .is_some();
             if !exists {
-                let max: Option<i32> =
-                    sqlx::query_scalar(finalization::terminal_event_max_seq_sql())
-                        .bind(call.run_id)
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .map_err(|error| SeamError(error.to_string()))?
-                        .flatten();
+                let max: Option<i32> = ev_entity::Entity::find()
+                    .filter(ev_entity::Column::AgentRunId.eq(call.run_id))
+                    .select_only()
+                    .column(ev_entity::Column::Seq)
+                    .order_by_desc(ev_entity::Column::Seq)
+                    .limit(1)
+                    .into_tuple::<i32>()
+                    .one(&conn)
+                    .await
+                    .map_err(seam_err)?;
                 let plan = finalization::plan_terminal_event(
                     max,
                     new_status,
                     &finalization::finalize_error_code(&values),
                 );
-                sqlx::query(&finalization::terminal_event_insert_sql())
-                    .bind(call.run_id)
-                    .bind(plan.seq)
-                    .bind("terminal")
-                    .bind(plan.payload)
-                    .bind(Utc::now())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| SeamError(error.to_string()))?;
+                use sea_orm::ActiveModelTrait;
+                ev_entity::ActiveModel {
+                    seq: sea_orm::Set(plan.seq),
+                    kind: sea_orm::Set("terminal".to_owned()),
+                    payload: sea_orm::Set(plan.payload),
+                    created_at: sea_orm::Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+                    agent_run_id: sea_orm::Set(call.run_id),
+                    ..Default::default()
+                }
+                .insert(&conn)
+                .await
+                .map_err(seam_err)?;
             }
         }
         tx.commit()
@@ -283,48 +454,38 @@ impl ExecuteSeams for LiveExecuteSeams {
         )))
     }
 
-    /// `has_usable_llm_config` (`model_provider.py:45-53`): the row
-    /// exists and holds a key. Pure gate over the mirrored read.
+    /// `user_has_llm_config` (`tasks.py:119-124` →
+    /// `agent_execution.py:93-104` → `has_usable_llm_config`,
+    /// `model_provider.py:45-53`): consulted through the installed
+    /// assistant seam, so the hosted build's overlay (OpenHub gateway,
+    /// Codex, BYOK, unselected default) admits runs exactly as Django
+    /// admits them. CE answers the row's key bit.
     async fn has_usable_llm_config(&self, creator_id: Uuid) -> Result<bool, SeamError> {
-        let row = Self::llm_row(&self.pool, creator_id)
-            .await
-            .map_err(|error| SeamError(error.to_string()))?;
-        Ok(pidash_services::assistant::seams::has_usable_llm_config(
-            row.as_ref().is_some_and(|row| row.has_api_key()),
-        ))
+        let inputs = self.execute_model_inputs(creator_id).await?;
+        Ok(self
+            .assistant
+            .has_usable_llm_config(creator_id, inputs.has_api_key)
+            .await)
     }
 
-    /// The creator's provider row as presence bits: the mirrored
-    /// `get_config` read plus the execution-time SSRF re-check
-    /// (`llm.py:78-84`). A missing row yields empty facts (no key),
-    /// which the resolve gates map to `llm_config_missing`, exactly
-    /// like the source's `cfg is None` arm.
-    async fn creator_llm_facts(&self, creator_id: Uuid) -> Result<CreatorLlmFacts, SeamError> {
-        let row = Self::llm_row(&self.pool, creator_id)
+    /// `resolve_model_for_run`
+    /// (`ee/cloud_agent/model_provider.py:6-7` → `model.py:11-22` →
+    /// `resolve_model_for_user`): the row read above feeds the
+    /// installed assistant seam; CE resolves the BYOK gates and answers
+    /// the row's ciphertext, the overlay routes the selected connection
+    /// and answers its minted credential (OpenHub/Codex).
+    async fn resolve_model_for_run(
+        &self,
+        creator_id: Uuid,
+    ) -> Result<pidash_services::extensions::ResolvedRunModel, ResolveError> {
+        let inputs = self
+            .execute_model_inputs(creator_id)
             .await
-            .map_err(|error| SeamError(error.to_string()))?;
-        let Some(row) = row else {
-            return Ok(CreatorLlmFacts {
-                has_api_key: false,
-                model_name: String::new(),
-                provider_kind: String::new(),
-                base_url: String::new(),
-                base_url_blocked: false,
-            });
-        };
-        let blocked = !row.base_url.is_empty()
-            && pidash_services::assistant::ssrf::is_blocked(
-                &row.base_url,
-                self.block_private_urls,
-                &pidash_services::assistant::ssrf::SystemResolver,
-            );
-        Ok(CreatorLlmFacts {
-            has_api_key: row.has_api_key(),
-            model_name: row.model_name,
-            provider_kind: row.provider_kind,
-            base_url: row.base_url,
-            base_url_blocked: blocked,
-        })
+            .map_err(ResolveError::from)?;
+        self.assistant
+            .resolve_model_for_user(creator_id, inputs)
+            .await
+            .map_err(ResolveError::from)
     }
 
     /// The live model runtime (PIDASHCONV-866): delegate to the
@@ -355,6 +516,65 @@ mod tests {
         assert!(!llm_row_with(None).has_api_key());
         assert!(!llm_row_with(Some(Vec::new())).has_api_key());
         assert!(llm_row_with(Some(vec![1, 2, 3])).has_api_key());
+    }
+
+    #[test]
+    fn inputs_from_row_maps_the_byok_row_verbatim() {
+        let row = LlmRow {
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "https://8.8.8.8/v1".to_owned(),
+            model_name: "claude-x".to_owned(),
+            api_key_encrypted: Some(vec![7, 8, 9]),
+        };
+        let inputs = inputs_from_row(Some(&row), true);
+        assert!(inputs.has_api_key);
+        assert_eq!(inputs.model_name, "claude-x");
+        assert_eq!(inputs.provider_kind, "openai_compatible");
+        assert_eq!(inputs.base_url, "https://8.8.8.8/v1");
+        // A public literal IP is never blocked.
+        assert!(!inputs.base_url_blocked);
+        // The ciphertext rides through for invoke to decrypt.
+        assert_eq!(inputs.api_key_encrypted, Some(vec![7, 8, 9]));
+    }
+
+    #[test]
+    fn inputs_from_row_reports_a_missing_row_as_keyless() {
+        let inputs = inputs_from_row(None, true);
+        assert!(!inputs.has_api_key);
+        assert!(inputs.model_name.is_empty());
+        assert!(inputs.provider_kind.is_empty());
+        assert!(inputs.base_url.is_empty());
+        assert!(!inputs.base_url_blocked);
+        assert_eq!(inputs.api_key_encrypted, None);
+    }
+
+    #[test]
+    fn inputs_from_row_reruns_the_ssrf_gate_at_execution_time() {
+        let mut row = LlmRow {
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "http://127.0.0.1:9/v1".to_owned(),
+            model_name: "m".to_owned(),
+            api_key_encrypted: Some(vec![1]),
+        };
+        // Loopback is blocked when the guard blocks private URLs (an
+        // IP literal: no DNS, deterministic), and passes when it does
+        // not.
+        assert!(inputs_from_row(Some(&row), true).base_url_blocked);
+        assert!(!inputs_from_row(Some(&row), false).base_url_blocked);
+        // An empty base URL is never guarded (nothing to block).
+        row.base_url = String::new();
+        assert!(!inputs_from_row(Some(&row), true).base_url_blocked);
+    }
+
+    #[test]
+    fn inputs_from_row_reports_an_empty_key_column_as_keyless() {
+        let row = LlmRow {
+            provider_kind: "anthropic".to_owned(),
+            base_url: String::new(),
+            model_name: "claude-x".to_owned(),
+            api_key_encrypted: Some(Vec::new()),
+        };
+        assert!(!inputs_from_row(Some(&row), true).has_api_key);
     }
 
     #[test]

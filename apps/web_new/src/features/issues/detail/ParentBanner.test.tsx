@@ -410,6 +410,14 @@ describe("ParentBanner", () => {
     // cached detail is the banner's source, and it is repainted at once.
   });
 
+  it("offers parent removal on synced items", async () => {
+    const { client, queryClient } = harness();
+    renderBanner(client, queryClient, { issue: issue({ is_synced: true }) });
+    await within(await screen.findByTestId("parent-banner")).findByRole("link");
+    fireEvent.click(screen.getByRole("button", { name: "Parent options" }));
+    expect(await screen.findByRole("menuitem", { name: REMOVE_PARENT_TEXT })).toBeInTheDocument();
+  });
+
   it("keeps the banner read-only for guests and archived items", async () => {
     const { client, queryClient } = harness();
     const view = renderBanner(client, queryClient, { editable: false });

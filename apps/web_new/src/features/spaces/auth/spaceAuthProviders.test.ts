@@ -26,7 +26,7 @@ describe("resolveSpaceAuthProviders", () => {
       name: "Google",
       monogram: "GO",
       label: "Continue with Google",
-      href: "/auth/google/",
+      href: "/auth/spaces/google/",
     });
   });
 
@@ -38,9 +38,9 @@ describe("resolveSpaceAuthProviders", () => {
   it("carries the encoded return address and omits it when empty", () => {
     const flags: SpaceAuthProviderFlags = { ...NONE, giteaEnabled: true };
     expect(resolveSpaceAuthProviders(flags, "sign-in", "/issues/a?board=x")[0]?.href).toBe(
-      "/auth/gitea/?next_path=%2Fissues%2Fa%3Fboard%3Dx"
+      "/auth/spaces/gitea/?next_path=%2Fissues%2Fa%3Fboard%3Dx"
     );
-    expect(resolveSpaceAuthProviders(flags, "sign-in", "")[0]?.href).toBe("/auth/gitea/");
-    expect(resolveSpaceAuthProviders(flags, "sign-in")[0]?.href).toBe("/auth/gitea/");
+    expect(resolveSpaceAuthProviders(flags, "sign-in", "")[0]?.href).toBe("/auth/spaces/gitea/");
+    expect(resolveSpaceAuthProviders(flags, "sign-in")[0]?.href).toBe("/auth/spaces/gitea/");
   });
 });

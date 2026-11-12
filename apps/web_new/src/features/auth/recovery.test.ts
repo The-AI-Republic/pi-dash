@@ -159,13 +159,23 @@ describe("secretStrength", () => {
     expect(secretStrength("Ab1!")).toBe("weak");
   });
 
-  it("needs three of the four character classes", () => {
+  it("needs all four character classes", () => {
     expect(secretStrength("abcdefgh")).toBe("weak");
     expect(secretStrength("ABCDEFG1")).toBe("weak");
     expect(secretStrength("Abcdefgh")).toBe("weak");
-    expect(secretStrength("Abcdefg1")).toBe("strong");
-    expect(secretStrength("Abcdefg!")).toBe("strong");
+    expect(secretStrength("Password1")).toBe("weak");
+    expect(secretStrength("Abcdefg1")).toBe("weak");
+    expect(secretStrength("Abcdefg!")).toBe("weak");
+    expect(secretStrength("Abcdef1!")).toBe("strong");
     expect(secretStrength("Tq7!mZ2@kP9#xR")).toBe("strong");
+  });
+
+  it("refuses marks outside the fixed punctuation set", () => {
+    expect(secretStrength("Abcdef12 ")).toBe("weak");
+    expect(secretStrength("Abcdef1~")).toBe("weak");
+    expect(secretStrength("Abcdef1`")).toBe("weak");
+    expect(secretStrength("Abcdef1\\")).toBe("weak");
+    expect(secretStrength("Abcdef1é")).toBe("weak");
   });
 });
 
@@ -178,6 +188,7 @@ describe("weakSecretHint", () => {
   it("names the length rule first, then the mix rule", () => {
     expect(weakSecretHint("Ab1!")).toBe("Use at least 8 characters.");
     expect(weakSecretHint("abcdefgh")).toBe("Weak password — add mixed case, numbers, or symbols.");
+    expect(weakSecretHint("Password1")).toBe("Weak password — add mixed case, numbers, or symbols.");
   });
 });
 
@@ -198,6 +209,7 @@ describe("canSubmitNewPassword", () => {
   it("needs a strong secret with a matching confirmation", () => {
     expect(canSubmitNewPassword("Tq7!mZ2@kP9#xR", "Tq7!mZ2@kP9#xR")).toBe(true);
     expect(canSubmitNewPassword("abcdefgh", "abcdefgh")).toBe(false);
+    expect(canSubmitNewPassword("Password1", "Password1")).toBe(false);
     expect(canSubmitNewPassword("Tq7!mZ2@kP9#xR", "Nb4@gH8$kL1!zQ")).toBe(false);
   });
 });

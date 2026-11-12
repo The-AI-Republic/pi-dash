@@ -7,11 +7,9 @@
 //! Fixtures FX-GIT-01, FX-GIT-02
 //! (`rust-api/fixtures/app_integrations/fx-git-0{1,2}-*.json`).
 //!
-//! Dynamic statements are sea-query builders; fixed reads are string
-//! constants executed with runtime `sqlx::query` (no `query!` macros:
-//! there is no build-time database, same as the merged `license/queries`
-//! precedent). Every executor is generic over `sqlx::Executor`. Row
-//! structs reuse the D-05 models (`crate::integrations::git_models`,
+//! Every executor is a SeaORM [`ConnectionTrait`](sea_orm::ConnectionTrait)
+//! (`sea_orm_connection` on the pool, `TxConn` inside a transaction);
+//! row structs reuse the D-05 models (`crate::integrations::git_models`,
 //! PIDASHCONV-42, Done) — this module ports queries only, never models.
 //!
 //! SQL semantics are Django's, quirks included (translate, don't
@@ -28,21 +26,17 @@
 //!   `https://` only when no `http(s)://` scheme is present
 //!   (`services.py:43-47`; vectors executed in FX-GIT-01).
 
-use sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement};
-use sqlx::postgres::PgRow;
-use sqlx::Row;
-
-use super::WORKSPACE_TABLE;
-use crate::integrations::git_models::{
-    git_provider_account::{self, GitProviderAccount},
-    git_repository,
-    git_repository_binding::{self, GitRepositoryBinding},
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select,
 };
 
-/// `GitProviderAccount` table shorthand.
-const ACCOUNT_TABLE: &str = git_provider_account::TABLE;
-/// `GitRepositoryBinding` table shorthand.
-const BINDING_TABLE: &str = git_repository_binding::TABLE;
+use crate::entity::{git_provider_accounts, git_repositories, git_repository_bindings, workspaces};
+use crate::integrations::git_models::{
+    git_provider_account::{self, GitProviderAccount},
+    git_repository_binding::GitRepositoryBinding,
+};
+
 /// Live account statuses admitted by `_provider_account_queryset`
 /// (`services.py:63-70`).
 pub const RESOLVABLE_STATUSES: &[&str] = &[
@@ -51,92 +45,30 @@ pub const RESOLVABLE_STATUSES: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Shared column helpers
-// ---------------------------------------------------------------------------
-
-/// `SELECT` every `GitProviderAccount` column, table-qualified.
-fn select_account_columns(sel: &mut SelectStatement) {
-    for col in git_provider_account::COLUMNS {
-        sel.column((Alias::new(ACCOUNT_TABLE), Alias::new(*col)));
-    }
-}
-
-/// Map one full `git_provider_accounts` row (column names,
-/// order-independent).
-pub fn map_git_provider_account_row(row: &PgRow) -> Result<GitProviderAccount, sqlx::Error> {
-    Ok(GitProviderAccount {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        workspace_id: row.try_get("workspace_id")?,
-        provider: row.try_get("provider")?,
-        host_url: row.try_get("host_url")?,
-        auth_type: row.try_get("auth_type")?,
-        external_account_id: row.try_get("external_account_id")?,
-        external_account_login: row.try_get("external_account_login")?,
-        display_name: row.try_get("display_name")?,
-        capabilities: row.try_get("capabilities")?,
-        credential_config: row.try_get("credential_config")?,
-        workspace_integration_id: row.try_get("workspace_integration_id")?,
-        status: row.try_get("status")?,
-        verified_at: row.try_get("verified_at")?,
-        last_check_error: row.try_get("last_check_error")?,
-        metadata: row.try_get("metadata")?,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Provider-account list (git.py:57-67)
 // ---------------------------------------------------------------------------
 
 /// `GitProviderAccount.objects.filter(workspace=workspace).order_by(
 /// "provider", "host_url", "display_name")` (`git.py:61-63`).
-/// Binds `$1 = workspace_id`.
-pub fn provider_account_list_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(ACCOUNT_TABLE.to_owned()));
-    select_account_columns(&mut sel);
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("workspace_id")))
-                    .eq(Expr::cust("$1")),
-            ),
-    )
-    .order_by(
-        (Alias::new(ACCOUNT_TABLE), Alias::new("provider")),
-        Order::Asc,
-    )
-    .order_by(
-        (Alias::new(ACCOUNT_TABLE), Alias::new("host_url")),
-        Order::Asc,
-    )
-    .order_by(
-        (Alias::new(ACCOUNT_TABLE), Alias::new("display_name")),
-        Order::Asc,
-    );
-    sel.to_string(PostgresQueryBuilder)
+pub fn provider_account_list_query(
+    workspace_id: uuid::Uuid,
+) -> Select<git_provider_accounts::Entity> {
+    git_provider_accounts::Entity::find()
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(workspace_id))
+        .order_by_asc(git_provider_accounts::Column::Provider)
+        .order_by_asc(git_provider_accounts::Column::HostUrl)
+        .order_by_asc(git_provider_accounts::Column::DisplayName)
 }
 
 /// Ordered provider accounts for one workspace
 /// (`git.py:64-67`, `{"accounts": [...]}`).
-pub async fn fetch_provider_account_list<'e, E>(
-    ex: E,
+pub async fn fetch_provider_account_list(
+    db: &impl ConnectionTrait,
     workspace_id: uuid::Uuid,
-) -> Result<Vec<GitProviderAccount>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&provider_account_list_sql())
-        .bind(workspace_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_git_provider_account_row).collect()
+) -> Result<Vec<GitProviderAccount>, sea_orm::DbErr> {
+    let rows = provider_account_list_query(workspace_id).all(db).await?;
+    Ok(rows.into_iter().map(GitProviderAccount::from).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -147,77 +79,37 @@ where
 /// workspace__slug=slug)` (`git.py:100,105`): the `workspace__slug`
 /// traversal inner-joins `workspaces` (non-nullable FK) and applies the
 /// default manager's `deleted_at IS NULL` on both tables.
-/// Binds `$1 = account_id`, `$2 = workspace slug`.
-pub fn provider_account_detail_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(ACCOUNT_TABLE.to_owned()));
-    select_account_columns(&mut sel);
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("workspace_id")))
-                .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("id"))).eq(Expr::cust("$1")))
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$2"))),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
-}
-
-/// One provider account by id scoped to a workspace slug, or `None`
-/// (the view's 404 branch).
-pub async fn fetch_provider_account_detail<'e, E>(
-    ex: E,
+pub fn provider_account_detail_query(
     account_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<Option<GitProviderAccount>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&provider_account_detail_sql())
-        .bind(account_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+) -> Select<git_provider_accounts::Entity> {
+    git_provider_accounts::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            git_provider_accounts::Relation::Workspaces.def(),
+        )
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::Id.eq(account_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+        .limit(1)
+}
+/// One provider account by id scoped to a workspace slug, or `None`
+/// (the view's 404 branch).
+pub async fn fetch_provider_account_detail(
+    db: &impl ConnectionTrait,
+    account_id: uuid::Uuid,
+    workspace_slug: &str,
+) -> Result<Option<GitProviderAccount>, sea_orm::DbErr> {
+    let row = provider_account_detail_query(account_id, workspace_slug)
+        .one(db)
         .await?;
-    row.map(|r| map_git_provider_account_row(&r)).transpose()
+    Ok(row.map(GitProviderAccount::from))
 }
 
 // ---------------------------------------------------------------------------
 // Project binding read (services.py:353-358, git.py:132-138)
 // ---------------------------------------------------------------------------
-
-/// `GitRepository` table shorthand.
-const REPO_TABLE: &str = git_repository::TABLE;
-
-/// Repository columns `serialize_binding` needs, fetched under the
-/// `git_repositories__` alias prefix (see the module docs for why the
-/// join is aliased while Django maps positionally).
-const BINDING_REPO_COLS: &[&str] = &[
-    "id",
-    "provider",
-    "host_url",
-    "external_id",
-    "namespace",
-    "name",
-    "full_name",
-    "web_url",
-    "clone_url_http",
-    "clone_url_ssh",
-    "default_branch",
-    "is_private",
-];
-
-/// Account columns `serialize_binding` needs for the `degraded` derivation
-/// (`provider_account.status != CONNECTED`, `services.py:280-295`).
-const BINDING_ACCOUNT_COLS: &[&str] = &["id", "status", "last_check_error"];
 
 /// Repository fields read through a project binding
 /// (`serialize_binding` + `serialize_repository`, `services.py:232-295`).
@@ -237,12 +129,41 @@ pub struct BoundRepository {
     pub is_private: bool,
 }
 
+impl From<git_repositories::Model> for BoundRepository {
+    fn from(row: git_repositories::Model) -> Self {
+        Self {
+            id: row.id,
+            provider: row.provider,
+            host_url: row.host_url,
+            external_id: row.external_id,
+            namespace: row.namespace,
+            name: row.name,
+            full_name: row.full_name,
+            web_url: row.web_url,
+            clone_url_http: row.clone_url_http,
+            clone_url_ssh: row.clone_url_ssh,
+            default_branch: row.default_branch,
+            is_private: row.is_private,
+        }
+    }
+}
+
 /// Account fields read through a project binding (the `degraded` inputs).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundAccount {
     pub id: uuid::Uuid,
     pub status: String,
     pub last_check_error: String,
+}
+
+impl From<git_provider_accounts::Model> for BoundAccount {
+    fn from(row: git_provider_accounts::Model) -> Self {
+        Self {
+            id: row.id,
+            status: row.status,
+            last_check_error: row.last_check_error,
+        }
+    }
 }
 
 /// One project binding with its `select_related` repository and provider
@@ -254,140 +175,204 @@ pub struct ProjectBinding {
     pub provider_account: BoundAccount,
 }
 
-/// Alias a joined-table column as `<table>__<col>`.
-fn select_aliased(sel: &mut SelectStatement, table: &str, cols: &[&str]) {
-    for col in cols {
-        sel.expr_as(
-            Expr::col((Alias::new(table.to_owned()), Alias::new((*col).to_owned()))),
-            Alias::new(format!("{table}__{col}")),
-        );
+/// One `binding_for_project_query` row. Joined columns carry the
+/// `<table>__<col>` alias prefix so every output name is unique by
+/// construction; decode is by name.
+#[derive(Debug, Clone, FromQueryResult)]
+#[allow(non_snake_case)]
+pub struct BindingRow {
+    pub id: uuid::Uuid,
+    pub created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    pub updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    pub created_by_id: Option<uuid::Uuid>,
+    pub updated_by_id: Option<uuid::Uuid>,
+    pub deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    pub project_id: uuid::Uuid,
+    pub workspace_id: uuid::Uuid,
+    pub repository_id: uuid::Uuid,
+    pub provider_account_id: uuid::Uuid,
+    pub actor_id: uuid::Uuid,
+    pub is_sync_enabled: bool,
+    pub clone_auth_mode: String,
+    pub last_synced_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    pub last_sync_error: String,
+    pub metadata: serde_json::Value,
+    pub git_repositories__id: uuid::Uuid,
+    pub git_repositories__provider: String,
+    pub git_repositories__host_url: String,
+    pub git_repositories__external_id: String,
+    pub git_repositories__namespace: String,
+    pub git_repositories__name: String,
+    pub git_repositories__full_name: String,
+    pub git_repositories__web_url: String,
+    pub git_repositories__clone_url_http: String,
+    pub git_repositories__clone_url_ssh: String,
+    pub git_repositories__default_branch: String,
+    pub git_repositories__is_private: bool,
+    pub git_provider_accounts__id: uuid::Uuid,
+    pub git_provider_accounts__status: String,
+    pub git_provider_accounts__last_check_error: String,
+}
+
+impl From<BindingRow> for ProjectBinding {
+    fn from(row: BindingRow) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        Self {
+            binding: GitRepositoryBinding {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                repository_id: row.repository_id,
+                provider_account_id: row.provider_account_id,
+                actor_id: row.actor_id,
+                is_sync_enabled: row.is_sync_enabled,
+                clone_auth_mode: row.clone_auth_mode,
+                last_synced_at: row.last_synced_at.map(at),
+                last_sync_error: row.last_sync_error,
+                metadata: row.metadata,
+            },
+            repository: BoundRepository {
+                id: row.git_repositories__id,
+                provider: row.git_repositories__provider,
+                host_url: row.git_repositories__host_url,
+                external_id: row.git_repositories__external_id,
+                namespace: row.git_repositories__namespace,
+                name: row.git_repositories__name,
+                full_name: row.git_repositories__full_name,
+                web_url: row.git_repositories__web_url,
+                clone_url_http: row.git_repositories__clone_url_http,
+                clone_url_ssh: row.git_repositories__clone_url_ssh,
+                default_branch: row.git_repositories__default_branch,
+                is_private: row.git_repositories__is_private,
+            },
+            provider_account: BoundAccount {
+                id: row.git_provider_accounts__id,
+                status: row.git_provider_accounts__status,
+                last_check_error: row.git_provider_accounts__last_check_error,
+            },
+        }
     }
 }
 
 /// `GitRepositoryBinding.objects.filter(project_id=project_id,
 /// workspace__slug=slug).select_related("repository",
 /// "provider_account").first()` (`services.py:353-358`).
-/// Binds `$1 = project_id`, `$2 = workspace slug`.
-pub fn binding_for_project_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(BINDING_TABLE.to_owned()));
-    for col in git_repository_binding::COLUMNS {
-        sel.column((Alias::new(BINDING_TABLE), Alias::new(*col)));
-    }
-    select_aliased(&mut sel, REPO_TABLE, BINDING_REPO_COLS);
-    select_aliased(&mut sel, ACCOUNT_TABLE, BINDING_ACCOUNT_COLS);
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(BINDING_TABLE), Alias::new("workspace_id")))
-                .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(REPO_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(BINDING_TABLE), Alias::new("repository_id")))
-                .equals((Alias::new(REPO_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(ACCOUNT_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(BINDING_TABLE), Alias::new("provider_account_id")))
-                .equals((Alias::new(ACCOUNT_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(BINDING_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(BINDING_TABLE), Alias::new("project_id")))
-                    .eq(Expr::cust("$1")),
-            )
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$2")))
-            .add(Expr::col((Alias::new(REPO_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("deleted_at"))).is_null()),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
-}
-
-fn aliased(row: &PgRow, table: &str, col: &str) -> Result<String, sqlx::Error> {
-    row.try_get(format!("{table}__{col}").as_str())
-}
-
-fn aliased_uuid(row: &PgRow, table: &str, col: &str) -> Result<uuid::Uuid, sqlx::Error> {
-    row.try_get(format!("{table}__{col}").as_str())
-}
-
-fn aliased_bool(row: &PgRow, table: &str, col: &str) -> Result<bool, sqlx::Error> {
-    row.try_get(format!("{table}__{col}").as_str())
-}
-
-/// Map one `binding_for_project_sql` row.
-pub fn map_project_binding_row(row: &PgRow) -> Result<ProjectBinding, sqlx::Error> {
-    Ok(ProjectBinding {
-        binding: GitRepositoryBinding {
-            id: row.try_get("id")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            created_by_id: row.try_get("created_by_id")?,
-            updated_by_id: row.try_get("updated_by_id")?,
-            deleted_at: row.try_get("deleted_at")?,
-            project_id: row.try_get("project_id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            repository_id: row.try_get("repository_id")?,
-            provider_account_id: row.try_get("provider_account_id")?,
-            actor_id: row.try_get("actor_id")?,
-            is_sync_enabled: row.try_get("is_sync_enabled")?,
-            clone_auth_mode: row.try_get("clone_auth_mode")?,
-            last_synced_at: row.try_get("last_synced_at")?,
-            last_sync_error: row.try_get("last_sync_error")?,
-            metadata: row.try_get("metadata")?,
-        },
-        repository: BoundRepository {
-            id: aliased_uuid(row, REPO_TABLE, "id")?,
-            provider: aliased(row, REPO_TABLE, "provider")?,
-            host_url: aliased(row, REPO_TABLE, "host_url")?,
-            external_id: aliased(row, REPO_TABLE, "external_id")?,
-            namespace: aliased(row, REPO_TABLE, "namespace")?,
-            name: aliased(row, REPO_TABLE, "name")?,
-            full_name: aliased(row, REPO_TABLE, "full_name")?,
-            web_url: aliased(row, REPO_TABLE, "web_url")?,
-            clone_url_http: aliased(row, REPO_TABLE, "clone_url_http")?,
-            clone_url_ssh: aliased(row, REPO_TABLE, "clone_url_ssh")?,
-            default_branch: aliased(row, REPO_TABLE, "default_branch")?,
-            is_private: aliased_bool(row, REPO_TABLE, "is_private")?,
-        },
-        provider_account: BoundAccount {
-            id: aliased_uuid(row, ACCOUNT_TABLE, "id")?,
-            status: aliased(row, ACCOUNT_TABLE, "status")?,
-            last_check_error: aliased(row, ACCOUNT_TABLE, "last_check_error")?,
-        },
-    })
+pub fn binding_for_project_query(
+    project_id: uuid::Uuid,
+    workspace_slug: &str,
+) -> Select<git_repository_bindings::Entity> {
+    git_repository_bindings::Entity::find()
+        .select_only()
+        .columns([
+            git_repository_bindings::Column::Id,
+            git_repository_bindings::Column::CreatedAt,
+            git_repository_bindings::Column::UpdatedAt,
+            git_repository_bindings::Column::CreatedById,
+            git_repository_bindings::Column::UpdatedById,
+            git_repository_bindings::Column::DeletedAt,
+            git_repository_bindings::Column::ProjectId,
+            git_repository_bindings::Column::WorkspaceId,
+            git_repository_bindings::Column::RepositoryId,
+            git_repository_bindings::Column::ProviderAccountId,
+            git_repository_bindings::Column::ActorId,
+            git_repository_bindings::Column::IsSyncEnabled,
+            git_repository_bindings::Column::CloneAuthMode,
+            git_repository_bindings::Column::LastSyncedAt,
+            git_repository_bindings::Column::LastSyncError,
+            git_repository_bindings::Column::Metadata,
+        ])
+        .column_as(git_repositories::Column::Id, "git_repositories__id")
+        .column_as(
+            git_repositories::Column::Provider,
+            "git_repositories__provider",
+        )
+        .column_as(
+            git_repositories::Column::HostUrl,
+            "git_repositories__host_url",
+        )
+        .column_as(
+            git_repositories::Column::ExternalId,
+            "git_repositories__external_id",
+        )
+        .column_as(
+            git_repositories::Column::Namespace,
+            "git_repositories__namespace",
+        )
+        .column_as(git_repositories::Column::Name, "git_repositories__name")
+        .column_as(
+            git_repositories::Column::FullName,
+            "git_repositories__full_name",
+        )
+        .column_as(
+            git_repositories::Column::WebUrl,
+            "git_repositories__web_url",
+        )
+        .column_as(
+            git_repositories::Column::CloneUrlHttp,
+            "git_repositories__clone_url_http",
+        )
+        .column_as(
+            git_repositories::Column::CloneUrlSsh,
+            "git_repositories__clone_url_ssh",
+        )
+        .column_as(
+            git_repositories::Column::DefaultBranch,
+            "git_repositories__default_branch",
+        )
+        .column_as(
+            git_repositories::Column::IsPrivate,
+            "git_repositories__is_private",
+        )
+        .column_as(
+            git_provider_accounts::Column::Id,
+            "git_provider_accounts__id",
+        )
+        .column_as(
+            git_provider_accounts::Column::Status,
+            "git_provider_accounts__status",
+        )
+        .column_as(
+            git_provider_accounts::Column::LastCheckError,
+            "git_provider_accounts__last_check_error",
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitRepositories.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitProviderAccounts.def(),
+        )
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+        .filter(git_repositories::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .limit(1)
 }
 
 /// The project's binding (`None` renders `{"bound": False}`,
 /// `git.py:136-137`).
-pub async fn fetch_binding_for_project<'e, E>(
-    ex: E,
+pub async fn fetch_binding_for_project(
+    db: &impl ConnectionTrait,
     project_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<Option<ProjectBinding>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&binding_for_project_sql())
-        .bind(project_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+) -> Result<Option<ProjectBinding>, sea_orm::DbErr> {
+    let row = binding_for_project_query(project_id, workspace_slug)
+        .into_model::<BindingRow>()
+        .one(db)
         .await?;
-    row.map(|r| map_project_binding_row(&r)).transpose()
+    Ok(row.map(ProjectBinding::from))
 }
 
 // ---------------------------------------------------------------------------
@@ -396,33 +381,22 @@ where
 
 /// `_provider_account_queryset(workspace, provider, host_url)`
 /// (`services.py:63-70`): live accounts for one host. The caller passes
-/// `host_url` already through [`normalize_host_url`]. Binds
-/// `$1 = workspace_id`, `$2 = provider`, `$3 = host_url`.
-pub fn provider_account_resolution_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(ACCOUNT_TABLE.to_owned()));
-    select_account_columns(&mut sel);
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("workspace_id")))
-                    .eq(Expr::cust("$1")),
-            )
-            .add(
-                Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("provider"))).eq(Expr::cust("$2")),
-            )
-            .add(
-                Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("host_url"))).eq(Expr::cust("$3")),
-            )
-            .add(
-                Expr::col((Alias::new(ACCOUNT_TABLE), Alias::new("status")))
-                    .is_in(vec![Expr::cust("$4"), Expr::cust("$5")]),
-            ),
-    )
-    .order_by((Alias::new(ACCOUNT_TABLE), Alias::new("id")), Order::Asc);
-    sel.to_string(PostgresQueryBuilder)
+/// `host_url` already through [`normalize_host_url`].
+pub fn provider_account_resolution_query(
+    workspace_id: uuid::Uuid,
+    provider: &str,
+    host_url: &str,
+) -> Select<git_provider_accounts::Entity> {
+    git_provider_accounts::Entity::find()
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq(provider.to_owned()))
+        .filter(git_provider_accounts::Column::HostUrl.eq(host_url.to_owned()))
+        .filter(git_provider_accounts::Column::Status.is_in([
+            git_provider_account::STATUS_CONNECTED,
+            git_provider_account::STATUS_DEGRADED,
+        ]))
+        .order_by_asc(git_provider_accounts::Column::Id)
 }
 
 /// Candidate accounts for binding a repository host: explicit
@@ -430,24 +404,16 @@ pub fn provider_account_resolution_sql() -> String {
 /// set); no id with 0 rows raises 409 Required and >1 rows raises 409
 /// Ambiguous (`services.py:110-131`). The count/branching itself is
 /// handler logic; this is the shared read.
-pub async fn fetch_provider_account_resolution<'e, E>(
-    ex: E,
+pub async fn fetch_provider_account_resolution(
+    db: &impl ConnectionTrait,
     workspace_id: uuid::Uuid,
     provider: &str,
     host_url: &str,
-) -> Result<Vec<GitProviderAccount>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&provider_account_resolution_sql())
-        .bind(workspace_id)
-        .bind(provider)
-        .bind(host_url)
-        .bind(git_provider_account::STATUS_CONNECTED)
-        .bind(git_provider_account::STATUS_DEGRADED)
-        .fetch_all(ex)
+) -> Result<Vec<GitProviderAccount>, sea_orm::DbErr> {
+    let rows = provider_account_resolution_query(workspace_id, provider, host_url)
+        .all(db)
         .await?;
-    rows.iter().map(map_git_provider_account_row).collect()
+    Ok(rows.into_iter().map(GitProviderAccount::from).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -481,33 +447,51 @@ pub fn parse_page_param(raw: Option<&str>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    fn shape(query: Select<git_provider_accounts::Entity>) -> String {
+        query.build(DbBackend::Postgres).to_string()
+    }
 
     #[test]
     fn list_orders_by_provider_host_display_name() {
-        let sql = provider_account_list_sql();
+        let ws = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = shape(provider_account_list_query(ws));
         assert!(sql.contains(r#"FROM "git_provider_accounts""#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
         assert!(
-            sql.contains(r#"ORDER BY "git_provider_accounts"."provider" ASC, "git_provider_accounts"."host_url" ASC, "git_provider_accounts"."display_name" ASC"#),
+            sql.contains(&format!(r#""workspace_id" = '{ws}'"#)),
             "{sql}"
         );
-        assert!(sql.contains(r#""workspace_id" = ($1)"#), "{sql}");
+        let order = sql.find("ORDER BY").expect("order");
+        let tail = &sql[order..];
+        assert!(tail.contains(r#""provider" ASC"#), "{tail}");
+        assert!(tail.contains(r#""host_url" ASC"#), "{tail}");
+        assert!(tail.contains(r#""display_name" ASC"#), "{tail}");
     }
 
     #[test]
     fn detail_scopes_id_to_workspace_slug() {
-        let sql = provider_account_detail_sql();
+        let id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid");
+        let sql = shape(provider_account_detail_query(id, "acme"));
+        assert!(sql.contains(r#"FROM "git_provider_accounts""#), "{sql}");
         assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
-        assert!(
-            sql.contains(r#""git_provider_accounts"."id" = ($1)"#),
+        assert!(sql.contains(&format!(r#""id" = '{id}'"#)), "{sql}");
+        assert!(sql.contains(r#""slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
+        assert_eq!(
+            sql.match_indices("deleted_at\" IS NULL").count(),
+            2,
             "{sql}"
         );
-        assert!(sql.contains(r#""workspaces"."slug" = ($2)"#), "{sql}");
-        assert_eq!(sql.matches("deleted_at\" IS NULL").count(), 2, "{sql}");
     }
 
     #[test]
     fn binding_joins_repo_account_and_workspace() {
-        let sql = binding_for_project_sql();
+        let proj = uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("uuid");
+        let sql = binding_for_project_query(proj, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.contains(r#"FROM "git_repository_bindings""#), "{sql}");
         assert!(sql.contains(r#"INNER JOIN "git_repositories""#), "{sql}");
         assert!(
@@ -515,20 +499,31 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains(r#""git_repository_bindings"."project_id" = ($1)"#),
+            sql.contains(&format!(r#""project_id" = '{proj}'"#)),
             "{sql}"
         );
-        assert!(sql.contains(r#""workspaces"."slug" = ($2)"#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
         assert!(sql.contains(r#""git_repositories__full_name""#), "{sql}");
         assert!(sql.contains(r#""git_provider_accounts__status""#), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
     }
 
     #[test]
     fn resolution_filters_host_and_live_statuses() {
-        let sql = provider_account_resolution_sql();
-        assert!(sql.contains(r#""provider" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""host_url" = ($3)"#), "{sql}");
-        assert!(sql.contains("IN ($4, $5)"), "{sql}");
+        let ws = uuid::Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("uuid");
+        let sql = shape(provider_account_resolution_query(
+            ws,
+            "github",
+            "https://github.com",
+        ));
+        assert!(sql.contains(r#""provider" = 'github'"#), "{sql}");
+        assert!(
+            sql.contains(r#""host_url" = 'https://github.com'"#),
+            "{sql}"
+        );
+        assert!(sql.contains("IN"), "{sql}");
+        assert!(sql.contains("'connected'"), "{sql}");
+        assert!(sql.contains("'degraded'"), "{sql}");
         assert_eq!(
             RESOLVABLE_STATUSES,
             &[
@@ -540,7 +535,6 @@ mod tests {
 
     #[test]
     fn normalize_host_url_vectors() {
-        // FX-GIT-01 executed vectors.
         assert_eq!(
             normalize_host_url("https://github.com/"),
             "https://github.com"
@@ -554,7 +548,6 @@ mod tests {
             "http://git.internal:8080"
         );
         assert_eq!(normalize_host_url(""), "");
-        // Scheme check is case-sensitive (services.py:45).
         assert_eq!(
             normalize_host_url("HTTP://upper.example/"),
             "https://HTTP://upper.example"
@@ -674,7 +667,6 @@ mod tests {
         let (wsa, wsb) = (live_uuid(1), live_uuid(2));
         seed_workspace(&mut tx, wsa, "acme", None).await;
         seed_workspace(&mut tx, wsb, "other", None).await;
-        // Deliberately unordered inserts: gitlab/b, github/z, github/a.
         seed_account(
             &mut tx,
             live_uuid(11),
@@ -731,33 +723,29 @@ mod tests {
         )
         .await;
 
-        let got = fetch_provider_account_list(&mut *tx, wsa)
-            .await
-            .expect("list");
-        // provider ASC ("github" < "gitlab" on the second byte), then
-        // host_url, then display_name.
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let got = fetch_provider_account_list(&conn, wsa).await.expect("list");
         assert_eq!(
             got.iter()
                 .map(|a| a.display_name.clone())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "z".to_string(), "b".to_string()]
         );
-        // Detail scoping: right id + right slug hits; cross-workspace misses.
         assert_eq!(
-            fetch_provider_account_detail(&mut *tx, live_uuid(12), "acme")
+            fetch_provider_account_detail(&conn, live_uuid(12), "acme")
                 .await
                 .expect("detail")
                 .map(|a| a.display_name),
             Some("z".to_string())
         );
         assert_eq!(
-            fetch_provider_account_detail(&mut *tx, live_uuid(12), "other")
+            fetch_provider_account_detail(&conn, live_uuid(12), "other")
                 .await
                 .expect("detail"),
             None
         );
         assert_eq!(
-            fetch_provider_account_detail(&mut *tx, live_uuid(14), "acme")
+            fetch_provider_account_detail(&conn, live_uuid(14), "acme")
                 .await
                 .expect("detail"),
             None
@@ -819,7 +807,8 @@ mod tests {
         )
         .await;
 
-        let got = fetch_provider_account_resolution(&mut *tx, ws, "github", "https://github.com")
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let got = fetch_provider_account_resolution(&conn, ws, "github", "https://github.com")
             .await
             .expect("resolution");
         assert_eq!(
@@ -878,7 +867,8 @@ mod tests {
         .await
         .expect("seed binding");
 
-        let got = fetch_binding_for_project(&mut *tx, proj, "acme")
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let got = fetch_binding_for_project(&conn, proj, "acme")
             .await
             .expect("binding")
             .expect("a row");
@@ -889,9 +879,8 @@ mod tests {
         assert!(!got.repository.is_private);
         assert_eq!(got.provider_account.id, acct);
         assert_eq!(got.provider_account.status, "connected");
-        // Unknown project reads as absent (the {"bound": False} branch).
         assert_eq!(
-            fetch_binding_for_project(&mut *tx, live_uuid(9), "acme")
+            fetch_binding_for_project(&conn, live_uuid(9), "acme")
                 .await
                 .expect("miss"),
             None

@@ -18,9 +18,13 @@ export {
   deriveSchedulerHandle,
   emptySchedulerDefinition,
   hasSchedulerDefinitionErrors,
+  isSchedulerSwatchColor,
+  SCHEDULER_COLOR_SWATCHES,
   validateSchedulerDefinition,
 } from "./definition.js";
 export type { SchedulerDefinitionErrors, SchedulerDefinitionValue } from "./definition.js";
+export { SchedulerColorField } from "./SchedulerColorField.js";
+export type { SchedulerColorFieldProps } from "./SchedulerColorField.js";
 export { SchedulerCatalog, formatSchedulerUpdatedAt, schedulerSourceLabel } from "./SchedulerCatalog.js";
 export type { SchedulerCatalogProps } from "./SchedulerCatalog.js";
 export { SchedulerDefinitionDialog } from "./SchedulerDefinitionDialog.js";

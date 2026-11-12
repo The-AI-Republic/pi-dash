@@ -532,7 +532,8 @@ pub fn estimate_point_to_representation<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::projects::states::STATE_DEFAULT_FLIP_SQL;
+    use crate::domain::projects::states::clear_project_defaults_stmt;
+    use sea_orm::QueryTrait;
 
     fn body_string(v: &serde_json::Value) -> String {
         serde_json::to_string(v).expect("error body serializes")
@@ -649,13 +650,16 @@ mod tests {
     fn state_default_flip_sql_carries_manager_scoping() {
         // State.objects = StateManager: soft-delete filter plus the
         // triage exclusion, so triage and soft-deleted siblings keep
-        // their default. Django quotes "default" (reserved).
+        // their default.
+        let project = uuid::Uuid::nil();
         assert_eq!(
-            STATE_DEFAULT_FLIP_SQL,
-            "UPDATE \"states\" SET \"default\" = false \
-             WHERE \"project_id\" = $1 \
-             AND \"deleted_at\" IS NULL \
-             AND NOT (\"group\" = 'triage')"
+            clear_project_defaults_stmt(project)
+                .build(sea_orm::DbBackend::Postgres)
+                .to_string(),
+            format!(
+                "UPDATE \"states\" SET \"default\" = FALSE WHERE \"states\".\"project_id\" = \
+                 '{project}' AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage'"
+            )
         );
     }
 

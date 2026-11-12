@@ -4,9 +4,11 @@
 // Pure rules for the project-settings General tab
 // (parity/specs/project-settings-general.md §PSET-005–009). Render-free so
 // the form, the write payloads and the unit suites share one answer: field
-// limits and messages, the short-code shaper, the visibility and executor
-// options, the automated-run policy math, the emblem value shapes and the
-// parsed failure codes.
+// limits and messages, the short-code shaper, the visibility options, the
+// automated-run policy math, the emblem value shapes and the parsed failure
+// codes. There is no executor choice: projects run on runners and the
+// default pod decides who runs the work (built-in engine design §6), so the
+// tab neither shows nor writes `default_agent_executor`.
 
 import { isApiError, type ProjectSettingsDetail, type ProjectUpdateInput } from "@pidash/api-client";
 
@@ -61,13 +63,6 @@ export const VISIBILITY_OPTIONS = [
   { value: 2, label: "Public" },
 ] as const;
 
-/** The three executor kinds, in picker order, with their visible labels. */
-export const EXECUTOR_OPTIONS = [
-  { kind: "local_runner", label: "Local runner" },
-  { kind: "cloud_agent", label: "Cloud agent" },
-  { kind: "managed_runner", label: "Desktop agent" },
-] as const;
-
 /** Default run pool when the stored budget is uncapped and none was typed. */
 export const DEFAULT_MAX_TICKS = 10;
 /** The server's no-cap sentinel for the run pool. */
@@ -97,7 +92,6 @@ export interface GeneralFormValues {
   baseBranch: string;
   repoUrl: string;
   logoProps: Record<string, unknown>;
-  executor: string;
   ticking: boolean;
   budget: string;
   noCap: boolean;
@@ -126,7 +120,6 @@ export function generalFormFrom(project: ProjectSettingsDetail): GeneralFormValu
     baseBranch: project.base_branch,
     repoUrl: project.repo_url,
     logoProps: project.logo_props,
-    executor: project.default_agent_executor === "" ? "local_runner" : project.default_agent_executor,
     ticking: project.agent_ticking_enabled,
     budget: capped === null ? "" : String(capped),
     noCap: capped === null,
@@ -270,7 +263,6 @@ export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput)
     timezone: values.timezone,
     base_branch: values.baseBranch,
     logo_props: values.logoProps,
-    default_agent_executor: values.executor,
     agent_ticking_enabled: values.ticking,
     agent_default_max_ticks: budgetOnSave(values),
   };
@@ -349,14 +341,6 @@ export function repositoryBoundState(
   return canonical !== "" && trimmed === canonical ? "bound" : "bind";
 }
 
-/** Executor choices with availability; the local runner is always enabled. */
-export function executorChoices(
-  options: ReadonlyArray<{ kind: string; available: boolean }>
-): Array<{ kind: string; label: string; disabled: boolean }> {
-  return EXECUTOR_OPTIONS.map((option) => ({
-    kind: option.kind,
-    label: option.label,
-    disabled:
-      option.kind === "local_runner" ? false : !options.some((row) => row.kind === option.kind && row.available),
-  }));
-}
+/** What the Execution section says in place of the old executor picker. */
+export const EXECUTION_TARGET_NOTE =
+  "Work in this project runs on runners. The project's default pod decides who runs new work; pick a pod or a specific runner on each work item to change it.";

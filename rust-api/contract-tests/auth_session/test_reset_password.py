@@ -9,8 +9,10 @@ Tokens are minted with the stdlib replica of Django 4.2's
 
 - app success lands on ``<base>/sign-in?success=True``; space success on
   the space base itself
-- app answers INVALID_PASSWORD_TOKEN (5125) for an unknown UUID user;
-  space lets ``DoesNotExist`` escape → HTTP 500
+- an unknown UUID user: app answers INVALID_PASSWORD_TOKEN (5125) on
+  both backends; space answers HTTP 500 on Django (``DoesNotExist``
+  escapes) and the 5125 redirect on Rust (DIFF-4: old bug fixed in
+  the new system only)
 - a uid that is not a UUID at all → HTTP 500 on both (field
   ``ValidationError`` escapes both Views)
 - non-UTF-8 uid bytes: app → 5125 (the inner ``except (ValueError, ...)``
@@ -18,6 +20,7 @@ Tokens are minted with the stdlib replica of Django 4.2's
   space → EXPIRED_PASSWORD_TOKEN (5130) at a double-slash URL
 """
 
+from _harness.diffs import expect, is_rust
 from _harness.redirects import assert_error_redirect, location_of
 from _harness.settings import database_url, secret_key
 
@@ -117,13 +120,15 @@ def test_space_weak_password(browser, space_base, user):
     assert_error_redirect(res, base=space_base, error_code=5021)
 
 
-def test_space_unknown_uuid_user_returns_500(browser, user):
+def test_space_unknown_uuid_user(browser, space_base, user):
     uidb64, token = _fresh_token(user)
     res = browser().post(
         f"/auth/spaces/reset-password/{tokens.ghost_uidb64()}/{token}/",
         data={"password": NEW_PASSWORD},
     )
-    assert res.status_code == 500
+    assert res.status_code == expect("DIFF-4", django=500, rust=302)
+    if is_rust():
+        assert_error_redirect(res, base=space_base, error_code=5125)
 
 
 def test_space_non_utf8_uid_is_expired_token(browser, space_base, user):

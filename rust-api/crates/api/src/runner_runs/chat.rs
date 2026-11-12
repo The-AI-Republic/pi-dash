@@ -63,10 +63,19 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Alias, Expr, Keyword, Query as SqlQuery, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, Set,
+};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_compat::db::is_unique_violation;
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::{
     AgentChatApprovalRequest, AgentChatEvent, AgentChatMessage, AgentChatSession,
 };
@@ -286,10 +295,12 @@ pub async fn check_chat_send_throttle(state: &AppState, user_id: &Uuid) -> ChatS
             CHAT_SEND_REQUESTS,
             CHAT_SEND_WINDOW_SECS,
         );
-        // `'%d' % wait`: truncation toward zero; a `None` wait sends
-        // no header (DRF skips falsy `exc.wait`).
-        let retry_after_secs = wait
-            .map(|wait| format!("{}", wait.trunc() as i64))
+        // `Throttled.__init__` ceils the wait (`exceptions.py:237`)
+        // before the handler renders `Retry-After: '%d' % wait`,
+        // skipping falsy waits (`views.py:90-91`); a `None` wait
+        // sends no header.
+        let retry_after_secs = crate::runner_enroll::throttle::retry_after_secs(wait)
+            .map(|secs| secs.to_string())
             .unwrap_or_default();
         return ChatSendVerdict::Deny { retry_after_secs };
     }
@@ -347,69 +358,10 @@ pub fn throttle_denied(retry_after_secs: &str) -> Response {
 // Rows, fetches, guards, serialization
 // ---------------------------------------------------------------------------
 
-/// `agent_chat_session` columns in L2 order: id, workspace, runner,
-/// creator, pod, status, agent_kind, local_thread, local_session,
-/// cwd, model, active_turn, active_message, close_requested,
-/// last_message_at, closed_at, error, created_at, updated_at.
-/// Nineteen columns exceed sqlx's 16-tuple `FromRow`, so sessions
-/// decode by position through [`session_from_pg`].
-const SESSION_COLUMNS: &str = r#""id", "workspace_id", "runner_id", "created_by_id", "pod_id",
-    "status", "agent_kind", "local_thread_id", "local_session_id", "cwd", "model",
-    "active_turn_id", "active_message_id", "close_requested", "last_message_at",
-    "closed_at", "error", "created_at", "updated_at""#;
-
-/// The session columns qualified with the session table (for joins —
-/// split on commas, since the constant spans lines).
-fn qualified_session_columns() -> String {
-    SESSION_COLUMNS
-        .split(',')
-        .map(|column| format!("agent_chat_session.{}", column.trim()))
-        .collect::<Vec<_>>()
-        .join(", ")
+/// A `DateTimeWithTimeZone` column as the L2 rows' UTC instant.
+fn utc(at: sea_orm::prelude::DateTimeWithTimeZone) -> DateTime<Utc> {
+    at.with_timezone(&Utc)
 }
-
-/// `agent_chat_message` columns in L2 order.
-type MessageRow = (
-    Uuid,
-    Uuid,
-    String,
-    String,
-    Value,
-    String,
-    String,
-    String,
-    i32,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-);
-
-/// `agent_chat_event` columns in L2 order.
-type EventRow = (
-    i64,
-    Uuid,
-    Option<Uuid>,
-    i32,
-    String,
-    String,
-    Value,
-    DateTime<Utc>,
-);
-
-/// `agent_chat_approval` columns in L2 order.
-type ChatApprovalRow = (
-    Uuid,
-    Uuid,
-    String,
-    String,
-    Value,
-    String,
-    String,
-    String,
-    Option<Uuid>,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-);
 
 /// The runner columns the chat guards read: id, owner, workspace,
 /// visibility, status. Unknown `visibility`/`status` values pass
@@ -422,87 +374,114 @@ pub struct RunnerGuard {
     pub status: String,
 }
 
+/// The guard columns as one `select_only` row, in [`runner_guard_select`]
+/// order.
 type RunnerGuardRow = (Uuid, Uuid, Uuid, i16, String);
 
-/// Build the L2 session from a row decoded by position. An
-/// unknown status is a 500 (the L2 rows cannot hold it; no contract
-/// input covers it).
-fn session_from_pg(row: &sqlx::postgres::PgRow) -> Result<AgentChatSession, Response> {
-    use sqlx::Row;
-    let status_raw: String = row.try_get(5).map_err(|_| server_error())?;
-    let status = pidash_types::runner_runs::AgentChatSessionStatus::from_value(&status_raw)
-        .ok_or_else(server_error)?;
+fn runner_guard_from_row(row: RunnerGuardRow) -> RunnerGuard {
+    RunnerGuard {
+        id: row.0,
+        owner_id: row.1,
+        workspace_id: row.2,
+        visibility: row.3,
+        status: row.4,
+    }
+}
+
+/// The runner guard columns by id (`LIMIT 1`; the lock variants add
+/// `FOR UPDATE`).
+fn runner_guard_select(runner_id: Uuid) -> sea_orm::Select<orm::runner::Entity> {
+    use orm::runner::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::OwnerId,
+            Column::WorkspaceId,
+            Column::Visibility,
+            Column::Status,
+        ])
+        .filter(Column::Id.eq(runner_id))
+        .limit(1)
+}
+
+/// Build the L2 session from its entity row. An unknown status is a
+/// 500 (the L2 rows cannot hold it; no contract input covers it).
+fn session_from_model(row: orm::agent_chat_session::Model) -> Result<AgentChatSession, Response> {
+    let status = AgentChatSessionStatus::from_value(&row.status).ok_or_else(server_error)?;
     Ok(AgentChatSession {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        workspace_id: row.try_get(1).map_err(|_| server_error())?,
-        runner_id: row.try_get(2).map_err(|_| server_error())?,
-        created_by_id: row.try_get(3).map_err(|_| server_error())?,
-        pod_id: row.try_get(4).map_err(|_| server_error())?,
+        id: row.id,
+        workspace_id: row.workspace_id,
+        runner_id: row.runner_id,
+        created_by_id: row.created_by_id,
+        pod_id: row.pod_id,
         status,
-        agent_kind: row.try_get(6).map_err(|_| server_error())?,
-        local_thread_id: row.try_get(7).map_err(|_| server_error())?,
-        local_session_id: row.try_get(8).map_err(|_| server_error())?,
-        cwd: row.try_get(9).map_err(|_| server_error())?,
-        model: row.try_get(10).map_err(|_| server_error())?,
-        active_turn_id: row.try_get(11).map_err(|_| server_error())?,
-        active_message_id: row.try_get(12).map_err(|_| server_error())?,
-        close_requested: row.try_get(13).map_err(|_| server_error())?,
-        last_message_at: row.try_get(14).map_err(|_| server_error())?,
-        closed_at: row.try_get(15).map_err(|_| server_error())?,
-        error: row.try_get(16).map_err(|_| server_error())?,
-        created_at: row.try_get(17).map_err(|_| server_error())?,
-        updated_at: row.try_get(18).map_err(|_| server_error())?,
+        agent_kind: row.agent_kind,
+        local_thread_id: row.local_thread_id,
+        local_session_id: row.local_session_id,
+        cwd: row.cwd,
+        model: row.model,
+        active_turn_id: row.active_turn_id,
+        active_message_id: row.active_message_id,
+        close_requested: row.close_requested,
+        last_message_at: row.last_message_at.map(utc),
+        closed_at: row.closed_at.map(utc),
+        error: row.error,
+        created_at: utc(row.created_at),
+        updated_at: utc(row.updated_at),
     })
 }
 
-fn message_from_row(row: MessageRow) -> Result<AgentChatMessage, Response> {
-    let role = AgentChatMessageRole::from_value(&row.2).ok_or_else(server_error)?;
-    let status = AgentChatMessageStatus::from_value(&row.5).ok_or_else(server_error)?;
+fn message_from_model(row: orm::agent_chat_message::Model) -> Result<AgentChatMessage, Response> {
+    let role = AgentChatMessageRole::from_value(&row.role).ok_or_else(server_error)?;
+    let status = AgentChatMessageStatus::from_value(&row.status).ok_or_else(server_error)?;
     Ok(AgentChatMessage {
-        id: row.0,
-        session_id: row.1,
+        id: row.id,
+        session_id: row.session_id,
         role,
-        content: row.3,
-        content_parts: row.4,
+        content: row.content,
+        content_parts: row.content_parts,
         status,
-        local_item_id: row.6,
-        local_turn_id: row.7,
-        seq: row.8,
-        created_at: row.9,
-        completed_at: row.10,
+        local_item_id: row.local_item_id,
+        local_turn_id: row.local_turn_id,
+        seq: row.seq,
+        created_at: utc(row.created_at),
+        completed_at: row.completed_at.map(utc),
     })
 }
 
-fn event_from_row(row: EventRow) -> Result<AgentChatEvent, Response> {
-    Ok(AgentChatEvent {
-        id: row.0,
-        session_id: row.1,
-        message_id: row.2,
-        seq: row.3,
-        source_key: row.4,
-        kind: row.5,
-        payload: row.6,
-        created_at: row.7,
-    })
+fn event_from_model(row: orm::agent_chat_event::Model) -> AgentChatEvent {
+    AgentChatEvent {
+        id: row.id,
+        session_id: row.session_id,
+        message_id: row.message_id,
+        seq: row.seq,
+        source_key: row.source_key,
+        kind: row.kind,
+        payload: row.payload,
+        created_at: utc(row.created_at),
+    }
 }
 
-fn chat_approval_from_row(row: ChatApprovalRow) -> Result<AgentChatApprovalRequest, Response> {
+fn chat_approval_from_model(
+    row: orm::agent_chat_approval::Model,
+) -> Result<AgentChatApprovalRequest, Response> {
     let kind =
-        pidash_types::runner_runs::ApprovalKind::from_value(&row.3).ok_or_else(server_error)?;
-    let status = ApprovalStatus::from_value(&row.6).ok_or_else(server_error)?;
+        pidash_types::runner_runs::ApprovalKind::from_value(&row.kind).ok_or_else(server_error)?;
+    let status = ApprovalStatus::from_value(&row.status).ok_or_else(server_error)?;
     Ok(AgentChatApprovalRequest {
-        id: row.0,
-        session_id: row.1,
-        local_approval_id: row.2,
+        id: row.id,
+        session_id: row.session_id,
+        local_approval_id: row.local_approval_id,
         kind,
-        payload: row.4,
-        reason: row.5,
+        payload: row.payload,
+        reason: row.reason,
         status,
-        decision_source: row.7,
-        decided_by_id: row.8,
-        requested_at: row.9,
-        expires_at: row.10,
-        decided_at: row.11,
+        decision_source: row.decision_source,
+        decided_by_id: row.decided_by_id,
+        requested_at: utc(row.requested_at),
+        expires_at: row.expires_at.map(utc),
+        decided_at: row.decided_at.map(utc),
     })
 }
 
@@ -514,20 +493,17 @@ pub struct LockedChatSession {
 }
 
 /// Lock one session row (no join — the runner locks separately
-/// below, since sqlx cannot decode nested tuples).
+/// below, the same two row locks Django's joined `FOR UPDATE` takes).
 async fn lock_session_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session_id: Uuid,
 ) -> Result<Option<AgentChatSession>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
-        r#"SELECT {SESSION_COLUMNS} FROM "agent_chat_session"
-           WHERE "id" = $1 LIMIT 1 FOR UPDATE"#
-    ))
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    row.map(|row| session_from_pg(&row)).transpose()
+    let row = orm::agent_chat_session::Entity::find_by_id(session_id)
+        .lock_exclusive()
+        .one(&TxConn::new(tx))
+        .await
+        .map_err(|_| server_error())?;
+    row.map(session_from_model).transpose()
 }
 
 /// Lock one runner's guard columns.
@@ -535,21 +511,13 @@ async fn lock_runner_guard(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     runner_id: Uuid,
 ) -> Result<Option<RunnerGuard>, Response> {
-    let row: Option<RunnerGuardRow> = sqlx::query_as(
-        r#"SELECT "id", "owner_id", "workspace_id", "visibility", "status"
-           FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(runner_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(row.map(|row| RunnerGuard {
-        id: row.0,
-        owner_id: row.1,
-        workspace_id: row.2,
-        visibility: row.3,
-        status: row.4,
-    }))
+    let row = runner_guard_select(runner_id)
+        .lock_exclusive()
+        .into_tuple::<RunnerGuardRow>()
+        .one(&TxConn::new(tx))
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(runner_guard_from_row))
 }
 
 /// Lock the session row with its runner's guard row — the same two
@@ -576,67 +544,48 @@ pub(crate) async fn fetch_session_with_runner(
     pool: &PgPool,
     session_id: Uuid,
 ) -> Result<Option<(AgentChatSession, RunnerGuard)>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
-        r#"SELECT {SESSION_COLUMNS} FROM "agent_chat_session" WHERE "id" = $1"#
-    ))
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let db = sea_orm_connection(pool);
+    let row = orm::agent_chat_session::Entity::find_by_id(session_id)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let session = session_from_pg(&row)?;
-    let guard: Option<RunnerGuardRow> = sqlx::query_as(
-        r#"SELECT "id", "owner_id", "workspace_id", "visibility", "status"
-           FROM "runner" WHERE "id" = $1"#,
-    )
-    .bind(session.runner_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let session = session_from_model(row)?;
+    let guard = runner_guard_select(session.runner_id)
+        .into_tuple::<RunnerGuardRow>()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
     let Some(guard) = guard else {
         return Err(server_error());
     };
-    Ok(Some((
-        session,
-        RunnerGuard {
-            id: guard.0,
-            owner_id: guard.1,
-            workspace_id: guard.2,
-            visibility: guard.3,
-            status: guard.4,
-        },
-    )))
+    Ok(Some((session, runner_guard_from_row(guard))))
 }
 
 /// The newest live workspace role (`core/permissions.py:39-51` plus
 /// the soft-delete filter): `None` when the user holds no live
 /// membership.
 async fn workspace_role(
-    executor: &PgPool,
+    pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<i32>, Response> {
-    workspace_role_in(executor, workspace_id, user_id).await
-}
-
-async fn workspace_role_in(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<i32>, Response> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "workspace_members"
-           WHERE ("workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL)
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(executor)
-    .await
-    .map_err(|_| server_error())?;
+    use orm::workspace_members::{Column, Entity};
+    let role = Entity::find()
+        .select_only()
+        .column(Column::Role)
+        .filter(Column::WorkspaceId.eq(workspace_id))
+        .filter(Column::MemberId.eq(user_id))
+        .filter(Column::IsActive.eq(true))
+        .filter(Column::DeletedAt.is_null())
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .into_tuple::<i16>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?;
     Ok(role.map(i32::from))
 }
 
@@ -670,12 +619,15 @@ pub async fn resolve_chat_session(
     session_id: Uuid,
     runner: Option<&DaemonRunner>,
 ) -> Result<ResolvedChatSession, Response> {
-    let row: Option<(Uuid, Uuid)> =
-        sqlx::query_as(r#"SELECT "id", "runner_id" FROM "agent_chat_session" WHERE "id" = $1"#)
-            .bind(session_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+    use orm::agent_chat_session::{Column, Entity};
+    let row = Entity::find()
+        .select_only()
+        .columns([Column::Id, Column::RunnerId])
+        .filter(Column::Id.eq(session_id))
+        .into_tuple::<(Uuid, Uuid)>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?;
     let Some((id, runner_id)) = row else {
         return Err(json_response(
             StatusCode::NOT_FOUND,
@@ -712,7 +664,12 @@ pub struct RunnerDetailOwned {
     pub name: String,
     pub status: String,
     pub host_label: String,
+    pub is_engine: bool,
+    pub engine_paused: bool,
+    pub dispatch_paused: bool,
+    pub machine_display_name: String,
     pub provisioning: String,
+    pub pod_dispatch: String,
     pub os: String,
     pub arch: String,
     pub runner_version: String,
@@ -748,6 +705,11 @@ pub struct DevMachineMiniOwned {
     pub id: String,
     pub host_label: String,
     pub label: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<String>,
 }
 
 pub struct LiveStateOwned {
@@ -790,6 +752,11 @@ impl RunnerDetailOwned {
                 id: &detail.id,
                 host_label: &detail.host_label,
                 label: &detail.label,
+                engine_paused_by_owner: detail.engine_paused_by_owner,
+                engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                engine_team_runs: detail.engine_team_runs,
+                engine_sign_in_state: &detail.engine_sign_in_state,
+                engine_credential_expires_at: detail.engine_credential_expires_at.as_deref(),
             }
         })
     }
@@ -831,7 +798,12 @@ impl RunnerDetailOwned {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
+            is_engine: self.is_engine,
+            engine_paused: self.engine_paused,
+            dispatch_paused: self.dispatch_paused,
+            machine_display_name: &self.machine_display_name,
             provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -853,6 +825,10 @@ impl RunnerDetailOwned {
             paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         }
     }
 }
@@ -866,144 +842,153 @@ pub async fn fetch_runner_detail(
     runner_id: Uuid,
 ) -> Result<RunnerDetailOwned, Response> {
     use pidash_services::runner_runs::shape::drf_datetime;
-    use sqlx::Row;
-    // Twenty-three columns exceed sqlx's 16-tuple `FromRow`: decode by
-    // position. Order: id, name, status, host_label, provisioning,
-    // os, arch, runner_version, dev_metadata, protocol_version,
-    // capabilities, last_heartbeat_at, owner, dev_machine,
-    // visibility, pod, enrolled_at, revoked_at, revoked_reason,
-    // created_at, updated_at, paused_at, paused_by_id.
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "name", "status", "host_label", "provisioning", "os", "arch",
-              "runner_version", "dev_metadata", "protocol_version", "capabilities",
-              "last_heartbeat_at", "owner_id", "dev_machine_id", "visibility", "pod_id",
-              "enrolled_at", "revoked_at", "revoked_reason", "created_at", "updated_at",
-              "paused_at", "paused_by_id"
-           FROM "runner" WHERE "id" = $1"#,
-    )
-    .bind(runner_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let db = sea_orm_connection(pool);
+    // The full runner row by name (the entity model), then the related
+    // rows one fetch each, exactly as the lazy nested serializers read.
+    let runner = orm::runner::Entity::find_by_id(runner_id)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(runner) = runner else {
         return Err(server_error());
     };
-    let get_uuid = |idx: usize| row.try_get::<Uuid, usize>(idx).map_err(|_| server_error());
-    let get_string = |idx: usize| {
-        row.try_get::<String, usize>(idx)
-            .map_err(|_| server_error())
-    };
-    let get_opt_uuid = |idx: usize| {
-        row.try_get::<Option<Uuid>, usize>(idx)
-            .map_err(|_| server_error())
-    };
-    let get_opt_moment = |idx: usize| {
-        row.try_get::<Option<DateTime<Utc>>, usize>(idx)
-            .map_err(|_| server_error())
-    };
-    let get_moment = |idx: usize| {
-        row.try_get::<DateTime<Utc>, usize>(idx)
-            .map_err(|_| server_error())
-    };
-    let dev_machine_id = get_opt_uuid(13)?;
-    let pod_id = get_uuid(15)?;
-    let dev_machine_detail = match dev_machine_id {
+    let dev_machine_detail = match runner.dev_machine_id {
         Some(dev_machine_id) => {
-            let mini: Option<(Uuid, String, String)> = sqlx::query_as(
-                r#"SELECT "id", "host_label", "label" FROM "dev_machine" WHERE "id" = $1"#,
-            )
-            .bind(dev_machine_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+            use orm::dev_machine::{Column, Entity};
+            type MiniRow = (
+                Uuid,
+                String,
+                String,
+                bool,
+                String,
+                bool,
+                String,
+                Option<DateTime<Utc>>,
+            );
+            let mini: Option<MiniRow> = Entity::find()
+                .select_only()
+                .columns([
+                    Column::Id,
+                    Column::HostLabel,
+                    Column::Label,
+                    Column::EnginePausedByOwner,
+                    Column::EngineAutoPauseReason,
+                    Column::EngineTeamRuns,
+                    Column::EngineSignInState,
+                    Column::EngineCredentialExpiresAt,
+                ])
+                .filter(Column::Id.eq(dev_machine_id))
+                .into_tuple::<MiniRow>()
+                .one(&db)
+                .await
+                .map_err(|_| server_error())?;
             match mini {
-                Some((id, host_label, label)) => Some(DevMachineMiniOwned {
-                    id: id.to_string(),
+                Some((
+                    id,
                     host_label,
                     label,
-                }),
+                    paused,
+                    pause_reason,
+                    team_runs,
+                    stored_state,
+                    expires_at,
+                )) => {
+                    let derived =
+                        pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                            &stored_state,
+                            expires_at,
+                            Utc::now(),
+                        );
+                    Some(DevMachineMiniOwned {
+                        id: id.to_string(),
+                        host_label,
+                        label,
+                        engine_paused_by_owner: paused,
+                        engine_auto_pause_reason: pause_reason,
+                        engine_team_runs: team_runs,
+                        engine_sign_in_state: derived,
+                        engine_credential_expires_at: expires_at.map(|dt| drf_datetime(&dt)),
+                    })
+                }
                 None => return Err(server_error()),
             }
         }
         None => None,
     };
-    let pod: Option<(Uuid, String, bool, Uuid, String)> = sqlx::query_as(
-        r#"SELECT "pod"."id", "pod"."name", "pod"."is_default",
-              "pod"."project_id", "projects"."identifier"
-           FROM "pod" INNER JOIN "projects" ON ("pod"."project_id" = "projects"."id")
-           WHERE "pod"."id" = $1"#,
-    )
-    .bind(pod_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let pod = {
+        use orm::pod::{Column, Entity, Relation};
+        Entity::find()
+            .select_only()
+            .columns([
+                Column::Id,
+                Column::Name,
+                Column::IsDefault,
+                Column::ProjectId,
+            ])
+            .column_as(orm::projects::Column::Identifier, "project_identifier")
+            .join(JoinType::InnerJoin, Relation::Projects.def())
+            .filter(Column::Id.eq(runner.pod_id))
+            .into_tuple::<(Uuid, String, bool, Uuid, String)>()
+            .one(&db)
+            .await
+            .map_err(|_| server_error())?
+    };
     let Some((pod_id, pod_name, pod_default, project_id, project_identifier)) = pod else {
         return Err(server_error());
     };
-    type LiveRow = (
-        Option<Uuid>,
-        Option<DateTime<Utc>>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-        Option<bool>,
-        Option<i32>,
-        Value,
-        Option<String>,
-        Option<i32>,
-        Option<String>,
-        Option<DateTime<Utc>>,
-        DateTime<Utc>,
-    );
-    let live: Option<LiveRow> = sqlx::query_as(
-        r#"SELECT "observed_run_id", "last_event_at", "last_event_kind",
-              "last_event_summary", "agent_pid", "agent_subprocess_alive",
-              "approvals_pending", "usage", "llm_model", "turn_count",
-              "agent_health", "agent_last_activity_at", "updated_at"
-           FROM "runner_live_state" WHERE "runner_id" = $1"#,
-    )
-    .bind(runner_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let id = get_uuid(0)?;
-    let name = get_string(1)?;
-    let status = get_string(2)?;
-    let host_label = get_string(3)?;
-    let provisioning = get_string(4)?;
-    let os = get_string(5)?;
-    let arch = get_string(6)?;
-    let runner_version = get_string(7)?;
-    let dev_metadata: Value = row.try_get(8).map_err(|_| server_error())?;
-    let protocol_version: i32 = row.try_get(9).map_err(|_| server_error())?;
-    let capabilities: Value = row.try_get(10).map_err(|_| server_error())?;
-    let last_heartbeat_at = get_opt_moment(11)?;
-    let owner = get_uuid(12)?;
-    let visibility: i16 = row.try_get(14).map_err(|_| server_error())?;
-    let enrolled_at = get_opt_moment(16)?;
-    let revoked_at = get_opt_moment(17)?;
-    let revoked_reason = get_string(18)?;
-    let created_at = get_moment(19)?;
-    let updated_at = get_moment(20)?;
-    let paused_at = get_opt_moment(21)?;
-    let paused_by_id = get_opt_uuid(22)?;
+    let live = orm::runner_live_state::Entity::find_by_id(runner_id)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    let drf_opt_tz = |at: &Option<sea_orm::prelude::DateTimeWithTimeZone>| drf_opt(&at.map(utc));
+    let is_engine = runner.provisioning == "desktop_bundled";
+    let engine_paused = match &dev_machine_detail {
+        Some(machine) if is_engine => {
+            machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+        }
+        _ => false,
+    };
+    let machine_display_name = match &dev_machine_detail {
+        Some(machine) => {
+            if !machine.label.is_empty() {
+                machine.label.clone()
+            } else if !machine.host_label.is_empty() {
+                machine.host_label.clone()
+            } else {
+                "This computer".to_owned()
+            }
+        }
+        None => {
+            if !runner.host_label.is_empty() {
+                runner.host_label.clone()
+            } else {
+                runner.name.clone()
+            }
+        }
+    };
+    let dispatch_paused = runner.paused_at.is_some();
     Ok(RunnerDetailOwned {
-        id: id.to_string(),
-        name,
-        status,
-        host_label,
-        provisioning,
-        os,
-        arch,
-        runner_version,
-        dev_metadata,
-        protocol_version: i64::from(protocol_version),
-        capabilities,
-        last_heartbeat_at: drf_opt(&last_heartbeat_at),
-        owner: owner.to_string(),
-        dev_machine: dev_machine_id.map(|id| id.to_string()),
+        id: runner.id.to_string(),
+        name: runner.name,
+        status: runner.status,
+        host_label: runner.host_label,
+        is_engine,
+        engine_paused,
+        dispatch_paused,
+        machine_display_name,
+        provisioning: runner.provisioning,
+        pod_dispatch: runner.pod_dispatch,
+        os: runner.os,
+        arch: runner.arch,
+        runner_version: runner.runner_version,
+        dev_metadata: runner.dev_metadata,
+        protocol_version: i64::from(runner.protocol_version),
+        capabilities: runner.capabilities,
+        last_heartbeat_at: drf_opt_tz(&runner.last_heartbeat_at),
+        owner: runner.owner_id.to_string(),
+        dev_machine: runner.dev_machine_id.map(|id| id.to_string()),
         dev_machine_detail,
-        visibility: i64::from(visibility),
+        visibility: i64::from(runner.visibility),
         pod: pod_id.to_string(),
         pod_detail: PodMiniOwned {
             id: pod_id.to_string(),
@@ -1013,27 +998,27 @@ pub async fn fetch_runner_detail(
             project_identifier,
         },
         live_state: live.map(|live| LiveStateOwned {
-            observed_run_id: live.0.map(|id| id.to_string()),
-            last_event_at: drf_opt(&live.1),
-            last_event_kind: live.2,
-            last_event_summary: live.3,
-            agent_pid: live.4.map(i64::from),
-            agent_subprocess_alive: live.5,
-            approvals_pending: live.6.map(i64::from),
-            usage: live.7,
-            llm_model: live.8,
-            turn_count: live.9.map(i64::from),
-            agent_health: live.10,
-            agent_last_activity_at: drf_opt(&live.11),
-            updated_at: drf_datetime(&live.12),
+            observed_run_id: live.observed_run_id.map(|id| id.to_string()),
+            last_event_at: drf_opt_tz(&live.last_event_at),
+            last_event_kind: live.last_event_kind,
+            last_event_summary: live.last_event_summary,
+            agent_pid: live.agent_pid.map(i64::from),
+            agent_subprocess_alive: live.agent_subprocess_alive,
+            approvals_pending: live.approvals_pending.map(i64::from),
+            usage: live.usage,
+            llm_model: live.llm_model,
+            turn_count: live.turn_count.map(i64::from),
+            agent_health: live.agent_health,
+            agent_last_activity_at: drf_opt_tz(&live.agent_last_activity_at),
+            updated_at: drf_datetime(&utc(live.updated_at)),
         }),
-        enrolled_at: drf_opt(&enrolled_at),
-        revoked_at: drf_opt(&revoked_at),
-        revoked_reason,
-        paused_at: drf_opt(&paused_at),
-        paused_by: paused_by_id.map(|id| id.to_string()),
-        created_at: drf_datetime(&created_at),
-        updated_at: drf_datetime(&updated_at),
+        enrolled_at: drf_opt_tz(&runner.enrolled_at),
+        revoked_at: drf_opt_tz(&runner.revoked_at),
+        revoked_reason: runner.revoked_reason,
+        paused_at: drf_opt_tz(&runner.paused_at),
+        paused_by: runner.paused_by_id.map(|id| id.to_string()),
+        created_at: drf_datetime(&utc(runner.created_at)),
+        updated_at: drf_datetime(&utc(runner.updated_at)),
     })
 }
 
@@ -1075,6 +1060,135 @@ async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), Resp
     tx.commit().await.map_err(|_| server_error())
 }
 
+/// `MAX(seq)` over one session's rows of `table_seq` (`next_event_seq`
+/// / `next_message_seq`, `services/chat.py:218-233`): `None` for an
+/// empty set; the caller adds one via [`chat_kernel::next_seq_after_max`].
+fn max_seq_select<E>(
+    seq: E::Column,
+    session_id_column: E::Column,
+    session_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<i32>>>
+where
+    E: EntityTrait,
+{
+    E::find()
+        .select_only()
+        .column_as(Expr::col((E::default(), seq)).max(), "seq__max")
+        .filter(session_id_column.eq(session_id))
+        .into_tuple::<Option<i32>>()
+}
+
+/// `next_event_seq` (`services/chat.py:218-224`): one past the
+/// session's event max.
+async fn next_event_seq(
+    db: &impl ConnectionTrait,
+    session_id: Uuid,
+) -> Result<i32, sea_orm::DbErr> {
+    use orm::agent_chat_event::{Column, Entity};
+    let max = max_seq_select::<Entity>(Column::Seq, Column::SessionId, session_id)
+        .one(db)
+        .await?
+        .flatten();
+    Ok(chat_kernel::next_seq_after_max(max))
+}
+
+/// `next_message_seq` (`services/chat.py:227-233`): one past the
+/// session's message max.
+async fn next_message_seq(
+    db: &impl ConnectionTrait,
+    session_id: Uuid,
+) -> Result<i32, sea_orm::DbErr> {
+    use orm::agent_chat_message::{Column, Entity};
+    let max = max_seq_select::<Entity>(Column::Seq, Column::SessionId, session_id)
+        .one(db)
+        .await?
+        .flatten();
+    Ok(chat_kernel::next_seq_after_max(max))
+}
+
+/// The session's event with this `source_key` (the idempotency probe),
+/// first row.
+fn event_by_source_key_select(
+    session_id: Uuid,
+    source_key: &str,
+) -> sea_orm::Select<orm::agent_chat_event::Entity> {
+    use orm::agent_chat_event::{Column, Entity};
+    Entity::find()
+        .filter(Column::SessionId.eq(session_id))
+        .filter(Column::SourceKey.eq(source_key))
+}
+
+/// The newest STREAMING assistant of the session (`role`, `session_id`,
+/// `status`), optionally scoped to one `local_turn_id`.
+fn streaming_assistant_select(
+    session_id: Uuid,
+    local_turn_id: Option<&str>,
+) -> sea_orm::Select<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::{Column, Entity};
+    let select = Entity::find()
+        .filter(Column::SessionId.eq(session_id))
+        .filter(Column::Role.eq(AgentChatMessageRole::Assistant.value()))
+        .filter(Column::Status.eq(AgentChatMessageStatus::Streaming.value()));
+    match local_turn_id {
+        Some(turn) => select.filter(Column::LocalTurnId.eq(turn)),
+        None => select,
+    }
+    .order_by_desc(Column::CreatedAt)
+    .limit(1)
+}
+
+/// The explicit finalize target scoped to the session
+/// (`filter(session_id, id)`): a cross-session id matches nothing.
+fn session_message_select(
+    session_id: Uuid,
+    message_id: Uuid,
+) -> sea_orm::Select<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::{Column, Entity};
+    Entity::find()
+        .filter(Column::SessionId.eq(session_id))
+        .filter(Column::Id.eq(message_id))
+}
+
+/// `SET status, completed_at WHERE pk` for one planned message
+/// finalization (unscoped by session — BUG-COMPLETE-UNSCOPED, as in
+/// the source).
+fn message_status_update(
+    update: &chat_kernel::MessageStatusUpdate,
+) -> sea_orm::UpdateMany<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(update.status.value()))
+        .col_expr(Column::CompletedAt, Expr::value(update.completed_at))
+        .filter(Column::Id.eq(update.id))
+}
+
+/// The fail-flow session write (`save(update_fields)`): the turn
+/// clears, the error stores, `updated_at` is `auto_now`; closing adds
+/// `status` / `closed_at`.
+fn fail_session_update(
+    session_id: Uuid,
+    error: &str,
+    closed_at: Option<DateTime<Utc>>,
+    updated_at: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::agent_chat_session::Entity> {
+    use orm::agent_chat_session::{Column, Entity};
+    let mut update = Entity::update_many();
+    if let Some(closed_at) = closed_at {
+        update = update
+            .col_expr(
+                Column::Status,
+                Expr::value(AgentChatSessionStatus::Closed.value()),
+            )
+            .col_expr(Column::ClosedAt, Expr::value(closed_at));
+    }
+    update
+        .col_expr(Column::ActiveTurnId, Expr::value(String::new()))
+        .col_expr(Column::ActiveMessageId, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::Error, Expr::value(error.to_owned()))
+        .col_expr(Column::UpdatedAt, Expr::value(updated_at))
+        .filter(Column::Id.eq(session_id))
+}
+
 /// `append_event_locked` (`services/chat.py:149-173`): the
 /// idempotent event insert. An existing `source_key` returns the
 /// stored row without queuing a publish; otherwise the row inserts
@@ -1090,41 +1204,34 @@ pub async fn append_event(
     full_source_key: &str,
     effects: &mut Vec<ChatEffect>,
 ) -> Result<AgentChatEvent, Response> {
+    let conn = TxConn::new(tx);
     if !full_source_key.is_empty() {
-        let existing: Option<EventRow> = sqlx::query_as(
-            r#"SELECT "id", "session_id", "message_id", "seq", "source_key", "kind",
-                  "payload", "created_at"
-               FROM "agent_chat_event"
-               WHERE ("session_id" = $1 AND "source_key" = $2)"#,
-        )
-        .bind(session_id)
-        .bind(full_source_key)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+        let existing = event_by_source_key_select(session_id, full_source_key)
+            .one(&conn)
+            .await
+            .map_err(|_| server_error())?;
         if let Some(existing) = existing {
-            return event_from_row(existing);
+            return Ok(event_from_model(existing));
         }
     }
-    let seq = chat_kernel::next_event_seq(&mut **tx, session_id)
+    let seq = next_event_seq(&conn, session_id)
         .await
         .map_err(|_| server_error())?;
     let created_at = Utc::now();
-    let id: i64 = sqlx::query_scalar(
-        r#"INSERT INTO "agent_chat_event"
-           ("session_id", "message_id", "seq", "source_key", "kind", "payload", "created_at")
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id""#,
-    )
-    .bind(session_id)
-    .bind(inputs.message_id)
-    .bind(seq)
-    .bind(&inputs.source_key)
-    .bind(&inputs.kind)
-    .bind(&inputs.payload)
-    .bind(created_at)
-    .fetch_one(&mut **tx)
+    let inserted = orm::agent_chat_event::Entity::insert(orm::agent_chat_event::ActiveModel {
+        id: sea_orm::NotSet,
+        seq: Set(seq),
+        source_key: Set(inputs.source_key.clone()),
+        kind: Set(inputs.kind.clone()),
+        payload: Set(inputs.payload.clone()),
+        created_at: Set(created_at.into()),
+        message_id: Set(inputs.message_id),
+        session_id: Set(session_id),
+    })
+    .exec(&conn)
     .await
     .map_err(|_| server_error())?;
+    let id = inserted.last_insert_id;
     effects.push(ChatEffect::PublishEvent { event_id: id });
     Ok(AgentChatEvent {
         id,
@@ -1152,24 +1259,22 @@ pub async fn record_chat_dedupe(
     if key.is_empty() {
         return Ok(true);
     }
-    let message_id = chat_kernel::record_dedupe_message_id(key);
-    let inserted = sqlx::query(
-        r#"INSERT INTO "chat_message_dedupe" ("session_id", "message_id", "created_at")
-           VALUES ($1, $2, $3)"#,
-    )
-    .bind(session_id)
-    .bind(&message_id)
-    .bind(Utc::now())
-    .execute(&mut **tx)
-    .await;
+    let Some(message_id) = chat_kernel::record_dedupe_message_id(key) else {
+        return Ok(true);
+    };
+    let inserted =
+        orm::chat_message_dedupe::Entity::insert(orm::chat_message_dedupe::ActiveModel {
+            id: sea_orm::NotSet,
+            message_id: Set(message_id),
+            created_at: Set(Utc::now().into()),
+            session_id: Set(session_id),
+        })
+        .exec_without_returning(&TxConn::new(tx))
+        .await;
     match inserted {
         Ok(_) => Ok(true),
         Err(error) => {
-            let unique_violation = error
-                .as_database_error()
-                .and_then(|db| db.code())
-                .is_some_and(|code| code == "23505");
-            if unique_violation {
+            if is_unique_violation(&pidash_db::orm_tx::into_sqlx(error)) {
                 Ok(false)
             } else {
                 Err(server_error())
@@ -1187,29 +1292,26 @@ pub async fn create_assistant(
 ) -> Result<AgentChatMessage, Response> {
     let inputs =
         chat_kernel::create_assistant_inputs(local_turn_id, "", AgentChatMessageStatus::Streaming);
-    let seq = chat_kernel::next_message_seq(&mut **tx, session_id)
+    let conn = TxConn::new(tx);
+    let seq = next_message_seq(&conn, session_id)
         .await
         .map_err(|_| server_error())?;
     let id = Uuid::new_v4();
     let created_at = Utc::now();
-    sqlx::query(
-        r#"INSERT INTO "agent_chat_message"
-           ("id", "session_id", "role", "content", "content_parts", "status",
-            "local_item_id", "local_turn_id", "seq", "created_at", "completed_at")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
-    )
-    .bind(id)
-    .bind(session_id)
-    .bind(AgentChatMessageRole::Assistant.value())
-    .bind("")
-    .bind(Value::Array(Vec::new()))
-    .bind(inputs.status.value())
-    .bind("")
-    .bind(&inputs.local_turn_id)
-    .bind(seq)
-    .bind(created_at)
-    .bind(None::<DateTime<Utc>>)
-    .execute(&mut **tx)
+    orm::agent_chat_message::Entity::insert(orm::agent_chat_message::ActiveModel {
+        id: Set(id),
+        role: Set(AgentChatMessageRole::Assistant.value().to_owned()),
+        content: Set(String::new()),
+        content_parts: Set(Value::Array(Vec::new())),
+        status: Set(inputs.status.value().to_owned()),
+        local_item_id: Set(String::new()),
+        local_turn_id: Set(inputs.local_turn_id.clone()),
+        seq: Set(seq),
+        created_at: Set(created_at.into()),
+        completed_at: Set(None),
+        session_id: Set(session_id),
+    })
+    .exec_without_returning(&conn)
     .await
     .map_err(|_| server_error())?;
     Ok(AgentChatMessage {
@@ -1234,44 +1336,25 @@ pub async fn active_assistant(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: &AgentChatSession,
 ) -> Result<Option<AgentChatMessage>, Response> {
+    let conn = TxConn::new(tx);
     // The turn-scoped probe runs only with a turn (`if
     // session.active_turn_id:`), and both probes carry the
     // `role=ASSISTANT` filter from the shared base queryset
     // (`services/chat.py:322-332`).
     if !session.active_turn_id.is_empty() {
-        let scoped: Option<MessageRow> = sqlx::query_as(
-            r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-                  "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-               FROM "agent_chat_message"
-               WHERE ("session_id" = $1 AND "local_turn_id" = $2 AND "status" = $3
-                      AND "role" = $4)
-               ORDER BY "created_at" DESC LIMIT 1"#,
-        )
-        .bind(session.id)
-        .bind(&session.active_turn_id)
-        .bind(AgentChatMessageStatus::Streaming.value())
-        .bind(AgentChatMessageRole::Assistant.value())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+        let scoped = streaming_assistant_select(session.id, Some(&session.active_turn_id))
+            .one(&conn)
+            .await
+            .map_err(|_| server_error())?;
         if let Some(scoped) = scoped {
-            return Ok(Some(message_from_row(scoped)?));
+            return Ok(Some(message_from_model(scoped)?));
         }
     }
-    let fallback: Option<MessageRow> = sqlx::query_as(
-        r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-              "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-           FROM "agent_chat_message"
-           WHERE ("session_id" = $1 AND "role" = $2 AND "status" = $3)
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(session.id)
-    .bind(AgentChatMessageRole::Assistant.value())
-    .bind(AgentChatMessageStatus::Streaming.value())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    fallback.map(message_from_row).transpose()
+    let fallback = streaming_assistant_select(session.id, None)
+        .one(&conn)
+        .await
+        .map_err(|_| server_error())?;
+    fallback.map(message_from_model).transpose()
 }
 
 /// `finalize_active_messages_locked` (`chat.py:298-338`) with no
@@ -1285,20 +1368,12 @@ pub async fn finalize_active(
 ) -> Result<Option<Uuid>, Response> {
     let target = chat_kernel::finalize_target_message_id(None, session.active_message_id);
     let explicit = match target {
-        Some(target) => {
-            let row: Option<MessageRow> = sqlx::query_as(
-                r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-                      "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-                   FROM "agent_chat_message"
-                   WHERE ("session_id" = $1 AND "id" = $2)"#,
-            )
-            .bind(session.id)
-            .bind(target)
-            .fetch_optional(&mut **tx)
+        Some(target) => session_message_select(session.id, target)
+            .one(&TxConn::new(&mut *tx))
             .await
-            .map_err(|_| server_error())?;
-            row.map(message_from_row).transpose()?
-        }
+            .map_err(|_| server_error())?
+            .map(message_from_model)
+            .transpose()?,
         None => None,
     };
     let assistant = active_assistant(tx, session).await?;
@@ -1308,19 +1383,7 @@ pub async fn finalize_active(
         status,
         Utc::now(),
     );
-    for update in &plan.updates {
-        // `message_status_update_sql` order: status, completed_at, id.
-        sqlx::query(
-            r#"UPDATE "agent_chat_message" SET "status" = $1, "completed_at" = $2
-               WHERE "id" = $3"#,
-        )
-        .bind(update.status.value())
-        .bind(update.completed_at)
-        .bind(update.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    }
+    apply_message_updates(tx, &plan.updates).await?;
     Ok(plan.returned_message_id)
 }
 
@@ -1329,17 +1392,12 @@ async fn apply_message_updates(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     updates: &[chat_kernel::MessageStatusUpdate],
 ) -> Result<(), Response> {
+    let conn = TxConn::new(tx);
     for update in updates {
-        sqlx::query(
-            r#"UPDATE "agent_chat_message" SET "status" = $1, "completed_at" = $2
-               WHERE "id" = $3"#,
-        )
-        .bind(update.status.value())
-        .bind(update.completed_at)
-        .bind(update.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+        message_status_update(update)
+            .exec(&conn)
+            .await
+            .map_err(|_| server_error())?;
     }
     Ok(())
 }
@@ -1357,44 +1415,37 @@ pub async fn complete_turn(
 ) -> Result<(), Response> {
     let now = Utc::now();
     let plan = chat_kernel::plan_complete_active_turn(session, final_status, Some(payload), now);
-    if let Some(update) = &plan.message_update {
-        // Unscoped by session (BUG-COMPLETE-UNSCOPED, ported as-is).
-        sqlx::query(
-            r#"UPDATE "agent_chat_message" SET "status" = $1, "completed_at" = $2
-               WHERE "id" = $3"#,
-        )
-        .bind(update.status.value())
-        .bind(update.completed_at)
-        .bind(update.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+    {
+        let conn = TxConn::new(&mut *tx);
+        if let Some(update) = &plan.message_update {
+            // Unscoped by session (BUG-COMPLETE-UNSCOPED, ported as-is).
+            message_status_update(update)
+                .exec(&conn)
+                .await
+                .map_err(|_| server_error())?;
+        }
+        // `complete_session_update_sql`: six columns; `status` /
+        // `closed_at` carry the session values when not closing,
+        // `updated_at` is `auto_now`.
+        use orm::agent_chat_session::{Column, Entity};
+        let status = if plan.close_session {
+            AgentChatSessionStatus::Closed.value()
+        } else {
+            session.status.value()
+        };
+        let closed_at = plan.closed_at.or(session.closed_at);
+        Entity::update_many()
+            .col_expr(Column::Status, Expr::value(status))
+            .col_expr(Column::ActiveTurnId, Expr::value(String::new()))
+            .col_expr(Column::ActiveMessageId, SimpleExpr::Keyword(Keyword::Null))
+            .col_expr(Column::ClosedAt, Expr::value(closed_at))
+            .col_expr(Column::LastMessageAt, Expr::value(plan.last_message_at))
+            .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
+            .filter(Column::Id.eq(session.id))
+            .exec(&conn)
+            .await
+            .map_err(|_| server_error())?;
     }
-    // `complete_session_update_sql`: six columns in model field
-    // order; `status`/`closed_at` carry the session values when not
-    // closing, `updated_at` is `auto_now`.
-    let status = if plan.close_session {
-        AgentChatSessionStatus::Closed.value()
-    } else {
-        session.status.value()
-    };
-    let closed_at = plan.closed_at.or(session.closed_at);
-    sqlx::query(
-        r#"UPDATE "agent_chat_session"
-           SET "status" = $1, "active_turn_id" = $2, "active_message_id" = $3,
-               "closed_at" = $4, "last_message_at" = $5, "updated_at" = $6
-           WHERE "id" = $7"#,
-    )
-    .bind(status)
-    .bind("")
-    .bind(None::<Uuid>)
-    .bind(closed_at)
-    .bind(plan.last_message_at)
-    .bind(Utc::now())
-    .bind(session.id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
     for event in &plan.events {
         append_event(tx, session.id, event, "", effects).await?;
     }
@@ -1421,41 +1472,18 @@ pub async fn execute_fail_session(
 ) -> Result<(), Response> {
     let finalized = finalize_active(tx, session, AgentChatMessageStatus::Failed).await?;
     let should_close = session.close_requested;
-    // `FAIL_SESSION_UPDATE_FIELDS` + `FAIL_SESSION_CLOSE_FIELDS` in
-    // model field order.
-    if should_close {
-        sqlx::query(
-            r#"UPDATE "agent_chat_session"
-               SET "status" = $1, "active_turn_id" = $2, "active_message_id" = $3,
-                   "closed_at" = $4, "error" = $5, "updated_at" = $6
-               WHERE "id" = $7"#,
-        )
-        .bind(AgentChatSessionStatus::Closed.value())
-        .bind("")
-        .bind(None::<Uuid>)
-        .bind(Utc::now())
-        .bind(truncate_chars(detail, 2000))
-        .bind(Utc::now())
-        .bind(session.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    } else {
-        sqlx::query(
-            r#"UPDATE "agent_chat_session"
-               SET "active_turn_id" = $1, "active_message_id" = $2,
-                   "error" = $3, "updated_at" = $4
-               WHERE "id" = $5"#,
-        )
-        .bind("")
-        .bind(None::<Uuid>)
-        .bind(truncate_chars(detail, 2000))
-        .bind(Utc::now())
-        .bind(session.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    }
+    // `FAIL_SESSION_UPDATE_FIELDS` + `FAIL_SESSION_CLOSE_FIELDS`: the
+    // close stamps its own `now()` before `updated_at`'s.
+    let closed_at = should_close.then(Utc::now);
+    fail_session_update(
+        session.id,
+        &truncate_chars(detail, 2000),
+        closed_at,
+        Utc::now(),
+    )
+    .exec(&TxConn::new(&mut *tx))
+    .await
+    .map_err(|_| server_error())?;
     let mut payload = serde_json::Map::with_capacity(2);
     payload.insert("code".to_owned(), code.clone());
     payload.insert("detail".to_owned(), Value::String(detail.to_owned()));
@@ -1501,21 +1529,22 @@ pub async fn execute_close_session(
     if was_active {
         finalize_active(tx, session, AgentChatMessageStatus::Cancelled).await?;
     }
-    sqlx::query(
-        r#"UPDATE "agent_chat_session"
-           SET "status" = $1, "active_turn_id" = $2, "active_message_id" = $3,
-               "closed_at" = $4, "updated_at" = $5
-           WHERE "id" = $6"#,
-    )
-    .bind(AgentChatSessionStatus::Closed.value())
-    .bind("")
-    .bind(None::<Uuid>)
-    .bind(Utc::now())
-    .bind(Utc::now())
-    .bind(session.id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
+    {
+        use orm::agent_chat_session::{Column, Entity};
+        Entity::update_many()
+            .col_expr(
+                Column::Status,
+                Expr::value(AgentChatSessionStatus::Closed.value()),
+            )
+            .col_expr(Column::ActiveTurnId, Expr::value(String::new()))
+            .col_expr(Column::ActiveMessageId, SimpleExpr::Keyword(Keyword::Null))
+            .col_expr(Column::ClosedAt, Expr::value(Utc::now()))
+            .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
+            .filter(Column::Id.eq(session.id))
+            .exec(&TxConn::new(&mut *tx))
+            .await
+            .map_err(|_| server_error())?;
+    }
     let inputs = chat_kernel::append_event_inputs(
         "chat_closed",
         Some(&serde_json::json!({"reason": reason})),
@@ -1544,35 +1573,18 @@ pub async fn execute_mark_message_dispatch_failed(
     effects: &mut Vec<ChatEffect>,
 ) -> Result<(), Response> {
     let mut tx = pool.begin().await.map_err(|_| server_error())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
-        r#"SELECT {SESSION_COLUMNS} FROM "agent_chat_session"
-           WHERE "id" = $1 LIMIT 1 FOR UPDATE"#
-    ))
-    .bind(session_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some(session) = lock_session_row(&mut tx, session_id).await? else {
         tx.rollback().await.map_err(|_| server_error())?;
         return Ok(());
     };
-    let session = session_from_pg(&row)?;
     let target = chat_kernel::finalize_target_message_id(message_id, session.active_message_id);
     let explicit = match target {
-        Some(target) => {
-            let row: Option<MessageRow> = sqlx::query_as(
-                r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-                      "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-                   FROM "agent_chat_message"
-                   WHERE ("session_id" = $1 AND "id" = $2)"#,
-            )
-            .bind(session.id)
-            .bind(target)
-            .fetch_optional(&mut *tx)
+        Some(target) => session_message_select(session.id, target)
+            .one(&TxConn::new(&mut tx))
             .await
-            .map_err(|_| server_error())?;
-            row.map(message_from_row).transpose()?
-        }
+            .map_err(|_| server_error())?
+            .map(message_from_model)
+            .transpose()?,
         None => None,
     };
     let assistant = active_assistant(&mut tx, &session).await?;
@@ -1585,40 +1597,15 @@ pub async fn execute_mark_message_dispatch_failed(
         &mut Utc::now,
     );
     apply_message_updates(&mut tx, &plan.finalize.updates).await?;
-    if plan.close_session {
-        let closed_at = plan.closed_at.ok_or_else(server_error)?;
-        sqlx::query(
-            r#"UPDATE "agent_chat_session"
-               SET "status" = $1, "active_turn_id" = $2, "active_message_id" = $3,
-                   "closed_at" = $4, "error" = $5, "updated_at" = $6
-               WHERE "id" = $7"#,
-        )
-        .bind(AgentChatSessionStatus::Closed.value())
-        .bind("")
-        .bind(None::<Uuid>)
-        .bind(closed_at)
-        .bind(&plan.session_error)
-        .bind(Utc::now())
-        .bind(session.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| server_error())?;
+    let closed_at = if plan.close_session {
+        Some(plan.closed_at.ok_or_else(server_error)?)
     } else {
-        sqlx::query(
-            r#"UPDATE "agent_chat_session"
-               SET "active_turn_id" = $1, "active_message_id" = $2,
-                   "error" = $3, "updated_at" = $4
-               WHERE "id" = $5"#,
-        )
-        .bind("")
-        .bind(None::<Uuid>)
-        .bind(&plan.session_error)
-        .bind(Utc::now())
-        .bind(session.id)
-        .execute(&mut *tx)
+        None
+    };
+    fail_session_update(session.id, &plan.session_error, closed_at, Utc::now())
+        .exec(&TxConn::new(&mut tx))
         .await
         .map_err(|_| server_error())?;
-    }
     for event in &plan.events {
         append_event(&mut tx, session.id, event, "", effects).await?;
     }
@@ -1640,20 +1627,22 @@ pub async fn execute_mark_warm_dispatch_failed(
     effects: &mut Vec<ChatEffect>,
 ) -> Result<(), Response> {
     let mut tx = pool.begin().await.map_err(|_| server_error())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
-        r#"SELECT {SESSION_COLUMNS} FROM "agent_chat_session"
-           WHERE ("id" = $1 AND "status" = $2) LIMIT 1 FOR UPDATE"#
-    ))
-    .bind(session_id)
-    .bind(AgentChatSessionStatus::Open.value())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
+    let row = {
+        use orm::agent_chat_session::{Column, Entity};
+        Entity::find()
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::Status.eq(AgentChatSessionStatus::Open.value()))
+            .limit(1)
+            .lock_exclusive()
+            .one(&TxConn::new(&mut tx))
+            .await
+            .map_err(|_| server_error())?
+    };
     let Some(row) = row else {
         tx.rollback().await.map_err(|_| server_error())?;
         return Ok(());
     };
-    let session = session_from_pg(&row)?;
+    let session = session_from_model(row)?;
     // `chat_warm_failed`, `{"code": "dispatch_failed"}`
     // (`chat.py:256-267`).
     let inputs = chat_kernel::append_event_inputs(
@@ -1685,19 +1674,14 @@ pub async fn publish_event_frame(
     ports: &impl RunnerPorts,
     event_id: i64,
 ) -> Result<(), Response> {
-    let row: Option<EventRow> = sqlx::query_as(
-        r#"SELECT "id", "session_id", "message_id", "seq", "source_key", "kind",
-              "payload", "created_at"
-           FROM "agent_chat_event" WHERE "id" = $1"#,
-    )
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let row = orm::agent_chat_event::Entity::find_by_id(event_id)
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Ok(());
     };
-    let event = event_from_row(row)?;
+    let event = event_from_model(row);
     let created_at = crate::assistant::common::py_iso(&event.created_at);
     let session_id = event.session_id.to_string();
     let message_id = event.message_id.map(|id| id.to_string());
@@ -1958,13 +1942,10 @@ pub async fn chat_sessions_list(
                 Ok(runner_id) => runner_id,
                 Err(_) => return server_error(),
             };
-            let runner: Option<RunnerGuardRow> = match sqlx::query_as(
-                r#"SELECT "id", "owner_id", "workspace_id", "visibility", "status"
-                   FROM "runner" WHERE "id" = $1"#,
-            )
-            .bind(runner_id)
-            .fetch_optional(&pool)
-            .await
+            let runner = match runner_guard_select(runner_id)
+                .into_tuple::<RunnerGuardRow>()
+                .one(&sea_orm_connection(&pool))
+                .await
             {
                 Ok(runner) => runner,
                 Err(_) => return server_error(),
@@ -2025,63 +2006,43 @@ pub async fn chat_sessions_list(
     // (`runner_visible_to_user_q`, `guards.py:67-82`); the project
     // filter joins the session pod. Default ordering
     // `-last_message_at, -created_at`, capped at 100.
-    let mut sql = format!(
-        r#"SELECT {columns} FROM "agent_chat_session"
-           INNER JOIN "runner" ON ("agent_chat_session"."runner_id" = "runner"."id")"#,
-        columns = qualified_session_columns(),
-    );
-    if project_id.is_some() {
-        sql.push_str(r#" INNER JOIN "pod" ON ("agent_chat_session"."pod_id" = "pod"."id")"#);
-    }
-    sql.push_str(r#" WHERE "runner"."owner_id" = $1 AND "runner"."visibility" = $2"#);
-    let mut position = 3;
-    if workspace_id.is_some() {
-        sql.push_str(&format!(
-            r#" AND "agent_chat_session"."workspace_id" = ${position}"#
-        ));
-        position += 1;
-    }
-    if runner_id.is_some() {
-        sql.push_str(&format!(
-            r#" AND "agent_chat_session"."runner_id" = ${position}"#
-        ));
-        position += 1;
-    }
-    if project_id.is_some() {
-        sql.push_str(&format!(r#" AND "pod"."project_id" = ${position}"#));
-        position += 1;
-    }
-    if only_own {
-        sql.push_str(&format!(
-            r#" AND "agent_chat_session"."created_by_id" = ${position}"#
-        ));
-    }
-    sql.push_str(
-        r#" ORDER BY "agent_chat_session"."last_message_at" DESC,
-                    "agent_chat_session"."created_at" DESC LIMIT 100"#,
-    );
-    let mut query = sqlx::query(&sql)
-        .bind(user_id)
-        .bind(pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16);
-    if let Some(workspace_id) = workspace_id {
-        query = query.bind(workspace_id);
-    }
-    if let Some(runner_id) = runner_id {
-        query = query.bind(runner_id);
-    }
-    if let Some(project_id) = project_id {
-        query = query.bind(project_id);
-    }
-    if only_own {
-        query = query.bind(user_id);
-    }
-    let rows: Vec<sqlx::postgres::PgRow> = match query.fetch_all(&pool).await {
-        Ok(rows) => rows,
-        Err(_) => return server_error(),
+    let rows = {
+        use orm::agent_chat_session::{Column, Entity, Relation};
+        let mut select = Entity::find()
+            .join(JoinType::InnerJoin, Relation::Runner.def())
+            .filter(orm::runner::Column::OwnerId.eq(user_id))
+            .filter(
+                orm::runner::Column::Visibility
+                    .eq(pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16),
+            );
+        if let Some(workspace_id) = workspace_id {
+            select = select.filter(Column::WorkspaceId.eq(workspace_id));
+        }
+        if let Some(runner_id) = runner_id {
+            select = select.filter(Column::RunnerId.eq(runner_id));
+        }
+        if let Some(project_id) = project_id {
+            select = select
+                .join(JoinType::InnerJoin, Relation::Pod.def())
+                .filter(orm::pod::Column::ProjectId.eq(project_id));
+        }
+        if only_own {
+            select = select.filter(Column::CreatedById.eq(user_id));
+        }
+        match select
+            .order_by_desc(Column::LastMessageAt)
+            .order_by_desc(Column::CreatedAt)
+            .limit(100)
+            .all(&sea_orm_connection(&pool))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return server_error(),
+        }
     };
     let mut rendered = Vec::with_capacity(rows.len());
     for row in rows {
-        let session = match session_from_pg(&row) {
+        let session = match session_from_model(row) {
             Ok(session) => session,
             Err(response) => return response,
         };
@@ -2148,17 +2109,29 @@ pub async fn chat_session_create(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let runner: Option<ChatCreateRunnerRow> = match sqlx::query_as(
-        r#"SELECT "id", "owner_id", "visibility", "status", "pod_id", "paused_at" FROM "runner"
-           WHERE ("id" = $1 AND "workspace_id" = $2) LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(runner_id)
-    .bind(workspace_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(runner) => runner,
-        Err(_) => return server_error(),
+    let runner: Option<ChatCreateRunnerRow> = {
+        use orm::runner::{Column, Entity};
+        match Entity::find()
+            .select_only()
+            .columns([
+                Column::Id,
+                Column::OwnerId,
+                Column::Visibility,
+                Column::Status,
+                Column::PodId,
+                Column::PausedAt,
+            ])
+            .filter(Column::Id.eq(runner_id))
+            .filter(Column::WorkspaceId.eq(workspace_id))
+            .limit(1)
+            .lock_exclusive()
+            .into_tuple::<ChatCreateRunnerRow>()
+            .one(&TxConn::new(&mut tx))
+            .await
+        {
+            Ok(runner) => runner,
+            Err(_) => return server_error(),
+        }
     };
     let not_found = || {
         json_response(
@@ -2179,25 +2152,35 @@ pub async fn chat_session_create(
     }
     // Empty-session reuse: the newest open session by this user on
     // this runner with no messages at all.
-    let existing: Option<sqlx::postgres::PgRow> = match sqlx::query(&format!(
-        r#"SELECT {columns} FROM "agent_chat_session"
-           WHERE ("created_by_id" = $1 AND "runner_id" = $2 AND "status" = $3
-             AND NOT EXISTS (SELECT 1 FROM "agent_chat_message"
-               WHERE "agent_chat_message"."session_id" = "agent_chat_session"."id"))
-           ORDER BY "created_at" DESC LIMIT 1"#,
-        columns = qualified_session_columns(),
-    ))
-    .bind(user_id)
-    .bind(runner_id)
-    .bind(AgentChatSessionStatus::Open.value())
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(existing) => existing,
-        Err(_) => return server_error(),
+    let existing = {
+        use orm::agent_chat_session::{Column, Entity};
+        let has_messages = SqlQuery::select()
+            .expr(Expr::val(1))
+            .from(orm::agent_chat_message::Entity)
+            .and_where(
+                Expr::col((
+                    orm::agent_chat_message::Entity,
+                    orm::agent_chat_message::Column::SessionId,
+                ))
+                .equals((Entity, Column::Id)),
+            )
+            .take();
+        match Entity::find()
+            .filter(Column::CreatedById.eq(user_id))
+            .filter(Column::RunnerId.eq(runner_id))
+            .filter(Column::Status.eq(AgentChatSessionStatus::Open.value()))
+            .filter(Expr::exists(has_messages).not())
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .one(&TxConn::new(&mut tx))
+            .await
+        {
+            Ok(existing) => existing,
+            Err(_) => return server_error(),
+        }
     };
     if let Some(existing) = existing {
-        let session = match session_from_pg(&existing) {
+        let session = match session_from_model(existing) {
             Ok(session) => session,
             Err(response) => return response,
         };
@@ -2216,35 +2199,28 @@ pub async fn chat_session_create(
     };
     let id = Uuid::new_v4();
     let now = Utc::now();
-    if sqlx::query(
-        r#"INSERT INTO "agent_chat_session"
-           ("id", "workspace_id", "runner_id", "created_by_id", "pod_id", "status",
-            "agent_kind", "local_thread_id", "local_session_id", "cwd", "model",
-            "active_turn_id", "active_message_id", "close_requested",
-            "last_message_at", "closed_at", "error", "created_at", "updated_at")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                   $15, $16, $17, $18, $19)"#,
-    )
-    .bind(id)
-    .bind(workspace_id)
-    .bind(runner_id)
-    .bind(user_id)
-    .bind(pod_id)
-    .bind(AgentChatSessionStatus::Open.value())
-    .bind("")
-    .bind("")
-    .bind("")
-    .bind("")
-    .bind(&model)
-    .bind("")
-    .bind(None::<Uuid>)
-    .bind(false)
-    .bind(None::<DateTime<Utc>>)
-    .bind(None::<DateTime<Utc>>)
-    .bind("")
-    .bind(now)
-    .bind(now)
-    .execute(&mut *tx)
+    if orm::agent_chat_session::Entity::insert(orm::agent_chat_session::ActiveModel {
+        id: Set(id),
+        status: Set(AgentChatSessionStatus::Open.value().to_owned()),
+        agent_kind: Set(String::new()),
+        local_thread_id: Set(String::new()),
+        local_session_id: Set(String::new()),
+        cwd: Set(String::new()),
+        model: Set(model.clone()),
+        active_turn_id: Set(String::new()),
+        active_message_id: Set(None),
+        close_requested: Set(false),
+        last_message_at: Set(None),
+        closed_at: Set(None),
+        error: Set(String::new()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(user_id),
+        pod_id: Set(pod_id),
+        runner_id: Set(runner_id),
+        workspace_id: Set(workspace_id),
+    })
+    .exec_without_returning(&TxConn::new(&mut tx))
     .await
     .is_err()
     {
@@ -2359,6 +2335,24 @@ async fn can_send_session(
     chat_kernel::can_send_chat(user_id, session.created_by_id, || member, || visible)
 }
 
+/// Lock the runner's `(status, paused_at)` for the warm / send checks
+/// (`LIMIT 1 FOR UPDATE`).
+async fn lock_runner_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+) -> Result<Option<(String, Option<DateTime<Utc>>)>, sea_orm::DbErr> {
+    use orm::runner::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::Status, Column::PausedAt])
+        .filter(Column::Id.eq(runner_id))
+        .limit(1)
+        .lock_exclusive()
+        .into_tuple::<(String, Option<DateTime<Utc>>)>()
+        .one(&TxConn::new(tx))
+        .await
+}
+
 /// `POST /api/runners/chat/sessions/<id>/warm/` (`chat.py:252-288`):
 /// lock the session, then the status check, then the runner check,
 /// then the active-turn skip — in that order — else enqueue warm
@@ -2392,13 +2386,7 @@ pub async fn chat_session_warm(
     if !can_send_session(&pool, user_id, &locked.session, &locked.runner).await {
         return chat_not_found();
     }
-    let runner_state: Option<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
-        r#"SELECT "status", "paused_at" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(locked.session.runner_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
+    let runner_state = match lock_runner_state(&mut tx, locked.session.runner_id).await {
         Ok(runner_status) => runner_status,
         Err(_) => return server_error(),
     };
@@ -2485,21 +2473,21 @@ pub async fn chat_messages_list(
     if !can_read_session(&pool, user_id, &session, &runner).await {
         return chat_not_found();
     }
-    let rows: Vec<MessageRow> = match sqlx::query_as(
-        r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-              "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-           FROM "agent_chat_message" WHERE "session_id" = $1 ORDER BY "seq" ASC"#,
-    )
-    .bind(session_id)
-    .fetch_all(&pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return server_error(),
+    let rows = {
+        use orm::agent_chat_message::{Column, Entity};
+        match Entity::find()
+            .filter(Column::SessionId.eq(session_id))
+            .order_by_asc(Column::Seq)
+            .all(&sea_orm_connection(&pool))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return server_error(),
+        }
     };
     let mut rendered = Vec::with_capacity(rows.len());
     for row in rows {
-        let message = match message_from_row(row) {
+        let message = match message_from_model(row) {
             Ok(message) => message,
             Err(response) => return response,
         };
@@ -2574,13 +2562,7 @@ pub async fn chat_message_create(
     if !can_send_session(&pool, user_id, &locked.session, &locked.runner).await {
         return chat_not_found();
     }
-    let runner_state: Option<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
-        r#"SELECT "status", "paused_at" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(locked.session.runner_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
+    let runner_state = match lock_runner_state(&mut tx, locked.session.runner_id).await {
         Ok(runner_status) => runner_status,
         Err(_) => return server_error(),
     };
@@ -2618,50 +2600,45 @@ pub async fn chat_message_create(
         Some(other) => pidash_compat::py::py_str(other),
         None => String::new(),
     };
-    let seq = match chat_kernel::next_message_seq(&mut *tx, session_id).await {
+    let seq = match next_message_seq(&TxConn::new(&mut tx), session_id).await {
         Ok(seq) => seq,
         Err(_) => return server_error(),
     };
     let message_id = Uuid::new_v4();
     let message_created_at = Utc::now();
-    if sqlx::query(
-        r#"INSERT INTO "agent_chat_message"
-           ("id", "session_id", "role", "content", "content_parts", "status",
-            "local_item_id", "local_turn_id", "seq", "created_at", "completed_at")
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
-    )
-    .bind(message_id)
-    .bind(session_id)
-    .bind(AgentChatMessageRole::User.value())
-    .bind(&content)
-    .bind(&parts_value)
-    .bind(AgentChatMessageStatus::Queued.value())
-    .bind("")
-    .bind("")
-    .bind(seq)
-    .bind(message_created_at)
-    .bind(None::<DateTime<Utc>>)
-    .execute(&mut *tx)
+    if orm::agent_chat_message::Entity::insert(orm::agent_chat_message::ActiveModel {
+        id: Set(message_id),
+        role: Set(AgentChatMessageRole::User.value().to_owned()),
+        content: Set(content.clone()),
+        content_parts: Set(parts_value.clone()),
+        status: Set(AgentChatMessageStatus::Queued.value().to_owned()),
+        local_item_id: Set(String::new()),
+        local_turn_id: Set(String::new()),
+        seq: Set(seq),
+        created_at: Set(message_created_at.into()),
+        completed_at: Set(None),
+        session_id: Set(session_id),
+    })
+    .exec_without_returning(&TxConn::new(&mut tx))
     .await
     .is_err()
     {
         return server_error();
     }
     let stamped_at = Utc::now();
-    if sqlx::query(
-        r#"UPDATE "agent_chat_session"
-           SET "active_message_id" = $1, "last_message_at" = $2, "updated_at" = $3
-           WHERE "id" = $4"#,
-    )
-    .bind(message_id)
-    .bind(stamped_at)
-    .bind(Utc::now())
-    .bind(session_id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
     {
-        return server_error();
+        use orm::agent_chat_session::{Column, Entity};
+        if Entity::update_many()
+            .col_expr(Column::ActiveMessageId, Expr::value(message_id))
+            .col_expr(Column::LastMessageAt, Expr::value(stamped_at))
+            .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
+            .filter(Column::Id.eq(session_id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     let mut effects = Vec::new();
     // `chat_timing`, `{"stage": ..., "message_id": ..., "recorded_at":
@@ -2836,18 +2813,18 @@ pub async fn chat_session_close(
         // Active: flag only — never touches the body, so a garbage
         // body still closes-requests.
         let updated_at = Utc::now();
-        if sqlx::query(
-            r#"UPDATE "agent_chat_session" SET "close_requested" = $1, "updated_at" = $2
-               WHERE "id" = $3"#,
-        )
-        .bind(true)
-        .bind(updated_at)
-        .bind(session_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
         {
-            return server_error();
+            use orm::agent_chat_session::{Column, Entity};
+            if Entity::update_many()
+                .col_expr(Column::CloseRequested, Expr::value(true))
+                .col_expr(Column::UpdatedAt, Expr::value(updated_at))
+                .filter(Column::Id.eq(session_id))
+                .exec(&TxConn::new(&mut tx))
+                .await
+                .is_err()
+            {
+                return server_error();
+            }
         }
         if commit_tx(tx).await.is_err() {
             return server_error();
@@ -2887,19 +2864,22 @@ pub async fn chat_session_close(
     };
     let closed_at = Utc::now();
     let updated_at = Utc::now();
-    if sqlx::query(
-        r#"UPDATE "agent_chat_session" SET "status" = $1, "closed_at" = $2, "updated_at" = $3
-           WHERE "id" = $4"#,
-    )
-    .bind(AgentChatSessionStatus::Closed.value())
-    .bind(closed_at)
-    .bind(updated_at)
-    .bind(session_id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
     {
-        return server_error();
+        use orm::agent_chat_session::{Column, Entity};
+        if Entity::update_many()
+            .col_expr(
+                Column::Status,
+                Expr::value(AgentChatSessionStatus::Closed.value()),
+            )
+            .col_expr(Column::ClosedAt, Expr::value(closed_at))
+            .col_expr(Column::UpdatedAt, Expr::value(updated_at))
+            .filter(Column::Id.eq(session_id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     let mut effects = Vec::new();
     let inputs = chat_kernel::append_event_inputs(
@@ -2986,68 +2966,66 @@ pub async fn chat_approvals_list(
         }
         None => false,
     };
-    const APPROVAL_COLUMNS: &str = r#""agent_chat_approval"."id", "agent_chat_approval"."session_id",
-        "agent_chat_approval"."local_approval_id", "agent_chat_approval"."kind",
-        "agent_chat_approval"."payload", "agent_chat_approval"."reason",
-        "agent_chat_approval"."status", "agent_chat_approval"."decision_source",
-        "agent_chat_approval"."decided_by_id", "agent_chat_approval"."requested_at",
-        "agent_chat_approval"."expires_at", "agent_chat_approval"."decided_at""#;
-    let mut sql = format!(
-        r#"SELECT {APPROVAL_COLUMNS} FROM "agent_chat_approval"
-           INNER JOIN "agent_chat_session"
-             ON ("agent_chat_approval"."session_id" = "agent_chat_session"."id")
-           INNER JOIN "runner"
-             ON ("agent_chat_session"."runner_id" = "runner"."id")
-           WHERE "runner"."owner_id" = $1 AND "runner"."visibility" = $2
-             AND "agent_chat_approval"."status" = 'pending'"#,
-    );
-    let mut position = 3;
-    if let Some(workspace_id) = workspace_id {
-        sql.push_str(&format!(
-            r#" AND "agent_chat_session"."workspace_id" = ${position}"#,
-        ));
-        position += 1;
-        if !admin {
-            sql.push_str(&format!(
-                r#" AND "agent_chat_session"."created_by_id" = ${position}"#,
-            ));
-            position += 1;
+    // Pending chat approvals over the session + runner joins for the
+    // visibility predicate; scoped callers filter the workspace (plus
+    // their own sessions unless admin), unscoped callers see their
+    // own sessions plus the workspaces they admin. `-requested_at`,
+    // capped at 200.
+    let rows = {
+        use orm::agent_chat_approval::{Column, Entity, Relation};
+        use orm::agent_chat_session as session;
+        let mut select = Entity::find()
+            .join(JoinType::InnerJoin, Relation::AgentChatSession.def())
+            .join(JoinType::InnerJoin, session::Relation::Runner.def())
+            .filter(orm::runner::Column::OwnerId.eq(user_id))
+            .filter(
+                orm::runner::Column::Visibility
+                    .eq(pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16),
+            )
+            .filter(Column::Status.eq(ApprovalStatus::Pending.value()));
+        match workspace_id {
+            Some(workspace_id) => {
+                select = select.filter(session::Column::WorkspaceId.eq(workspace_id));
+                if !admin {
+                    select = select.filter(session::Column::CreatedById.eq(user_id));
+                }
+            }
+            None => {
+                use orm::workspace_members as members;
+                let admin_of_workspace = SqlQuery::select()
+                    .expr(Expr::val(1))
+                    .from(members::Entity)
+                    .and_where(
+                        Expr::col((members::Entity, members::Column::WorkspaceId))
+                            .equals((session::Entity, session::Column::WorkspaceId)),
+                    )
+                    .and_where(Expr::col((members::Entity, members::Column::MemberId)).eq(user_id))
+                    .and_where(
+                        Expr::col((members::Entity, members::Column::Role)).gte(ROLE_ADMIN as i16),
+                    )
+                    .and_where(Expr::col((members::Entity, members::Column::IsActive)).eq(true))
+                    .and_where(Expr::col((members::Entity, members::Column::DeletedAt)).is_null())
+                    .take();
+                select = select.filter(
+                    sea_orm::Condition::any()
+                        .add(session::Column::CreatedById.eq(user_id))
+                        .add(Expr::exists(admin_of_workspace)),
+                );
+            }
         }
-        let _ = workspace_id;
-    } else {
-        sql.push_str(&format!(
-            r#" AND ("agent_chat_session"."created_by_id" = ${position} OR EXISTS (
-                   SELECT 1 FROM "workspace_members"
-                   WHERE ("workspace_members"."workspace_id"
-                            = "agent_chat_session"."workspace_id"
-                     AND "workspace_members"."member_id" = ${next}
-                     AND "workspace_members"."role" >= {ROLE_ADMIN}
-                     AND "workspace_members"."is_active"
-                     AND "workspace_members"."deleted_at" IS NULL)))"#,
-            next = position + 1,
-        ));
-        position += 2;
-    }
-    let _ = position;
-    sql.push_str(r#" ORDER BY "agent_chat_approval"."requested_at" DESC LIMIT 200"#);
-    let mut query = sqlx::query_as::<_, ChatApprovalRow>(&sql)
-        .bind(user_id)
-        .bind(pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16);
-    if let Some(workspace_id) = workspace_id {
-        query = query.bind(workspace_id);
-        if !admin {
-            query = query.bind(user_id);
+        match select
+            .order_by_desc(Column::RequestedAt)
+            .limit(200)
+            .all(&sea_orm_connection(&pool))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return server_error(),
         }
-    } else {
-        query = query.bind(user_id).bind(user_id);
-    }
-    let rows: Vec<ChatApprovalRow> = match query.fetch_all(&pool).await {
-        Ok(rows) => rows,
-        Err(_) => return server_error(),
     };
     let mut rendered = Vec::with_capacity(rows.len());
     for row in rows {
-        let approval = match chat_approval_from_row(row) {
+        let approval = match chat_approval_from_model(row) {
             Ok(approval) => approval,
             Err(response) => return response,
         };
@@ -3100,15 +3078,10 @@ pub async fn chat_approval_decide(
     };
     // The approval, session, and runner each lock — the same three
     // locks Django's `select_for_update` + `select_related` takes.
-    let approval_row: Option<ChatApprovalRow> = match sqlx::query_as(
-        r#"SELECT "id", "session_id", "local_approval_id", "kind", "payload", "reason",
-              "status", "decision_source", "decided_by_id", "requested_at",
-              "expires_at", "decided_at"
-           FROM "agent_chat_approval" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(approval_id)
-    .fetch_optional(&mut *tx)
-    .await
+    let approval_row = match orm::agent_chat_approval::Entity::find_by_id(approval_id)
+        .lock_exclusive()
+        .one(&TxConn::new(&mut tx))
+        .await
     {
         Ok(approval_row) => approval_row,
         Err(_) => return server_error(),
@@ -3116,7 +3089,7 @@ pub async fn chat_approval_decide(
     let Some(approval_row) = approval_row else {
         return chat_not_found();
     };
-    let approval = match chat_approval_from_row(approval_row) {
+    let approval = match chat_approval_from_model(approval_row) {
         Ok(approval) => approval,
         Err(response) => return response,
     };
@@ -3141,21 +3114,20 @@ pub async fn chat_approval_decide(
         );
     }
     let decided_at = Utc::now();
-    if sqlx::query(
-        r#"UPDATE "agent_chat_approval"
-           SET "status" = $1, "decision_source" = $2, "decided_by_id" = $3, "decided_at" = $4
-           WHERE "id" = $5"#,
-    )
-    .bind(status.value())
-    .bind("web")
-    .bind(user_id)
-    .bind(decided_at)
-    .bind(approval_id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
     {
-        return server_error();
+        use orm::agent_chat_approval::{Column, Entity};
+        if Entity::update_many()
+            .col_expr(Column::Status, Expr::value(status.value()))
+            .col_expr(Column::DecisionSource, Expr::value("web"))
+            .col_expr(Column::DecidedById, Expr::value(user_id))
+            .col_expr(Column::DecidedAt, Expr::value(decided_at))
+            .filter(Column::Id.eq(approval_id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     let mut effects = Vec::new();
     let inputs = chat_kernel::append_event_inputs(
@@ -3348,22 +3320,23 @@ pub async fn daemon_chat_started(
         Ok(agent_kind) => agent_kind,
         Err(response) => return response,
     };
-    if sqlx::query(
-        r#"UPDATE "agent_chat_session"
-           SET "local_thread_id" = $1, "local_session_id" = $2, "agent_kind" = $3,
-               "updated_at" = $4
-           WHERE "id" = $5"#,
-    )
-    .bind(&local_thread_id)
-    .bind(&local_session_id)
-    .bind(&agent_kind)
-    .bind(Utc::now())
-    .bind(session.id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
     {
-        return server_error();
+        use orm::agent_chat_session::{Column, Entity};
+        if Entity::update_many()
+            .col_expr(Column::LocalThreadId, Expr::value(local_thread_id.clone()))
+            .col_expr(
+                Column::LocalSessionId,
+                Expr::value(local_session_id.clone()),
+            )
+            .col_expr(Column::AgentKind, Expr::value(agent_kind.clone()))
+            .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
+            .filter(Column::Id.eq(session.id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     let mut effects = Vec::new();
     let inputs = chat_kernel::append_event_inputs(
@@ -3423,13 +3396,12 @@ pub async fn daemon_chat_message_started(
         Err(response) => return response,
     };
     let source_key = format!("message_started:{message_id}");
-    let existing: Option<i64> = match sqlx::query_scalar(
-        r#"SELECT "id" FROM "agent_chat_event" WHERE ("session_id" = $1 AND "source_key" = $2)"#,
-    )
-    .bind(session.id)
-    .bind(&source_key)
-    .fetch_optional(&mut *tx)
-    .await
+    let existing: Option<i64> = match event_by_source_key_select(session.id, &source_key)
+        .select_only()
+        .column(orm::agent_chat_event::Column::Id)
+        .into_tuple::<i64>()
+        .one(&TxConn::new(&mut tx))
+        .await
     {
         Ok(existing) => existing,
         Err(_) => return server_error(),
@@ -3449,36 +3421,39 @@ pub async fn daemon_chat_message_started(
     };
     // The user message flips to `sent` (a queryset `update` — zero
     // rows are fine).
-    if sqlx::query(
-        r#"UPDATE "agent_chat_message" SET "status" = $1, "local_turn_id" = $2
-           WHERE ("id" = $3 AND "session_id" = $4)"#,
-    )
-    .bind(AgentChatMessageStatus::Sent.value())
-    .bind(&turn_id)
-    .bind(message_id)
-    .bind(session.id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
     {
-        return server_error();
+        use orm::agent_chat_message::{Column, Entity};
+        if Entity::update_many()
+            .col_expr(
+                Column::Status,
+                Expr::value(AgentChatMessageStatus::Sent.value()),
+            )
+            .col_expr(Column::LocalTurnId, Expr::value(turn_id.clone()))
+            .filter(Column::Id.eq(message_id))
+            .filter(Column::SessionId.eq(session.id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     let assistant = match create_assistant(&mut tx, session.id, &turn_id).await {
         Ok(assistant) => assistant,
         Err(response) => return response,
     };
-    if sqlx::query(
-        r#"UPDATE "agent_chat_session" SET "active_turn_id" = $1, "updated_at" = $2
-           WHERE "id" = $3"#,
-    )
-    .bind(&turn_id)
-    .bind(Utc::now())
-    .bind(session.id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
     {
-        return server_error();
+        use orm::agent_chat_session::{Column, Entity};
+        if Entity::update_many()
+            .col_expr(Column::ActiveTurnId, Expr::value(turn_id.clone()))
+            .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
+            .filter(Column::Id.eq(session.id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     let mut effects = Vec::new();
     let inputs = chat_kernel::append_event_inputs(
@@ -3514,6 +3489,22 @@ pub async fn daemon_chat_message_started(
     json_response(StatusCode::OK, r#"{"ok":true}"#.to_owned())
 }
 
+/// Link an appended event to the assistant message it accumulated onto
+/// (`event.message = assistant; event.save(update_fields=["message"])`).
+async fn link_event_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event_id: i64,
+    message_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    use orm::agent_chat_event::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::MessageId, Expr::value(message_id))
+        .filter(Column::Id.eq(event_id))
+        .exec(&TxConn::new(tx))
+        .await
+        .map(drop)
+}
+
 /// `POST /api/v1/runner/chat/sessions/<session_id>/events/`
 /// (`chat.py:586-629`): the header key is the `source_key` (a hit
 /// replays the stored event in the duplicate answer); otherwise the
@@ -3539,24 +3530,15 @@ pub async fn daemon_chat_event(
         Ok(session) => session,
         Err(response) => return response,
     };
-    let existing: Option<EventRow> = match sqlx::query_as(
-        r#"SELECT "id", "session_id", "message_id", "seq", "source_key", "kind",
-              "payload", "created_at"
-           FROM "agent_chat_event" WHERE ("session_id" = $1 AND "source_key" = $2)"#,
-    )
-    .bind(session.id)
-    .bind(truncate_chars(&preamble.key, 160))
-    .fetch_optional(&mut *tx)
-    .await
+    let existing = match event_by_source_key_select(session.id, &truncate_chars(&preamble.key, 160))
+        .one(&TxConn::new(&mut tx))
+        .await
     {
         Ok(existing) => existing,
         Err(_) => return server_error(),
     };
     if let Some(existing) = existing {
-        let event = match event_from_row(existing) {
-            Ok(event) => event,
-            Err(response) => return response,
-        };
+        let event = event_from_model(existing);
         if commit_tx(tx).await.is_err() {
             return server_error();
         }
@@ -3617,19 +3599,19 @@ pub async fn daemon_chat_event(
             }
             let assistant = assistant.expect("created above");
             let content = format!("{}{delta}", assistant.content);
-            if sqlx::query(r#"UPDATE "agent_chat_message" SET "content" = $1 WHERE "id" = $2"#)
-                .bind(&content)
-                .bind(assistant.id)
-                .execute(&mut *tx)
+            if orm::agent_chat_message::Entity::update_many()
+                .col_expr(
+                    orm::agent_chat_message::Column::Content,
+                    Expr::value(content),
+                )
+                .filter(orm::agent_chat_message::Column::Id.eq(assistant.id))
+                .exec(&TxConn::new(&mut tx))
                 .await
                 .is_err()
             {
                 return server_error();
             }
-            if sqlx::query(r#"UPDATE "agent_chat_event" SET "message_id" = $1 WHERE "id" = $2"#)
-                .bind(assistant.id)
-                .bind(event.id)
-                .execute(&mut *tx)
+            if link_event_message(&mut tx, event.id, assistant.id)
                 .await
                 .is_err()
             {
@@ -3637,10 +3619,7 @@ pub async fn daemon_chat_event(
             }
             event.message_id = Some(assistant.id);
         } else if let Some(assistant) = assistant {
-            if sqlx::query(r#"UPDATE "agent_chat_event" SET "message_id" = $1 WHERE "id" = $2"#)
-                .bind(assistant.id)
-                .bind(event.id)
-                .execute(&mut *tx)
+            if link_event_message(&mut tx, event.id, assistant.id)
                 .await
                 .is_err()
             {
@@ -3736,35 +3715,38 @@ pub async fn daemon_chat_approval(
     };
     // `update_or_create(session=..., local_approval_id=...)`: the
     // get, then the update or the create.
-    let existing: Option<Uuid> = match sqlx::query_scalar(
-        r#"SELECT "id" FROM "agent_chat_approval"
-           WHERE ("session_id" = $1 AND "local_approval_id" = $2)"#,
-    )
-    .bind(session.id)
-    .bind(&local_approval_id)
-    .fetch_optional(&mut *tx)
-    .await
+    use orm::agent_chat_approval::{Column, Entity};
+    let conn = TxConn::new(&mut tx);
+    let existing: Option<Uuid> = match Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::SessionId.eq(session.id))
+        .filter(Column::LocalApprovalId.eq(local_approval_id.as_str()))
+        .into_tuple::<Uuid>()
+        .one(&conn)
+        .await
     {
         Ok(existing) => existing,
         Err(_) => return server_error(),
     };
+    // `expires_at` binds as the daemon sent it and lets Postgres parse
+    // it (`::timestamptz`); a missing value writes `NULL`.
+    let expires_at_expr = match expires_at.as_deref() {
+        Some(text) => Expr::val(text.to_owned()).cast_as(Alias::new("timestamptz")),
+        None => SimpleExpr::Keyword(Keyword::Null),
+    };
     let approval_id = match existing {
         Some(approval_id) => {
-            if sqlx::query(
-                r#"UPDATE "agent_chat_approval"
-                   SET "kind" = $1, "payload" = $2, "reason" = $3, "status" = $4,
-                       "expires_at" = $5::timestamptz
-                   WHERE "id" = $6"#,
-            )
-            .bind(kind)
-            .bind(&payload)
-            .bind(&reason)
-            .bind(ApprovalStatus::Pending.value())
-            .bind(expires_at.as_deref())
-            .bind(approval_id)
-            .execute(&mut *tx)
-            .await
-            .is_err()
+            if Entity::update_many()
+                .col_expr(Column::Kind, Expr::value(kind))
+                .col_expr(Column::Payload, Expr::value(payload.clone()))
+                .col_expr(Column::Reason, Expr::value(reason.clone()))
+                .col_expr(Column::Status, Expr::value(ApprovalStatus::Pending.value()))
+                .col_expr(Column::ExpiresAt, expires_at_expr)
+                .filter(Column::Id.eq(approval_id))
+                .exec(&conn)
+                .await
+                .is_err()
             {
                 return server_error();
             }
@@ -3772,29 +3754,41 @@ pub async fn daemon_chat_approval(
         }
         None => {
             let approval_id = Uuid::new_v4();
-            if sqlx::query(
-                r#"INSERT INTO "agent_chat_approval"
-                   ("id", "session_id", "local_approval_id", "kind", "payload", "reason",
-                    "status", "decision_source", "decided_by_id", "requested_at",
-                    "expires_at", "decided_at")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz, $12)"#,
-            )
-            .bind(approval_id)
-            .bind(session.id)
-            .bind(&local_approval_id)
-            .bind(kind)
-            .bind(&payload)
-            .bind(&reason)
-            .bind(ApprovalStatus::Pending.value())
-            .bind("")
-            .bind(None::<Uuid>)
-            .bind(Utc::now())
-            .bind(expires_at.as_deref())
-            .bind(None::<DateTime<Utc>>)
-            .execute(&mut *tx)
-            .await
-            .is_err()
-            {
+            // A sea-query insert: `expires_at` is a cast expression, not
+            // a bound value, so the active model cannot carry it.
+            let mut insert = SqlQuery::insert();
+            insert
+                .into_table(Entity)
+                .columns([
+                    Column::Id,
+                    Column::SessionId,
+                    Column::LocalApprovalId,
+                    Column::Kind,
+                    Column::Payload,
+                    Column::Reason,
+                    Column::Status,
+                    Column::DecisionSource,
+                    Column::DecidedById,
+                    Column::RequestedAt,
+                    Column::ExpiresAt,
+                    Column::DecidedAt,
+                ])
+                .values_panic([
+                    approval_id.into(),
+                    session.id.into(),
+                    local_approval_id.clone().into(),
+                    kind.into(),
+                    payload.clone().into(),
+                    reason.clone().into(),
+                    ApprovalStatus::Pending.value().into(),
+                    "".into(),
+                    Option::<Uuid>::None.into(),
+                    Utc::now().into(),
+                    expires_at_expr,
+                    Option::<DateTime<Utc>>::None.into(),
+                ]);
+            let statement = conn.get_database_backend().build(&insert);
+            if conn.execute(statement).await.is_err() {
                 return server_error();
             }
             approval_id
@@ -3834,15 +3828,9 @@ pub async fn daemon_chat_approval(
             return server_error();
         }
     }
-    let row: Option<ChatApprovalRow> = match sqlx::query_as(
-        r#"SELECT "id", "session_id", "local_approval_id", "kind", "payload", "reason",
-              "status", "decision_source", "decided_by_id", "requested_at",
-              "expires_at", "decided_at"
-           FROM "agent_chat_approval" WHERE "id" = $1"#,
-    )
-    .bind(approval_id)
-    .fetch_optional(&pool)
-    .await
+    let row = match Entity::find_by_id(approval_id)
+        .one(&sea_orm_connection(&pool))
+        .await
     {
         Ok(row) => row,
         Err(_) => return server_error(),
@@ -3850,7 +3838,7 @@ pub async fn daemon_chat_approval(
     let Some(row) = row else {
         return server_error();
     };
-    let approval = match chat_approval_from_row(row) {
+    let approval = match chat_approval_from_model(row) {
         Ok(approval) => approval,
         Err(response) => return response,
     };
@@ -3894,13 +3882,12 @@ pub async fn daemon_chat_message_complete(
         Err(response) => return response,
     };
     let source_key = format!("message_complete:{message_id}");
-    let existing: Option<i64> = match sqlx::query_scalar(
-        r#"SELECT "id" FROM "agent_chat_event" WHERE ("session_id" = $1 AND "source_key" = $2)"#,
-    )
-    .bind(session.id)
-    .bind(&source_key)
-    .fetch_optional(&mut *tx)
-    .await
+    let existing: Option<i64> = match event_by_source_key_select(session.id, &source_key)
+        .select_only()
+        .column(orm::agent_chat_event::Column::Id)
+        .into_tuple::<i64>()
+        .one(&TxConn::new(&mut tx))
+        .await
     {
         Ok(existing) => existing,
         Err(_) => return server_error(),
@@ -3924,23 +3911,14 @@ pub async fn daemon_chat_message_complete(
     };
     // The newest streaming assistant, unscoped by turn (unlike the
     // delta path's `active_assistant_message_locked`).
-    let assistant: Option<MessageRow> = match sqlx::query_as(
-        r#"SELECT "id", "session_id", "role", "content", "content_parts", "status",
-              "local_item_id", "local_turn_id", "seq", "created_at", "completed_at"
-           FROM "agent_chat_message"
-           WHERE ("session_id" = $1 AND "role" = $2 AND "status" = $3)
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(session.id)
-    .bind(AgentChatMessageRole::Assistant.value())
-    .bind(AgentChatMessageStatus::Streaming.value())
-    .fetch_optional(&mut *tx)
-    .await
+    let assistant = match streaming_assistant_select(session.id, None)
+        .one(&TxConn::new(&mut tx))
+        .await
     {
         Ok(assistant) => assistant,
         Err(_) => return server_error(),
     };
-    let mut assistant = match assistant.map(message_from_row).transpose() {
+    let mut assistant = match assistant.map(message_from_model).transpose() {
         Ok(assistant) => assistant,
         Err(response) => return response,
     };
@@ -3963,33 +3941,22 @@ pub async fn daemon_chat_message_complete(
         }
         let assistant = assistant.expect("present or created above");
         let completed_at = Utc::now();
-        if assistant_text.is_empty() {
-            if sqlx::query(
-                r#"UPDATE "agent_chat_message" SET "status" = $1, "completed_at" = $2
-                   WHERE "id" = $3"#,
-            )
-            .bind(final_status.value())
-            .bind(completed_at)
-            .bind(assistant.id)
-            .execute(&mut *tx)
-            .await
-            .is_err()
+        {
+            use orm::agent_chat_message::{Column, Entity};
+            let mut update = Entity::update_many();
+            if !assistant_text.is_empty() {
+                update = update.col_expr(Column::Content, Expr::value(assistant_text.clone()));
+            }
+            if update
+                .col_expr(Column::Status, Expr::value(final_status.value()))
+                .col_expr(Column::CompletedAt, Expr::value(completed_at))
+                .filter(Column::Id.eq(assistant.id))
+                .exec(&TxConn::new(&mut tx))
+                .await
+                .is_err()
             {
                 return server_error();
             }
-        } else if sqlx::query(
-            r#"UPDATE "agent_chat_message" SET "content" = $1, "status" = $2, "completed_at" = $3
-               WHERE "id" = $4"#,
-        )
-        .bind(&assistant_text)
-        .bind(final_status.value())
-        .bind(completed_at)
-        .bind(assistant.id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-        {
-            return server_error();
         }
     }
     let mut effects = Vec::new();
@@ -4615,5 +4582,214 @@ mod tests {
             OneOrMany::Many(vec!["aaa".to_owned(), String::new()]),
         );
         assert_eq!(query_param(&params, "runner"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Live executor round trip (session temp tables, rolled back)
+    // ------------------------------------------------------------------
+
+    /// The transaction-bound executors on temp copies: the session +
+    /// runner locks, the idempotent event append (`source_key` hit,
+    /// `MAX(seq) + 1`), the dedupe unique violation, the assistant
+    /// placeholder and its probes, the finalize / close / fail flows.
+    #[tokio::test]
+    async fn live_chat_executors_on_temp_tables() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["agent_chat_session", "agent_chat_message", "runner"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        // The identity pk feeds the insert's `RETURNING id`; the dedupe
+        // table keeps its unique index for the duplicate arm.
+        sqlx::query(
+            "CREATE TEMP TABLE agent_chat_event (LIKE public.agent_chat_event INCLUDING DEFAULTS INCLUDING IDENTITY)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp event table");
+        sqlx::query(
+            "CREATE TEMP TABLE chat_message_dedupe (LIKE public.chat_message_dedupe INCLUDING ALL)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp dedupe table");
+        let runner = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        sqlx::query("INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) VALUES ($1, 'r', '{}', 'online', 'linux', 'x64', '1', 1, now(), now(), $2, $3, $4, 'h', '', '', 0, '', 1, '', '', '', 0, '{}', 'manual')")
+            .bind(runner).bind(owner).bind(workspace).bind(pod)
+            .execute(&mut *tx).await.expect("seed runner");
+        let seed_session = |id: Uuid, close_requested: bool| {
+            sqlx::query(
+                "INSERT INTO agent_chat_session (id, status, agent_kind, local_thread_id, \
+                 local_session_id, cwd, model, active_turn_id, active_message_id, \
+                 close_requested, error, created_at, updated_at, created_by_id, pod_id, \
+                 runner_id, workspace_id) VALUES ($1, 'open', '', '', '', '', '', '', NULL, \
+                 $2, '', now(), now(), $3, $4, $5, $6)",
+            )
+            .bind(id)
+            .bind(close_requested)
+            .bind(owner)
+            .bind(pod)
+            .bind(runner)
+            .bind(workspace)
+        };
+        let session_id = Uuid::new_v4();
+        let failing_id = Uuid::new_v4();
+        seed_session(session_id, false)
+            .execute(&mut *tx)
+            .await
+            .expect("seed session");
+        seed_session(failing_id, true)
+            .execute(&mut *tx)
+            .await
+            .expect("seed failing session");
+
+        // Locks: the session row plus its runner's guard columns.
+        let locked = lock_chat_session(&mut tx, session_id)
+            .await
+            .expect("lock")
+            .expect("row");
+        assert_eq!(locked.session.status, AgentChatSessionStatus::Open);
+        assert_eq!(locked.runner.id, runner);
+        assert_eq!(locked.runner.owner_id, owner);
+        assert!(lock_chat_session(&mut tx, Uuid::new_v4())
+            .await
+            .expect("lock")
+            .is_none());
+
+        // Dedupe: the first key records, the repeat is the unique
+        // violation (behind a savepoint so the test transaction lives).
+        {
+            let mut savepoint = sqlx::Acquire::begin(&mut tx).await.expect("savepoint");
+            assert!(record_chat_dedupe(&mut savepoint, session_id, "k1")
+                .await
+                .expect("dedupe"));
+            assert!(!record_chat_dedupe(&mut savepoint, session_id, "k1")
+                .await
+                .expect("dedupe"));
+            savepoint.rollback().await.expect("rollback savepoint");
+        }
+
+        // Events: `source_key` hits replay the stored row; new keys
+        // take `MAX(seq) + 1` and queue a publish.
+        let mut effects = Vec::new();
+        let first =
+            chat_kernel::append_event_inputs("chat_started", Some(&json!({"a": 1})), None, "sk-1");
+        let event = append_event(&mut tx, session_id, &first, "sk-1", &mut effects)
+            .await
+            .expect("append");
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.payload, json!({"a": 1}));
+        let replay = append_event(&mut tx, session_id, &first, "sk-1", &mut effects)
+            .await
+            .expect("append again");
+        assert_eq!(replay.id, event.id);
+        let second = chat_kernel::append_event_inputs("raw", None, None, "");
+        let next = append_event(&mut tx, session_id, &second, "", &mut effects)
+            .await
+            .expect("append second");
+        assert_eq!(next.seq, 2);
+        assert_eq!(effects.len(), 2);
+
+        // The assistant placeholder, the turn-scoped probe, the
+        // fallback, and the finalize.
+        let assistant = create_assistant(&mut tx, session_id, "t1")
+            .await
+            .expect("assistant");
+        assert_eq!(assistant.seq, 1);
+        assert_eq!(assistant.status, AgentChatMessageStatus::Streaming);
+        let mut session = locked.session;
+        session.active_turn_id = "t1".to_owned();
+        assert_eq!(
+            active_assistant(&mut tx, &session)
+                .await
+                .expect("probe")
+                .map(|message| message.id),
+            Some(assistant.id)
+        );
+        session.active_turn_id = "elsewhere".to_owned();
+        assert_eq!(
+            active_assistant(&mut tx, &session)
+                .await
+                .expect("fallback")
+                .map(|message| message.id),
+            Some(assistant.id)
+        );
+        assert_eq!(
+            finalize_active(&mut tx, &session, AgentChatMessageStatus::Completed)
+                .await
+                .expect("finalize"),
+            Some(assistant.id)
+        );
+        let completed = orm::agent_chat_message::Entity::find_by_id(assistant.id)
+            .one(&TxConn::new(&mut tx))
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(completed.status, "completed");
+        assert!(completed.completed_at.is_some());
+
+        // Close: the session closes and `chat_closed` appends.
+        let mut effects = Vec::new();
+        execute_close_session(&mut tx, &session, &json!("user_closed"), &mut effects)
+            .await
+            .expect("close");
+        let closed = orm::agent_chat_session::Entity::find_by_id(session_id)
+            .one(&TxConn::new(&mut tx))
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+        assert_eq!(closed.active_turn_id, "");
+
+        // Fail with `close_requested`: the error stores, the session
+        // closes, `chat_failed` + `chat_closed` append.
+        let failing = lock_chat_session(&mut tx, failing_id)
+            .await
+            .expect("lock")
+            .expect("row")
+            .session;
+        let mut effects = Vec::new();
+        execute_fail_session(&mut tx, &failing, &json!("boom"), "detail", &mut effects)
+            .await
+            .expect("fail");
+        let failed = orm::agent_chat_session::Entity::find_by_id(failing_id)
+            .one(&TxConn::new(&mut tx))
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(failed.status, "closed");
+        assert_eq!(failed.error, "detail");
+        let kinds: Vec<String> = orm::agent_chat_event::Entity::find()
+            .select_only()
+            .column(orm::agent_chat_event::Column::Kind)
+            .filter(orm::agent_chat_event::Column::SessionId.eq(failing_id))
+            .order_by_asc(orm::agent_chat_event::Column::Seq)
+            .into_tuple::<String>()
+            .all(&TxConn::new(&mut tx))
+            .await
+            .expect("events");
+        assert_eq!(
+            kinds,
+            vec!["chat_failed".to_owned(), "chat_closed".to_owned()]
+        );
+        assert_eq!(effects.len(), 2);
+        tx.rollback().await.expect("rollback");
     }
 }

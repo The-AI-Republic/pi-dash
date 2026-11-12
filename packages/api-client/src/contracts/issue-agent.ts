@@ -43,6 +43,8 @@ export const DispatchWait = z.object({
   queued_at: nullableDateTime(),
   runner_last_seen_at: nullableDateTime(),
   runs_ahead: z.number(),
+  pause_reason: z.optional(z.nullable(z.string())),
+  expires_at: z.optional(nullableDateTime()),
   releasable: z.boolean(),
 });
 export type DispatchWait = z.infer<typeof DispatchWait>;
@@ -89,7 +91,9 @@ export const AgentRunSummary = z.object({
   id: uuid(),
   status: z.string(),
   executor_kind: z.string(),
-  queue_position: z.nullable(z.number()),
+  // Dropped with the worktree-pool columns (PDASHOSS01-156): current
+  // servers omit it, older ones still send it.
+  queue_position: z.optional(z.nullable(z.number())),
   runner: nullableUuid(),
   runner_name: z.nullable(z.string()),
   /**
@@ -104,6 +108,8 @@ export const AgentRunSummary = z.object({
   assigned_at: nullableDateTime(),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
+  cancel_requested_at: z.optional(nullableDateTime()),
+  cancel_reason: z.optional(z.string()),
   done_payload: z.unknown(),
   error: z.string(),
   error_code: z.string(),

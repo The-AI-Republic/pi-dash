@@ -1,91 +1,42 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Background agent-runtime supervisor (RUN-044) with the per-project
-// enrollment pill (RUN-045). Desktop only: on web and cloud the platform
-// exposes no runtime capability, so this renders nothing and runs no
-// step. Mounted once in the signed-in workspace layout. On desktop it
-// resumes the runtime for the signed account, registers the local chat
-// transport, refreshes the engine setup on a minute cadence plus window
-// focus, and enrolls each opened project while a pill tracks preparing,
-// waiting and runs-locally (or the honest failure).
+// Background agent-runtime supervisor (RUN-044; PIDESKAPP-222/223). Desktop
+// only: on web and cloud the platform exposes no runtime capability, so
+// this renders nothing and runs no step. Mounted once in the signed-in
+// workspace layout. On desktop it resumes the runtime for the signed
+// account (discovery of this computer's Pi Dash daemon is evaluated for
+// it), registers the local chat transport, re-checks the daemon and the
+// engine sign-in on a minute cadence plus window focus, moves older
+// builds' private daemon trees to it (PIDESKAPP-223, design §13), asks
+// once per machine whether it replaces an offline one (§4.10), and hosts
+// the "Set up Pi Dash on this computer" consent dialog.
+//
+// Opening a project enrols nothing and shows no notice: the daemon hosts
+// the engine whether or not the app is open, and a project gets its
+// engine runner the first time a run uses it (design §5, PO-15).
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
-import type { Project } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
 import { useMe } from "../../../core/session/index.js";
-import { agentFailureMessage } from "../../../shared/lib/agentReasons.js";
-import { projectsQueryOptions } from "../../projects/index.js";
-import { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./queries.js";
-import { connectProject, refreshRuntime, resumeRuntime } from "./service.js";
+import { migrateLegacyTrees } from "./desktop-migration.js";
+import { offerReplace } from "./desktop-replace.js";
+import { compatibleHello, currentDiscovery, refreshRuntime, resumeRuntime, signInWorkspace } from "./service.js";
 
-/** Background engine-setup refresh cadence (plus every window focus). */
+/** Background daemon re-check cadence (plus every window focus). */
 export const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
-
-/** Managed-runner availability poll while the pill waits. */
-export const AVAILABILITY_POLL_INTERVAL_MS = 5_000;
-
-export const RUNTIME_PREPARING_TEXT = "Getting the local agent ready…";
-export const RUNTIME_WAITING_TEXT = "Waiting for the local agent to connect…";
-export const RUNTIME_CONNECTED_TEXT = "This project runs on this computer. Keep the app open while the agent runs.";
-
-export interface RuntimeNoticeInput {
-  connectError: string | null;
-  availabilityError: string | null;
-  enrolled: boolean;
-  available: boolean;
-  refreshError: string | null;
-}
-
-/**
- * Pick the pill text: a failed enrollment or poll first (honest errors,
- * never a false claim), then the enrollment phase, with a background
- * refresh failure surfacing once connected.
- */
-export function selectRuntimeNotice(input: RuntimeNoticeInput): string {
-  if (input.connectError) return input.connectError;
-  if (input.availabilityError) return input.availabilityError;
-  if (!input.enrolled) return RUNTIME_PREPARING_TEXT;
-  if (!input.available) return RUNTIME_WAITING_TEXT;
-  return input.refreshError ?? RUNTIME_CONNECTED_TEXT;
-}
-
-/**
- * Notice text for a failed step. A server refusal is rendered through the
- * shared agent vocabulary, so the reason code becomes a plain-language
- * explanation of that specific refusal; anything else keeps its message.
- */
-function errorMessage(error: unknown): string {
-  return agentFailureMessage(error);
-}
-
-/**
- * Resolve a direct work-item link (IDENTIFIER-sequence) to its project by
- * identifier within the workspace collection. Unknown links resolve to
- * nothing and enroll nothing.
- */
-export function matchProjectIdentifier(
-  projects: Array<Project> | undefined,
-  issueKey: string | undefined
-): string | undefined {
-  if (!projects || !issueKey) return undefined;
-  const identifier = issueKey.split("-")[0];
-  return projects.find((project) => project.identifier === identifier)?.id;
-}
 
 export interface RuntimeSupervisorProps {
   /** Registers the local chat transport once the runtime resumes (desktop chat slice). */
   registerChatTransport?: (() => void) | undefined;
-}
-
-interface SupervisorRouteParams {
-  ws?: string | undefined;
-  projectId?: string | undefined;
-  issueKey?: string | undefined;
+  /** The consent dialog host; tests replace it. */
+  setupDialog?: React.ComponentType | undefined;
+  /** The migration-notices host; tests stub it. */
+  noticesDialog?: ((props: { account: string }) => React.ReactElement) | undefined;
+  /** The replace-machine host; tests stub it. */
+  replaceDialog?: React.ComponentType | undefined;
 }
 
 /** Install the local chat transport once its chunk has loaded. */
@@ -96,113 +47,99 @@ function registerLocalChatTransportLazily(): void {
   );
 }
 
+// The consent dialog and its kit controls load on demand, off the
+// first-paint chain; most builds never take this path.
+const LazyDaemonSetupDialog = React.lazy(() =>
+  import("./DaemonSetupDialog.js").then((module) => ({ default: module.DaemonSetupDialog }))
+);
+const LazyMigrationNoticesDialog = React.lazy(() =>
+  import("./MigrationNoticesDialog.js").then((module) => ({ default: module.MigrationNoticesDialog }))
+);
+const LazyReplaceMachineDialog = React.lazy(() =>
+  import("./ReplaceMachineDialog.js").then((module) => ({ default: module.ReplaceMachineDialog }))
+);
+
 export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactElement | null {
-  // The desktop chat transport is loaded on demand: the supervisor itself
-  // rides the first-paint chain, and most builds never take this path.
   const registerChatTransport = props.registerChatTransport ?? registerLocalChatTransportLazily;
+  const SetupDialog = props.setupDialog ?? LazyDaemonSetupDialog;
+  const NoticesDialog = props.noticesDialog ?? LazyMigrationNoticesDialog;
+  const ReplaceDialog = props.replaceDialog ?? LazyReplaceMachineDialog;
   const client = getAppClient();
-  const queryClient = useQueryClient();
   const runtime = platform.agentRuntime;
   const { data: me } = useMe();
   const userId = me?.id;
-  const params = useParams({ strict: false }) as SupervisorRouteParams;
-  const ws = params.ws;
-  const routeProjectId = params.projectId;
-  // Direct work-item links carry no project id: resolve the owning project
-  // by identifier within the workspace collection before enrolling
-  // anything. The shell already loads the collection, so this reuses its
-  // cached row instead of fetching.
-  const issueKey = routeProjectId ? undefined : params.issueKey;
-  const projects = useQuery({
-    ...projectsQueryOptions(client, ws ?? ""),
-    enabled: !!runtime && !!ws && !!issueKey,
-  });
-  const projectId = routeProjectId ?? matchProjectIdentifier(projects.data, issueKey) ?? undefined;
-
-  const [enrolled, setEnrolled] = React.useState(false);
-  const [connectError, setConnectError] = React.useState<string | null>(null);
-  const [refreshError, setRefreshError] = React.useState<string | null>(null);
-
-  const availability = useQuery({
-    ...projectAvailabilityQueryOptions(client, ws ?? "", projectId ?? ""),
-    enabled: !!runtime && enrolled && !!ws && !!projectId,
-    // The poll only waits for the first heartbeat: the interval stops as
-    // soon as the cached row reports the agent available. Leaving the
-    // project stops it via the enabled flag; a focus-triggered reconnect
-    // re-reads the row, restarting the wait when the agent went away.
-    refetchInterval: (query) =>
-      query.state.error || !isManagedRunnerAvailable(query.state.data) ? AVAILABILITY_POLL_INTERVAL_MS : false,
-  });
-  const available = isManagedRunnerAvailable(availability.data);
-  const availabilityError = availability.isError ? errorMessage(availability.error) : null;
-  const notice = selectRuntimeNotice({ connectError, availabilityError, enrolled, available, refreshError });
+  const email = me?.email;
+  // The cloud the app is signed in to, as the daemon's `Hello` names it.
+  const cloudUrl = platform.apiOrigin ?? client.baseUrl;
 
   React.useEffect(() => {
     if (!runtime || !userId) return;
-    resumeRuntime(userId, { client, runtime });
+    resumeRuntime({ id: userId, email, cloudUrl }, { client, runtime });
     registerChatTransport?.();
-    let disposed = false;
-    const refresh = (): void => {
-      void refreshRuntime({ client, runtime }).then(
-        () => {
-          if (!disposed) setRefreshError(null);
-        },
-        (error: unknown) => {
-          if (!disposed) setRefreshError(errorMessage(error));
-        }
-      );
-    };
-    const timer = setInterval(refresh, RUNTIME_REFRESH_INTERVAL_MS);
-    const unsubscribe = platform.onFocusChange((focused) => {
-      if (focused) refresh();
-    });
-    return () => {
-      disposed = true;
-      clearInterval(timer);
-      unsubscribe();
-    };
-  }, [runtime, userId, client, registerChatTransport]);
-
-  React.useEffect(() => {
-    setEnrolled(false);
-    setConnectError(null);
-    if (!runtime || !userId || !ws || !projectId) return;
     let active = true;
-    resumeRuntime(userId, { client, runtime });
-    const reconnect = (): void => {
-      setConnectError(null);
-      void connectProject({ client, runtime, workspaceSlug: ws, projectId }).then(
-        () => {
-          if (!active) return;
-          setEnrolled(true);
-          // Re-read availability immediately, then let the interval carry
-          // on. A focus-triggered reconnect restarts the wait when the
-          // agent went away, since the interval follows the cached row.
-          void queryClient.invalidateQueries({ queryKey: runtimeKeys.projectAvailability(ws, projectId) });
-        },
-        (error: unknown) => {
-          if (active) setConnectError(errorMessage(error));
+    let migrated = false;
+    const askedFor = new Set<string>();
+    const refresh = async (): Promise<void> => {
+      await refreshRuntime({ client, runtime }).catch(() => undefined);
+      if (!active) return;
+      if (!migrated) {
+        const cli = platform.cliSetup;
+        const outcome = await migrateLegacyTrees(userId, {
+          runtime,
+          client,
+          cli,
+          cloudUrl,
+          discovery: () => currentDiscovery(),
+          signInWorkspace: (workspaceSlug: string) => signInWorkspace({ client, runtime, cli, workspaceSlug }),
+        }).catch(() => ({ status: "nothing_to_do" }) as const);
+        // Blocked (no daemon yet, another account): nothing happened, so try
+        // again on the next refresh — set-up may finish meanwhile. A tree
+        // that failed half-way waits for the next launch rather than
+        // retrying every minute.
+        if (outcome.status !== "blocked") migrated = true;
+        if (outcome.status === "done" && outcome.failed.length) {
+          console.warn("Moving to Pi Dash on this computer did not finish for", outcome.failed);
         }
-      );
+      }
+      // "Is this <label>? Replace it": once per launch for each machine the
+      // daemon is signed in as (a fresh sign-in is a new machine id).
+      const machineId = compatibleHello(currentDiscovery())?.machine_id;
+      if (!active || !migrated || !machineId || askedFor.has(machineId)) return;
+      askedFor.add(machineId);
+      // A failed lookup (offline) is not an answer: ask again next refresh.
+      await offerReplace(userId, {
+        runtime,
+        client,
+        cli: platform.cliSetup,
+        cloudUrl,
+        discovery: () => currentDiscovery(),
+        signInWorkspace: (workspaceSlug: string) =>
+          signInWorkspace({ client, runtime, cli: platform.cliSetup, workspaceSlug }),
+      }).catch(() => {
+        askedFor.delete(machineId);
+      });
     };
-    reconnect();
+    const tick = (): void => {
+      void refresh().catch(() => undefined);
+    };
+    tick();
+    const timer = setInterval(tick, RUNTIME_REFRESH_INTERVAL_MS);
     const unsubscribe = platform.onFocusChange((focused) => {
-      if (focused) reconnect();
+      if (focused) tick();
     });
     return () => {
       active = false;
+      clearInterval(timer);
       unsubscribe();
     };
-  }, [runtime, userId, ws, projectId, client, queryClient]);
+  }, [runtime, userId, email, cloudUrl, client, registerChatTransport]);
 
-  if (!runtime) return null;
-  return userId && projectId ? (
-    <div
-      role="status"
-      data-testid="runtime-notice"
-      className="text-caption fixed bottom-(--space-4) left-1/2 z-40 w-max max-w-[min(36rem,92vw)] -translate-x-1/2 rounded-(--radius-full) border border-(--border) bg-(--surface) px-(--space-6) py-(--space-2) text-(--text)"
-    >
-      {notice}
-    </div>
-  ) : null;
+  if (!runtime || !userId) return null;
+  return (
+    <React.Suspense fallback={null}>
+      <SetupDialog />
+      <NoticesDialog account={userId} />
+      <ReplaceDialog />
+    </React.Suspense>
+  );
 }

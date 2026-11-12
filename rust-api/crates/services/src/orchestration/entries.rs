@@ -236,6 +236,31 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
     agent_default_interval_seconds, agent_review_default_interval_seconds, \
     agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
+/// SeaORM form of [`CLOCK_POLICY_SQL`]: the project's
+/// `(agent_ticking_enabled, agent_default_max_ticks,
+/// agent_default_interval_seconds, agent_review_default_interval_seconds,
+/// agent_test_default_interval_seconds)`, no soft-delete guard.
+pub async fn clock_policy(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<(bool, i32, i32, i32, i32)>, sea_orm::DbErr> {
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+        ])
+        .filter(projects::Column::Id.eq(project_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
 /// The scheduler full-row INSERT (`AgentRun.objects.create`,
 /// `service.py:953-965`): the same 36 non-generated columns in model
 /// order as L6's `RUN_INSERT_SQL`, with the scheduler VALUES shape —
@@ -512,6 +537,18 @@ pub trait PreflightSeam {
         pod_id: Uuid,
         triggered_by: &str,
     ) -> Result<bool, CreationError>;
+
+    /// The `pod_once` preflight (PDASHOSS01-350, design §23.3): the
+    /// authorization (`pod_once_not_allowed` / `pod_once_not_applicable`)
+    /// and the pod-branch availability (`no_eligible_runner_in_pod`).
+    /// `None` means proceed; `Some(code)` is the refusal reason and
+    /// nothing is created (and nothing bounces).
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, CreationError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +608,10 @@ pub struct TransitionRequest {
     pub jitter_secs: f64,
     /// The crum user for the ticker create-shape, or `None` on system paths.
     pub created_by: Option<Uuid>,
+    /// One-shot pod run (PDASHOSS01-350, design §23.3): the run goes to
+    /// the pod, unpinned, for this run only; the issue stays dedicated.
+    /// `false` everywhere except the assistant-tool dispatch surface.
+    pub pod_once: bool,
 }
 
 /// One `handle_issue_comment` call (`service.py:349-440`).
@@ -608,6 +649,12 @@ pub struct FireRequest {
     pub jitter_secs: f64,
     /// The crum user for the ticker create-shape, or `None` on system paths.
     pub created_by: Option<Uuid>,
+    /// One-shot pod run (design §23.3, PIDASHCONV-1723): when `true` the
+    /// transition's run is created unpinned in the pod. Threaded from
+    /// `FireSpec::pod_once` (the MCP `pin:"pod_once"` on the state
+    /// move) to `TransitionRequest::pod_once`; `false` on the sync
+    /// path.
+    pub pod_once: bool,
 }
 
 /// Lock the ticker, apply one clock event, and persist the write — the
@@ -731,6 +778,44 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     }
 
+    // Refusal before reconcile (§11.2, §23.3): a person's state move
+    // into a ticking state on an unavailable or usage-excluded
+    // dedicated runner is refused with nothing queued and the clock
+    // untouched. The state change itself stands (the caller already
+    // saved it); no run is created. An agent move (`moved_by_run`
+    // set) is automatic.
+    let creator = match req.actor {
+        Some(actor) => Some(actor),
+        None => resolve_fallback_creator(seam, req.issue_id).await?,
+    };
+    if req.moved_by_run.is_none() {
+        let creator = creator.unwrap_or_else(Uuid::nil);
+        let pin = CreationSeam::dedicated_pin(
+            seam,
+            &crate::orchestration::creation::DedicatedPinArgs {
+                issue_id: req.issue_id,
+                parent: None,
+                pod_id: None,
+                fresh_session: false,
+                creator_id: Some(creator),
+                trigger: AgentRunTrigger::StateTransition.value(),
+                pod_once: req.pod_once,
+                actor_id: creator,
+                now: req.now,
+            },
+        )
+        .await?;
+        if let Some(code) = pin.refusal {
+            if let Some(comment) = pin.refusal_comment {
+                CreationSeam::insert_system_comment(seam, &comment).await?;
+            }
+            return Ok(TransitionOutcome {
+                created_run: None,
+                reason: code.to_owned(),
+            });
+        }
+    }
+
     let event = if from_ticking {
         TickerEvent::moved_stage(
             req.moved_by_run,
@@ -802,10 +887,6 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
     let (parent, fresh_session) =
         parent_for_next_run(seam, req.issue_id, to_state_id, Some(cross_stage)).await?;
 
-    let creator = match req.actor {
-        Some(actor) => Some(actor),
-        None => resolve_fallback_creator(seam, req.issue_id).await?,
-    };
     let Some(creator) = creator else {
         return Ok(TransitionOutcome {
             created_run: None,
@@ -821,18 +902,30 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     };
 
-    if !preflight
-        .preflight_eligibility_or_bounce(
-            req.issue_id,
-            creator,
-            pod,
-            AgentRunTrigger::StateTransition.value(),
-        )
+    if !req.pod_once {
+        if !preflight
+            .preflight_eligibility_or_bounce(
+                req.issue_id,
+                creator,
+                pod,
+                AgentRunTrigger::StateTransition.value(),
+            )
+            .await?
+        {
+            return Ok(TransitionOutcome {
+                created_run: None,
+                reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
+            });
+        }
+    } else if let Some(code) = preflight
+        .pod_once_preflight(req.issue_id, creator, pod)
         .await?
     {
+        // §23.3: refused with the code, nothing queued, nothing bounced;
+        // the move itself already stands.
         return Ok(TransitionOutcome {
             created_run: None,
-            reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
+            reason: code,
         });
     }
 
@@ -843,12 +936,19 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
             parent,
             creator_id: creator,
             pod_id: pod,
+            pod_once: req.pod_once,
             fresh_session,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: req.now,
         },
     )
     .await?;
+    if req.pod_once && outcome.created_run.is_some() {
+        let comment =
+            CreationSeam::pod_once_started_comment(seam, req.issue_id, pod, creator, req.now)
+                .await?;
+        CreationSeam::insert_system_comment(seam, &comment).await?;
+    }
     Ok(outcome)
 }
 
@@ -919,6 +1019,35 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
         });
     };
 
+    // Refusal before reconcile (§11.2): the comment is saved; the
+    // clock is never armed and one system comment explains why no
+    // run started.
+    let pin = CreationSeam::dedicated_pin(
+        seam,
+        &crate::orchestration::creation::DedicatedPinArgs {
+            issue_id: issue.id,
+            parent: None,
+            pod_id: None,
+            fresh_session: false,
+            creator_id: Some(actor_id),
+            trigger: AgentRunTrigger::CommentAndRun.value(),
+            pod_once: false,
+            actor_id,
+            now: req.now,
+        },
+    )
+    .await?;
+    if let Some(code) = pin.refusal {
+        if let Some(comment) = pin.refusal_comment {
+            CreationSeam::insert_system_comment(seam, &comment).await?;
+        }
+        return Ok(ContinuationOutcome {
+            created_run: None,
+            coalesced_into: None,
+            reason: code.to_owned(),
+        });
+    }
+
     // A human comment is engagement: one free run. If a run is in
     // flight, the clock queues the follow-up and fires it as soon as
     // the issue is free; otherwise re-time the clock and dispatch now —
@@ -971,6 +1100,7 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
             parent: prior,
             creator_id: actor_id,
             pod_id: pod,
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: req.now,
         },
@@ -1312,6 +1442,7 @@ pub fn fire_transition_request(
         now: req.now,
         jitter_secs: req.jitter_secs,
         created_by: req.created_by,
+        pod_once: req.pod_once,
     }
 }
 
@@ -1378,9 +1509,12 @@ mod tests {
     use crate::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use crate::orchestration::creation::{
         AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, IssueView, NewAgentRun,
-        PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView,
+        NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView,
+        StateView,
     };
-    use crate::orchestration::creation::{CreationError, CreationSeam, FinalizeAgentRunSeam};
+    use crate::orchestration::creation::{
+        CreationError, CreationSeam, DedicatedPinArgs, FinalizeAgentRunSeam,
+    };
     use crate::prompting::composer::OverrideRow;
     use crate::prompting::{composer, context};
 
@@ -1438,6 +1572,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x40)),
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -1496,6 +1631,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status,
@@ -1662,6 +1798,9 @@ mod tests {
         rollbacks: usize,
         policies: HashMap<Uuid, ProjectClockPolicy>,
         bindings: HashMap<Uuid, BindingView>,
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
         schedulers: HashMap<Uuid, SchedulerView>,
         workspaces: HashMap<Uuid, WorkspaceView>,
         role_facts: HashMap<Uuid, (bool, bool, bool, bool)>,
@@ -1850,6 +1989,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: row.pin_kind.clone(),
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
@@ -1929,6 +2069,64 @@ mod tests {
 
         fn extra_toolsets_schema_tool(&self) -> String {
             String::new()
+        }
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
         }
     }
 
@@ -2107,6 +2305,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: String::new(),
                 parent_run_id: None,
                 work_item_id: None,
                 status: AgentRunStatus::Queued,
@@ -2190,8 +2389,19 @@ mod tests {
         ) -> Result<bool, CreationError> {
             self.calls
                 .push((issue_id, creator_id, pod_id, triggered_by.to_owned()));
-            self.verdict
-                .ok_or_else(|| CreationError::Db("preflight not scripted".to_owned()))
+            match self.verdict {
+                Some(v) => Ok(v),
+                None => panic!("preflight consulted outside its script"),
+            }
+        }
+
+        async fn pod_once_preflight(
+            &mut self,
+            _issue_id: Uuid,
+            _creator_id: Uuid,
+            _pod_id: Uuid,
+        ) -> Result<Option<String>, CreationError> {
+            Ok(None)
         }
     }
 
@@ -2212,6 +2422,7 @@ mod tests {
             now,
             jitter_secs: 0.0,
             created_by: None,
+            pod_once: false,
         }
     }
 
@@ -2890,8 +3101,12 @@ mod tests {
                 id: uid(0x55),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(frozen_now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))
@@ -3620,6 +3835,8 @@ mod tests {
             prev_state_id: prev,
             current_state_id: current,
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now,
             jitter_secs: 0.0,
@@ -3985,12 +4202,14 @@ mod tests {
 
     #[test]
     fn scheduler_insert_shares_l6_column_order() {
-        // Same 38 non-generated columns in model order as RUN_INSERT_SQL;
-        // only the VALUES shape differs.
+        // Same non-generated columns in model order as RUN_INSERT_SQL,
+        // except the folded §9.1 `pin_kind` (the scheduler builds no pin;
+        // Django's scheduler-created rows default it to ""), only the
+        // VALUES shape differs.
         let head = |sql: &str| sql.split(") VALUES").next().expect("head").to_owned();
         assert_eq!(
             head(SCHEDULER_RUN_INSERT_SQL),
-            head(crate::orchestration::creation::RUN_INSERT_SQL)
+            head(crate::orchestration::creation::RUN_INSERT_SQL).replace(", pin_kind", "")
         );
         let values = SCHEDULER_RUN_INSERT_SQL
             .split("VALUES")

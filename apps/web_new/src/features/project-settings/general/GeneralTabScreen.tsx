@@ -232,13 +232,7 @@ function GeneralTabBody({
         onChange={(repoUrl) => update({ repoUrl })}
         onBind={(repoUrl) => bind.mutate({ repoUrl })}
       />
-      <ExecutionSection
-        values={values}
-        errors={errors}
-        disabled={!canEdit}
-        executorOptions={stored.agent_executor_options}
-        onChange={update}
-      />
+      <ExecutionSection values={values} errors={errors} disabled={!canEdit} onChange={update} />
       {canEdit ? (
         <GeneralDangerZone workspaceSlug={workspaceSlug} projectId={projectId} projectName={stored.name} />
       ) : null}

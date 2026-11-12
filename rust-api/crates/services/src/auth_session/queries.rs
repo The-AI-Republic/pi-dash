@@ -437,9 +437,13 @@ pub fn project_member_bulk_create_sql(table: &str, rows: usize) -> String {
     format!("INSERT INTO \"{table}\" (\"project_id\", \"workspace_id\", \"member_id\", \"role\", \"created_by_id\") VALUES {values} ON CONFLICT DO NOTHING")
 }
 
-/// Invite deletes (`:90-91`): both querysets deleted after the joins.
+/// Invite soft-deletes (`:90-91`): the default manager's `delete()`
+/// stamps `deleted_at` instead of removing rows
+/// (`SoftDeletionQuerySet.delete`, `db/mixins.py:48-53`).
 pub fn invite_delete_sql(table: &str) -> String {
-    format!("DELETE FROM \"{table}\" WHERE email = $1 AND accepted = TRUE")
+    format!(
+        "UPDATE \"{table}\" SET \"deleted_at\" = $1 WHERE email = $2 AND accepted = TRUE AND \"deleted_at\" IS NULL"
+    )
 }
 
 /// `invalidate_cache_directly` call shape (`:39-44`, fixture-pinned).
@@ -722,7 +726,7 @@ mod tests {
         assert!(project_member_bulk_create_sql(PROJECT_MEMBER_TABLE, 1).contains("project_id"));
         assert_eq!(
             invite_delete_sql(WORKSPACE_INVITE_TABLE),
-            "DELETE FROM \"workspace_member_invites\" WHERE email = $1 AND accepted = TRUE"
+            "UPDATE \"workspace_member_invites\" SET \"deleted_at\" = $1 WHERE email = $2 AND accepted = TRUE AND \"deleted_at\" IS NULL"
         );
         // Call sequences replay the fixture.
         assert_eq!(

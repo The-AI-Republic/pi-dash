@@ -928,6 +928,21 @@ export async function issueFacts(
   });
 }
 
+/** Browse key (`IDENT-seq`) for one issue by id; archived rows included (NEWPIDASH-141). */
+export async function issueBrowseKey(
+  workspaceSlug: string,
+  projectId: string,
+  projectIdentifier: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const row = await fetchIssue(workspaceSlug, projectId, issueId, sessionCookie, apiBase);
+  if (typeof row["sequence_id"] !== "number")
+    throw new Error(`[parity] issue ${issueId} carried no numeric sequence_id.`);
+  return `${projectIdentifier}-${row["sequence_id"]}`;
+}
+
 /** `IDENT-seq` (e.g. `PAR-1`) for the named issue; throws when absent. */
 export async function issueSeqForName(
   workspaceSlug: string,
@@ -5404,6 +5419,23 @@ export async function serverDeleteState(
   );
   if (!res.ok && res.status !== 204) throw new Error(`[parity] state delete failed with HTTP ${res.status}.`);
 }
+/** Patch a project state (name, group, color, description) through the API. */
+export async function serverPatchState(
+  workspaceSlug: string,
+  projectId: string,
+  stateId: string,
+  patch: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/${stateId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] state patch failed with HTTP ${res.status}.`);
+}
 /** Single-issue read through the public REST API. */
 export async function serverIssue(
   workspaceSlug: string,
@@ -5433,6 +5465,7 @@ export async function serverIssue(
   return {
     id: str("id"),
     name: str("name"),
+    is_synced: row["is_synced"] === true,
     state_id: str("state_id"),
     priority: strOrNull("priority"),
     assignee_ids: strArray("assignee_ids"),
@@ -5960,6 +5993,7 @@ export interface ParityServerIssue {
 export interface ParityServerIssueDetail {
   id: string;
   name: string;
+  is_synced: boolean;
   state_id: string;
   priority: string | null;
   assignee_ids: string[];
@@ -17342,6 +17376,10 @@ export async function serverPlantRepositoryBinding(
     `repo, _ = GitRepository.objects.get_or_create(provider="github", host_url="https://github.com", namespace="parity", name="parity-seed", full_name="parity/parity-seed", defaults={"created_by_id": proj.created_by_id})\n` +
     `binding, _ = GitRepositoryBinding.objects.get_or_create(repository=repo, project=proj, defaults={"workspace_id": ws.id, "provider_account": account, "actor_id": proj.created_by_id, "created_by_id": proj.created_by_id})\n` +
     `issue = Issue.objects.get(id=${JSON.stringify(issueId)}, project=proj)\n` +
+    `if not issue.external_source:\n` +
+    `    issue.external_source = "github"\n` +
+    `    issue.external_id = "3931"\n` +
+    `    issue.save(update_fields=["external_source", "external_id"])\n` +
     `GitIssueSync.objects.get_or_create(binding=binding, issue=issue, defaults={"workspace_id": ws.id, "project_id": proj.id, "provider": "github", "external_iid": "3931", "created_by_id": proj.created_by_id})\n` +
     `print("PARITY_BINDING:" + str(binding.id))\n`;
   const out = await apiShell(python);

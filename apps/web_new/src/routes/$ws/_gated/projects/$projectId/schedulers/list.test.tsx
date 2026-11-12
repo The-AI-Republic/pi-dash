@@ -3,11 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project schedulers list route composition (parity/specs/agents.md §2–§3,
-// AGT-007/010/012): the route reads the caller's project role and workspace
-// standing, hands the install dialog its permission flags and the list of
-// already-installed definitions, opens the dialog from the list header,
-// navigates a row to its install detail, and opens the edit and uninstall
-// dialogs from the row actions without navigating.
+// AGT-007/012): the route hands the list no creation trigger (the section
+// tab row owns "New Scheduler", AGT-010), navigates a row to its install
+// detail, and opens the edit and uninstall dialogs from the row actions
+// without navigating.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SchedulerBinding } from "@pidash/api-client";
@@ -17,9 +16,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { navigate, hooks } = vi.hoisted(() => ({
   navigate: vi.fn(),
   hooks: {
-    permissions: { isAdmin: false },
-    roles: { isSuccess: true, isPending: false, data: {} as Record<string, number> },
-    membership: { isSuccess: true, isPending: false },
     bindings: { data: [] as SchedulerBinding[] | undefined, refetch: vi.fn() },
   },
 }));
@@ -28,17 +24,6 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return { ...original, useNavigate: () => navigate };
 });
-vi.mock("../../../../../../core/session/index.js", () => ({
-  ROLE_ADMIN: 20,
-  ROLE_MEMBER: 15,
-  ROLE_GUEST: 5,
-  useWorkspace: () => ({ workspace: { slug: "acme", name: "Acme" } }),
-  usePermissions: () => hooks.permissions,
-}));
-vi.mock("../../../../../../features/auth/queries.js", () => ({
-  useProjectRoles: () => hooks.roles,
-  useWorkspaceMembership: () => hooks.membership,
-}));
 vi.mock("../../../../../../features/schedulers/installData.js", () => ({
   useSchedulerBindings: () => hooks.bindings,
 }));
@@ -49,15 +34,17 @@ vi.mock("../../../../../../features/schedulers/InstallsList.js", () => ({
     onEditInstall,
     onUninstallInstall,
   }: {
-    onCreate: () => void;
+    onCreate?: (() => void) | undefined;
     onOpenInstall: (binding: SchedulerBinding) => void;
     onEditInstall: (binding: SchedulerBinding) => void;
     onUninstallInstall: (binding: SchedulerBinding) => void;
   }) => (
     <div>
-      <button type="button" onClick={onCreate}>
-        New Scheduler
-      </button>
+      {onCreate === undefined ? null : (
+        <button type="button" onClick={onCreate}>
+          New Scheduler
+        </button>
+      )}
       <button type="button" onClick={() => onOpenInstall(binding())}>
         Open install
       </button>
@@ -84,34 +71,6 @@ vi.mock("../../../../../../features/schedulers/UninstallInstallDialog.js", () =>
     <div data-testid="uninstall-dialog" data-binding={binding?.id ?? ""} />
   ),
 }));
-vi.mock("../../../../../../features/schedulers/InstallDialog.js", () => ({
-  InstallDialog: ({
-    open,
-    canInstall,
-    canAuthor,
-    installedSchedulerIds,
-    onInstalled,
-  }: {
-    open: boolean;
-    canInstall: boolean;
-    canAuthor: boolean;
-    installedSchedulerIds: string[];
-    onInstalled: () => void;
-  }) => (
-    <div
-      data-testid="install-dialog"
-      data-open={open}
-      data-can-install={canInstall}
-      data-can-author={canAuthor}
-      data-installed={installedSchedulerIds.join(",")}
-    >
-      <button type="button" onClick={onInstalled}>
-        Settle list
-      </button>
-    </div>
-  ),
-}));
-
 import { Route } from "./list.js";
 
 const PARAMS = { ws: "acme", projectId: "p1" };
@@ -122,9 +81,6 @@ function binding(): SchedulerBinding {
 
 afterEach(() => {
   vi.clearAllMocks();
-  hooks.permissions = { isAdmin: false };
-  hooks.roles = { isSuccess: true, isPending: false, data: {} };
-  hooks.membership = { isSuccess: true, isPending: false };
   hooks.bindings = { data: [], refetch: vi.fn() };
 });
 
@@ -136,57 +92,11 @@ function renderRoute(): void {
 }
 
 describe("schedulers list route", () => {
-  it("enables management for a project admin in a joined workspace", async () => {
-    hooks.roles = { isSuccess: true, isPending: false, data: { p1: 20 } };
-    hooks.permissions = { isAdmin: true };
+  it("hands the list no creation trigger: the section tab row owns New Scheduler", () => {
     hooks.bindings = { data: [binding()], refetch: vi.fn() };
-    const user = userEvent.setup();
     renderRoute();
-    const dialog = screen.getByTestId("install-dialog");
-    expect(dialog).toHaveAttribute("data-can-install", "true");
-    expect(dialog).toHaveAttribute("data-can-author", "true");
-    expect(dialog).toHaveAttribute("data-installed", "s9");
-
-    await user.click(screen.getByRole("button", { name: "New Scheduler" }));
-    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-open", "true");
-  });
-
-  it("treats an unsettled install list as empty", () => {
-    hooks.roles = { isSuccess: true, isPending: false, data: { p1: 20 } };
-    hooks.bindings = { data: undefined, refetch: vi.fn() };
-    renderRoute();
-    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-installed", "");
-  });
-
-  it("keeps a plain member read-only and non-authoring", () => {
-    hooks.roles = { isSuccess: true, isPending: false, data: { p1: 15 } };
-    renderRoute();
-    const dialog = screen.getByTestId("install-dialog");
-    expect(dialog).toHaveAttribute("data-can-install", "false");
-    expect(dialog).toHaveAttribute("data-can-author", "false");
-  });
-
-  it("refuses management while the standing reads are missing or failed", () => {
-    hooks.roles = { isSuccess: true, isPending: false, data: { p1: 20 } };
-    hooks.membership = { isSuccess: false, isPending: false };
-    renderRoute();
-    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-can-install", "false");
-  });
-
-  it("gives a workspace admin authoring rights without project management", () => {
-    hooks.permissions = { isAdmin: true };
-    hooks.roles = { isSuccess: true, isPending: false, data: { p1: 15 } };
-    renderRoute();
-    const dialog = screen.getByTestId("install-dialog");
-    expect(dialog).toHaveAttribute("data-can-install", "false");
-    expect(dialog).toHaveAttribute("data-can-author", "true");
-  });
-
-  it("settles the install list after a successful install", async () => {
-    const user = userEvent.setup();
-    renderRoute();
-    await user.click(screen.getByRole("button", { name: "Settle list" }));
-    expect(hooks.bindings.refetch).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "New Scheduler" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("install-dialog")).not.toBeInTheDocument();
   });
 
   it("opens and closes the edit dialog from a row, settling the list on save", async () => {

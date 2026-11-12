@@ -17,41 +17,6 @@ import { listBoundCommands, type PidashCommand } from "../commands/index.js";
 import { SequenceBadge } from "./paletteRows.js";
 import { useShortcutsDialog } from "./shortcutsDialogStore.js";
 
-/** True on macOS, where the mod key renders as ⌘. */
-export function isMacPlatform(): boolean {
-  if (typeof navigator === "undefined" || typeof navigator.platform !== "string") return false;
-  return navigator.platform.toUpperCase().includes("MAC");
-}
-
-/**
- * Display glyphs for one chord ("mod+shift+c" → ["⌘", "⇧", "C"] on macOS,
- * ["Ctrl", "Shift", "C"] elsewhere). Unknown parts render uppercased, so a
- * malformed chord still shows something instead of vanishing (SHELL-094).
- */
-export function formatChordKeys(shortcut: string, mac: boolean): string[] {
-  return shortcut.split("+").map((part) => {
-    const raw = part.trim();
-    const key = raw.toLowerCase();
-    switch (key) {
-      case "mod":
-      case "meta":
-      case "cmd":
-        return mac ? "⌘" : "Ctrl";
-      case "ctrl":
-        return mac ? "⌃" : "Ctrl";
-      case "alt":
-      case "option":
-        return mac ? "⌥" : "Alt";
-      case "shift":
-        return mac ? "⇧" : "Shift";
-      case "":
-        return "Space";
-      default:
-        return raw.toUpperCase();
-    }
-  });
-}
-
 /** One bound-command family in the dialog. */
 export interface ShortcutGroup {
   section: string;
@@ -88,7 +53,6 @@ export function ShortcutsDialog(): React.ReactElement {
   }, [open]);
   // Fresh snapshot per opening: registrations change as screens mount.
   const groups = React.useMemo(() => (open ? groupBoundCommands(listBoundCommands(), filter) : []), [open, filter]);
-  const mac = isMacPlatform();
 
   return (
     <Dialog title="Keyboard shortcuts" open={open} onOpenChange={(next) => (next ? undefined : closeShortcuts())}>
@@ -117,7 +81,7 @@ export function ShortcutsDialog(): React.ReactElement {
                     <span className="min-w-0 flex-1 truncate">{command.title}</span>
                     <span className="flex shrink-0 items-center gap-(--space-2)">
                       {command.sequence ? <SequenceBadge sequence={command.sequence} /> : null}
-                      {command.shortcut ? <Kbd keys={formatChordKeys(command.shortcut, mac)} /> : null}
+                      {command.shortcut ? <Kbd keys={command.shortcut.split("+")} /> : null}
                     </span>
                   </li>
                 ))}

@@ -166,6 +166,41 @@ describe("parsePageDocument", () => {
 });
 
 describe("asset URLs", () => {
+  it("prefixes bare ids with the scope API origin when one is given", () => {
+    const scope = { ...SCOPE, apiBaseUrl: "https://api.test" };
+    expect(pageAssetViewHref("asset-9", scope)).toBe(
+      "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
+    );
+    expect(pageAssetDownloadHref("asset-9", scope)).toBe(
+      "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/download/asset-9/"
+    );
+  });
+
+  it("prefixes a rooted asset source with the scope API origin", () => {
+    const scope = { ...SCOPE, apiBaseUrl: "https://api.test" };
+    expect(pageAssetViewHref("/api/assets/v2/workspaces/acme/projects/project-1/asset-9/", scope)).toBe(
+      "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
+    );
+    expect(pageAssetDownloadHref("/api/assets/v2/workspaces/acme/projects/project-1/asset-9/", scope)).toBe(
+      "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/download/asset-9/"
+    );
+  });
+
+  it("leaves other rooted paths alone even with an API origin", () => {
+    const scope = { ...SCOPE, apiBaseUrl: "https://api.test" };
+    expect(pageAssetViewHref("/images/hill.png", scope)).toBe("/images/hill.png");
+    expect(pageAssetDownloadHref("/images/hill.png", scope)).toBe("/images/hill.png");
+  });
+
+  it("paints pane thumbnails from the API origin when the scope carries one", () => {
+    const scope = { ...SCOPE, apiBaseUrl: "https://api.test" };
+    const doc = parsePageDocument('<image-component src="asset-9" alt="Chart"></image-component>', scope);
+    expect(doc.assets[0]?.thumbnailHref).toBe(
+      "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
+    );
+    expect(doc.assets[0]?.viewHref).toBe("https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-9/");
+  });
+
   it("builds project view and download paths for a bare asset id", () => {
     expect(pageAssetViewHref("asset-9", SCOPE)).toBe("/api/assets/v2/workspaces/acme/projects/project-1/asset-9/");
     expect(pageAssetDownloadHref("asset-9", SCOPE)).toBe(

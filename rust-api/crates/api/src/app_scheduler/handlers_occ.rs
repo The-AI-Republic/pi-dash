@@ -63,9 +63,15 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
 
+use pidash_db::entity::{scheduler_bindings, schedulers};
 use pidash_jobs::tasks_ticker::fire_binding::coerce_iso_datetimes;
 use pidash_jobs::tasks_ticker::rrule::occurrences_between;
 use pidash_services::app_scheduler::occurrences::{self, FutureBindingRow, Occurrence, PastRunRow};
+use sea_orm::sea_query::{Alias, Expr, JoinType, Order, Query as SeaQuery, SelectStatement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
+    QueryResult, QuerySelect, RelationTrait,
+};
 
 use super::gate::{self, Gate};
 use crate::app_issues::{query_last, QueryMap};
@@ -120,12 +126,12 @@ impl IntoResponse for Denial {
 // Decode rows (services structs gain no sqlx impls; the handler decodes)
 // ---------------------------------------------------------------------------
 
-/// Decode row for [`occurrences::future_bindings_sql`]: field names match
-/// the SELECT aliases. Every column is NOT NULL per the model
+/// Decode row for the future-bindings [`Select`] below: field names match
+/// the `column_as` aliases. Every column is NOT NULL per the model
 /// (`db/models/scheduler.py`: `dtstart`/`tzid`/`rrule`/`rdates`/`exdates`
 /// carry no `null=True`; empty strings fall back in the services layer —
 /// Python `or`), so strict types are exact.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct FutureBindingRecord {
     id: uuid::Uuid,
     dtstart: DateTime<Utc>,
@@ -154,12 +160,12 @@ impl FutureBindingRecord {
     }
 }
 
-/// Decode row for [`occurrences::past_runs_sql`]: field names match the
-/// SELECT aliases. `status` is NOT NULL (`runner/models.py`, default
-/// QUEUED); `started_at` is nullable but the range predicates exclude
-/// NULLs (a decode failure is the unreachable 500, as in the services
-/// layer); the filter excludes NULL bindings.
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// Decode row for the past-runs statement below: keys match the `expr_as`
+/// aliases. `status` is NOT NULL (`runner/models.py`, default QUEUED);
+/// `started_at` is nullable but the range predicates exclude NULLs (a
+/// decode failure is the unreachable 500, as in the services layer); the
+/// filter excludes NULL bindings.
+#[derive(Debug, Clone)]
 struct PastRunRecord {
     run_id: uuid::Uuid,
     binding_id: uuid::Uuid,
@@ -248,17 +254,13 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = future_resolve_select(slug, &upper)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 /// `get_object_or_404(Project, pk=project_id, workspace__slug=slug)`
@@ -268,18 +270,179 @@ async fn project_exists(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = project_exists_select(slug, *project_id)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
+}
+
+/// Project id by workspace slug + identifier (live rows only), as a
+/// `Select` so statement-shape tests pin the join/filter without a
+/// database. Identical shape to `mod.rs`'s `resolve_project_id_select`;
+/// kept local because the denial rendering differs (this handler
+/// answers `Denial`, mod answers `Response`).
+fn future_resolve_select(
+    slug: &str,
+    upper: &str,
+) -> sea_orm::Select<pidash_db::entity::projects::Entity> {
+    use pidash_db::entity::{projects, workspaces};
+    projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([projects::Column::Id])
+}
+
+/// [`project_exists`] as a `Select`: one live project row in the named
+/// workspace. The `INNER JOIN` on `workspaces` has no `deleted_at`
+/// predicate — exactly the old SQL.
+fn project_exists_select(
+    slug: &str,
+    project_id: uuid::Uuid,
+) -> sea_orm::Select<pidash_db::entity::projects::Entity> {
+    use pidash_db::entity::{projects, workspaces};
+    projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([projects::Column::Id])
+        .limit(1)
+}
+
+/// Future bindings (`occurrences.py`): enabled bindings of enabled
+/// schedulers in the named workspace + project, newest first (the old
+/// `occurrences::future_bindings_sql` shape, kept exact: every join is
+/// `INNER`, `scheduler_color` is the scheduler's stored value).
+/// `select_only` + `column_as` + `into_model` per orm-migration.md
+/// §3.2 — every output name is unique by construction.
+fn future_bindings_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+) -> sea_orm::Select<scheduler_bindings::Entity> {
+    use pidash_db::entity::{projects, workspaces};
+    scheduler_bindings::Entity::find()
+        .select_only()
+        .columns([
+            scheduler_bindings::Column::Id,
+            scheduler_bindings::Column::Dtstart,
+            scheduler_bindings::Column::Tzid,
+            scheduler_bindings::Column::Rrule,
+            scheduler_bindings::Column::Rdates,
+            scheduler_bindings::Column::Exdates,
+            scheduler_bindings::Column::SchedulerId,
+        ])
+        .column_as(schedulers::Column::Name, "scheduler_name")
+        .column_as(schedulers::Column::Color, "scheduler_color")
+        .join(
+            JoinType::InnerJoin,
+            scheduler_bindings::Relation::Schedulers.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            scheduler_bindings::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            scheduler_bindings::Relation::Workspaces.def(),
+        )
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::Enabled.eq(true))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(scheduler_bindings::Column::ProjectId.eq(*project_id))
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::IsEnabled.eq(true))
+        .filter(projects::Column::DeletedAt.is_null())
+        .order_by_desc(scheduler_bindings::Column::CreatedAt)
+}
+
+/// Past runs (`occurrences.py`): runs of bindings in the named workspace
+/// + project inside the window, oldest first.
+///
+/// The old `occurrences::past_runs_sql` shape is kept exact: the workspace
+/// join is on `agent_run.workspace_id`, and NULL bindings and out-of-window
+/// rows are excluded.
+///
+/// Built with sea-query because `agent_run` carries no `Relation` to
+/// `scheduler_bindings`/`workspaces` (adding one edits an out-of-scope
+/// entity file). sea-query builders are not raw SQL (orm-migration.md
+/// §2); the statement shape is pinned by a unit test the same way.
+fn past_runs_stmt(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> SelectStatement {
+    let mut query = SeaQuery::select();
+    query
+        .expr_as(Expr::col(("agent_run", "id")), Alias::new("run_id"))
+        .expr_as(
+            Expr::col(("agent_run", "scheduler_binding_id")),
+            Alias::new("binding_id"),
+        )
+        .expr_as(
+            Expr::col(("agent_run", "started_at")),
+            Alias::new("started_at"),
+        )
+        .expr_as(Expr::col(("agent_run", "status")), Alias::new("status"))
+        .expr_as(
+            Expr::col(("scheduler_bindings", "tzid")),
+            Alias::new("binding_tzid"),
+        )
+        .expr_as(Expr::col(("schedulers", "id")), Alias::new("scheduler_id"))
+        .expr_as(
+            Expr::col(("schedulers", "name")),
+            Alias::new("scheduler_name"),
+        )
+        .expr_as(
+            Expr::col(("schedulers", "color")),
+            Alias::new("scheduler_color"),
+        )
+        .from("agent_run")
+        .join(
+            JoinType::InnerJoin,
+            "scheduler_bindings",
+            Expr::col(("agent_run", "scheduler_binding_id")).equals(("scheduler_bindings", "id")),
+        )
+        .join(
+            JoinType::InnerJoin,
+            "schedulers",
+            Expr::col(("scheduler_bindings", "scheduler_id")).equals(("schedulers", "id")),
+        )
+        .join(
+            JoinType::InnerJoin,
+            "workspaces",
+            Expr::col(("agent_run", "workspace_id")).equals(("workspaces", "id")),
+        )
+        .and_where(Expr::col(("workspaces", "slug")).eq(slug))
+        .and_where(Expr::col(("scheduler_bindings", "project_id")).eq(*project_id))
+        .and_where(Expr::col(("agent_run", "scheduler_binding_id")).is_not_null())
+        .and_where(Expr::col(("agent_run", "started_at")).gte(from))
+        .and_where(Expr::col(("agent_run", "started_at")).lte(to))
+        .order_by(("agent_run", "started_at"), Order::Asc);
+    query.to_owned()
+}
+
+/// Decode one past-runs row by alias name (the `query_all` shape,
+/// orchestration precedent). A decode failure is the unreachable 500 —
+/// the predicates exclude the NULLs the strict types cannot hold.
+fn past_run_from(row: &QueryResult) -> Result<PastRunRecord, sea_orm::DbErr> {
+    Ok(PastRunRecord {
+        run_id: row.try_get("", "run_id")?,
+        binding_id: row.try_get("", "binding_id")?,
+        started_at: row.try_get("", "started_at")?,
+        status: row.try_get("", "status")?,
+        binding_tzid: row.try_get("", "binding_tzid")?,
+        scheduler_id: row.try_get("", "scheduler_id")?,
+        scheduler_name: row.try_get("", "scheduler_name")?,
+        scheduler_color: row.try_get("", "scheduler_color")?,
+    })
 }
 
 /// The injected `expand_binding` closure body: coerce the raw JSON
@@ -370,16 +533,15 @@ pub async fn occurrences_list(
                 return (StatusCode::BAD_REQUEST, Json(error.body())).into_response();
             }
         };
-    let bindings: Vec<FutureBindingRecord> =
-        match sqlx::query_as(occurrences::future_bindings_sql())
-            .bind(&slug)
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let bindings: Vec<FutureBindingRecord> = match future_bindings_select(&slug, &project_id)
+        .into_model::<FutureBindingRecord>()
+        .all(&db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let bindings: Vec<FutureBindingRow> = bindings
         .into_iter()
         .map(FutureBindingRecord::into_row)
@@ -393,13 +555,15 @@ pub async fn occurrences_list(
     );
     let end = occurrences::past_end(window_end, now);
     if occurrences::past_query_needed(window_start, end) {
-        let runs: Vec<PastRunRecord> = match sqlx::query_as(occurrences::past_runs_sql())
-            .bind(&slug)
-            .bind(project_id)
-            .bind(window_start)
-            .bind(end)
-            .fetch_all(pool)
-            .await
+        let stmt = past_runs_stmt(&slug, &project_id, window_start, end);
+        let found = match db.query_all(DbBackend::Postgres.build(&stmt)).await {
+            Ok(rows) => rows,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let runs: Vec<PastRunRecord> = match found
+            .iter()
+            .map(past_run_from)
+            .collect::<Result<Vec<_>, _>>()
         {
             Ok(rows) => rows,
             Err(_) => return Denial::ServerError.into_response(),
@@ -459,6 +623,52 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    /// The occurrences selects keep the old join/filter shape: unique
+    /// aliased outputs, live rows only, named workspace + project scope
+    /// (orm-migration.md §3.2, no database needed).
+    #[test]
+    fn occ_selects_pin_join_and_filters() {
+        let project = uuid::Uuid::nil();
+        let fb = future_bindings_select("acme", &project);
+        let sql = fb.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("INNER JOIN"), "fb join: {sql}");
+        assert!(sql.contains("\"scheduler_name\""), "fb aliased name: {sql}");
+        assert!(
+            sql.contains("\"scheduler_color\""),
+            "fb aliased color: {sql}"
+        );
+        assert!(sql.contains("\"enabled\""), "fb enabled: {sql}");
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "fb live rows: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "fb newest-first order: {sql}");
+
+        let from = Utc::now();
+        let to = Utc::now();
+        let pr = past_runs_stmt("acme", &project, from, to);
+        let sql = DbBackend::Postgres.build(&pr).to_string();
+        assert!(sql.contains("INNER JOIN"), "pr join: {sql}");
+        assert!(sql.contains("AS \"run_id\""), "pr run alias: {sql}");
+        assert!(sql.contains("AS \"binding_id\""), "pr binding alias: {sql}");
+        assert!(
+            sql.contains("IS NOT NULL"),
+            "pr null-binding exclusion: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "pr oldest-first order: {sql}");
+
+        let res = future_resolve_select("acme", "ENG");
+        let sql = res.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("INNER JOIN"), "resolve join: {sql}");
+        assert!(sql.contains("\"identifier\""), "resolve ident: {sql}");
+
+        let ex = project_exists_select("acme", project);
+        let sql = ex.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("INNER JOIN"), "exists join: {sql}");
+        assert!(sql.contains("LIMIT 1"), "exists limit: {sql}");
+    }
     use chrono::TimeZone;
     use pidash_services::app_scheduler::occurrences::WindowError;
     use serde_json::json;

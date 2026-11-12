@@ -3,7 +3,7 @@
 //! Ports the five `get_queryset` chains in
 //! `apps/api/pi_dash/api/views/module.py` — plus the two `GET` inline
 //! `Issue` querysets that shadow the issue querysets on the wire — to
-//! executable SQL text (drift baseline `01a93e17`):
+//! executable SeaORM sea-query statements (drift baseline `01a93e17`):
 //!
 //! * M1 `ModuleListCreateAPIEndpoint.get_queryset` (`module.py:85-171`)
 //!   + the list `GET` archived filter (`:272`).
@@ -25,34 +25,33 @@
 //!
 //! # Builder contract
 //!
-//! Each `*_sql` function returns a complete `SELECT` statement with
-//! symbolic bind parameters, following the merged `v1_projects`
-//! precedent (`queries_stateest.rs`): `$1` is the workspace slug
-//! (`workspaces.slug`, text), `$2` the project id (uuid), `$3` the module
-//! id (uuid, M2 detail / M4 / M5), `$4` the acting-user id (uuid, M4/M5
-//! querysets only) or the issue id (uuid, M5 GET / M5 delete). Handlers
-//! bind them in that order; group literals (`'completed'`, `'triage'`,
-//! `'ISSUE_ATTACHMENT'`) are embedded because they are fixed enums, the
-//! same values Django sends as parameters at execution.
+//! Each builder returns a complete sea-query [`SelectStatement`] with its
+//! values bound (the workspace slug, the project id, the module id, the
+//! acting user, the issue id), so the handlers run it through SeaORM
+//! (`DbBackend::Postgres.build(&stmt)` → `query_all`) and decode the rows
+//! by name. No SQL text is written here: Django's
+//! `Count(..., distinct=True, filter=...)` (`COUNT(DISTINCT x) FILTER
+//! (WHERE ...)`) is the `COUNT(DISTINCT CASE WHEN <filter> THEN x END)`
+//! form (sea-query 0.32 has no aggregate `FILTER` clause — the same
+//! count, since `COUNT` skips the `NULL` the unmatched rows produce, and
+//! `DISTINCT` still sees at most one value per group), the correlated
+//! subqueries are nested selects, and the group literals (`'completed'`,
+//! `'triage'`, `'ISSUE_ATTACHMENT'`) bind as values — the same values
+//! Django sends as parameters at execution.
 //!
-//! Dynamic statements are sea-query builders; the fixed aggregate
-//! fragments are string constants spliced in with `Expr::cust` (there is
-//! no build-time database, same as the merged `license/queries` and
-//! `app_integrations/queries_git` precedents). Spelling note: sea-query
-//! renders `LEFT JOIN` where Django renders `LEFT OUTER JOIN` —
-//! identical semantics, pinned as-rendered by the tests. `ORDER BY` is dynamic:
-//! `.order_by(self.kwargs.get("order_by", ...))` passes the kwarg through
-//! untouched, so [`OrderBy`] carries the raw column plus direction and
-//! the builder quotes it onto the base table — an unknown column fails at
-//! the database exactly like Django's `FieldError`-at-evaluation.
-//! (PIDASHCONV-510: the M4/M5 GET `?order_by=` additionally resolves
-//! Django-side to `?` → `RANDOM()`, single-level FK traversals onto the
-//! already-joined tables, bare output aliases for the two annotations
-//! that exist at `.order_by()` time, and bare-M2M default orderings with
-//! extra joins; PIDASHCONV-511: bare-FK names resolve to the related
-//! model's `Meta.ordering` terms, with extra joins where the M4 GET
-//! lacks them — [`OrderTarget`] carries those shapes and [`apply_order`]
-//! renders them identically in every builder.)
+//! `ORDER BY` is dynamic: `.order_by(self.kwargs.get("order_by", ...))`
+//! passes the kwarg through untouched, so [`OrderBy`] carries the raw
+//! column plus direction and the builder quotes it onto the base table —
+//! an unknown column fails at the database exactly like Django's
+//! `FieldError`-at-evaluation. (PIDASHCONV-510: the M4/M5 GET
+//! `?order_by=` additionally resolves Django-side to `?` → `RANDOM()`,
+//! single-level FK traversals onto the already-joined tables, bare
+//! output aliases for the two annotations that exist at `.order_by()`
+//! time, and bare-M2M default orderings with extra joins; PIDASHCONV-511:
+//! bare-FK names resolve to the related model's `Meta.ordering` terms,
+//! with extra joins where the M4 GET lacks them — [`OrderTarget`] carries
+//! those shapes and [`apply_order`] renders them identically in every
+//! builder.)
 //!
 //! # Reads scope tables, not views
 //!
@@ -71,18 +70,17 @@
 //!    distinct=True)` counts distinct group values, and the `FILTER`
 //!    restricts to one group). Only `total_issues`
 //!    (`COUNT(DISTINCT "module_issues"."id")`) counts rows. Ported as
-//!    observed via [`count_issues_sql`]; the 0/1 shape is pinned by
+//!    observed via [`count_issues_expr`]; the 0/1 shape is pinned by
 //!    `grouped_counts_are_zero_or_one_distinct_group`.
 //! 2. M1/M2/M3 carry **no member-visibility join** (unlike the cycle
 //!    querysets, `cycle.py:93-96`): any caller in the project lists every
 //!    module; membership is enforced by `ProjectEntityPermission` only.
-//!    Ported as observed — [`module_list_sql`] joins no
-//!    `project_members`.
+//!    Ported as observed — [`module_list`] joins no `project_members`.
 //! 3. M1/M2 omit the trailing `.distinct()` the cycle querysets keep;
 //!    only the `DISTINCT` *inside* each `Count` remains. M4/M5 querysets
 //!    keep `SELECT DISTINCT`. Ported as observed.
 //! 4. M3 has **no estimate annotations**, unlike archived cycles Q3
-//!    (`cycle.py:699-721`). Ported as observed: [`archived_module_list_sql`]
+//!    (`cycle.py:699-721`). Ported as observed: [`archived_module_list`]
 //!    is M1 with the archived predicate and nothing else.
 //! 5. Relation traversals use the model's **base** manager, so no
 //!    `IssueManager` guards (triage / archived issue / archived project /
@@ -95,7 +93,7 @@
 //! 6. The M5 detail `GET` (`module.py:800-849`) is **unreachable on the
 //!    wire**: `api/urls/module.py:33-37` allows only `delete` on the
 //!    `module-issues-detail` route (cycles allow `get` + `delete`).
-//!    [`module_issue_detail_get_sql`] ports the shape anyway (the fixture
+//!    [`module_issue_detail_get`] ports the shape anyway (the fixture
 //!    M5 covers it); handlers wire only `delete`.
 //! 7. `sub_issues_count` counts children in **every project**: the
 //!    correlated subquery restricts `parent_id` only (no project/module
@@ -107,7 +105,11 @@
 //! round trips (`members`, `link_module`, `assignees`, `labels` arrive via
 //! separate queries — no SQL fanout — and stay handler-owned).
 
-use sea_query::{Alias, Condition, Expr, IntoIden, JoinType, Order, Query, TableRef};
+use sea_query::{
+    Alias, Asterisk, CaseStatement, Condition, Expr, Func, IntoIden, JoinType, Order, Query,
+    SelectStatement, SimpleExpr, TableRef,
+};
+use uuid::Uuid;
 
 use super::module::{self, module_issue};
 use crate::v1_projects::models::{estimate_point, project, project_member, state};
@@ -137,6 +139,29 @@ const POD_TABLE: &str = "pod";
 /// Alias of the parent self-join (`select_related("parent")`, M4/M5 GET);
 /// `order_by=parent__<col>` renders onto it (PIDASHCONV-510).
 pub const PARENT_ALIAS: &str = "T7";
+
+/// The tenant scope every module read binds: `workspaces.slug` and the
+/// project id (`module.py:87-88` et al.).
+#[derive(Debug, Clone, Copy)]
+pub struct TenantScope<'a> {
+    pub slug: &'a str,
+    pub project_id: Uuid,
+}
+
+/// `"<table>"."<column>"`.
+fn col(table: &str, column: &str) -> Expr {
+    Expr::col((Alias::new(table), Alias::new(column)))
+}
+
+/// A scalar subquery as a select item.
+fn scalar(sub: SelectStatement) -> SimpleExpr {
+    SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
+}
+
+/// `"<table>"` as a `FROM`/`JOIN` target.
+fn table(name: &str) -> Alias {
+    Alias::new(name)
+}
 
 // ---------------------------------------------------------------------------
 // Shared scope inputs
@@ -442,7 +467,7 @@ pub fn issue_traversal_table(head: &str) -> Option<&'static str> {
 /// only reach the M4/M5 GET builders (kwargs chains always carry the
 /// default); rendered elsewhere they fail at the database exactly like
 /// Django's `FieldError` for the same name on those chains.
-fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy) {
+fn apply_order(sel: &mut SelectStatement, base: &str, order: &OrderBy) {
     match order.target {
         OrderTarget::Base => {
             sel.order_by(
@@ -468,7 +493,7 @@ fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy
         // Django's compiler yields `OrderBy(Random())` ascending — the
         // `-` flag never survives onto `?` (`-?` is a FieldError).
         OrderTarget::Random => {
-            sel.order_by_expr(Expr::cust("RANDOM()"), Order::Asc);
+            sel.order_by_expr(Func::random().into(), Order::Asc);
         }
         // Related `Meta.ordering` is `('-created_at',)`: the request `-`
         // inverts it, so plain M2M renders `DESC`.
@@ -511,54 +536,83 @@ fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy
 }
 
 /// Project one table's `columns` as `"table"."col"` selects, in order.
-fn select_table_columns(sel: &mut sea_query::SelectStatement, table: &str, columns: &[&str]) {
-    for col in columns {
-        sel.column((Alias::new(table.to_owned()), Alias::new((*col).to_owned())));
+fn select_table_columns(sel: &mut SelectStatement, table_name: &str, columns: &[&str]) {
+    for column in columns {
+        sel.column((Alias::new(table_name), Alias::new(*column)));
     }
 }
 
 /// `INNER JOIN "projects" ON ("<table>"."project_id" = "projects"."id")`
 /// (every `select_related("project")`).
-fn join_project(sel: &mut sea_query::SelectStatement, table: &str) {
+fn join_project(sel: &mut SelectStatement, from: &str) {
     sel.join(
         JoinType::InnerJoin,
-        Alias::new(project::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(table.to_owned()), Alias::new("project_id")))
-                .equals((Alias::new(project::TABLE), Alias::new("id"))),
-        ),
+        table(project::TABLE),
+        col(from, "project_id").equals((Alias::new(project::TABLE), Alias::new("id"))),
     );
 }
 
 /// `INNER JOIN "workspaces" ON ("<table>"."workspace_id" = "workspaces"."id")`
 /// (every `select_related("workspace")`).
-fn join_workspace(sel: &mut sea_query::SelectStatement, table: &str) {
+fn join_workspace(sel: &mut SelectStatement, from: &str) {
     sel.join(
         JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(table.to_owned()), Alias::new("workspace_id")))
-                .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
+        table(WORKSPACE_TABLE),
+        col(from, "workspace_id").equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
+    );
+}
+
+/// `LEFT JOIN "<to>" ON ("<from>"."<from_col>" = "<to>"."<to_col>")`.
+fn left_join(sel: &mut SelectStatement, from: &str, from_col: &str, to: &str, to_col: &str) {
+    sel.join(
+        JoinType::LeftJoin,
+        table(to),
+        col(from, from_col).equals((Alias::new(to), Alias::new(to_col))),
+    );
+}
+
+/// `INNER JOIN "<to>" ON ("<from>"."<from_col>" = "<to>"."<to_col>")`.
+fn inner_join(sel: &mut SelectStatement, from: &str, from_col: &str, to: &str, to_col: &str) {
+    sel.join(
+        JoinType::InnerJoin,
+        table(to),
+        col(from, from_col).equals((Alias::new(to), Alias::new(to_col))),
+    );
+}
+
+/// `LEFT JOIN "<table>" ON ("issues"."<fk>" = "<table>"."id")` — one
+/// ordering-only to-one join (bare-FK related orderings), appended after
+/// the parent `T7` join like Django.
+fn join_order_fk(sel: &mut SelectStatement, target: &str, fk: &str) {
+    sel.join(
+        JoinType::LeftJoin,
+        table(target),
+        col(ISSUE_TABLE, fk).equals((Alias::new(target), Alias::new("id"))),
     );
 }
 
 /// Tenant scope shared by the module reads: this project, this workspace
-/// slug (`module.py:87-88,290-291,553-554,760-761,897-898`). Soft-delete
-/// scoping (`deleted_at IS NULL`) comes from each model's manager and is
-/// applied per table at the call site — `projects` / `workspaces` carry
-/// NO deleted predicate (verified against live Django SQL: only the base
+/// slug (`module.py:87-88,290-291,553-554,760-761,897-898`). Conjunct
+/// order follows Django (slug, then project). Soft-delete scoping
+/// (`deleted_at IS NULL`) comes from each model's manager and is applied
+/// per table at the call site — `projects` / `workspaces` carry NO
+/// deleted predicate (verified against live Django SQL: only the base
 /// table's manager scope renders).
-fn tenant_condition(table: &str) -> Condition {
+fn tenant_condition(base: &str, scope: &TenantScope<'_>) -> Condition {
     Condition::all()
-        .add(
-            Expr::col((Alias::new(table.to_owned()), Alias::new("project_id")))
-                .eq(Expr::cust("$2")),
-        )
-        .add(
-            Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                .eq(Expr::cust("$1")),
-        )
+        .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug))
+        .add(col(base, "project_id").eq(scope.project_id))
+}
+
+/// Member-visibility conjuncts (`project__project_projectmember` traversal,
+/// the M4/M5 querysets): the acting user is an active member of the
+/// project. Inlined at each call site (flat `AND` chain, like Django)
+/// rather than nested: Django renders the `is_active=True` conjunct
+/// bare; sea-query renders `= TRUE` — identical semantics.
+fn add_member_scope(scope: Condition, actor_id: Uuid) -> Condition {
+    scope
+        .add(col(project_member::TABLE, "is_active").eq(true))
+        .add(col(project_member::TABLE, "member_id").eq(actor_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -596,47 +650,70 @@ pub const COUNT_ALIASES: &[&str] = &[
     "backlog_issues",
 ];
 
+/// The `(group, alias)` pairs of the five grouped counts, in source order.
+const GROUPED_COUNTS: &[(&str, &str)] = &[
+    ("completed", "completed_issues"),
+    ("cancelled", "cancelled_issues"),
+    ("started", "started_issues"),
+    ("unstarted", "unstarted_issues"),
+    ("backlog", "backlog_issues"),
+];
+
 /// Explicit issue-liveness filter shared by all six counts
 /// (`module.py:102-106` and each group `Q`): the bridge is live, the
 /// issue is not archived and not a draft. There is deliberately NO
 /// triage / project-archived guard — relation traversals use the base
 /// manager (ported bug 5).
-const LIVE_ISSUE_FILTER: &str = r#""module_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft""#;
+fn live_issue_filter() -> Condition {
+    Condition::all()
+        .add(col(module_issue::TABLE, "deleted_at").is_null())
+        .add(col(ISSUE_TABLE, "archived_at").is_null())
+        .add(col(ISSUE_TABLE, "is_draft").not())
+}
 
-/// One `Count(...)` annotation as Django renders it
-/// (`module.py:99-169`, verified against live `str(query)` output):
+/// `COUNT(DISTINCT CASE WHEN <filter> THEN <counted> END)`: Django's
+/// `Count(..., distinct=True, filter=Q(...))` (`COUNT(DISTINCT x) FILTER
+/// (WHERE ...)`) — the same count, since `COUNT` skips the `NULL` the
+/// unmatched rows yield and `DISTINCT` still sees only the counted
+/// values (at most one distinct group value under a single-group filter,
+/// i.e. 0/1 — ported bug 1).
+fn count_distinct_where(filter: Condition, counted: Expr) -> SimpleExpr {
+    let case = CaseStatement::new().case(filter, counted);
+    Func::count_distinct(SimpleExpr::Case(Box::new(case))).into()
+}
+
+/// One `Count(...)` annotation (`module.py:99-169`):
 ///
 /// * total (`GroupFilter::All`): `COUNT(DISTINCT "module_issues"."id")`
-///   — a real row count.
-/// * grouped: `COUNT(DISTINCT "states"."group")` — the count of distinct
-///   group values under a single-group `FILTER`, i.e. **0 or 1**
-///   (ported bug 1). The `FILTER` carries the same liveness guard plus
-///   `"states"."group" = '<group>'`.
-pub fn count_issues_sql(filter: GroupFilter, alias: &str) -> String {
+///   over the live filter — a real row count.
+/// * grouped: `COUNT(DISTINCT "states"."group")` over the live filter
+///   plus `"states"."group" = '<group>'` — the count of distinct group
+///   values under a single-group filter, i.e. **0 or 1** (ported bug 1).
+pub fn count_issues_expr(filter: GroupFilter) -> SimpleExpr {
     match filter {
-        GroupFilter::All => format!(
-            r#"COUNT(DISTINCT "module_issues"."id") FILTER (WHERE ({LIVE_ISSUE_FILTER})) AS "{alias}""#
-        ),
-        GroupFilter::Eq(group) => format!(
-            r#"COUNT(DISTINCT "states"."group") FILTER (WHERE ({LIVE_ISSUE_FILTER} AND "states"."group" = '{group}')) AS "{alias}""#
+        GroupFilter::All => {
+            count_distinct_where(live_issue_filter(), col(module_issue::TABLE, "id"))
+        }
+        GroupFilter::Eq(group) => count_distinct_where(
+            live_issue_filter().add(col(state::TABLE, "group").eq(group)),
+            col(state::TABLE, "group"),
         ),
     }
 }
 
-/// All six count annotations in source order, for the M1/M2/M3 select
+/// All six count annotations in source order, onto the M1/M2/M3 select
 /// list (`total_issues` first, then the five groups).
-pub fn all_count_annotations_sql() -> Vec<String> {
-    let mut out = vec![count_issues_sql(GroupFilter::All, "total_issues")];
-    for (group, alias) in [
-        ("completed", "completed_issues"),
-        ("cancelled", "cancelled_issues"),
-        ("started", "started_issues"),
-        ("unstarted", "unstarted_issues"),
-        ("backlog", "backlog_issues"),
-    ] {
-        out.push(count_issues_sql(GroupFilter::Eq(group), alias));
+fn add_count_annotations(sel: &mut SelectStatement) {
+    sel.expr_as(
+        count_issues_expr(GroupFilter::All),
+        Alias::new("total_issues"),
+    );
+    for (group, alias) in GROUPED_COUNTS {
+        sel.expr_as(
+            count_issues_expr(GroupFilter::Eq(group)),
+            Alias::new(*alias),
+        );
     }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -650,56 +727,35 @@ pub fn all_count_annotations_sql() -> Vec<String> {
 /// (`select_related("lead")`). `members` and `link_module` are
 /// `prefetch_related` — separate round trips, no join here (ported bug 2
 /// documents the missing member-visibility join: there is none at all).
-fn join_module_reads(sel: &mut sea_query::SelectStatement) {
-    let modules = Alias::new(module::TABLE.to_owned());
+fn join_module_reads(sel: &mut SelectStatement) {
     join_project(sel, module::TABLE);
     join_workspace(sel, module::TABLE);
-    // LEFT OUTER JOIN "module_issues" ON ("modules"."id" = "module_issues"."module_id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(module_issue::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((modules.clone(), Alias::new("id")))
-                .equals((Alias::new(module_issue::TABLE), Alias::new("module_id"))),
-        ),
-    );
-    // LEFT OUTER JOIN "issues" ON ("module_issues"."issue_id" = "issues"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(ISSUE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(module_issue::TABLE), Alias::new("issue_id")))
-                .equals((Alias::new(ISSUE_TABLE), Alias::new("id"))),
-        ),
-    );
-    // LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(state::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("state_id")))
-                .equals((Alias::new(state::TABLE), Alias::new("id"))),
-        ),
-    );
-    // LEFT OUTER JOIN "users" ON ("modules"."lead_id" = "users"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(USER_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((modules, Alias::new("lead_id")))
-                .equals((Alias::new(USER_TABLE), Alias::new("id"))),
-        ),
-    );
+    left_join(sel, module::TABLE, "id", module_issue::TABLE, "module_id");
+    left_join(sel, module_issue::TABLE, "issue_id", ISSUE_TABLE, "id");
+    left_join(sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
+    left_join(sel, module::TABLE, "lead_id", USER_TABLE, "id");
 }
 
 /// Shared M1/M2/M3 `WHERE` head: the base-table manager scope
 /// (`modules.deleted_at IS NULL`) plus the tenant scope. The
 /// `projects` / `workspaces` joins carry no deleted predicate
 /// (verified against live Django SQL).
-fn module_list_where() -> Condition {
+fn module_list_where(scope: &TenantScope<'_>) -> Condition {
     Condition::all()
-        .add(Expr::col((Alias::new(module::TABLE), Alias::new("deleted_at"))).is_null())
-        .add(tenant_condition(module::TABLE))
+        .add(col(module::TABLE, "deleted_at").is_null())
+        .add(tenant_condition(module::TABLE, scope))
+}
+
+/// The M1/M2/M3 select head: base columns in [`module::COLUMNS`] order
+/// plus the six counts, `FROM "modules"` with the shared joins. No
+/// `SELECT DISTINCT` (ported bug 3 — the asymmetry vs cycles).
+fn module_read_head() -> SelectStatement {
+    let mut sel = Query::select();
+    select_table_columns(&mut sel, module::TABLE, module::COLUMNS);
+    add_count_annotations(&mut sel);
+    sel.from(table(module::TABLE));
+    join_module_reads(&mut sel);
+    sel
 }
 
 /// M1 module list (`ModuleListCreateAPIEndpoint.get_queryset`,
@@ -712,34 +768,26 @@ fn module_list_where() -> Condition {
 /// groups (documented projection narrowing: joined-table columns are
 /// re-added by the handlers layer when serializing nested objects, per
 /// the `queries_stateest` precedent — the row set is unchanged).
-///
-/// Binds: `$1` slug, `$2` project id.
-pub fn module_list_sql(order: &OrderBy, archived: ArchivedFilter) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    select_table_columns(&mut sel, module::TABLE, module::COLUMNS);
-    for annotation in all_count_annotations_sql() {
-        sel.expr(Expr::cust(annotation));
-    }
-    sel.from(Alias::new(module::TABLE.to_owned()));
-    join_module_reads(&mut sel);
-    let mut scope = module_list_where();
+pub fn module_list(
+    order: &OrderBy,
+    archived: ArchivedFilter,
+    scope: &TenantScope<'_>,
+) -> SelectStatement {
+    let mut sel = module_read_head();
+    let mut where_ = module_list_where(scope);
     match archived {
         ArchivedFilter::Live => {
-            scope = scope
-                .add(Expr::col((Alias::new(module::TABLE), Alias::new("archived_at"))).is_null());
+            where_ = where_.add(col(module::TABLE, "archived_at").is_null());
         }
         ArchivedFilter::Archived => {
-            scope = scope.add(
-                Expr::col((Alias::new(module::TABLE), Alias::new("archived_at"))).is_not_null(),
-            );
+            where_ = where_.add(col(module::TABLE, "archived_at").is_not_null());
         }
         ArchivedFilter::Any => {}
     }
-    sel.cond_where(scope);
+    sel.cond_where(where_);
     sel.group_by_col((Alias::new(module::TABLE), Alias::new("id")));
     apply_order(&mut sel, module::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// M2 module detail (`ModuleDetailAPIEndpoint.get_queryset`,
@@ -747,40 +795,55 @@ pub fn module_list_sql(order: &OrderBy, archived: ArchivedFilter) -> String {
 /// from the detail `GET` at `:473`): identical to M1 live plus the pk
 /// predicate. The chain text is byte-identical to M1's; only the GET
 /// wrapper differs.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` module id.
-pub fn module_detail_sql(order: &OrderBy) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    select_table_columns(&mut sel, module::TABLE, module::COLUMNS);
-    for annotation in all_count_annotations_sql() {
-        sel.expr(Expr::cust(annotation));
-    }
-    sel.from(Alias::new(module::TABLE.to_owned()));
-    join_module_reads(&mut sel);
+pub fn module_detail(order: &OrderBy, scope: &TenantScope<'_>, module_id: Uuid) -> SelectStatement {
+    let mut sel = module_read_head();
     sel.cond_where(
-        module_list_where()
-            .add(Expr::col((Alias::new(module::TABLE), Alias::new("archived_at"))).is_null())
-            .add(Expr::col((Alias::new(module::TABLE), Alias::new("id"))).eq(Expr::cust("$3"))),
+        module_list_where(scope)
+            .add(col(module::TABLE, "archived_at").is_null())
+            .add(col(module::TABLE, "id").eq(module_id)),
     );
     sel.group_by_col((Alias::new(module::TABLE), Alias::new("id")));
     apply_order(&mut sel, module::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// M3 archived-module list (`ModuleArchiveUnarchiveAPIEndpoint.get_queryset`,
 /// `module.py:895-982`): same chain as M1 with
 /// `archived_at__isnull=False` (`:899`) and NO estimate annotations
 /// (ported bug 4 — the asymmetry vs archived cycles is intentional).
-///
-/// Binds: `$1` slug, `$2` project id.
-pub fn archived_module_list_sql(order: &OrderBy) -> String {
-    module_list_sql(order, ArchivedFilter::Archived)
+pub fn archived_module_list(order: &OrderBy, scope: &TenantScope<'_>) -> SelectStatement {
+    module_list(order, ArchivedFilter::Archived, scope)
 }
 
 // ---------------------------------------------------------------------------
 // M4/M5 issue querysets (ModuleIssue-based)
 // ---------------------------------------------------------------------------
+
+/// The `IssueManager` guards (`db/models/issue.py:95-104`) spelled onto
+/// the given `issues` / `states` / `projects` identifiers: soft-delete,
+/// non-triage states (NULL-safe — the `states` join is a `LEFT OUTER
+/// JOIN`), live issues, live projects, non-drafts. Django's `NOT (x IS
+/// NOT NULL)` arms render as the equivalent `x IS NULL`.
+fn issue_manager_guards(issues: &str, states: &str, projects: &str) -> Condition {
+    Condition::all()
+        .add(col(issues, "deleted_at").is_null())
+        .add(
+            Condition::all()
+                .add(col(states, "group").eq("triage"))
+                .add(col(states, "group").is_not_null())
+                .not(),
+        )
+        .add(col(issues, "archived_at").is_null())
+        .add(col(projects, "archived_at").is_null())
+        .add(col(issues, "is_draft").not())
+}
+
+/// Outer `IssueManager` guards for the M4/M5 GET shape
+/// (`Issue.issue_objects` entry points — never relation traversals,
+/// ported bug 5), on the plain `issues` / `states` / `projects` tables.
+pub fn issue_manager_outer_guards() -> Condition {
+    issue_manager_guards(ISSUE_TABLE, state::TABLE, project::TABLE)
+}
 
 /// `sub_issues_count` correlated subquery (`module.py:547-552,753-758`,
 /// verified against live `str(query)` output):
@@ -794,16 +857,31 @@ pub fn archived_module_list_sql(order: &OrderBy) -> String {
 ///
 /// `outer` is the correlated parent column: `"module_issues"."issue_id"`
 /// for the M4/M5 querysets, `"issues"."id"` for the M4/M5 GET shapes.
-pub fn sub_issues_count_sql(outer: &str) -> String {
-    format!(
-        r#"(SELECT COUNT(U0."id") AS "count" FROM "issues" U0 LEFT OUTER JOIN "states" U1 ON (U0."state_id" = U1."id") INNER JOIN "projects" U2 ON (U0."project_id" = U2."id") WHERE (U0."deleted_at" IS NULL AND NOT (U1."group" = 'triage' AND U1."group" IS NOT NULL) AND NOT (U0."archived_at" IS NOT NULL) AND NOT (U2."archived_at" IS NOT NULL) AND NOT (U0."is_draft") AND U0."parent_id" = ({outer}))) AS "sub_issues_count""#
-    )
+pub fn sub_issues_count_expr(outer: Expr) -> SimpleExpr {
+    let (u0, u1, u2) = ("U0", "U1", "U2");
+    let mut sub = Query::select();
+    sub.expr(Func::count(col(u0, "id")))
+        .from_as(table(ISSUE_TABLE), Alias::new(u0))
+        .join_as(
+            JoinType::LeftJoin,
+            table(state::TABLE),
+            Alias::new(u1),
+            col(u0, "state_id").equals((Alias::new(u1), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            table(project::TABLE),
+            Alias::new(u2),
+            col(u0, "project_id").equals((Alias::new(u2), Alias::new("id"))),
+        )
+        .cond_where(issue_manager_guards(u0, u1, u2).add(col(u0, "parent_id").eq(outer)));
+    scalar(sub)
 }
 
 /// M4/M5 queryset (`ModuleIssueListCreateAPIEndpoint.get_queryset`,
 /// `module.py:545-569`; M5's `module.py:751-775` is chain-identical):
 /// `SELECT DISTINCT` bridge columns in [`module_issue::COLUMNS`] order +
-/// [`sub_issues_count_sql`] correlated to the bridge's issue.
+/// [`sub_issues_count_expr`] correlated to the bridge's issue.
 ///
 /// Joins (verified order): `issues` inner (`select_related("issue",
 /// "issue__state", "issue__project")` — the issue's own project arrives
@@ -818,104 +896,90 @@ pub fn sub_issues_count_sql(outer: &str) -> String {
 ///
 /// `WHERE` order follows Django: bridge deleted scope, slug, project,
 /// module, member `is_active` + member id, `projects.archived_at IS NULL`.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` module id, `$4` acting-user id.
-pub fn module_issue_queryset_sql(order: &OrderBy) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let bridges = Alias::new(module_issue::TABLE.to_owned());
+pub fn module_issue_queryset(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    module_id: Uuid,
+    actor_id: Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
     sel.distinct();
     select_table_columns(&mut sel, module_issue::TABLE, module_issue::COLUMNS);
-    sel.expr(Expr::cust(sub_issues_count_sql(
-        r#""module_issues"."issue_id""#,
-    )));
-    sel.from(Alias::new(module_issue::TABLE.to_owned()));
-    // INNER JOIN "issues" ON ("module_issues"."issue_id" = "issues"."id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(ISSUE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((bridges.clone(), Alias::new("issue_id")))
-                .equals((Alias::new(ISSUE_TABLE), Alias::new("id"))),
-        ),
+    sel.expr_as(
+        sub_issues_count_expr(col(module_issue::TABLE, "issue_id")),
+        Alias::new("sub_issues_count"),
     );
+    sel.from(table(module_issue::TABLE));
+    inner_join(&mut sel, module_issue::TABLE, "issue_id", ISSUE_TABLE, "id");
     join_workspace(&mut sel, module_issue::TABLE);
     join_project(&mut sel, module_issue::TABLE);
-    // INNER JOIN "modules" ON ("module_issues"."module_id" = "modules"."id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(module::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((bridges.clone(), Alias::new("module_id")))
-                .equals((Alias::new(module::TABLE), Alias::new("id"))),
-        ),
+    inner_join(
+        &mut sel,
+        module_issue::TABLE,
+        "module_id",
+        module::TABLE,
+        "id",
     );
-    // INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(project_member::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(project::TABLE), Alias::new("id")))
-                .equals((Alias::new(project_member::TABLE), Alias::new("project_id"))),
-        ),
+    inner_join(
+        &mut sel,
+        project::TABLE,
+        "id",
+        project_member::TABLE,
+        "project_id",
     );
     // INNER JOIN "projects" AS "T8" ON ("issues"."project_id" = T8."id")
     // (select_related("issue__project")).
     sel.join(
         JoinType::InnerJoin,
-        TableRef::Table(Alias::new(project::TABLE.to_owned()).into_iden()).alias(Alias::new("T8")),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("project_id")))
-                .equals((Alias::new("T8"), Alias::new("id"))),
-        ),
+        TableRef::Table(table(project::TABLE).into_iden()).alias(Alias::new("T8")),
+        col(ISSUE_TABLE, "project_id").equals((Alias::new("T8"), Alias::new("id"))),
     );
-    // LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(state::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("state_id")))
-                .equals((Alias::new(state::TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((bridges.clone(), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                    .eq(Expr::cust("$1")),
-            )
-            .add(Expr::col((bridges.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
-            .add(Expr::col((bridges.clone(), Alias::new("module_id"))).eq(Expr::cust("$3")))
-            .add(Expr::col((Alias::new(project_member::TABLE), Alias::new("is_active"))).eq(true))
-            .add(
-                Expr::col((Alias::new(project_member::TABLE), Alias::new("member_id")))
-                    .eq(Expr::cust("$4")),
-            )
-            .add(Expr::col((Alias::new(project::TABLE), Alias::new("archived_at"))).is_null()),
-    );
+    left_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
+    let where_ = Condition::all()
+        .add(col(module_issue::TABLE, "deleted_at").is_null())
+        .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug))
+        .add(col(module_issue::TABLE, "project_id").eq(scope.project_id))
+        .add(col(module_issue::TABLE, "module_id").eq(module_id));
+    let where_ =
+        add_member_scope(where_, actor_id).add(col(project::TABLE, "archived_at").is_null());
+    sel.cond_where(where_);
     apply_order(&mut sel, module_issue::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// `link_count` scalar annotation (M4/M5 GET, `module.py:619-624,829-834`,
 /// verified against live `str(query)` output): `IssueLink.objects` uses
 /// the soft-delete default manager, so `deleted_at IS NULL` renders
 /// (unlike the unguarded traversal in `sub_issues_count`'s outer query).
-pub fn link_count_sql() -> String {
-    format!(
-        r#"(SELECT COUNT(U0."id") AS "count" FROM "{ISSUE_LINK_TABLE}" U0 WHERE (U0."deleted_at" IS NULL AND U0."issue_id" = ("issues"."id"))) AS "link_count""#
-    )
+pub fn link_count_expr() -> SimpleExpr {
+    let u0 = "U0";
+    let mut sub = Query::select();
+    sub.expr(Func::count(col(u0, "id")))
+        .from_as(table(ISSUE_LINK_TABLE), Alias::new(u0))
+        .cond_where(
+            Condition::all()
+                .add(col(u0, "deleted_at").is_null())
+                .add(col(u0, "issue_id").eq(col(ISSUE_TABLE, "id"))),
+        );
+    scalar(sub)
 }
 
 /// `attachment_count` scalar annotation (M4/M5 GET, `module.py:625-633,
 /// 835-843`): same soft-delete manager scope plus the
 /// `entity_type = 'ISSUE_ATTACHMENT'` literal
 /// (`FileAsset.EntityTypeContext.ISSUE_ATTACHMENT`).
-pub fn attachment_count_sql() -> String {
-    format!(
-        r#"(SELECT COUNT(U0."id") AS "count" FROM "{FILE_ASSET_TABLE}" U0 WHERE (U0."deleted_at" IS NULL AND U0."entity_type" = 'ISSUE_ATTACHMENT' AND U0."issue_id" = ("issues"."id"))) AS "attachment_count""#
-    )
+pub fn attachment_count_expr() -> SimpleExpr {
+    let u0 = "U0";
+    let mut sub = Query::select();
+    sub.expr(Func::count(col(u0, "id")))
+        .from_as(table(FILE_ASSET_TABLE), Alias::new(u0))
+        .cond_where(
+            Condition::all()
+                .add(col(u0, "deleted_at").is_null())
+                .add(col(u0, "entity_type").eq("ISSUE_ATTACHMENT"))
+                .add(col(u0, "issue_id").eq(col(ISSUE_TABLE, "id"))),
+        );
+    scalar(sub)
 }
 
 /// `bridge_id` annotation (M4/M5 GET, `module.py:609,819`):
@@ -923,18 +987,9 @@ pub fn attachment_count_sql() -> String {
 /// via the `INNER JOIN "module_issues"`. One row per live bridge: an
 /// issue bridged twice (deleted-then-recreated rows excepted by the
 /// `deleted_at` guard) fans out into two rows — ported as observed.
-pub fn bridge_id_sql() -> String {
-    r#""module_issues"."id" AS "bridge_id""#.to_owned()
+pub fn bridge_id_expr() -> SimpleExpr {
+    col(module_issue::TABLE, "id").into()
 }
-
-/// Outer `IssueManager` guards for the M4/M5 GET shapes
-/// (`db/models/issue.py:95-104`, verified against live `str(query)`
-/// output): soft-delete, non-triage states (NULL-safe — the `states`
-/// join is a `LEFT OUTER JOIN`), live issues, live projects, non-drafts.
-/// These apply ONLY to `Issue.issue_objects` entry points (the GET outer
-/// query and the `sub_issues_count` subqueries), never to relation
-/// traversals (ported bug 5).
-pub const ISSUE_MANAGER_OUTER_GUARDS: &str = r#""issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft")"#;
 
 /// M4 issue list `GET` inline queryset (`module.py:601-634`): the shape
 /// the wire actually serves (the `post` re-read at `:731` uses the M4
@@ -952,118 +1007,81 @@ pub const ISSUE_MANAGER_OUTER_GUARDS: &str = r#""issues"."deleted_at" IS NULL AN
 /// The `issues` projection is `"issues".*`: Django projects every issue
 /// column explicitly; same row content. (The issues-domain port owns the
 /// typed column list; this layer ports the scope, joins and annotations.)
-///
-/// Binds: `$1` slug, `$2` project id, `$3` module id.
-pub fn module_issue_list_get_sql(order: &OrderBy) -> String {
-    module_issue_get_sql_inner(order, None)
+pub fn module_issue_list_get(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    module_id: Uuid,
+) -> SelectStatement {
+    module_issue_get_inner(order, None, scope, module_id)
 }
 
 /// M5 issue detail `GET` inline queryset (`module.py:807-843`): M4 GET
 /// plus `pk=issue_id`. Unreachable on the wire (ported bug 6 — the
 /// `module-issues-detail` route allows `delete` only); ported because
 /// fixture M5 covers it and the domain gate may exercise it.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` module id, `$4` issue id.
-pub fn module_issue_detail_get_sql(order: &OrderBy) -> String {
-    module_issue_get_sql_inner(order, Some("$4"))
+pub fn module_issue_detail_get(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    module_id: Uuid,
+    issue_id: Uuid,
+) -> SelectStatement {
+    module_issue_get_inner(order, Some(issue_id), scope, module_id)
 }
 
-fn module_issue_get_sql_inner(order: &OrderBy, issue_bind: Option<&str>) -> String {
-    use sea_query::PostgresQueryBuilder;
+fn module_issue_get_inner(
+    order: &OrderBy,
+    issue_id: Option<Uuid>,
+    scope: &TenantScope<'_>,
+    module_id: Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
-    sel.expr(Expr::cust(r#""issues".*"#));
-    sel.expr(Expr::cust(sub_issues_count_sql(r#""issues"."id""#)));
-    sel.expr(Expr::cust(bridge_id_sql()));
-    sel.expr(Expr::cust(link_count_sql()));
-    sel.expr(Expr::cust(attachment_count_sql()));
-    sel.from(Alias::new(ISSUE_TABLE.to_owned()));
-    // LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(state::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("state_id")))
-                .equals((Alias::new(state::TABLE), Alias::new("id"))),
-        ),
+    sel.column((Alias::new(ISSUE_TABLE), Asterisk));
+    sel.expr_as(
+        sub_issues_count_expr(col(ISSUE_TABLE, "id")),
+        Alias::new("sub_issues_count"),
     );
+    sel.expr_as(bridge_id_expr(), Alias::new("bridge_id"));
+    sel.expr_as(link_count_expr(), Alias::new("link_count"));
+    sel.expr_as(attachment_count_expr(), Alias::new("attachment_count"));
+    sel.from(table(ISSUE_TABLE));
+    left_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
     join_project(&mut sel, ISSUE_TABLE);
-    // INNER JOIN "module_issues" ON ("issues"."id" = "module_issues"."issue_id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(module_issue::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id")))
-                .equals((Alias::new(module_issue::TABLE), Alias::new("issue_id"))),
-        ),
-    );
+    inner_join(&mut sel, ISSUE_TABLE, "id", module_issue::TABLE, "issue_id");
     join_workspace(&mut sel, ISSUE_TABLE);
     // LEFT OUTER JOIN "issues" AS "T7" ON ("issues"."parent_id" = T7."id")
     // (select_related("parent")).
     sel.join(
         JoinType::LeftJoin,
-        TableRef::Table(Alias::new(ISSUE_TABLE.to_owned()).into_iden())
-            .alias(Alias::new(PARENT_ALIAS)),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("parent_id")))
-                .equals((Alias::new(PARENT_ALIAS), Alias::new("id"))),
-        ),
+        TableRef::Table(table(ISSUE_TABLE).into_iden()).alias(Alias::new(PARENT_ALIAS)),
+        col(ISSUE_TABLE, "parent_id").equals((Alias::new(PARENT_ALIAS), Alias::new("id"))),
     );
     // Bare-M2M ordering joins (PIDASHCONV-510), after T7 like Django:
     // `LEFT JOIN "<through>"` + `LEFT JOIN "<target>"`, no DISTINCT —
     // rows multiply per through-row exactly like the Django queryset.
     if let OrderTarget::M2M(which) = order.target {
         let (through, issue_fk, target_fk, target) = which.tables();
-        sel.join(
-            JoinType::LeftJoin,
-            Alias::new(through.to_owned()),
-            Condition::all().add(
-                Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id")))
-                    .equals((Alias::new(through), Alias::new(issue_fk))),
-            ),
-        );
-        sel.join(
-            JoinType::LeftJoin,
-            Alias::new(target.to_owned()),
-            Condition::all().add(
-                Expr::col((Alias::new(through), Alias::new(target_fk)))
-                    .equals((Alias::new(target), Alias::new("id"))),
-            ),
-        );
+        left_join(&mut sel, ISSUE_TABLE, "id", through, issue_fk);
+        left_join(&mut sel, through, target_fk, target, "id");
     }
     // Bare-FK related-ordering joins (PIDASHCONV-511), after T7 like
     // Django: one `LEFT JOIN "<table>" ON ("issues"."<fk>" =
     // "<table>"."id")`. To-one, so rows never multiply (unlike M2M).
     if let OrderTarget::Related(which) = order.target {
-        if let Some((table, fk)) = which.join() {
-            sel.join(
-                JoinType::LeftJoin,
-                Alias::new(table.to_owned()),
-                Condition::all().add(
-                    Expr::col((Alias::new(ISSUE_TABLE), Alias::new(fk)))
-                        .equals((Alias::new(table), Alias::new("id"))),
-                ),
-            );
+        if let Some((target, fk)) = which.join() {
+            join_order_fk(&mut sel, target, fk);
         }
     }
-    let mut scope = Condition::all()
-        .add(Expr::cust(ISSUE_MANAGER_OUTER_GUARDS))
-        .add(Expr::col((Alias::new(module_issue::TABLE), Alias::new("deleted_at"))).is_null())
-        .add(
-            Expr::col((Alias::new(module_issue::TABLE), Alias::new("module_id")))
-                .eq(Expr::cust("$3")),
-        )
-        .add(Expr::col((Alias::new(ISSUE_TABLE), Alias::new("project_id"))).eq(Expr::cust("$2")))
-        .add(
-            Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                .eq(Expr::cust("$1")),
-        );
-    if let Some(bind) = issue_bind {
-        scope =
-            scope.add(Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id"))).eq(Expr::cust(bind)));
+    let mut scope_ = issue_manager_outer_guards()
+        .add(col(module_issue::TABLE, "deleted_at").is_null())
+        .add(col(module_issue::TABLE, "module_id").eq(module_id))
+        .add(col(ISSUE_TABLE, "project_id").eq(scope.project_id))
+        .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug));
+    if let Some(issue_id) = issue_id {
+        scope_ = scope_.add(col(ISSUE_TABLE, "id").eq(issue_id));
     }
-    sel.cond_where(scope);
+    sel.cond_where(scope_);
     apply_order(&mut sel, ISSUE_TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// M5 detail `DELETE` lookup (`ModuleIssueDetailAPIEndpoint.delete`,
@@ -1072,37 +1090,68 @@ fn module_issue_get_sql_inner(order: &OrderBy, issue_bind: Option<&str>) -> Stri
 /// (`deleted_at IS NULL`) plus the four equality predicates. Django's
 /// `.get()` adds no `LIMIT` (0 rows → `DoesNotExist` → 404, 2+ →
 /// `MultipleObjectsReturned` → 500); handlers own that mapping.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` module id, `$4` issue id.
-pub fn module_issue_delete_lookup_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let bridges = Alias::new(module_issue::TABLE.to_owned());
+pub fn module_issue_delete_lookup(
+    scope: &TenantScope<'_>,
+    module_id: Uuid,
+    issue_id: Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
     select_table_columns(&mut sel, module_issue::TABLE, module_issue::COLUMNS);
-    sel.from(Alias::new(module_issue::TABLE.to_owned()));
+    sel.from(table(module_issue::TABLE));
     join_workspace(&mut sel, module_issue::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((bridges.clone(), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                    .eq(Expr::cust("$1")),
-            )
-            .add(Expr::col((bridges.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
-            .add(Expr::col((bridges.clone(), Alias::new("module_id"))).eq(Expr::cust("$3")))
-            .add(Expr::col((bridges, Alias::new("issue_id"))).eq(Expr::cust("$4"))),
+            .add(col(module_issue::TABLE, "deleted_at").is_null())
+            .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug))
+            .add(col(module_issue::TABLE, "project_id").eq(scope.project_id))
+            .add(col(module_issue::TABLE, "module_id").eq(module_id))
+            .add(col(module_issue::TABLE, "issue_id").eq(issue_id)),
     );
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_query::PostgresQueryBuilder;
+
+    const SLUG: &str = "acme";
+    fn project_id() -> Uuid {
+        Uuid::from_u128(0xA)
+    }
+    fn module_id() -> Uuid {
+        Uuid::from_u128(0xB)
+    }
+    fn actor_id() -> Uuid {
+        Uuid::from_u128(0xD)
+    }
+    fn issue_id() -> Uuid {
+        Uuid::from_u128(0xE)
+    }
+    fn scope() -> TenantScope<'static> {
+        TenantScope {
+            slug: SLUG,
+            project_id: project_id(),
+        }
+    }
+    fn render(sel: &SelectStatement) -> String {
+        sel.to_string(PostgresQueryBuilder)
+    }
+    fn lit(id: Uuid) -> String {
+        format!("'{id}'")
+    }
+
+    /// The literal `CASE` filter every M1 count carries.
+    const LIVE_FILTER: &str = r#""module_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND (NOT "issues"."is_draft")"#;
 
     #[test]
     fn m1_list_live_scope_and_joins() {
         // FX-CYCMOD-05 M1 (`module.py:85-171` + `:272`).
-        let sql = module_list_sql(&OrderBy::default_module(), ArchivedFilter::Live);
+        let sql = render(&module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Live,
+            &scope(),
+        ));
         assert!(sql.contains(r#"FROM "modules""#), "{sql}");
         assert!(
             sql.contains(r#"INNER JOIN "projects" ON "modules"."project_id" = "projects"."id""#),
@@ -1138,10 +1187,15 @@ mod tests {
         assert!(!sql.contains("project_members"), "{sql}");
         // No trailing DISTINCT (ported asymmetry vs cycles).
         assert!(!sql.contains("SELECT DISTINCT"), "{sql}");
-        // Tenant scope + live filter + binds.
+        // Tenant scope + live filter, values bound.
         assert!(sql.contains(r#""modules"."deleted_at" IS NULL"#), "{sql}");
-        assert!(sql.contains(r#""modules"."project_id" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
+        assert!(
+            sql.contains(&format!(
+                r#""workspaces"."slug" = '{SLUG}' AND "modules"."project_id" = {}"#,
+                lit(project_id())
+            )),
+            "{sql}"
+        );
         assert!(sql.contains(r#""modules"."archived_at" IS NULL"#), "{sql}");
         // Only the base table carries a deleted predicate.
         assert!(!sql.contains(r#""projects"."deleted_at""#), "{sql}");
@@ -1150,46 +1204,58 @@ mod tests {
         assert!(!sql.contains("triage"), "{sql}");
         assert!(sql.contains(r#"GROUP BY "modules"."id""#), "{sql}");
         assert!(
-            sql.contains(r#"ORDER BY "modules"."created_at" DESC"#),
+            sql.ends_with(r#"ORDER BY "modules"."created_at" DESC"#),
             "{sql}"
         );
     }
 
     #[test]
-    fn m1_annotations_total_counts_rows_groups_are_zero_or_one() {
+    fn grouped_counts_are_zero_or_one_distinct_group() {
         // FX-CYCMOD-05 M1 (`module.py:99-169`): total counts bridge rows,
-        // each grouped count tallies DISTINCT group values (0/1).
-        let sql = module_list_sql(&OrderBy::default_module(), ArchivedFilter::Live);
+        // each grouped count tallies DISTINCT group values (0/1) as
+        // `COUNT(DISTINCT CASE WHEN ...)`.
+        let sql = render(&module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Live,
+            &scope(),
+        ));
         assert!(
-            sql.contains(
-                r#"COUNT(DISTINCT "module_issues"."id") FILTER (WHERE ("module_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft")) AS "total_issues""#
-            ),
+            sql.contains(&format!(
+                r#"COUNT(DISTINCT (CASE WHEN ({LIVE_FILTER}) THEN "module_issues"."id" END)) AS "total_issues""#
+            )),
             "{sql}"
         );
-        for (group, alias) in [
-            ("completed", "completed_issues"),
-            ("cancelled", "cancelled_issues"),
-            ("started", "started_issues"),
-            ("unstarted", "unstarted_issues"),
-            ("backlog", "backlog_issues"),
-        ] {
+        for (group, alias) in GROUPED_COUNTS {
             assert!(
                 sql.contains(&format!(
-                    r#"COUNT(DISTINCT "states"."group") FILTER (WHERE ("module_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = '{group}')) AS "{alias}""#
+                    r#"COUNT(DISTINCT (CASE WHEN ({LIVE_FILTER} AND "states"."group" = '{group}') THEN "states"."group" END)) AS "{alias}""#
                 )),
                 "{sql}"
             );
         }
+        assert!(!sql.contains("FILTER"), "{sql}");
         assert_eq!(
             COUNT_ALIASES.len(),
             6,
             "six annotations serve the fixture row keys"
         );
+        assert_eq!(COUNT_GROUPS.len(), 6);
+        for alias in COUNT_ALIASES {
+            assert_eq!(
+                sql.matches(&format!(r#" AS "{alias}""#)).count(),
+                1,
+                "{alias}"
+            );
+        }
     }
 
     #[test]
     fn m1_bare_queryset_carries_no_archived_predicate() {
-        let sql = module_list_sql(&OrderBy::default_module(), ArchivedFilter::Any);
+        let sql = render(&module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Any,
+            &scope(),
+        ));
         // The projected `"modules"."archived_at"` column stays (it is a
         // real column); only the WHERE predicate is absent.
         assert!(!sql.contains(r#""modules"."archived_at" IS"#), "{sql}");
@@ -1198,18 +1264,36 @@ mod tests {
     #[test]
     fn m2_detail_adds_live_plus_pk() {
         // FX-CYCMOD-05 M2 (`module.py:288-374` + `:473`).
-        let sql = module_detail_sql(&OrderBy::default_module());
+        let sql = render(&module_detail(
+            &OrderBy::default_module(),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains(r#""modules"."archived_at" IS NULL"#), "{sql}");
-        assert!(sql.contains(r#""modules"."id" = ($3)"#), "{sql}");
+        assert!(
+            sql.contains(&format!(
+                r#""modules"."id" = {} GROUP BY"#,
+                lit(module_id())
+            )),
+            "{sql}"
+        );
         assert!(!sql.contains("project_members"), "{sql}");
         assert!(!sql.contains("SELECT DISTINCT"), "{sql}");
+        // Same head as M1: select list and joins are identical.
+        let live = render(&module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Live,
+            &scope(),
+        ));
+        let head = |s: &str| s.split(" WHERE ").next().expect("head").to_owned();
+        assert_eq!(head(&sql), head(&live));
     }
 
     #[test]
     fn m3_archived_flips_predicate_and_adds_no_estimates() {
         // FX-CYCMOD-05 M3 (`module.py:895-982`): same chain, archived
         // predicate, no estimate annotations (ported bug 4).
-        let sql = archived_module_list_sql(&OrderBy::default_module());
+        let sql = render(&archived_module_list(&OrderBy::default_module(), &scope()));
         assert!(
             sql.contains(r#""modules"."archived_at" IS NOT NULL"#),
             "{sql}"
@@ -1222,15 +1306,23 @@ mod tests {
     #[test]
     fn m1_order_passthrough() {
         // kwargs `.order_by(...)` passes through untouched.
-        let sql = module_list_sql(&OrderBy::new("name", false), ArchivedFilter::Live);
-        assert!(sql.contains(r#"ORDER BY "modules"."name" ASC"#), "{sql}");
+        let sql = render(&module_list(
+            &OrderBy::new("name", false),
+            ArchivedFilter::Live,
+            &scope(),
+        ));
+        assert!(sql.ends_with(r#"ORDER BY "modules"."name" ASC"#), "{sql}");
     }
 
     #[test]
     fn m4_get_order_random_renders_random_asc() {
         // PIDASHCONV-510: `?order_by=?` → Django `ORDER BY RANDOM() ASC`,
         // no extra joins.
-        let sql = module_issue_list_get_sql(&OrderBy::random());
+        let sql = render(&module_issue_list_get(
+            &OrderBy::random(),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains("ORDER BY RANDOM() ASC"), "{sql}");
         assert!(!sql.contains("issue_assignees"), "{sql}");
         assert!(!sql.contains("issue_labels"), "{sql}");
@@ -1239,12 +1331,24 @@ mod tests {
     #[test]
     fn m4_get_order_traversal_renders_qualified() {
         // PIDASHCONV-510: `state__group` reuses the select_related join.
-        let sql = module_issue_list_get_sql(&OrderBy::table("states", "group", false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::table("states", "group", false),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains(r#"ORDER BY "states"."group" ASC"#), "{sql}");
-        let sql = module_issue_list_get_sql(&OrderBy::table("states", "group", true));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::table("states", "group", true),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains(r#"ORDER BY "states"."group" DESC"#), "{sql}");
         // Parent traversals render onto the T7 self-join alias.
-        let sql = module_issue_list_get_sql(&OrderBy::table(PARENT_ALIAS, "created_at", false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::table(PARENT_ALIAS, "created_at", false),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains(r#"ORDER BY "T7"."created_at" ASC"#), "{sql}");
     }
 
@@ -1253,7 +1357,11 @@ mod tests {
         // PIDASHCONV-510: early annotations order by bare alias (Django
         // renders the positional `ORDER BY 35` — same semantics, without
         // depending on the `issues.*` width).
-        let sql = module_issue_list_get_sql(&OrderBy::alias("sub_issues_count", false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::alias("sub_issues_count", false),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains(r#"ORDER BY "sub_issues_count" ASC"#), "{sql}");
         assert!(!sql.contains(r#""issues"."sub_issues_count""#), "{sql}");
     }
@@ -1262,7 +1370,11 @@ mod tests {
     fn m4_get_order_m2m_joins_and_inverts_direction() {
         // PIDASHCONV-510: `assignees` — through + target LEFT JOINs after
         // T7, related Meta.ordering ('-created_at',) as-is → DESC ...
-        let sql = module_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::m2m(M2MOrder::Assignees, false),
+            &scope(),
+            module_id(),
+        ));
         let t7 = sql.find(r#""T7""#).expect("T7 join");
         let through = sql
             .find(r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id""#)
@@ -1277,13 +1389,21 @@ mod tests {
             "{sql}"
         );
         // ... and the `-` prefix inverts it to ASC.
-        let sql = module_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, true));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::m2m(M2MOrder::Assignees, true),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
             "{sql}"
         );
         // `labels` mirrors via issue_labels/labels.
-        let sql = module_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Labels, false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::m2m(M2MOrder::Labels, false),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(
                 r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id""#
@@ -1306,9 +1426,17 @@ mod tests {
         // read off live Django 4.2 str(query) output for the M4 GET.
         // Already-joined tables add no join: `state` renders the
         // ascending `sequence` term ...
-        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::related(RelatedOrder::State, false),
+            &scope(),
+            module_id(),
+        ));
         assert!(sql.contains(r#"ORDER BY "states"."sequence" ASC"#), "{sql}");
-        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, true));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::related(RelatedOrder::State, true),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(r#"ORDER BY "states"."sequence" DESC"#),
             "{sql}"
@@ -1330,10 +1458,18 @@ mod tests {
                 r#"ORDER BY "module_issues"."created_at" DESC"#,
             ),
         ] {
-            let sql = module_issue_list_get_sql(&OrderBy::related(which, false));
+            let sql = render(&module_issue_list_get(
+                &OrderBy::related(which, false),
+                &scope(),
+                module_id(),
+            ));
             assert!(sql.contains(term), "{sql}");
             let inverted = term.replace("DESC", "ASC");
-            let sql = module_issue_list_get_sql(&OrderBy::related(which, true));
+            let sql = render(&module_issue_list_get(
+                &OrderBy::related(which, true),
+                &scope(),
+                module_id(),
+            ));
             assert!(sql.contains(&inverted), "{sql}");
         }
         // New joins render after T7, like Django: `created_by` and
@@ -1348,7 +1484,11 @@ mod tests {
                 r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id""#,
             ),
         ] {
-            let sql = module_issue_list_get_sql(&OrderBy::related(which, false));
+            let sql = render(&module_issue_list_get(
+                &OrderBy::related(which, false),
+                &scope(),
+                module_id(),
+            ));
             let t7 = sql.find(r#""T7""#).expect("T7 join");
             let extra = sql.find(join).expect("ordering join");
             assert!(extra > t7, "{sql}");
@@ -1356,7 +1496,11 @@ mod tests {
                 sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
                 "{sql}"
             );
-            let sql = module_issue_list_get_sql(&OrderBy::related(which, true));
+            let sql = render(&module_issue_list_get(
+                &OrderBy::related(which, true),
+                &scope(),
+                module_id(),
+            ));
             assert!(
                 sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
                 "{sql}"
@@ -1364,7 +1508,11 @@ mod tests {
         }
         // ... `estimate_point` joins `estimate_points` for the
         // ascending `value` term ...
-        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::related(RelatedOrder::EstimatePoint, false),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(
                 r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#
@@ -1375,14 +1523,22 @@ mod tests {
             sql.contains(r#"ORDER BY "estimate_points"."value" ASC"#),
             "{sql}"
         );
-        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, true));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::related(RelatedOrder::EstimatePoint, true),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(r#"ORDER BY "estimate_points"."value" DESC"#),
             "{sql}"
         );
         // ... and `assigned_pod` joins `pod` for TWO terms (the `-`
         // inverts both).
-        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, false));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::related(RelatedOrder::AssignedPod, false),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id""#),
             "{sql}"
@@ -1391,7 +1547,11 @@ mod tests {
             .find(r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#)
             .expect("two-term ordering");
         assert!(first > 0, "{sql}");
-        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, true));
+        let sql = render(&module_issue_list_get(
+            &OrderBy::related(RelatedOrder::AssignedPod, true),
+            &scope(),
+            module_id(),
+        ));
         assert!(
             sql.contains(r#"ORDER BY "pod"."is_default" ASC, "pod"."created_at" DESC"#),
             "{sql}"
@@ -1402,15 +1562,28 @@ mod tests {
     fn m5_get_shares_exotic_order_targets() {
         // PIDASHCONV-510: M5 GET shares the inner builder — M2M joins
         // render there too, plus the pk predicate.
-        let sql = module_issue_detail_get_sql(&OrderBy::m2m(M2MOrder::Assignees, false));
+        let sql = render(&module_issue_detail_get(
+            &OrderBy::m2m(M2MOrder::Assignees, false),
+            &scope(),
+            module_id(),
+            issue_id(),
+        ));
         assert!(sql.contains(r#"LEFT JOIN "issue_assignees""#), "{sql}");
         assert!(
             sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
             "{sql}"
         );
-        assert!(sql.contains(r#""issues"."id" = ($4)"#), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""issues"."id" = {} "#, lit(issue_id()))),
+            "{sql}"
+        );
         // PIDASHCONV-511: related-ordering joins render there too.
-        let sql = module_issue_detail_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, false));
+        let sql = render(&module_issue_detail_get(
+            &OrderBy::related(RelatedOrder::AssignedPod, false),
+            &scope(),
+            module_id(),
+            issue_id(),
+        ));
         assert!(sql.contains(r#"LEFT JOIN "pod""#), "{sql}");
         assert!(
             sql.contains(r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#),
@@ -1434,7 +1607,12 @@ mod tests {
     #[test]
     fn m4_queryset_distinct_member_scope_and_subquery() {
         // FX-CYCMOD-05 M4 queryset (`module.py:545-569`).
-        let sql = module_issue_queryset_sql(&OrderBy::default_module());
+        let sql = render(&module_issue_queryset(
+            &OrderBy::default_module(),
+            &scope(),
+            module_id(),
+            actor_id(),
+        ));
         assert!(sql.contains("SELECT DISTINCT"), "{sql}");
         assert!(sql.contains(r#"FROM "module_issues""#), "{sql}");
         assert!(
@@ -1445,7 +1623,10 @@ mod tests {
             sql.contains(r#"INNER JOIN "modules" ON "module_issues"."module_id" = "modules"."id""#),
             "{sql}"
         );
-        assert!(sql.contains(r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#), "{sql}");
+        assert!(
+            sql.contains(r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#),
+            "{sql}"
+        );
         assert!(
             sql.contains(r#"INNER JOIN "projects" AS "T8" ON "issues"."project_id" = "T8"."id""#),
             "{sql}"
@@ -1459,11 +1640,17 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains(r#""module_issues"."project_id" = ($2)"#),
+            sql.contains(&format!(
+                r#""module_issues"."project_id" = {}"#,
+                lit(project_id())
+            )),
             "{sql}"
         );
         assert!(
-            sql.contains(r#""module_issues"."module_id" = ($3)"#),
+            sql.contains(&format!(
+                r#""module_issues"."module_id" = {}"#,
+                lit(module_id())
+            )),
             "{sql}"
         );
         assert!(
@@ -1471,25 +1658,23 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains(r#""project_members"."member_id" = ($4)"#),
+            sql.contains(&format!(
+                r#""project_members"."member_id" = {}"#,
+                lit(actor_id())
+            )),
             "{sql}"
         );
         assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
-        // Outer issues join carries no manager guards (ported bug 5): the
-        // outer WHERE (the final WHERE — sea-query renders top-level
-        // conjuncts without wrapping parens) has no triage /
-        // archived-issue / draft guard...
+        // Outer WHERE (the final WHERE) carries no manager guards
+        // (ported bug 5)...
         let outer_where = sql.rsplit("WHERE ").next().unwrap_or("");
-        assert!(!outer_where.contains("triage"), "{sql}");
-        assert!(!outer_where.contains(r#""issues"."archived_at""#), "{sql}");
-        assert!(!outer_where.contains("is_draft"), "{sql}");
         // ...but the correlated subquery does (IssueManager inside).
         assert!(
-            sql.contains(r#"U0."parent_id" = ("module_issues"."issue_id")"#),
+            sql.contains(r#""U0"."parent_id" = "module_issues"."issue_id""#),
             "{sql}"
         );
         assert!(
-            sql.contains(r#"NOT (U1."group" = 'triage' AND U1."group" IS NOT NULL)"#),
+            sql.contains(r#"NOT ("U1"."group" = 'triage' AND "U1"."group" IS NOT NULL)"#),
             "{sql}"
         );
         // No module-archived predicate: archived modules' issues list.
@@ -1503,30 +1688,49 @@ mod tests {
     #[test]
     fn m4_get_issue_shape_annotations_and_guards() {
         // FX-CYCMOD-05 M4 GET (`module.py:601-634`).
-        let sql = module_issue_list_get_sql(&OrderBy::default_issue());
+        let sql = render(&module_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope(),
+            module_id(),
+        ));
         assert!(!sql.contains("SELECT DISTINCT"), "{sql}");
         assert!(sql.contains(r#"FROM "issues""#), "{sql}");
-        assert!(sql.contains(ISSUE_MANAGER_OUTER_GUARDS), "{sql}");
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.contains(r#"NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)"#),
+            "{sql}"
+        );
         assert!(
             sql.contains(r#""module_issues"."deleted_at" IS NULL"#),
             "{sql}"
         );
         assert!(
-            sql.contains(r#""module_issues"."module_id" = ($3)"#),
+            sql.contains(&format!(
+                r#""module_issues"."module_id" = {}"#,
+                lit(module_id())
+            )),
             "{sql}"
         );
-        assert!(sql.contains(r#""issues"."project_id" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""issues"."project_id" = {}"#, lit(project_id()))),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(r#""workspaces"."slug" = '{SLUG}'"#)),
+            "{sql}"
+        );
         assert!(
             sql.contains(r#""module_issues"."id" AS "bridge_id""#),
             "{sql}"
         );
         assert!(
-            sql.contains(r#"FROM "issue_links" U0 WHERE (U0."deleted_at" IS NULL AND U0."issue_id" = ("issues"."id"))"#),
+            sql.contains(
+                r#"FROM "issue_links" AS "U0" WHERE "U0"."deleted_at" IS NULL AND "U0"."issue_id" = "issues"."id""#
+            ),
             "{sql}"
         );
         assert!(
-            sql.contains(r#"U0."entity_type" = 'ISSUE_ATTACHMENT'"#),
+            sql.contains(r#""U0"."entity_type" = 'ISSUE_ATTACHMENT'"#),
             "{sql}"
         );
         assert!(
@@ -1543,11 +1747,27 @@ mod tests {
     #[test]
     fn m5_get_is_m4_get_plus_issue_pk() {
         // FX-CYCMOD-05 M5 GET (`module.py:807-843`).
-        let m4 = module_issue_list_get_sql(&OrderBy::default_issue());
-        let m5 = module_issue_detail_get_sql(&OrderBy::default_issue());
-        assert!(m5.contains(r#""issues"."id" = ($4)"#), "{m5}");
-        assert!(!m4.contains(r#""issues"."id" = ($4)"#), "{m4}");
-        let m5_without_pk = m5.replacen(r#" AND "issues"."id" = ($4)"#, "", 1);
+        let m4 = render(&module_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope(),
+            module_id(),
+        ));
+        let m5 = render(&module_issue_detail_get(
+            &OrderBy::default_issue(),
+            &scope(),
+            module_id(),
+            issue_id(),
+        ));
+        assert!(
+            m5.contains(&format!(r#""issues"."id" = {}"#, lit(issue_id()))),
+            "{m5}"
+        );
+        assert!(
+            !m4.contains(&format!(r#""issues"."id" = {}"#, lit(issue_id()))),
+            "{m4}"
+        );
+        // Every M4 fragment is in M5; the only extra predicate is the pk.
+        let m5_without_pk = m5.replace(&format!(r#" AND "issues"."id" = {}"#, lit(issue_id())), "");
         assert_eq!(
             m5_without_pk, m4,
             "M5 GET differs from M4 GET only by the pk predicate"
@@ -1557,23 +1777,39 @@ mod tests {
     #[test]
     fn m5_delete_lookup_scope() {
         // FX-CYCMOD-05 M5 delete (`module.py:870-875`).
-        let sql = module_issue_delete_lookup_sql();
+        let sql = render(&module_issue_delete_lookup(
+            &scope(),
+            module_id(),
+            issue_id(),
+        ));
         assert!(sql.contains(r#"FROM "module_issues""#), "{sql}");
         assert!(
             sql.contains(r#""module_issues"."deleted_at" IS NULL"#),
             "{sql}"
         );
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
         assert!(
-            sql.contains(r#""module_issues"."project_id" = ($2)"#),
+            sql.contains(&format!(r#""workspaces"."slug" = '{SLUG}'"#)),
             "{sql}"
         );
         assert!(
-            sql.contains(r#""module_issues"."module_id" = ($3)"#),
+            sql.contains(&format!(
+                r#""module_issues"."project_id" = {}"#,
+                lit(project_id())
+            )),
             "{sql}"
         );
         assert!(
-            sql.contains(r#""module_issues"."issue_id" = ($4)"#),
+            sql.contains(&format!(
+                r#""module_issues"."module_id" = {}"#,
+                lit(module_id())
+            )),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                r#""module_issues"."issue_id" = {}"#,
+                lit(issue_id())
+            )),
             "{sql}"
         );
         assert!(!sql.contains("LIMIT"), "{sql}");
@@ -1583,5 +1819,356 @@ mod tests {
     fn order_defaults_match_django() {
         assert_eq!(OrderBy::default_module(), OrderBy::new("created_at", true));
         assert_eq!(OrderBy::default_issue(), OrderBy::new("created_at", false));
+    }
+
+    #[test]
+    fn no_sql_text_in_builders() {
+        // Every statement binds its values: rendering with the Postgres
+        // builder yields parameters, never inlined ids or slugs.
+        let (sql, values) = module_issue_list_get(&OrderBy::default_issue(), &scope(), module_id())
+            .build(PostgresQueryBuilder);
+        assert!(!sql.contains(SLUG), "{sql}");
+        assert!(!sql.contains(&module_id().to_string()), "{sql}");
+        // triage (subquery + outer), ISSUE_ATTACHMENT, module id, project
+        // id, slug.
+        assert_eq!(values.0.len(), 6, "{sql}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Live reads against the scratch database (temp tables, one transaction)
+    // -----------------------------------------------------------------------
+
+    /// `DATABASE_URL` pointing at a migrated database, else skip.
+    async fn pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.module_issues')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    async fn exec(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, sql: &str) {
+        sqlx::query(sql)
+            .execute(&mut **tx)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+
+    fn get<T: sea_orm::TryGetable>(row: &sea_orm::QueryResult, column: &str) -> T {
+        row.try_get("", column)
+            .unwrap_or_else(|error| panic!("{column}: {error}"))
+    }
+
+    /// Every builder runs and counts over a seeded tenant: a live module
+    /// with a completed, a started, a draft and an archived bridged
+    /// issue, plus an archived module; the grouped counts follow the
+    /// ported 0/1 distinct-group shape (drafts and archived issues never
+    /// count, triage counts).
+    #[tokio::test]
+    async fn live_module_reads() {
+        use sea_orm::{ConnectionTrait, DbBackend};
+        let Some(pool) = pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "workspaces",
+            "projects",
+            "project_members",
+            "users",
+            "modules",
+            "module_issues",
+            "issues",
+            "states",
+            "estimates",
+            "estimate_points",
+            "issue_assignees",
+            "issue_labels",
+            "labels",
+            "issue_links",
+            "file_assets",
+        ] {
+            exec(
+                &mut tx,
+                &format!("CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"),
+            )
+            .await;
+        }
+        // `GROUP BY "modules"."id"` selects the other module columns
+        // through the primary key's functional dependence, which the
+        // copy must carry too.
+        exec(&mut tx, "ALTER TABLE modules ADD PRIMARY KEY (id)").await;
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let other_project = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let outsider = Uuid::new_v4();
+        let estimate = Uuid::new_v4();
+        let point = Uuid::new_v4();
+        let label = Uuid::new_v4();
+        let (done, started, backlog) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (live_module, archived_module) = (Uuid::new_v4(), Uuid::new_v4());
+        let (i_done, i_started, i_draft, i_archived, i_old) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let issue = |id: Uuid,
+                     state: Uuid,
+                     draft: bool,
+                     archived: bool,
+                     completed: bool,
+                     with_point: bool,
+                     age: i32| {
+            format!(
+                "INSERT INTO issues (id, name, workspace_id, project_id, state_id, sort_order, priority, complexity_score, sequence_id, \
+                 created_at, updated_at, is_draft, archived_at, completed_at, estimate_point_id, description_html, description_json, git_work_branch, workpad) \
+                 VALUES ('{id}', 'n', '{ws}', '{project}', '{state}', 1, 'none', 0, 1, now() - interval '{age} min', now(), {draft}, {}, {}, {}, '', '{{}}', '', '')",
+                if archived { "current_date" } else { "NULL" },
+                if completed { "now()" } else { "NULL" },
+                if with_point { format!("'{point_id}'", point_id = point) } else { "NULL".to_owned() },
+            )
+        };
+        let bridge = |module: Uuid, issue: Uuid, age: i32| {
+            format!(
+                "INSERT INTO module_issues (id, created_at, updated_at, project_id, workspace_id, module_id, issue_id) \
+                 VALUES ('{}', now() - interval '{age} min', now(), '{project}', '{ws}', '{module}', '{issue}')",
+                Uuid::new_v4()
+            )
+        };
+        let seeds = [
+            format!("INSERT INTO workspaces (id, slug, name, created_at, updated_at, owner_id, timezone, background_color) VALUES ('{ws}', 'acme', 'Acme', now(), now(), '{actor}', 'UTC', '')"),
+            format!("INSERT INTO projects (id, workspace_id, name, identifier, created_at, updated_at, estimate_id, cycle_view, timezone) VALUES ('{project}', '{ws}', 'P', 'P', now(), now(), '{estimate}', true, 'UTC'), ('{other_project}', '{ws}', 'Q', 'Q', now(), now(), NULL, true, 'UTC')"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, created_at, updated_at) VALUES ('{}', '{ws}', '{project}', '{actor}', 20, true, now(), now()), ('{}', '{ws}', '{project}', '{outsider}', 15, false, now(), now())", Uuid::new_v4(), Uuid::new_v4()),
+            format!("INSERT INTO users (id, display_name, avatar, email, first_name, last_name, created_at, updated_at, username, password, date_joined, user_timezone) VALUES ('{actor}', 'Ada', 'http://a/x.png', 'ada@example.invalid', 'Ada', 'L', now(), now(), 'ada', '', now(), 'UTC'), ('{outsider}', 'Bob', '', NULL, 'Bob', 'B', now(), now(), 'bob', '', now(), 'UTC')"),
+            format!("INSERT INTO estimates (id, project_id, workspace_id, name, type, created_at, updated_at) VALUES ('{estimate}', '{project}', '{ws}', 'E', 'points', now(), now())"),
+            format!("INSERT INTO estimate_points (id, estimate_id, project_id, workspace_id, key, value, description, created_at, updated_at) VALUES ('{point}', '{estimate}', '{project}', '{ws}', 3, '3', '', now(), now())"),
+            format!("INSERT INTO states (id, name, \"group\", created_at, updated_at, description, color, slug, project_id, workspace_id, sequence, \"default\", is_triage) VALUES \
+                     ('{done}', 'Done', 'completed', now(), now(), '', '', 'done', '{project}', '{ws}', 1, false, false), \
+                     ('{started}', 'Doing', 'started', now(), now(), '', '', 'doing', '{project}', '{ws}', 2, false, false), \
+                     ('{backlog}', 'Backlog', 'backlog', now(), now(), '', '', 'backlog', '{project}', '{ws}', 3, true, false)"),
+            format!("INSERT INTO labels (id, name, color, workspace_id, project_id, created_at, updated_at, description, sort_order) VALUES ('{label}', 'bug', '#f00', '{ws}', '{project}', now(), now(), '', 1)"),
+            format!("INSERT INTO modules (id, created_at, updated_at, project_id, workspace_id, name, description, view_props, sort_order, logo_props, status, start_date, target_date) VALUES \
+                     ('{live_module}', now() - interval '2 min', now(), '{project}', '{ws}', 'Epic 1', '', '{{}}', 65535, '{{}}', 'planned', '2026-03-01', '2026-03-31'), \
+                     ('{archived_module}', now() - interval '1 min', now(), '{project}', '{ws}', 'Epic 0', '', '{{}}', 55535, '{{}}', 'completed', '2026-02-01', '2026-02-28')"),
+            issue(i_done, done, false, false, true, true, 5),
+            issue(i_started, started, false, false, false, false, 4),
+            issue(i_draft, backlog, true, false, false, false, 3),
+            issue(i_archived, backlog, false, true, false, false, 2),
+            issue(i_old, done, false, false, true, true, 1),
+            bridge(live_module, i_done, 4),
+            bridge(live_module, i_started, 3),
+            bridge(live_module, i_draft, 2),
+            bridge(live_module, i_archived, 1),
+            bridge(archived_module, i_old, 1),
+            format!("INSERT INTO issue_assignees (id, issue_id, assignee_id, project_id, workspace_id, created_at, updated_at) VALUES ('{}', '{i_done}', '{actor}', '{project}', '{ws}', now(), now())", Uuid::new_v4()),
+            format!("INSERT INTO issue_labels (id, issue_id, label_id, project_id, workspace_id, created_at, updated_at) VALUES ('{}', '{i_done}', '{label}', '{project}', '{ws}', now(), now())", Uuid::new_v4()),
+            format!("INSERT INTO issue_links (id, issue_id, url, project_id, workspace_id, created_at, updated_at, metadata) VALUES ('{}', '{i_started}', 'http://x', '{project}', '{ws}', now(), now(), '{{}}')", Uuid::new_v4()),
+        ];
+        // Archive one module (M3) — the live/archived split is by
+        // `archived_at`; the seeds leave both live, so stamp the old one.
+        let mut with_archive = seeds.to_vec();
+        with_archive.push(format!(
+            "UPDATE modules SET archived_at = now() WHERE id = '{archived_module}'"
+        ));
+        for sql in &with_archive {
+            exec(&mut tx, sql).await;
+        }
+        // The sub_issues_count shape: a child counts, a triage child does
+        // not (the full IssueManager guards inside the subquery). Seeded
+        // here, before the `TxConn` borrow, alongside the main seeds.
+        let child = Uuid::new_v4();
+        let triage_child = Uuid::new_v4();
+        let triage = Uuid::new_v4();
+        exec(
+            &mut tx,
+            &format!("INSERT INTO states (id, name, \"group\", created_at, updated_at, description, color, slug, project_id, workspace_id, sequence, \"default\", is_triage) VALUES ('{triage}', 'Triage', 'triage', now(), now(), '', '', 'triage', '{project}', '{ws}', 4, false, true)"),
+        )
+        .await;
+        exec(
+            &mut tx,
+            &format!("INSERT INTO issues (id, name, parent_id, workspace_id, project_id, state_id, sort_order, priority, complexity_score, sequence_id, created_at, updated_at, is_draft, description_html, description_json, git_work_branch, workpad) VALUES ('{child}', 'c', '{i_done}', '{ws}', '{project}', '{started}', 1, 'none', 0, 1, now(), now(), false, '', '{{}}', '', ''), ('{triage_child}', 't', '{i_done}', '{ws}', '{project}', '{triage}', 1, 'none', 0, 1, now(), now(), false, '', '{{}}', '', '')"),
+        )
+        .await;
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let run = |sel: SelectStatement| {
+            let conn = &conn;
+            async move {
+                conn.query_all(DbBackend::Postgres.build(&sel))
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}: {}", render(&sel)))
+            }
+        };
+        let scope = TenantScope {
+            slug: "acme",
+            project_id: project,
+        };
+
+        // M1: the live module only, two counted issues (draft + archived
+        // skip); the grouped counts are 0/1.
+        let rows = run(module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Live,
+            &scope,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<Uuid>(&rows[0], "id"), live_module);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 2);
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "started_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "backlog_issues"), 0);
+        assert_eq!(get::<String>(&rows[0], "name"), "Epic 1");
+        // M1 has no member scope: an inactive member still lists.
+        let rows = run(module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Live,
+            &scope,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        // Both modules without the archived predicate, `-created_at` order.
+        let rows = run(module_list(
+            &OrderBy::default_module(),
+            ArchivedFilter::Any,
+            &scope,
+        ))
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "id"))
+                .collect::<Vec<_>>(),
+            vec![archived_module, live_module]
+        );
+        // M2: live pk hits, archived pk misses (the live predicate).
+        let rows = run(module_detail(
+            &OrderBy::default_module(),
+            &scope,
+            live_module,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 2);
+        let rows = run(module_detail(
+            &OrderBy::default_module(),
+            &scope,
+            archived_module,
+        ))
+        .await;
+        assert!(rows.is_empty());
+        // M3: the archived module only.
+        let rows = run(archived_module_list(&OrderBy::default_module(), &scope)).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<Uuid>(&rows[0], "id"), archived_module);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        // M4 queryset: every live bridge (ported bug 5), newest first;
+        // member-scoped (the outsider sees nothing).
+        let rows = run(module_issue_queryset(
+            &OrderBy::default_module(),
+            &scope,
+            live_module,
+            actor,
+        ))
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "issue_id"))
+                .collect::<Vec<_>>(),
+            vec![i_archived, i_draft, i_started, i_done]
+        );
+        // Only i_done has a (non-triage) child seeded above.
+        let sub_by_issue: std::collections::HashMap<Uuid, i64> = rows
+            .iter()
+            .map(|row| {
+                (
+                    get::<Uuid>(row, "issue_id"),
+                    get::<i64>(row, "sub_issues_count"),
+                )
+            })
+            .collect();
+        assert_eq!(sub_by_issue[&i_done], 1);
+        assert_eq!(sub_by_issue[&i_started], 0);
+        assert_eq!(sub_by_issue[&i_draft], 0);
+        assert_eq!(sub_by_issue[&i_archived], 0);
+        let rows = run(module_issue_queryset(
+            &OrderBy::default_module(),
+            &scope,
+            live_module,
+            outsider,
+        ))
+        .await;
+        assert!(rows.is_empty());
+        // M4 GET: the manager guards drop the draft and archived issues;
+        // ascending created_at; the annotations decode by name.
+        let rows = run(module_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope,
+            live_module,
+        ))
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "id"))
+                .collect::<Vec<_>>(),
+            vec![i_done, i_started]
+        );
+        assert_eq!(get::<i64>(&rows[1], "link_count"), 1);
+        assert_eq!(get::<i64>(&rows[0], "link_count"), 0);
+        assert_eq!(get::<i64>(&rows[0], "attachment_count"), 0);
+        // M5 GET: the same row by pk; a wrong pk misses.
+        let rows = run(module_issue_detail_get(
+            &OrderBy::default_issue(),
+            &scope,
+            live_module,
+            i_done,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<Uuid>(&rows[0], "id"), i_done);
+        let rows = run(module_issue_detail_get(
+            &OrderBy::default_issue(),
+            &scope,
+            live_module,
+            i_archived,
+        ))
+        .await;
+        assert!(rows.is_empty());
+        // M5 delete lookup: the live bridge by (module, issue).
+        let rows = run(module_issue_delete_lookup(&scope, live_module, i_done)).await;
+        assert_eq!(rows.len(), 1);
+        let rows = run(module_issue_delete_lookup(&scope, live_module, i_old)).await;
+        assert!(rows.is_empty());
+
+        // The sub_issues_count shape (seeded above): a child counts, a
+        // triage child does not.
+        let rows = run(module_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope,
+            live_module,
+        ))
+        .await;
+        let done_row = rows
+            .iter()
+            .find(|row| get::<Uuid>(row, "id") == i_done)
+            .expect("done row");
+        assert_eq!(get::<i64>(done_row, "sub_issues_count"), 1);
+        let started_row = rows
+            .iter()
+            .find(|row| get::<Uuid>(row, "id") == i_started)
+            .expect("started row");
+        assert_eq!(get::<i64>(started_row, "sub_issues_count"), 0);
     }
 }
