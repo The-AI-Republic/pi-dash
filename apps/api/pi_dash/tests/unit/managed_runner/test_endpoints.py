@@ -118,7 +118,9 @@ def test_issue_endpoints_translate_the_viewers_desktop_selection(
     detail = web_client.get(f"{path}{issue_id}/")
     assert detail.status_code == 200
     assert detail.json()["agent_executor"] == "local_runner"
-    assert "assigned_runner_id" not in detail.json()
+    # Dedicated runner read side (§14.1): the field is always present and
+    # null when no runner is named.
+    assert detail.json()["assigned_runner_id"] is None
     project.refresh_from_db()
     assert project.default_agent_executor == "local_runner"
 

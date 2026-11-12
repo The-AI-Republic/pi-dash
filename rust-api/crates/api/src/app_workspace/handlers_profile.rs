@@ -349,9 +349,17 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 /// detail"}`.
 const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 
-fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
-    raw.parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+/// Parse a `<uuid:user_id>` path segment the way Django's converter routes
+/// it: only the canonical lowercase hyphenated spelling reaches the view;
+/// anything else is the resolver 404 before auth (`UUIDConverter` matches
+/// `[0-9a-f]{8}-…` lowercase-only, PIDASHCONV-1713).
+fn parse_uuid_path(raw: &str) -> Result<uuid::Uuid, Denial> {
+    match crate::uuid_path::classify_uuid_segment(raw) {
+        crate::uuid_path::UuidSegment::Canonical(id) => Ok(id),
+        crate::uuid_path::UuidSegment::NonCanonical | crate::uuid_path::UuidSegment::Garbage => {
+            Err(Denial::PageNotFound)
+        }
+    }
 }
 
 /// The actor's `user_timezone` (`users.user_timezone`), parsed for DRF
@@ -628,9 +636,10 @@ async fn user_profile(
     Path((slug, user_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth.
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     // `User.objects.get(pk=user_id)` (`:283`): miss → 404.
     let db = pidash_db::pool::sea_orm_connection(&pool);
     let profile_row: Option<users::Model> = users::Entity::find_by_id(user_id)
@@ -960,8 +969,11 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// M2M group keys name the relation alias that must be joined (and its
+/// `deleted_at` guarded): the join is LEFT over `alias.deleted_at IS NULL`
+/// (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`), so linkless rows
+/// survive with the NULL group key that feeds the "None" bucket
+/// (NEWPIDASH-131 twin, NEWPIDASH-152).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -1144,7 +1156,7 @@ fn p_rich_condition(
                 for leaf in leaves {
                     let name = crate::app_issues::leaf_name(&leaf.field, leaf.lookup);
                     let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !matches!(expr, SimpleExpr::Custom(_)) {
+                    if !pidash_db::filterset::is_constant(&expr) {
                         if let Some(alias) = relation_alias(&name) {
                             used.insert(alias);
                         }
@@ -1284,7 +1296,11 @@ fn profile_filtered_set(
             if !used_leg {
                 continue;
             }
-            let inner = grouped || rich_inner || !nullable_only;
+            // NEWPIDASH-152 (NEWPIDASH-131 twin): a grouped m2m alias is
+            // joined LEFT (Django's LEFT OUTER JOIN + `deleted_at IS NULL`
+            // on `utils/grouper.py:41-49`); only a rich leaf or a
+            // positive legacy predicate upgrades to INNER.
+            let inner = rich_inner || (mentioned && !nullable_only);
             let kind = if inner {
                 JoinType::InnerJoin
             } else {
@@ -1405,17 +1421,18 @@ async fn user_profile_issues(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth
+    // and before the class gate (a non-member with a garbage id 404s,
+    // never 403s).
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    // Class gates run in `initial()`, before the body parses `user_id`
-    // (a non-member with a garbage id 403s, never 400s).
     let gate = gates::gate_for("GET", "workspaces/<slug>/user-issues/<user_id>/")
         .expect("user-issues gate")
         .gate;
     if let Some(denied) = check_class_gate(&pool, &gate, &slug, &viewer).await? {
         return Ok(denied);
     }
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     // Group clash is checked in-view before `paginate` parses per_page
     // (`user.py:174-182`).
     if let Some(mismatch) = qp::profile_group_mismatch(
@@ -1713,6 +1730,35 @@ fn profile_shape_json_value(field: &str, value: &Value) -> Value {
     }
 }
 
+/// Unquote `sort_order` in serialized grouped rows: Django renders the
+/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
+/// a string for the grouping kernels (which never do math on it). The
+/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
+/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
+/// splicing the quotes is exact.
+fn unquote_sort_order(results_json: &str) -> String {
+    let mut out = String::with_capacity(results_json.len());
+    let mut rest = results_json;
+    let marker = "\"sort_order\":\"";
+    while let Some(start) = rest.find(marker) {
+        let (head, tail) = rest.split_at(start + marker.len());
+        out.push_str(&head[..head.len() - 1]);
+        match tail.find('"') {
+            Some(end) => {
+                out.push_str(&tail[..end]);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push_str(tail);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Grouped / sub-grouped branch (`user.py:174-242`): window-function
 /// pagination over the group partition, totals with the intake /
 /// archived / draft `count_filter`, buckets from QRY-C
@@ -1834,6 +1880,7 @@ async fn profile_grouped_response(
             .map_err(|_| Denial::ServerError)?,
     };
     let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
+    let results_json = unquote_sort_order(&results_json);
     let top = group_totals
         .iter()
         .map(|(_, count)| *count)
@@ -2372,8 +2419,8 @@ fn p_parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// Compile the legacy predicates for the Q7 subscriber scope
 /// (`user.py:484-494`): the SAME `**filters` dict, resolved against
-/// `IssueSubscriber`. Only `created_by`, `project` and `created_at`
-/// lookups resolve there; every other name is a Django `FieldError` →
+/// `IssueSubscriber`. Only `created_by`, `project`, `created_at` and
+/// `updated_at` lookups resolve there; every other name is a Django `FieldError` →
 /// generic 500. Date validation mirrors the pilot compiler (garbage
 /// bounds are `ValidationError` → 400 invalid detail).
 fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr, Denial> {
@@ -2423,28 +2470,23 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => pidash_db::entity::issue_subscribers::Column::CreatedAt,
+                "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
+                _ => return Err(Denial::ServerError),
+            };
             if text.parse::<chrono::NaiveDate>().is_err()
                 && chrono::DateTime::parse_from_rfc3339(text).is_err()
             {
                 return Err(Denial::BadError(INVALID.to_owned()));
             }
             match operator {
-                "contains" => Ok(p_col(
-                    "sub",
-                    pidash_db::entity::issue_subscribers::Column::CreatedAt,
-                )
-                .cast_as(p_a("text"))
-                .like(s_like_pattern(text))),
+                "contains" => Ok(p_col("sub", column)
+                    .cast_as(p_a("text"))
+                    .like(s_like_pattern(text))),
                 "gte" | "lte" => {
                     let right = Expr::val(text.clone()).cast_as(p_a("date"));
-                    let left = p_col(
-                        "sub",
-                        pidash_db::entity::issue_subscribers::Column::CreatedAt,
-                    )
-                    .cast_as(p_a("date"));
+                    let left = p_col("sub", column).cast_as(p_a("date"));
                     Ok(if operator == "gte" {
                         left.gte(right)
                     } else {
@@ -2459,19 +2501,17 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => pidash_db::entity::issue_subscribers::Column::CreatedAt,
+                "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
+                _ => return Err(Denial::ServerError),
+            };
             let operator = match operator {
                 "gte" => ">=",
                 "lte" => "<=",
                 _ => return Err(Denial::ServerError),
             };
-            let left = p_col(
-                "sub",
-                pidash_db::entity::issue_subscribers::Column::CreatedAt,
-            )
-            .cast_as(p_a("date"));
+            let left = p_col("sub", column).cast_as(p_a("date"));
             let right = Expr::val(day.to_string()).cast_as(p_a("date"));
             Ok(if operator == ">=" {
                 left.gte(right)
@@ -2909,9 +2949,10 @@ async fn user_profile_stats(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth.
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     // No permission_classes (`:397`): any authenticated caller runs the
     // bundle; the queries scope by requester.
     let (legacy, sub_legacy) = compile_stats_legacy(&query)?;
@@ -3588,17 +3629,18 @@ async fn user_activity(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth
+    // and before the class gate (a non-member with a garbage id 404s,
+    // never 403s).
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    // Class gates run in `initial()`, before the body parses `user_id`
-    // (a non-member with a garbage id 403s, never 400s).
     let gate = gates::gate_for("GET", "workspaces/<slug>/user-activity/<user_id>/")
         .expect("user-activity gate")
         .gate;
     if let Some(denied) = check_class_gate(&pool, &gate, &slug, &viewer).await? {
         return Ok(denied);
     }
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     let (params, order_by) = activity_params(&query)?;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
     // `?project=` getlist (`:375,386-387`): raw strings, UUID-validated
@@ -3677,6 +3719,43 @@ mod tests {
             "/api/workspaces/{slug}/user-issues/{user_id}/"
         );
         assert_eq!(ME_ACTIVITIES_PATH, "/api/users/me/activities/");
+    }
+
+    #[test]
+    fn sort_order_unquotes_exactly() {
+        assert_eq!(
+            unquote_sort_order(r#"{"a":1,"sort_order":"65535.0","b":[]}"#),
+            r#"{"a":1,"sort_order":65535.0,"b":[]}"#
+        );
+        assert_eq!(
+            unquote_sort_order(r#"[{"sort_order":"1e+20"}]"#),
+            r#"[{"sort_order":1e+20}]"#
+        );
+        assert_eq!(unquote_sort_order(r#"{"x":"y"}"#), r#"{"x":"y"}"#);
+    }
+
+    #[test]
+    fn uuid_spelling_follows_the_converter() {
+        // PIDASHCONV-1713: only the canonical lowercase hyphenated spelling
+        // routes; uppercase/simple/braced/urn/garbage 404 at resolution.
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert_eq!(
+            parse_uuid_path(canonical).unwrap(),
+            uuid::Uuid::parse_str(canonical).unwrap()
+        );
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "xyz",
+            "",
+        ] {
+            assert!(
+                matches!(parse_uuid_path(raw), Err(Denial::PageNotFound)),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
@@ -4118,6 +4197,97 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#""i2"."id" = "issue"."id""#), "{text}");
+    }
+
+    #[test]
+    fn grouped_m2m_aliases_join_left_and_keep_deleted_guard() {
+        // NEWPIDASH-152 (NEWPIDASH-131 twin): a bare m2m group key (no
+        // rich/legacy leaf through that alias) LEFT-joins with the
+        // GROUP_FILTER_MAPPER guard, so linkless rows survive as the
+        // "None" bucket. Group and sub-group keys alike.
+        use crate::app_issues::OneOrMany;
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let query = QueryMap::new();
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("labels__id"),
+            Some("issue_module__module_id"),
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert_parens_balanced(&text);
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"LEFT JOIN "module_issues" AS "issue_module""#),
+            "{text}"
+        );
+        assert!(
+            !text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
+        assert!(
+            !text.contains(r#"INNER JOIN "module_issues" AS "issue_module""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""label_issue"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""issue_module"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+        // Assignees triple alone.
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("assignees__id"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_assignees" AS "issue_assignee""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""issue_assignee"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+        // A positive legacy filter through the same alias still upgrades
+        // to INNER (`mentioned && !nullable_only`), so grouped+filtered
+        // keeps the legacy fan-out behaviour.
+        let mut query = QueryMap::new();
+        query.insert(
+            "labels".to_owned(),
+            OneOrMany::One("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()),
+        );
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("labels__id"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert!(
+            text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
     }
 
     #[test]

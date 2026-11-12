@@ -37,6 +37,11 @@ pub struct Model {
     pub pod_id: Uuid,
     pub created_by_id: Uuid,
     pub pinned_runner_id: Option<Uuid>,
+    // Why the run is pinned (PDASHOSS01-297, design §6.4): `locality` is a
+    // best-effort session-continuity hint, `dedicated` is the issue's
+    // runner choice (never released, H-13). Existing rows default to
+    // `locality`. Reads the Django-owned column (runner 0039).
+    pub pin_kind: String,
     pub scheduler_binding_id: Option<Uuid>,
     pub llm_model: String,
     pub trigger: String,

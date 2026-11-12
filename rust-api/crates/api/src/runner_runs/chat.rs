@@ -825,6 +825,10 @@ impl RunnerDetailOwned {
             paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         }
     }
 }

@@ -17,7 +17,7 @@
 //! needed. Reads stay on the primary (`base.py:47-52`, `issue.py:18-22`:
 //! read-your-writes for the pickers backed by these endpoints).
 //!
-//! Layering: SQL text plus param parsing live in
+//! Layering: sea-query statement builders plus param parsing live in
 //! `pidash_services::app_views_search::{queries_search, fts}` (PIDASHCONV-272);
 //! the guard semantics in `permissions` (PIDASHCONV-273). This module owns
 //! the HTTP shell (routes, session auth, the project-kwarg rewrite), the
@@ -68,10 +68,11 @@ pub mod handlers_views;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use sqlx::{Postgres, Row};
 
 use crate::state::AppState;
 pub use pidash_compat::response::{json_ok as json_response, SERVER_ERROR_BODY};
+use pidash_db::entity::{projects, workspaces};
+use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 
 /// Merge the app-search route groups with the views route groups
 /// (PIDASHCONV-275); merges keep both sides.
@@ -180,6 +181,16 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// raises the resolve `Http404`, i.e. [`Denial::ProjectNotFound`].
 /// Skipped for anonymous callers (the slug-existence oracle stays closed) —
 /// so callers must check auth first, in Django's order.
+fn resolve_query(slug: &str, identifier: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
 pub async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -189,16 +200,13 @@ pub async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = resolve_query(slug, &upper)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 /// A badly-formed UUID where Django would raise `ValidationError` in the
@@ -232,8 +240,10 @@ pub enum Col {
     StrArray,
 }
 
-/// One shaped column: the response key, its `SELECT` position, its decoder.
-pub type Spec<'a> = &'a [(/* key */ &'a str, /* position */ usize, Col)];
+/// One shaped column: the response key (the SELECT alias the builders emit)
+/// and its decoder. `values()` order — the spec is written against Django's
+/// compiler order, e.g. the page section's slug-last.
+pub type Spec<'a> = &'a [(&'a str, Col)];
 
 /// One decoded cell.
 #[derive(Debug, Clone)]
@@ -278,44 +288,19 @@ fn json_quote(text: &str) -> String {
     serde_json::to_string(text).expect("json string")
 }
 
-/// Bind a services [`BuiltQuery`](pidash_services::app_views_search::queries_search::BuiltQuery)
-/// to sqlx in `$N` order. `IntegerArray` binds `Vec<i32>`: the SQL casts
-/// the bind to `int[]`, and an `int8[]` would not cast.
-fn bind_built<'q>(
-    query: sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>,
-    params: &[pidash_services::app_views_search::queries_search::SqlParam],
-) -> Result<sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>, Denial> {
-    use pidash_services::app_views_search::queries_search::SqlParam;
-    let mut query = query;
-    for param in params {
-        query = match param {
-            SqlParam::Text(text) => query.bind(text.clone()),
-            SqlParam::Integer(n) => query.bind(*n),
-            SqlParam::IntegerArray(values) => {
-                query.bind(values.iter().map(|n| *n as i32).collect::<Vec<i32>>())
-            }
-            // Builders only emit UUIDs the handler constructed from
-            // validated input or straight from the database, so a parse
-            // failure here is unreachable — 500 either way.
-            SqlParam::Uuid(raw) => {
-                query.bind(raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?)
-            }
-        };
-    }
-    Ok(query)
-}
-
-/// Run one section query and shape every row: keys in Django's compiler
+/// Run one section statement and shape every row: keys in Django's compiler
 /// order, compact JSON, `null` for missing/NULL — the exact bytes of DRF
-/// rendering the `values()` dicts.
+/// rendering the `values()` dicts. Rows decode by **name** (the builders
+/// alias every column to its spec key, so names are unique).
 pub async fn fetch_shaped(
     pool: &sqlx::PgPool,
-    built: &pidash_services::app_views_search::queries_search::BuiltQuery,
+    stmt: &sea_orm::sea_query::SelectStatement,
     spec: Spec<'_>,
 ) -> Result<Vec<String>, Denial> {
-    let query = bind_built(sqlx::query(&built.sql), &built.params)?;
-    let rows = query
-        .fetch_all(pool)
+    use sea_orm::{ConnectionTrait, DbBackend};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(stmt))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut out = Vec::with_capacity(rows.len());
@@ -325,52 +310,52 @@ pub async fn fetch_shaped(
     Ok(out)
 }
 
-fn decode_cell(row: &sqlx::postgres::PgRow, index: usize, col: Col) -> Result<Cell, Denial> {
+fn decode_cell(row: &sea_orm::QueryResult, name: &str, col: Col) -> Result<Cell, Denial> {
     let cell = match col {
         Col::Text => match row
-            .try_get::<Option<String>, _>(index)
+            .try_get::<Option<String>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(text) => Cell::Text(text),
             None => Cell::Null,
         },
         Col::Int => match row
-            .try_get::<Option<i32>, _>(index)
+            .try_get::<Option<i32>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(n) => Cell::Int(n),
             None => Cell::Null,
         },
         Col::Uuid => match row
-            .try_get::<Option<uuid::Uuid>, _>(index)
+            .try_get::<Option<uuid::Uuid>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(id) => Cell::Uid(id),
             None => Cell::Null,
         },
         Col::Date => match row
-            .try_get::<Option<chrono::NaiveDate>, _>(index)
+            .try_get::<Option<chrono::NaiveDate>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(date) => Cell::Date(date),
             None => Cell::Null,
         },
         Col::Json => match row
-            .try_get::<Option<serde_json::Value>, _>(index)
+            .try_get::<Option<serde_json::Value>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(value) => Cell::Json(value),
             None => Cell::Null,
         },
         Col::UuidArray => match row
-            .try_get::<Option<Vec<uuid::Uuid>>, _>(index)
+            .try_get::<Option<Vec<uuid::Uuid>>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(ids) => Cell::UidArray(ids),
             None => Cell::Null,
         },
         Col::StrArray => match row
-            .try_get::<Option<Vec<String>>, _>(index)
+            .try_get::<Option<Vec<String>>>("", name)
             .map_err(|_| Denial::ServerError)?
         {
             Some(items) => Cell::StrArray(items),
@@ -380,16 +365,16 @@ fn decode_cell(row: &sqlx::postgres::PgRow, index: usize, col: Col) -> Result<Ce
     Ok(cell)
 }
 
-fn shape_row(row: &sqlx::postgres::PgRow, spec: Spec<'_>) -> Result<String, Denial> {
+fn shape_row(row: &sea_orm::QueryResult, spec: Spec<'_>) -> Result<String, Denial> {
     let mut out = String::from("{");
-    for (entry, (key, position, col)) in spec.iter().enumerate() {
+    for (entry, (key, col)) in spec.iter().enumerate() {
         if entry > 0 {
             out.push(',');
         }
         out.push('"');
         out.push_str(key);
         out.push_str("\":");
-        out.push_str(&decode_cell(row, *position, *col)?.render());
+        out.push_str(&decode_cell(row, key, *col)?.render());
     }
     out.push('}');
     Ok(out)
@@ -397,7 +382,18 @@ fn shape_row(row: &sqlx::postgres::PgRow, spec: Spec<'_>) -> Result<String, Deni
 
 #[cfg(test)]
 mod pidashconv_736_tests {
-    use super::normalize_resolve_identifier;
+    use super::{normalize_resolve_identifier, resolve_query};
+
+    #[test]
+    fn resolve_statement_shape_is_identifier_join() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = resolve_query("acme", "ACM")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "identifier join: {sql}");
+        assert!(sql.contains("\"identifier\""), "identifier filter: {sql}");
+        assert!(sql.contains("deleted_at"), "soft-delete scope: {sql}");
+    }
 
     #[test]
     fn resolve_identifier_strips_py_whitespace() {

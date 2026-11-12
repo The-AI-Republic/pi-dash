@@ -19,7 +19,7 @@ use super::{order_key, with_order_joins, Binder, Denial};
 // Shared column lists (Django concrete-field order, live-compiled)
 // ---------------------------------------------------------------------------
 
-/// All 34 concrete `issues` columns in Django's select order, qualified with
+/// All 35 concrete `issues` columns in Django's select order, qualified with
 /// the pilot-2 `issue` alias so these fragments compose with
 /// `complex_filter` / `legacy_sql` / `order_key` output.
 pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.created_by_id, \
@@ -30,7 +30,7 @@ pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.creat
     issue.target_date, issue.sequence_id, issue.sort_order, issue.completed_at, \
     issue.archived_at, issue.is_draft, issue.external_source, issue.external_id, \
     issue.type_id, issue.git_work_branch, issue.workpad, issue.created_via, \
-    issue.assigned_pod_id, issue.agent_executor";
+    issue.assigned_pod_id, issue.assigned_runner_id, issue.agent_executor";
 
 /// All 18 concrete `states` columns (`select_related("state")` order).
 /// `group`/`default` stay quoted: reserved words.
@@ -293,7 +293,7 @@ pub const TICKER_COLUMNS: &str = "issue_agent_ticker.created_at, issue_agent_tic
     issue_agent_ticker.pending_entry_free, issue_agent_ticker.pending_entry_actor_id, \
     issue_agent_ticker.pending_entry_trigger, issue_agent_ticker.resume_parent_run_id";
 
-/// All 34 concrete `issues` columns under the `parent` self-join alias
+/// All 35 concrete `issues` columns under the `parent` self-join alias
 /// (identifier-full `select_related("parent")`; Django renders `T4`).
 pub const PARENT_ISSUE_COLUMNS: &str = "parent.created_at, parent.updated_at, \
     parent.created_by_id, parent.updated_by_id, parent.deleted_at, parent.id, \
@@ -303,7 +303,7 @@ pub const PARENT_ISSUE_COLUMNS: &str = "parent.created_at, parent.updated_at, \
     parent.complexity_score, parent.start_date, parent.target_date, parent.sequence_id, \
     parent.sort_order, parent.completed_at, parent.archived_at, parent.is_draft, \
     parent.external_source, parent.external_id, parent.type_id, parent.git_work_branch, \
-    parent.workpad, parent.created_via, parent.assigned_pod_id, parent.agent_executor";
+    parent.workpad, parent.created_via, parent.assigned_pod_id, parent.assigned_runner_id, parent.agent_executor";
 
 /// Identifier-lite `.only()` select list in Django's RENDER order: `.only()`
 /// honors model field order, not the call order. `external_source` rides
@@ -570,7 +570,7 @@ pub fn scoped_issue_ids_sql(ids: &[uuid::Uuid]) -> Stmt {
 const POST_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, issue.sort_order, \
     issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority, \
     issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
-    issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.agent_executor, \
+    issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.assigned_runner_id, issue.agent_executor, \
     issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
     issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at, \
     issue.external_source, state.\"group\" AS state_group";
@@ -851,7 +851,7 @@ mod pins {
             names(&LITE_ISSUE_FIELDS),
             stems(LITE_ISSUE_COLUMNS, "issue")
         );
-        assert_eq!(full_row_aliases().len(), 175);
+        assert_eq!(full_row_aliases().len(), 177);
     }
 }
 

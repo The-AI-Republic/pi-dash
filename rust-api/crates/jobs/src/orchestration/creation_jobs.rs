@@ -50,9 +50,10 @@ use uuid::Uuid;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, git_code_review_links, git_repositories, git_repository_bindings,
-    issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
-    labels, pod, projects, prompt_section_override, runner, states, users, workspaces,
+    agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
+    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
+    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
+    workspaces,
 };
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
@@ -66,9 +67,9 @@ use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::creation::{
     state_name_group, user_id_for_run, AdmissionError as ServiceAdmissionError, CreationError,
-    CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -252,6 +253,7 @@ struct IssueRow {
     parent_id: Option<Uuid>,
     created_by_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
     git_work_branch: String,
     workpad: String,
@@ -272,6 +274,7 @@ impl From<IssueRow> for IssueView {
             parent_id: row.parent_id,
             created_by_id: row.created_by_id,
             assigned_pod_id: row.assigned_pod_id,
+            assigned_runner_id: row.assigned_runner_id,
             agent_executor: row.agent_executor,
             git_work_branch: Some(row.git_work_branch),
             workpad: Some(row.workpad),
@@ -334,6 +337,7 @@ struct RunRow {
     pod_id: Uuid,
     runner_id: Option<Uuid>,
     pinned_runner_id: Option<Uuid>,
+    pin_kind: String,
     parent_run_id: Option<Uuid>,
     work_item_id: Option<Uuid>,
     status: String,
@@ -357,6 +361,7 @@ fn issue_columns() -> Vec<issues::Column> {
         issues::Column::ParentId,
         issues::Column::CreatedById,
         issues::Column::AssignedPodId,
+        issues::Column::AssignedRunnerId,
         issues::Column::AgentExecutor,
         issues::Column::GitWorkBranch,
         issues::Column::Workpad,
@@ -395,6 +400,7 @@ fn run_columns() -> Vec<agent_run::Column> {
         agent_run::Column::PodId,
         agent_run::Column::RunnerId,
         agent_run::Column::PinnedRunnerId,
+        agent_run::Column::PinKind,
         agent_run::Column::ParentRunId,
         agent_run::Column::WorkItemId,
         agent_run::Column::Status,
@@ -428,6 +434,7 @@ fn map_run_row(row: RunRow) -> Result<RunView, CreationError> {
         pod_id: row.pod_id,
         runner_id: row.runner_id,
         pinned_runner_id: row.pinned_runner_id,
+        pin_kind: row.pin_kind,
         parent_run_id: row.parent_run_id,
         work_item_id: row.work_item_id,
         status,
@@ -461,6 +468,7 @@ fn map_run_model(model: agent_run::Model) -> Result<RunView, CreationError> {
         pod_id: model.pod_id,
         runner_id: model.runner_id,
         pinned_runner_id: model.pinned_runner_id,
+        pin_kind: model.pin_kind,
         parent_run_id: model.parent_run_id,
         work_item_id: model.work_item_id,
         status,
@@ -482,20 +490,12 @@ struct RunnerRow {
     id: Uuid,
     pod_id: Uuid,
     status: String,
+    name: String,
     last_heartbeat_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     paused_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-}
-
-impl From<RunnerRow> for RunnerView {
-    fn from(row: RunnerRow) -> Self {
-        Self {
-            id: row.id,
-            pod_id: row.pod_id,
-            status: row.status,
-            last_heartbeat_at: row.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
-            paused_at: row.paused_at.map(|at| at.with_timezone(&Utc)),
-        }
-    }
+    provisioning: String,
+    pod_dispatch: String,
+    dev_machine_id: Option<Uuid>,
 }
 
 /// The `users.is_active/is_bot` flags, decoded by name.
@@ -622,24 +622,51 @@ where
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row = {
+        let (row, engine_paused) = {
             let conn = TxConn::new(self.tx.inner());
-            runner::Entity::find()
+            let row = runner::Entity::find()
                 .select_only()
                 .columns([
                     runner::Column::Id,
                     runner::Column::PodId,
                     runner::Column::Status,
+                    runner::Column::Name,
                     runner::Column::LastHeartbeatAt,
                     runner::Column::PausedAt,
+                    runner::Column::Provisioning,
+                    runner::Column::PodDispatch,
+                    runner::Column::DevMachineId,
                 ])
                 .filter(runner::Column::Id.eq(runner_id))
                 .into_model::<RunnerRow>()
                 .one(&conn)
                 .await
-                .map_err(sea_db)?
+                .map_err(sea_db)?;
+            let engine_paused = match row.as_ref().and_then(|r| r.dev_machine_id) {
+                Some(machine_id) => {
+                    let machine = dev_machine::Entity::find_by_id(machine_id)
+                        .one(&conn)
+                        .await
+                        .map_err(sea_db)?;
+                    machine.is_some_and(|m| {
+                        m.engine_paused_by_owner || !m.engine_auto_pause_reason.is_empty()
+                    })
+                }
+                None => false,
+            };
+            (row, engine_paused)
         };
-        Ok(row.map(RunnerView::from))
+        Ok(row.map(|row| RunnerView {
+            id: row.id,
+            pod_id: row.pod_id,
+            status: row.status,
+            name: row.name,
+            last_heartbeat_at: row.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
+            paused_at: row.paused_at.map(|at| at.with_timezone(&Utc)),
+            provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
+            engine_paused,
+        }))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
@@ -808,6 +835,8 @@ where
             pod_id: Set(row.pod_id),
             created_by_id: Set(row.created_by_id),
             pinned_runner_id: Set(row.pinned_runner_id),
+            // The resolved pin's kind (design §9.1, runner 0039).
+            pin_kind: Set(row.pin_kind.clone()),
             scheduler_binding_id: Set(None),
             llm_model: Set(String::new()),
             trigger: Set(row.trigger.clone()),
@@ -891,7 +920,6 @@ where
             managed,
             has_usable_llm_config,
             toolsets,
-            llm_profile,
             now_unix_secs,
             deferred,
             ..
@@ -911,7 +939,6 @@ where
         };
         let has_llm = has_usable_llm_config.clone();
         let toolsets = toolsets.clone();
-        let profile = llm_profile.clone();
         let mut collect = |consume: DeferredConsume| deferred.push(consume);
         let fields = resolve_execution_fields(
             &mut short,
@@ -923,7 +950,6 @@ where
             ExecutionSeams {
                 has_usable_llm_config: move || actor_id.is_some_and(&has_llm),
                 toolsets,
-                llm_profile: move || profile(actor_id),
             },
         )
         .await;
@@ -987,6 +1013,57 @@ where
 
     fn extra_toolsets_schema_tool(&self) -> String {
         self.toolsets.schema_tool_name().to_owned()
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        // The dedicated-pin decision (§9.1 + §11.2/§23.3).
+        let conn = pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner());
+        pidash_services::domain::issue_assignment::flight_pin(&conn, args, args.actor_id)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner());
+        pidash_services::domain::issue_assignment::pod_once_started_comment(
+            &conn, issue_id, pod_id, actor_id, now,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        // `// raw-sql:`-free: the two SELECT-free entity wrappers.
+        let conn = pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner());
+        pidash_services::domain::issue_assignment::system_comment_row(&conn, comment)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        // `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+        // (`service.py:494-495,896-897`, `pod_once`, §23.3).
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::ThreadId, Expr::value(""))
+            .filter(agent_run::Column::Id.eq(run_id))
+            .filter(agent_run::Column::ThreadId.ne(""))
+            .exec(&conn)
+            .await
+            .map_err(sea_db)?;
+        Ok(())
     }
 }
 
@@ -2371,6 +2448,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -2708,12 +2786,12 @@ mod tests {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
-             name, host_label, provisioning, visibility, refresh_token_hash, \
+             name, host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
              refresh_token_fingerprint, refresh_token_generation, \
              previous_refresh_token_hash, access_token_signing_key_version, \
              enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
              os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
-             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 'pinned_only', 0, '', '', 0, '', \
              1, '', '', '[]', $7, '', '', '', '{}', 1, '')",
         )
         .bind(id)
@@ -2956,6 +3034,7 @@ mod tests {
             parent,
             creator_id: graph.user,
             pod_id: graph.pod,
+            pod_once: false,
             fresh_session: false,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
@@ -3245,6 +3324,7 @@ mod tests {
             parent,
             creator_id: graph.user,
             pod_id: graph.pod,
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }

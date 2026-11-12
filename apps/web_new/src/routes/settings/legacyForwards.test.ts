@@ -49,6 +49,7 @@ const WORKSPACES = [
 /** The gated reads, keyed by the fixture name in the query key. */
 function queryClient(fixtures: { last?: string | null; fallback?: string | null; workspaces?: unknown }): QueryClient {
   return {
+    getQueryState: () => undefined,
     ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
       const key = options.queryKey[1];
       if (key === "me") return ME;

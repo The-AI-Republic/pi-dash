@@ -100,6 +100,7 @@ use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
 use pidash_db::orm_tx::TxConn;
 use pidash_services::runner_enroll::queries::manage_reads::RunnerJoinRow;
+use sea_orm::EntityTrait;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -148,6 +149,25 @@ pub const POD_MISSING_BODY: &str = r#"{"error":"pod does not exist or has been d
 pub const POD_OTHER_WORKSPACE_BODY: &str = r#"{"error":"pod is in a different workspace"}"#;
 /// Runner busy guard — 409 (`runners.py:414-417`).
 pub const RUNNER_BUSY_BODY: &str = r#"{"error":"runner has an in-flight or queued run; wait for it to finish or cancel it first","code":"runner_busy"}"#;
+
+/// Cross-project pod move with dedicated issues — 409 (PDASHOSS01-297,
+/// §13.1): I1/E2 would break. The issue list (max 20) rides along.
+pub fn runner_has_assigned_issues_body(issues: &[(Uuid, String)]) -> String {
+    serde_json::json!({
+        "error": "runner has assigned issues; clear their dedicated runner first",
+        "code": "runner_has_assigned_issues",
+        "issues": issues.iter().map(|(id, name)| serde_json::json!({
+            "id": id.to_string(),
+            "name": name,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+/// `pod_dispatch` validation — 400 (`runners.py` #2903).
+pub const POD_DISPATCH_INVALID_BODY: &str =
+    r#"{"error":"pod_dispatch must be one of: pinned_only, pod_member"}"#;
+/// Engine pod-move restriction — 400 (`runners.py` #2903).
+pub const ENGINE_PROJECT_FIXED_BODY: &str = r#"{"error":"a built-in engine runner can only move between pods of its project","code":"engine_runner_project_fixed"}"#;
 /// Pod delete guard 1 — 409 (`pods.py:230-234`).
 pub const POD_HAS_RUNNERS_BODY: &str =
     r#"{"error":"pod has runners; move or revoke them first","code":"pod_has_runners"}"#;
@@ -425,6 +445,59 @@ fn body_uuid(value: &JVal) -> Result<Uuid, Response> {
         JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
             Err(server_error())
         }
+    }
+}
+
+/// The runner-PATCH `pod_dispatch` member (`runners.py` #2903): the raw
+/// value must be one of the two choices; anything else (including
+/// non-strings) is the 400. Returns the value when valid.
+fn pod_dispatch_value(value: Option<&JVal>) -> Option<String> {
+    match value {
+        Some(JVal::Str(text)) => {
+            let raw = text.to_lossy_string().to_owned();
+            if raw == "pinned_only" || raw == "pod_member" {
+                Some(raw)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a runner is a built-in engine runner (`provisioning` check,
+/// `Runner.is_engine`, `models.py` #2903).
+fn is_engine_runner(executor: &RunnerOwned) -> bool {
+    executor.provisioning == "desktop_bundled"
+}
+
+/// Drain a runner after commit (the `_apply_pod_dispatch_change` pod-member
+/// arm, `drain_for_runner_by_id` on commit).
+async fn drain_runner_after_commit(pool: &PgPool, state: &AppState, runner_id: Uuid) {
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await;
+}
+
+/// Drain pods after commit (the `release_locality_pins` pod drains).
+async fn drain_pods_after_commit(pool: &PgPool, state: &AppState, pods: &[Uuid]) {
+    if pods.is_empty() {
+        return;
+    }
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    for pod in pods {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod,
+        )
+        .await;
     }
 }
 
@@ -980,6 +1053,12 @@ struct RunnerRender {
     paused_by: Option<String>,
     created_at: String,
     updated_at: String,
+    /// `?assignable_for=` eligibility read (design §7.4): absent unless
+    /// the list was asked for it, mirroring the context-gated fields.
+    assignable: Option<bool>,
+    not_assignable_code: Option<&'static str>,
+    is_busy: Option<bool>,
+    queue_depth: Option<u64>,
 }
 
 /// Owned pod mini (`serializers.py:133-142`).
@@ -1075,9 +1154,22 @@ impl RunnerRender {
             paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
+            assignable: self.assignable,
+            not_assignable_code: self.not_assignable_code,
+            is_busy: self.is_busy,
+            queue_depth: self.queue_depth,
         };
         serde_json::to_string(&shapes::runner_to_representation(&row)).map_err(|_| server_error())
     }
+}
+
+/// `?assignable_for=` eligibility triple (design §7.4).
+#[derive(Clone, Copy, Default)]
+struct RunnerEligibility {
+    assignable: Option<bool>,
+    not_assignable_code: Option<&'static str>,
+    is_busy: Option<bool>,
+    queue_depth: Option<u64>,
 }
 
 /// Build the runner render buffer from decoded parts (pure — the
@@ -1088,6 +1180,7 @@ fn runner_render(
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
     live_state: Option<LiveStateOwned>,
+    eligibility: RunnerEligibility,
 ) -> RunnerRender {
     // `Runner.is_engine` / `engine_paused` / `machine_display_name`
     // (`models.py:740-755`): engine-ness from provisioning, pause from
@@ -1157,6 +1250,10 @@ fn runner_render(
             .as_ref()
             .map(crate::serializer::render_datetime),
         paused_by: runner.paused_by_id.map(|id| id.to_string()),
+        assignable: eligibility.assignable,
+        not_assignable_code: eligibility.not_assignable_code,
+        is_busy: eligibility.is_busy,
+        queue_depth: eligibility.queue_depth,
         created_at: crate::serializer::render_datetime(&runner.created_at),
         updated_at: crate::serializer::render_datetime(&runner.updated_at),
     }
@@ -1171,22 +1268,113 @@ async fn render_runner_parts(
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
 ) -> Result<String, Response> {
+    render_runner_parts_ctx(
+        pool,
+        runner,
+        pod,
+        pod_identifier,
+        dev_machine_detail,
+        None,
+        None,
+    )
+    .await
+}
+
+/// `#assignable_for` context, when the list was asked for it (§7.4).
+async fn render_runner_parts_ctx(
+    pool: &PgPool,
+    runner: &RunnerOwned,
+    pod: &PodOwned,
+    pod_identifier: String,
+    dev_machine_detail: Option<DevMachineMiniOwned>,
+    viewer_id: Option<Uuid>,
+    assignable_for: Option<Option<Uuid>>,
+) -> Result<String, Response> {
     let live_state = fetch_live_state(pool, runner.id).await?;
-    runner_render(runner, pod, pod_identifier, dev_machine_detail, live_state).to_json()
+    let eligibility = match assignable_for {
+        None => RunnerEligibility::default(),
+        Some(issue_id) => {
+            let orm = pidash_db::pool::sea_orm_connection(pool);
+            let Some(runner_row) = pidash_db::entity::runner::Entity::find_by_id(runner.id)
+                .one(&orm)
+                .await
+                .map_err(|_| server_error())?
+            else {
+                return Err(server_error());
+            };
+            let issue = match issue_id {
+                Some(id) => pidash_db::entity::issues::Entity::find_by_id(id)
+                    .one(&orm)
+                    .await
+                    .map_err(|_| server_error())?,
+                None => None,
+            };
+            let check = pidash_services::domain::issue_assignment::AssignmentCheck {
+                user_id: viewer_id,
+                issue_id,
+                pod_id: None,
+                project_id: None,
+                issue: issue.as_ref(),
+            };
+            let (assignable, code) =
+                pidash_services::domain::issue_assignment::assignable_for_runner(
+                    &orm,
+                    &runner_row,
+                    &check,
+                )
+                .await
+                .map_err(|_| server_error())?;
+            let busy = pidash_services::domain::issue_assignment::is_busy(&orm, runner.id)
+                .await
+                .map_err(|_| server_error())?;
+            let depth = pidash_services::domain::issue_assignment::queue_depth(&orm, runner.id)
+                .await
+                .map_err(|_| server_error())?;
+            RunnerEligibility {
+                assignable: Some(assignable),
+                not_assignable_code: Some(code),
+                is_busy: Some(busy),
+                queue_depth: Some(depth),
+            }
+        }
+    };
+    runner_render(
+        runner,
+        pod,
+        pod_identifier,
+        dev_machine_detail,
+        live_state,
+        eligibility,
+    )
+    .to_json()
 }
 
 /// Serialize one R1/R2 join row: the runner + dev-machine + pod blocks
 /// decode positionally; `projects.identifier` reads by name (the only
 /// `identifier` column across the four tables).
 async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow) -> Result<String, Response> {
+    render_runner_row_ctx(pool, row, None, None).await
+}
+
+/// `#assignable_for` context, when the list was asked for it (design
+/// §7.4): the viewer and the resolved issue (outer `None` = not
+/// requested, inner `None` = "new" / garbage).
+pub(crate) async fn render_runner_row_ctx(
+    pool: &PgPool,
+    row: &RunnerJoinRow,
+    viewer_id: Option<Uuid>,
+    assignable_for: Option<Option<Uuid>>,
+) -> Result<String, Response> {
     let runner = runner_of(row);
     let pod = pod_of(row);
-    render_runner_parts(
+    render_runner_parts_ctx(
         pool,
         &runner,
         &pod,
         row.project_identifier.clone(),
         machine_mini_of(row),
+        viewer_id,
+        assignable_for,
     )
     .await
 }
@@ -1397,8 +1585,31 @@ pub async fn dev_machine_patch(
     };
     let updated = match updated {
         Ok(updated) => {
+            let effects = updated.effects.clone();
             if tx.commit().await.is_err() {
                 return server_error();
+            }
+            // Post-commit drains for the owner-pause flip (Django on_commit).
+            if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                let redis = pidash_db::redis::client_from_settings(state.settings());
+                for pod_id in &effects.drain_pod_ids {
+                    let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                        &pool,
+                        redis.as_ref(),
+                        &state.settings().runner,
+                        *pod_id,
+                    )
+                    .await;
+                }
+                for runner_id in &effects.drain_runner_ids {
+                    let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                        &pool,
+                        redis.as_ref(),
+                        &state.settings().runner,
+                        *runner_id,
+                    )
+                    .await;
+                }
             }
             updated
         }
@@ -1508,13 +1719,65 @@ pub async fn dev_machine_patch(
 }
 
 // ---------------------------------------------------------------------------
-// Runner list (`runners.py:289-333`)
+// Runner list (`runners.py:340-413`)
 // ---------------------------------------------------------------------------
 
-/// `GET /api/runners/` (`runners.py:289-333`): workspace gate, the
-/// owner+private visibility predicate, `?pod=`/`?project=` narrowing,
-/// desktop-bundled exclusion unless `?include_bundled=` is exactly
-/// `1`/`true`/`yes`, `-updated_at` order.
+/// `RunnerListEndpoint.get` scope resolution: `?project=` wins over
+/// `?workspace=` ([`pods_list`]); project mode 404s an unknown project
+/// and 403s non-members of the project's workspace, and the returned
+/// workspace is the project's, so a mismatched `workspace` param cannot
+/// widen the list; workspace mode 400s when neither filter is present.
+/// Returns `(workspace_id, project_id)`.
+async fn runner_list_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    params: &crate::license::QueryMap,
+) -> Result<(Uuid, Option<Uuid>), Response> {
+    if let Some(raw) = query_param(params, "project") {
+        let project_id = match parse_uuid(&raw) {
+            Ok(project_id) => project_id,
+            Err(response) => return Err(response),
+        };
+        let facts = match fetch_project_facts(pool, project_id).await {
+            Ok(facts) => facts,
+            Err(response) => return Err(response),
+        };
+        let Some(facts) = facts else {
+            return Err(json_response(
+                StatusCode::NOT_FOUND,
+                PROJECT_NOT_FOUND_BODY.to_owned(),
+            ));
+        };
+        let role = match workspace_role(pool, facts.workspace_id, user_id).await {
+            Ok(role) => role,
+            Err(response) => return Err(response),
+        };
+        if !membership::is_workspace_member(role) {
+            return Err(forbidden());
+        }
+        Ok((facts.workspace_id, Some(project_id)))
+    } else {
+        let Some(raw) = query_param(params, "workspace") else {
+            return Err(bad_request(PROJECT_OR_WORKSPACE_REQUIRED_BODY));
+        };
+        let workspace_id = match parse_uuid(&raw) {
+            Ok(workspace_id) => workspace_id,
+            Err(response) => return Err(response),
+        };
+        let role = match workspace_role(pool, workspace_id, user_id).await {
+            Ok(role) => role,
+            Err(response) => return Err(response),
+        };
+        if !membership::is_workspace_member(role) {
+            return Err(forbidden());
+        }
+        Ok((workspace_id, None))
+    }
+}
+
+/// `GET /api/runners/` (`runners.py:340-413`): the [`runner_list_scope`]
+/// gate, the owner+private visibility predicate, `?pod=` narrowing,
+/// `-updated_at` order.
 pub async fn runners_list(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1524,20 +1787,10 @@ pub async fn runners_list(
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let Some(raw) = query_param(&params, "workspace") else {
-        return bad_request(WORKSPACE_REQUIRED_BODY);
-    };
-    let workspace_id = match parse_uuid(&raw) {
-        Ok(workspace_id) => workspace_id,
+    let (workspace_id, project_id) = match runner_list_scope(&pool, user_id, &params).await {
+        Ok(scope) => scope,
         Err(response) => return response,
     };
-    let role = match workspace_role(&pool, workspace_id, user_id).await {
-        Ok(role) => role,
-        Err(response) => return response,
-    };
-    if !membership::is_workspace_member(role) {
-        return forbidden();
-    }
     // Filter UUIDs parse at queryset evaluation — after the member
     // gate, so a non-member with a garbage filter still answers 403.
     let mut pod_id = None;
@@ -1547,15 +1800,26 @@ pub async fn runners_list(
             Err(response) => return response,
         }
     }
-    let mut project_id = None;
-    if let Some(raw) = query_param(&params, "project") {
-        match parse_uuid(&raw) {
-            Ok(id) => project_id = Some(id),
-            Err(response) => return response,
-        }
-    }
     // Engine runners are listed like any other runner (#2910);
     // `?include_bundled` is ignored.
+    // `?assignable_for=<issue-id | "new">` (design §7.4): the per-row
+    // eligibility read. A garbage id behaves as "new" (Django's
+    // `except (ValueError, TypeError)` arm).
+    let assignable_for: Option<Option<Uuid>> = match query_param(&params, "assignable_for") {
+        None => None,
+        Some(raw) if raw == "new" => Some(None),
+        Some(raw) => match raw.parse::<Uuid>() {
+            Ok(id) => {
+                let orm = pidash_db::pool::sea_orm_connection(&pool);
+                let found = pidash_db::entity::issues::Entity::find_by_id(id)
+                    .one(&orm)
+                    .await
+                    .unwrap_or(None);
+                Some(found.map(|issue| issue.id))
+            }
+            Err(_) => Some(None),
+        },
+    };
     let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
     let rows = match manage_reads::runner_list(
         &pidash_db::pool::sea_orm_connection(&pool),
@@ -1573,7 +1837,7 @@ pub async fn runners_list(
     };
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
-        match render_runner_row(&pool, row).await {
+        match render_runner_row_ctx(&pool, row, Some(user_id), assignable_for).await {
             Ok(body) => bodies.push(body),
             Err(response) => return response,
         }
@@ -1717,6 +1981,26 @@ pub async fn runner_patch(
         Ok(false) => {}
         Err(response) => return response,
     }
+    // `pod_dispatch` validation (`runners.py` #2903): when the key is
+    // present the value must be one of the two choices.
+    let mut new_dispatch: Option<String> = None;
+    match data_has(&data, "pod_dispatch") {
+        Ok(true) => {
+            let raw = match data_get(&data, "pod_dispatch") {
+                Ok(raw) => raw,
+                Err(response) => return response,
+            };
+            match pod_dispatch_value(raw) {
+                Some(value) => new_dispatch = Some(value),
+                None => return bad_request(POD_DISPATCH_INVALID_BODY),
+            }
+        }
+        Ok(false) => {}
+        Err(response) => return response,
+    }
+    let dispatch_changed = new_dispatch
+        .as_deref()
+        .is_some_and(|value| value != runner.pod_dispatch);
     let mut new_pod: Option<PodOwned> = None;
     let want_pod = match data_has(&data, "pod") {
         Ok(want_pod) => want_pod,
@@ -1754,6 +2038,40 @@ pub async fn runner_patch(
         if target.workspace_id != runner.workspace_id {
             return bad_request(POD_OTHER_WORKSPACE_BODY);
         }
+        // Engine pod-move restriction (`runners.py` #2903): an engine
+        // runner that already has a pod may only move within its project.
+        // This runs after the workspace check and before the busy guard.
+        if is_engine_runner(&runner) && target.project_id != hit.row.pod_project_id {
+            return bad_request(ENGINE_PROJECT_FIXED_BODY);
+        }
+        // Cross-project move (§13.1, §23.4): refused while any issue is
+        // dedicated to the runner — I1/E2 would break. Same-project
+        // moves follow the runner (§13.1): the assigned_pod update
+        // below tracks the move.
+        if manage_reads::is_real_move(&target.id, &runner.pod_id)
+            && target.project_id != hit.row.pod_project_id
+        {
+            use pidash_db::entity::issues;
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+            let conn = TxConn::new(&mut tx);
+            let dedicated: Vec<(Uuid, String)> = match issues::Entity::find()
+                .filter(issues::Column::AssignedRunnerId.eq(runner.id))
+                .select_only()
+                .column(issues::Column::Id)
+                .column(issues::Column::Name)
+                .order_by_asc(issues::Column::CreatedAt)
+                .limit(20u64)
+                .into_tuple()
+                .all(&conn)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => return server_error(),
+            };
+            if !dedicated.is_empty() {
+                return conflict(runner_has_assigned_issues_body(&dedicated).as_str());
+            }
+        }
         if manage_reads::is_real_move(&target.id, &runner.pod_id) {
             let busy = match manage_reads::runner_is_busy(&TxConn::new(&mut tx), runner.id).await {
                 Ok(busy) => busy,
@@ -1771,12 +2089,50 @@ pub async fn runner_patch(
             runner.id,
             Some(target.id),
             new_name.as_deref(),
+            if dispatch_changed {
+                new_dispatch.as_deref()
+            } else {
+                None
+            },
             now,
         )
         .await
         .is_err()
         {
             return server_error();
+        }
+        // §13.1 follow: same-project moves pull the dedicated issues'
+        // assigned_pod to the new pod (the cross-project case is
+        // refused above).
+        if manage_reads::is_real_move(&target.id, &runner.pod_id)
+            && target.project_id == hit.row.pod_project_id
+            && pidash_services::domain::issue_assignment::follow_pod_move(
+                &TxConn::new(&mut tx),
+                runner.id,
+                target.id,
+            )
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        // Side effects in the same transaction (`_apply_pod_dispatch_change`).
+        let mut drain_runner = false;
+        let mut drain_pods: Vec<Uuid> = Vec::new();
+        if dispatch_changed {
+            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+                match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
+                    &TxConn::new(&mut tx),
+                    &[runner.id],
+                )
+                .await
+                {
+                    Ok((_, pods)) => drain_pods = pods,
+                    Err(_) => return server_error(),
+                }
+            } else if new_dispatch.as_deref() == Some("pod_member") {
+                drain_runner = true;
+            }
         }
         if tx.commit().await.is_err() {
             return server_error();
@@ -1786,24 +2142,89 @@ pub async fn runner_patch(
         if let Some(name) = new_name.clone() {
             runner.name = name;
         }
-        new_pod = Some(target);
-    } else if let Some(name) = new_name.clone() {
-        // Rename-only: a standalone autocommit save, no transaction.
-        let now = now_micros();
-        if manage_reads::patch_runner(
-            &pidash_db::pool::sea_orm_connection(&pool),
-            runner.id,
-            None,
-            Some(&name),
-            now,
-        )
-        .await
-        .is_err()
-        {
-            return server_error();
+        if dispatch_changed {
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
         }
-        runner.name = name;
-        runner.updated_at = now;
+        new_pod = Some(target);
+        if drain_runner {
+            drain_runner_after_commit(&pool, &state, runner.id).await;
+        } else if !drain_pods.is_empty() {
+            drain_pods_after_commit(&pool, &state, &drain_pods).await;
+        }
+    } else if new_name.is_some() || dispatch_changed {
+        if dispatch_changed {
+            // Non-pod path is wrapped in `transaction.atomic` (#2903).
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(_) => return server_error(),
+            };
+            let now = now_micros();
+            if manage_reads::patch_runner(
+                &TxConn::new(&mut tx),
+                runner.id,
+                None,
+                new_name.as_deref(),
+                new_dispatch.as_deref(),
+                now,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+            let mut drain_runner = false;
+            let mut drain_pods: Vec<Uuid> = Vec::new();
+            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+                match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
+                    &TxConn::new(&mut tx),
+                    &[runner.id],
+                )
+                .await
+                {
+                    Ok((_, pods)) => drain_pods = pods,
+                    Err(_) => return server_error(),
+                }
+            } else if new_dispatch.as_deref() == Some("pod_member") {
+                drain_runner = true;
+            }
+            if tx.commit().await.is_err() {
+                return server_error();
+            }
+            runner.updated_at = now;
+            if let Some(name) = new_name.clone() {
+                runner.name = name;
+            }
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
+            if drain_runner {
+                drain_runner_after_commit(&pool, &state, runner.id).await;
+            } else if !drain_pods.is_empty() {
+                drain_pods_after_commit(&pool, &state, &drain_pods).await;
+            }
+        } else {
+            // Rename-only: a standalone autocommit save, no transaction.
+            let now = now_micros();
+            if manage_reads::patch_runner(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                runner.id,
+                None,
+                new_name.as_deref(),
+                None,
+                now,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+            runner.updated_at = now;
+            if let Some(name) = new_name.clone() {
+                runner.name = name;
+            }
+        }
     }
     // Serialize the in-memory row: the pod mini comes from the moved-to
     // pod (whose project slug re-reads — the lock-read instance never
@@ -2492,7 +2913,14 @@ mod tests {
 
     #[test]
     fn f7_runner_list_bodies() {
-        assert_errors_match("GET_runners", &[WORKSPACE_REQUIRED_BODY, FORBIDDEN_BODY]);
+        assert_errors_match(
+            "GET_runners",
+            &[
+                PROJECT_NOT_FOUND_BODY,
+                FORBIDDEN_BODY,
+                PROJECT_OR_WORKSPACE_REQUIRED_BODY,
+            ],
+        );
     }
 
     #[test]
@@ -2850,6 +3278,202 @@ mod tests {
         );
     }
 
+    fn scope_params(pairs: &[(&str, &str)]) -> crate::license::QueryMap {
+        pairs
+            .iter()
+            .map(|(key, value)| {
+                (
+                    (*key).to_owned(),
+                    pidash_compat::http::OneOrMany::One((*value).to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    async fn scope_body(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        (status, String::from_utf8(body.to_vec()).expect("utf8"))
+    }
+
+    // -- Runner list scope (`GET /api/runners/` `?project=` wins) --
+    //
+    // Live-db: [`runner_list_scope`] against session-local TEMP tables
+    // (only the columns the two reads select), on a one-connection pool
+    // so the SeaORM reads see the temp tables. Owner-only listing and
+    // the `assignable_for` eligibility render are untouched by this
+    // branch; they stay pinned by the Django suite and the byte-exact
+    // render test above.
+    #[tokio::test]
+    async fn live_runner_list_scope() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.projects')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return;
+        }
+        sqlx::query(
+            "CREATE TEMP TABLE projects (id uuid PRIMARY KEY, workspace_id uuid NOT NULL, \
+             identifier varchar(12) NOT NULL, deleted_at timestamptz, \
+             created_at timestamptz NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp projects");
+        sqlx::query(
+            "CREATE TEMP TABLE workspace_members (workspace_id uuid NOT NULL, \
+             member_id uuid NOT NULL, role smallint NOT NULL, is_active boolean NOT NULL, \
+             deleted_at timestamptz, created_at timestamptz NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp members");
+        let (owner, outsider, ws1, ws2, project1, project2, deleted_project) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, created_at) VALUES \
+                 ('{project1}', '{ws1}', 'DEF', now()), ('{project2}', '{ws2}', 'OTHER', now())"
+            ),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, deleted_at, created_at) VALUES \
+                 ('{deleted_project}', '{ws1}', 'GONE', now(), now())"
+            ),
+            format!(
+                "INSERT INTO workspace_members (workspace_id, member_id, role, is_active, created_at) VALUES \
+                 ('{ws1}', '{owner}', 20, true, now()), ('{ws2}', '{owner}', 20, true, now())"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        // `?project=` alone: the project's workspace, filtered by project.
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", &project1.to_string())]),
+        )
+        .await
+        .expect("project alone");
+        assert_eq!(scope, (ws1, Some(project1)));
+
+        // Both params: project wins — a mismatched `workspace` cannot
+        // widen the scope.
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[
+                ("project", &project1.to_string()),
+                ("workspace", &ws2.to_string()),
+            ]),
+        )
+        .await
+        .expect("project wins");
+        assert_eq!(scope, (ws1, Some(project1)));
+
+        // `?workspace=` alone is unchanged.
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("workspace", &ws1.to_string())]),
+        )
+        .await
+        .expect("workspace alone");
+        assert_eq!(scope, (ws1, None));
+
+        // An empty `?project=` disables the filter (Django truthiness).
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", ""), ("workspace", &ws1.to_string())]),
+        )
+        .await
+        .expect("empty project falls through");
+        assert_eq!(scope, (ws1, None));
+
+        // Neither param: 400 `project or workspace is required`.
+        let err = runner_list_scope(&pool, owner, &scope_params(&[]))
+            .await
+            .expect_err("neither 400s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, PROJECT_OR_WORKSPACE_REQUIRED_BODY);
+
+        // Unknown project: 404 `project not found`.
+        let err = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", &Uuid::new_v4().to_string())]),
+        )
+        .await
+        .expect_err("unknown project 404s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PROJECT_NOT_FOUND_BODY);
+
+        // A tombstoned project reads as unknown (scoped read).
+        let err = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", &deleted_project.to_string())]),
+        )
+        .await
+        .expect_err("tombstoned project 404s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PROJECT_NOT_FOUND_BODY);
+
+        // Non-member: 403 in both modes.
+        let err = runner_list_scope(
+            &pool,
+            outsider,
+            &scope_params(&[("project", &project1.to_string())]),
+        )
+        .await
+        .expect_err("non-member project 403s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, FORBIDDEN_BODY);
+        let err = runner_list_scope(
+            &pool,
+            outsider,
+            &scope_params(&[("workspace", &ws1.to_string())]),
+        )
+        .await
+        .expect_err("non-member workspace 403s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, FORBIDDEN_BODY);
+
+        // A garbage project is a 500 (Django's `ValidationError`), not a
+        // 404 — the `parse_uuid` arm, same as [`pods_list`].
+        let err = runner_list_scope(&pool, owner, &scope_params(&[("project", "nope")]))
+            .await
+            .expect_err("garbage project 500s");
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[test]
     fn runner_render_is_byte_exact() {
         let runner = RunnerOwned {
@@ -2894,9 +3518,16 @@ mod tests {
             agent_last_activity_at: Some("2026-10-02T01:02:01Z".to_owned()),
             updated_at: "2026-10-02T01:02:03Z".to_owned(),
         };
-        let body = runner_render(&runner, &fixed_pod(), "WEB".to_owned(), None, Some(live))
-            .to_json()
-            .unwrap();
+        let body = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            Some(live),
+            RunnerEligibility::default(),
+        )
+        .to_json()
+        .unwrap();
         assert_eq!(
             body,
             r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","is_engine":false,"engine_paused":false,"dispatch_paused":false,"machine_display_name":"h","provisioning":"manual","pod_dispatch":"pod_member","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#

@@ -34,6 +34,10 @@ def managed_runner_configuration_check(app_configs, **kwargs):
         errors.append(
             Error("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive", id="managed.E004")
         )
+    if settings.DEDICATED_RUN_QUEUED_MAX_AGE_SECS <= 0:
+        errors.append(
+            Error("DEDICATED_RUN_QUEUED_MAX_AGE_SECS must be positive", id="dedicated.E004")
+        )
 
     from pi_dash.orchestration.agent_phases import PHASES
     from pi_dash.prompting import recipes

@@ -66,6 +66,11 @@ export interface SidebarProps {
    * shell owns only the mount point beside the account area.
    */
   updateControl?: React.ReactNode;
+  /**
+   * Desktop About control mount (DESK-028): the About area renders its
+   * button here, beside the update control; absent on web.
+   */
+  aboutControl?: React.ReactNode;
   /** Personal entries above projects, already filtered and ordered. */
   personalEntries?: SidebarPersonalEntry[];
   /**
@@ -104,6 +109,7 @@ export function Sidebar({
   onSignOut,
   onDeactivateAccount,
   updateControl,
+  aboutControl,
   personalEntries = [],
   editionEntries = [],
   currentPath = null,
@@ -148,6 +154,7 @@ export function Sidebar({
             />
           </div>
           {updateControl}
+          {aboutControl}
         </>
       }
     >

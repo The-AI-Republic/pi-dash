@@ -858,6 +858,7 @@ pub async fn fire_tick(
                             .select_only()
                             .columns([issue_agent_ticker::Column::Id])
                             .lock_exclusive()
+                            .into_tuple::<Uuid>()
                             .one(&conn)
                             .await
                             .map_err(orm_sqlx)?

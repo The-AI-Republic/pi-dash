@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::explicit_auto_deref)]
 
 //! Beat-equivalent scheduler loop.
 //!
@@ -21,8 +22,15 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::watch;
 
+use sea_orm::sea_query::{
+    Alias, Expr, InsertStatement, OnConflict, Query as SeaQuery, SelectStatement,
+};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult};
+
+use pidash_db::orm_tx;
+
 use crate::queue::{enqueue_exec, NewJob};
-use crate::schedule::{beat_schedule, due_entries, mark_run_sql, BeatEntry};
+use crate::schedule::{beat_schedule, due_entries, BeatEntry};
 
 /// Advisory-lock key for the scheduler singleton. Arbitrary but fixed:
 /// any second scheduler asking for this key waits on the first.
@@ -57,6 +65,35 @@ pub fn unlock_sql() -> &'static str {
     unlock_sql_inner()
 }
 
+/// Last-run ledger state (`rust_job_schedule`, the schedule state table):
+/// every entry's last fire time. SeaORM/`sea-query` expression of the same
+/// `SELECT name, last_run_at FROM rust_job_schedule` the legacy SQL
+/// strings spelled out.
+fn last_runs_select() -> SelectStatement {
+    SeaQuery::select()
+        .column(Alias::new("name"))
+        .column(Alias::new("last_run_at"))
+        .from(Alias::new("rust_job_schedule"))
+        .to_owned()
+}
+
+/// Last-run ledger write: upsert `(entry, now)` so the first fire
+/// inserts and later fires overwrite. `ON CONFLICT (name) DO UPDATE SET
+/// last_run_at = EXCLUDED.last_run_at` spelled through `OnConflict` —
+/// `update_column` against the excluded row's inserting value.
+fn mark_run_statement(name: &str, now: DateTime<Utc>) -> InsertStatement {
+    SeaQuery::insert()
+        .into_table(Alias::new("rust_job_schedule"))
+        .columns([Alias::new("name"), Alias::new("last_run_at")])
+        .values_panic([Expr::val(name).into(), Expr::val(now).into()])
+        .on_conflict(
+            OnConflict::column(Alias::new("name"))
+                .update_column(Alias::new("last_run_at"))
+                .to_owned(),
+        )
+        .to_owned()
+}
+
 /// Fire every due entry once: one transaction per entry holding the
 /// enqueue plus the last-run bookkeeping. Returns the fired entry names.
 pub async fn fire_due(
@@ -64,12 +101,18 @@ pub async fn fire_due(
     schedule: &[BeatEntry],
     now: &DateTime<Utc>,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let last_runs: HashMap<String, DateTime<Utc>> =
-        sqlx::query_as::<_, (String, DateTime<Utc>)>(crate::schedule::fetch_last_runs_sql())
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .collect();
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<QueryResult> = db
+        .query_all(DbBackend::Postgres.build(&last_runs_select()))
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    let mut last_runs: HashMap<String, DateTime<Utc>> = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        // Named decode, never positional (orm-migration.md §3.2).
+        let name: String = row.try_get("", "name").map_err(orm_tx::into_sqlx)?;
+        let last_run: DateTime<Utc> = row.try_get("", "last_run_at").map_err(orm_tx::into_sqlx)?;
+        last_runs.insert(name, last_run);
+    }
     let mut fired = Vec::new();
     for entry in due_entries(schedule, now, &last_runs) {
         let mut tx = pool.begin().await?;
@@ -82,11 +125,16 @@ pub async fn fire_due(
             ),
         )
         .await?;
-        sqlx::query(mark_run_sql())
-            .bind(entry.name)
-            .bind(*now)
-            .execute(&mut *tx)
-            .await?;
+        {
+            // The mark runs on the same open transaction, so an enqueue
+            // without its bookkeeping (or vice versa) still cannot
+            // survive a crash between the two.
+            let tx_conn = orm_tx::TxConn::new(&mut tx);
+            tx_conn
+                .execute(DbBackend::Postgres.build(&mark_run_statement(entry.name, *now)))
+                .await
+                .map_err(orm_tx::into_sqlx)?;
+        }
         tx.commit().await?;
         fired.push(entry.name.to_owned());
     }
@@ -125,6 +173,9 @@ pub async fn run_scheduler(
                 }
             }
         }
+        // PostgreSQL session advisory lock returns its row by
+        // function, not by a table `SELECT`; spelling the function needs
+        // raw-sql: session advisory lock by function, not a table SELECT; builder needs Expr::cust, itself a raw marker.
         let locked: bool = match sqlx::query_scalar(try_lock_sql())
             .bind(BEAT_LOCK_KEY)
             .fetch_one(
@@ -168,26 +219,8 @@ pub async fn run_scheduler(
         // worker that dies while already running leaves rows `running`
         // that `claim` never picks up again.
         let minute = now.format("%Y-%m-%d %H:%M").to_string();
-        if minute != last_purge_minute {
-            match crate::queue::purge_failed(&pool, FAILED_RETENTION_SECS).await {
-                Ok(removed) => {
-                    if removed > 0 {
-                        tracing::info!(removed, "scheduler purged old failures");
-                    }
-                    last_purge_minute = minute;
-                }
-                Err(error) => tracing::warn!(%error, "scheduler purge failed"),
-            }
-            match crate::queue::reclaim_stale_running(&pool, crate::queue::STALE_CLAIM_LEASE_SECS)
-                .await
-            {
-                Ok(reclaimed) => {
-                    if reclaimed > 0 {
-                        tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
-            }
+        if minute != last_purge_minute && purge_and_reclaim(&pool).await {
+            last_purge_minute = minute;
         }
         if tick(&mut shutdown).await {
             break;
@@ -196,6 +229,9 @@ pub async fn run_scheduler(
     // Release the lock on the session that holds it. If the session is
     // already gone, its end released the lock for us.
     if let Some(mut conn) = lock_conn {
+        // PostgreSQL session advisory unlock returns its row by
+        // function, not by a table `SELECT`; spelling the function needs
+        // raw-sql: session advisory unlock by function, not a table SELECT; builder needs Expr::cust, itself a raw marker.
         match sqlx::query_scalar::<_, bool>(unlock_sql())
             .bind(BEAT_LOCK_KEY)
             .fetch_one(&mut *conn)
@@ -213,6 +249,99 @@ pub fn default_schedule() -> Vec<BeatEntry> {
     beat_schedule()
 }
 
+/// Scheduler allowlist from `PIDASH_BEAT_ONLY` (Phase 2, 2.2).
+/// Unset (var absent) means all entries. Set — even to an empty string —
+/// means an allowlist: an empty/whitespace-only value yields `Some(empty)`
+/// and fires nothing. This fail-closed choice matters during
+/// coexistence: a blank SSM value left from an earlier overlay must not
+/// silently re-enable all 31 entries next to Python beat (Finding 7 review).
+/// Set to a comma-separated list of exact `BeatEntry::name` values to
+/// fire only those entries while Python beat stays live beside Rust.
+/// The allowlist is consulted by [`WorkerBuilder::with_scheduler`]'s
+/// schedule filtering; queue maintenance (reclaim, purge) always runs
+/// even when the allowlist is empty or the scheduler is off.
+pub fn scheduler_allowlist() -> Option<std::collections::HashSet<String>> {
+    let raw = match std::env::var("PIDASH_BEAT_ONLY") {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    // Set (even empty) stays an allowlist: an empty string fires nothing.
+    let set: std::collections::HashSet<String> = raw
+        .split(',')
+        .map(|part| part.trim().to_owned())
+        .filter(|part| !part.is_empty())
+        .collect();
+    Some(set)
+}
+
+/// Pure allowlist filter for tests and the builder: `None` keeps every
+/// entry; `Some(set)` keeps only entries whose name is in the set, in
+/// `beat_schedule` order (stable for the boot log).
+pub fn filter_schedule_by_allowlist(
+    schedule: Vec<BeatEntry>,
+    allowlist: &Option<std::collections::HashSet<String>>,
+) -> Vec<BeatEntry> {
+    match allowlist {
+        None => schedule,
+        Some(allowed) => schedule
+            .into_iter()
+            .filter(|entry| allowed.contains(entry.name))
+            .collect(),
+    }
+}
+
+/// One purge + stale-reclaim sweep (Finding 10 review): shared by the
+/// full scheduler and the `--no-scheduler` maintenance loop so the two
+/// cannot drift. Returns `true` when both writes succeeded (so callers
+/// can advance their minute), `false` on any purge failure (reclaim may
+/// still have run — logged separately).
+async fn purge_and_reclaim(pool: &PgPool) -> bool {
+    let purge_ok = match crate::queue::purge_failed(pool, FAILED_RETENTION_SECS).await {
+        Ok(removed) => {
+            if removed > 0 {
+                tracing::info!(removed, "scheduler purged old failures");
+            }
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "scheduler purge failed");
+            false
+        }
+    };
+    match crate::queue::reclaim_stale_running(pool, crate::queue::STALE_CLAIM_LEASE_SECS).await {
+        Ok(reclaimed) => {
+            if reclaimed > 0 {
+                tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
+    }
+    purge_ok
+}
+
+/// Maintenance loop for the `--no-scheduler` case (Phase 2, 2.2):
+/// keeps the purge + stale-reclaim cadence alive while firing nothing.
+/// Runs inside [`crate::queue`] cadence (once a minute), logging every
+/// sweep so a misconfigured agent-only worker is visible in logs.
+pub async fn run_maintenance(pool: PgPool, mut shutdown: watch::Receiver<bool>) {
+    let mut last_minute = String::new();
+    tracing::info!("queue maintenance running (--no-scheduler; firing nothing)");
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        let now = Utc::now();
+        let minute = now.format("%Y-%m-%d %H:%M").to_string();
+        if minute != last_minute && purge_and_reclaim(&pool).await {
+            last_minute = minute;
+        }
+        if tick(&mut shutdown).await {
+            break;
+        }
+    }
+    tracing::info!("maintenance loop stopped");
+}
+
 /// Sleep one tick, or stop early on shutdown. True when stopping.
 async fn tick(shutdown: &mut watch::Receiver<bool>) -> bool {
     tokio::select! {
@@ -226,6 +355,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scheduler_allowlist_filtering_matches_allowlist_semantics() {
+        // Phase 2 (2.2): None keeps all; Some(set) keeps only named entries
+        // in beat order.
+        let schedule = default_schedule();
+        assert_eq!(schedule.len(), 31);
+        assert_eq!(
+            filter_schedule_by_allowlist(schedule.clone(), &None),
+            schedule
+        );
+        let allowed = Some(
+            [
+                "cloud-agent-scan-queued-runs",
+                "cloud-agent-sweep-stale-runs",
+                "agent-run-reconcile-terminal-effects",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>(),
+        );
+        let filtered = filter_schedule_by_allowlist(schedule, &allowed);
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(
+            filtered.iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            vec![
+                "cloud-agent-scan-queued-runs",
+                "cloud-agent-sweep-stale-runs",
+                "agent-run-reconcile-terminal-effects",
+            ]
+        );
+        // An empty set (no entries) is a valid allowlist that fires nothing.
+        let none_allowed = Some(std::collections::HashSet::new());
+        assert!(filter_schedule_by_allowlist(default_schedule(), &none_allowed).is_empty());
+    }
+
+    #[test]
     fn singleton_lock_key_is_fixed() {
         // A second scheduler must ask for the same key, or the
         // singleton rule silently stops working.
@@ -236,6 +400,38 @@ mod tests {
 
     #[test]
     fn default_schedule_is_the_full_beat_table() {
-        assert_eq!(default_schedule().len(), 28);
+        assert_eq!(default_schedule().len(), 31);
+    }
+
+    #[test]
+    fn last_runs_statement_shape() {
+        use sea_orm::DbBackend;
+        let sql = DbBackend::Postgres.build(&last_runs_select()).to_string();
+        assert!(sql.contains("FROM"), "select from: {sql}");
+        assert!(
+            sql.contains("\"rust_job_schedule\""),
+            "schedule table: {sql}"
+        );
+        assert!(sql.contains("\"name\""), "name column: {sql}");
+        assert!(sql.contains("\"last_run_at\""), "last_run_at column: {sql}");
+    }
+
+    #[test]
+    fn mark_run_statement_shape() {
+        use sea_orm::DbBackend;
+        let now = Utc::now();
+        let sql = DbBackend::Postgres
+            .build(&mark_run_statement("prune-failed", now))
+            .to_string();
+        assert!(sql.contains("INSERT INTO"), "insert upsert into: {sql}");
+        assert!(
+            sql.contains("\"rust_job_schedule\""),
+            "schedule table: {sql}"
+        );
+        assert!(
+            sql.contains("ON CONFLICT (\"name\") DO UPDATE SET \"last_run_at\" = \"excluded\".\"last_run_at\""),
+            "upsert overwrites last_run_at from excluded: {sql}"
+        );
+        assert!(sql.contains("prune-failed"), "entry name binds: {sql}");
     }
 }

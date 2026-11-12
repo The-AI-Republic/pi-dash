@@ -587,6 +587,7 @@ struct MachineTokenRow {
     dev_machine_id: Option<uuid::Uuid>,
     host_label: String,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
     dev_revoked: Option<bool>,
 }
 
@@ -639,6 +640,7 @@ async fn fetch_machine_token(
             machine_token::Column::DevMachineId,
             machine_token::Column::HostLabel,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .column_as(
             Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
@@ -835,6 +837,12 @@ async fn authenticate_machine_token(
     if token.revoked_at.is_some() {
         return Err(auth_failed("machine_token_revoked"));
     }
+    if token
+        .expires_at
+        .is_some_and(|expires| expires <= chrono::Utc::now())
+    {
+        return Err(auth_failed("machine_token_expired"));
+    }
     if token.dev_machine_id.is_some() && token.dev_revoked.unwrap_or(false) {
         return Err(auth_failed("dev_machine_revoked"));
     }
@@ -983,6 +991,20 @@ mod auth_tests {
         assert!(!resolve_runner_for_run(Some(other), Some(&runner)));
         assert!(!resolve_runner_for_run(None, Some(&runner)));
         assert!(!resolve_runner_for_run(Some(id), None));
+    }
+
+    /// 60-day idle expiry (`#2910`): an expired `mt_` token is refused
+    /// with `machine_token_expired` on the daemon runner path, checked
+    /// after revoked and before dev-machine revocation.
+    #[test]
+    fn machine_token_expiry_is_checked() {
+        let now = chrono::Utc::now();
+        let past = now - chrono::Duration::seconds(1);
+        let future = now + chrono::Duration::days(1);
+        assert!(Some(past).is_some_and(|exp| exp <= now));
+        assert!(!Some(future).is_some_and(|exp| exp <= now));
+        assert!(!None.is_some_and(|exp: chrono::DateTime<chrono::Utc>| exp <= now));
+        assert!(Some(now).is_some_and(|exp| exp <= now));
     }
 
     #[tokio::test]

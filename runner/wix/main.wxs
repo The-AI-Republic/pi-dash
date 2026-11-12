@@ -181,6 +181,22 @@
                                         Source='$(var.EngineStageDir)\pidash-agent-engine.exe'
                                         KeyPath='yes'/>
                                 </Component>
+                                <Component Id='engineCommandRunner' Guid='*'>
+                                    <File
+                                        Id='engineCommandRunnerExe'
+                                        Name='codex-command-runner.exe'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\codex-command-runner.exe'
+                                        KeyPath='yes'/>
+                                </Component>
+                                <Component Id='engineSandboxSetup' Guid='*'>
+                                    <File
+                                        Id='engineSandboxSetupExe'
+                                        Name='codex-windows-sandbox-setup.exe'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\codex-windows-sandbox-setup.exe'
+                                        KeyPath='yes'/>
+                                </Component>
                                 <Component Id='engineLicense' Guid='*'>
                                     <File
                                         Id='engineLicenseFile'
@@ -269,6 +285,8 @@
 
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='engineBinary'/>
+            <ComponentRef Id='engineCommandRunner'/>
+            <ComponentRef Id='engineSandboxSetup'/>
             <ComponentRef Id='engineLicense'/>
             <ComponentRef Id='engineNotice'/>
             <ComponentRef Id='engineReadme'/>

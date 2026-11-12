@@ -110,7 +110,7 @@ use super::list_engine::{
 // one row, so every `row_to_json` key is unique by construction.
 
 /// All 34 concrete `issues` columns in Django's select order.
-pub const ISSUE_FIELDS: [issues::Column; 34] = [
+pub const ISSUE_FIELDS: [issues::Column; 35] = [
     issues::Column::CreatedAt,
     issues::Column::UpdatedAt,
     issues::Column::CreatedById,
@@ -144,6 +144,7 @@ pub const ISSUE_FIELDS: [issues::Column; 34] = [
     issues::Column::Workpad,
     issues::Column::CreatedVia,
     issues::Column::AssignedPodId,
+    issues::Column::AssignedRunnerId,
     issues::Column::AgentExecutor,
 ];
 

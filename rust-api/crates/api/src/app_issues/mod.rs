@@ -354,6 +354,11 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// Resolver 404 for a `<uuid:...>` segment that misses the converter
+/// (global `handler404`, `pi_dash/urls.py:15` → `custom_404_view`):
+/// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
+/// the colon (PIDASHCONV-1713).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
@@ -384,6 +389,8 @@ pub enum Denial {
     NotFound,
     /// 404, `{"detail":"Project not found"}` (project-kwarg rewrite miss).
     ProjectNotFound,
+    /// 404, the URL resolver (`<uuid:...>` converter miss → `handler404`).
+    PageNotFound,
     /// 400, `{"detail": ...}` (`ParseError`, filter validation).
     BadDetail(String),
     /// 415, unsupported media type (DRF `UnsupportedMediaType`); the body
@@ -409,6 +416,7 @@ impl Denial {
             ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -678,11 +686,13 @@ impl Binder {
 }
 
 /// Render a kernel [`Condition`] to a `WHERE`-ready fragment plus binds.
-/// The `SELECT 1 WHERE` shell keeps user placeholders numbered from `$1`
-/// (`Expr::cust` emits no bind of its own).
+/// The `SELECT 1 WHERE` shell keeps user placeholders numbered from `$1`;
+/// the shell literal is a custom keyword — sea-query renders it bind-free,
+/// so no placeholder of its own leaks into the fragment.
 pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     let mut stmt = SelectStatement::new();
-    stmt.expr(Expr::cust("1")).cond_where(cond.clone());
+    stmt.expr(Expr::custom_keyword("1"))
+        .cond_where(cond.clone());
     let (sql, values) = stmt.build(PostgresQueryBuilder);
     let fragment = sql
         .strip_prefix("SELECT 1 WHERE ")
@@ -737,7 +747,10 @@ pub async fn fetch_count(
         .fetch_one(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.try_get::<i64, _>(0).map_err(|_| Denial::ServerError)
+    // Every caller runs a COUNT aggregate; Postgres names it `count`.
+    // Decode by name, never by position (orm-migration.md §1).
+    row.try_get::<i64, _>("count")
+        .map_err(|_| Denial::ServerError)
 }
 
 // ---- filter stack -----------------------------------------------------------
@@ -1079,6 +1092,7 @@ fn day_comparison(
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+        "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
         "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
         "start_date" => "issue.start_date".to_owned(),
         "target_date" => "issue.target_date".to_owned(),
@@ -1123,6 +1137,7 @@ fn legacy_text_sql(
         };
         let column = match term {
             "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+            "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
             "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
             "start_date" => "issue.start_date".to_owned(),
             "target_date" => "issue.target_date".to_owned(),
@@ -2255,6 +2270,7 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
     "created_at",
     "updated_at",
@@ -2842,6 +2858,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_updated_at_predicates_hit_the_updated_column() {
+        let mut binder = Binder::new();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let sql = legacy_sql(
+            &mut binder,
+            "updated_at__date__gte",
+            &FilterValue::Day(day),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
+        assert!(sql.starts_with("(issue.updated_at AT TIME ZONE $"), "{sql}");
+        assert!(sql.contains(")::date >= "), "{sql}");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql =
+            legacy_sql(&mut binder, "updated_at__date__lte", &text, &chrono_tz::UTC).expect("sql");
+        assert!(sql.contains("issue.updated_at"), "{sql}");
+        assert!(!sql.contains("created_at"), "{sql}");
+    }
+
+    #[test]
     fn logged_by_is_a_server_error_like_djangos_field_error() {
         let mut binder = Binder::new();
         let denial = legacy_sql(
@@ -3012,6 +3048,17 @@ mod tests {
             filter_denial(E::EmptyRangeBounds("x".to_owned())),
             Denial::ServerError
         ));
+    }
+
+    #[test]
+    fn page_not_found_pins_the_resolver_404_bytes() {
+        // `custom_404_view` (`app/views/error_404.py`) returns
+        // `JsonResponse({"error": "Page not found."})`: `json.dumps`
+        // defaults, i.e. the space after the colon (PIDASHCONV-1713).
+        let (status, body) = Denial::PageNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"error": "Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
     }
 }
 

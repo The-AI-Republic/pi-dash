@@ -43,8 +43,8 @@ pr-run-mode = "plan"
 install-path = "~/.local/bin"
 # The built-in engine (design .ai_design/built_engine_as_runner §4.5, PO-20):
 # every archive carries `engine/<version>/pidash-agent-engine[.exe]` with
-# Codex's LICENSE and NOTICE. The release workflow stages it per target with
-# runner/scripts/stage_engine.py before `cargo dist build`; `dist plan` does
+# Codex's LICENSE, NOTICE and sandbox helpers. The release workflow stages
+# it per target with runner/scripts/stage_engine.py before `cargo dist build`; `dist plan` does
 # not need it to exist. cargo-dist 0.22's shell and PowerShell installers
 # install only executables, so this directory reaches the user's machine via
 # `pidash engine install` (run by install.sh / install.ps1 and by

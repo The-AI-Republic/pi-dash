@@ -35,7 +35,62 @@ const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.3;
 const ZOOM_MAX: f64 = 3.0;
 
+/// Linux (WebKitGTK) undo/redo for plain text fields (PIDESKAPP-52).
+/// WebKitGTK leaves undo/redo to the embedder — Ctrl+Z / Ctrl+Shift+Z /
+/// Ctrl+Y reach the page but do nothing in an `<input>`/`<textarea>`,
+/// while cut/copy/paste/select-all, which WebKit implements itself, work.
+/// Tauri neither supplies the editing commands nor an Edit menu on any
+/// platform, so the script drives the browser's own edit commands for
+/// those fields. A `keydown` handler (never native menu accelerators) so
+/// Tiptap editors — which keep their own ProseMirror history and Mod+Z
+/// keymap — are never intercepted; Windows/macOS handle undo natively in
+/// their webviews and never load it.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux.
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_EDIT_FIX: &str = include_str!("linux_edit_fix.js");
+
 struct ZoomState(Mutex<f64>);
+
+/// Ctrl+NumpadPlus zoom-in on Linux and Windows (PIDESKAPP-51). The
+/// `CmdOrCtrl+NumpadPlus` menu accelerator can never fire: muda parses it
+/// to `Code::NumpadAdd` and then immediately collapses that to
+/// `Key::Character("+")`, which the GTK backend turns into the main-row
+/// `+` keyval (0x2B) and the Windows backend into `VK_OEM_PLUS`. The
+/// physical numpad key matches neither, so the stroke falls through to
+/// the page as a plain `+` keydown and nothing zooms. The script catches
+/// the stroke in the page (`NumpadAdd` is exactly that physical key) and
+/// routes it to the `zoom_in` command below, which steps the same
+/// `ZoomState` as the View menu — one zoom level, two triggers. Loaded
+/// on Linux and Windows only (see the setup block); macOS keeps `Cmd+=`.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux/Windows.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+const ZOOM_FIX: &str = include_str!("zoom_fix.js");
+
+/// Step the shared zoom level up and apply it to the main window. The
+/// View-menu handler and the `zoom_in` command (the numpad fix) both go
+/// through here so they can never desync.
+fn step_zoom_up(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let state = app.state::<ZoomState>();
+    // Recover from a poisoned mutex rather than crashing every future
+    // menu click — the inner f64 is independently valid.
+    let mut zoom = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    *zoom = (*zoom + ZOOM_STEP).min(ZOOM_MAX);
+    window.set_zoom(*zoom)
+}
+
+/// Zoom in one step; invoked by `zoom_fix.js` when Ctrl+NumpadPlus
+/// reaches the page (the menu accelerator cannot express the numpad key).
+#[tauri::command]
+fn zoom_in(app: tauri::AppHandle) -> Result<(), String> {
+    step_zoom_up(&app).map_err(|e| e.to_string())
+}
 
 /// Compile-time target URL. Lives in app state so the deep-link handler
 /// can derive the `/api/auth/desktop-exchange/` URL on the same origin.
@@ -400,7 +455,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // panics in release profile (rust-analyzer would crash otherwise);
     // without this warning, the window would just hang on the 118-byte
     // placeholder with no signal. PIDASH_DIST_VALID is emitted by build.rs
-    // from the same size/assets check dev-prep.sh and the release guard use.
+    // from dist_guard::check_dist_bundle, the check the release guard uses.
     if !hot_reload && option_env!("PIDASH_DIST_VALID") == Some("0") {
         eprintln!(
             "Pi Dash: WARNING dist/ looks like the 118-byte placeholder — the window will \
@@ -468,6 +523,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
+            zoom_in,
             desktop_http::desktop_api_request,
             desktop_http::desktop_api_stream,
             desktop_http::desktop_api_cancel,
@@ -538,6 +594,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // does get through (e.g. a redirect the policy hook didn't see),
         // bounce as soon as it finishes loading.
         .on_page_load(move |webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                // A new page is loading (reload, 401 bounce, theme-switch
+                // reload, sign-in exchange, …): the page that asked for
+                // the in-flight native requests is going away and cannot
+                // receive their responses, and its JS never gets to run
+                // its cleanup (e.g. NativeEventSource::close). Cancel
+                // them all here, so a reloaded stream is not orphaned
+                // until sign-out. SPA route changes load no new page and
+                // never reach this branch.
+                if webview.label() == "main" {
+                    webview.state::<desktop_http::DesktopHttp>().cancel_all();
+                }
+                return;
+            }
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
@@ -569,7 +639,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
-                .resizable(true);
+                .resizable(true)
+                // PIDESKAPP-87: Tauri's native handler replaces the webview
+                // drop target on Windows, so the shared UI's HTML5 drag and
+                // drop (board cards, reorder, file drops) never reaches the
+                // page. Nothing consumes Tauri's own drag events.
+                .disable_drag_drop_handler();
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                // PIDESKAPP-51: the numpad-plus accelerator can never fire
+                // (muda collapses NumpadAdd onto the main-row `+`), so the
+                // script asks Rust to zoom in when the physical numpad
+                // key arrives. See the const.
+                window = window.initialization_script(ZOOM_FIX);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // PIDESKAPP-52: WebKitGTK leaves undo/redo to the embedder;
+                // the script drives them for plain fields. See the const.
+                window = window.initialization_script(LINUX_EDIT_FIX);
+            }
             let open_app = app.handle().clone();
             window = window.on_new_window(move |url, _features| {
                 let config = open_app.state::<AppConfig>();
@@ -618,11 +707,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // View menu: browser-style zoom shortcuts. The Tauri webview
             // doesn't bind these by default, so we register them as menu
             // accelerators. muda's accelerator parser has no `Plus` token
-            // (it would silently bind the `P` key); the numpad `+` is
-            // spelled `NumpadPlus`. We register three variants routed to
-            // the same `zoom_in` id; alternates are Linux/Windows only —
-            // on macOS, `Cmd+=` is the conventional shortcut and the
-            // duplicates would visibly clutter the menubar.
+            // (it would silently bind the `P` key); the numpad `+` would
+            // be spelled `NumpadPlus` — but no accelerator can express it:
+            // muda collapses `NumpadAdd` onto the main-row `+` key, so the
+            // physical numpad stroke never matches (PIDESKAPP-51).
+            // Numpad-plus zoom is handled by the `zoom_fix.js`
+            // initialization script (see ZOOM_FIX) instead. The
+            // main-row alternates are Linux/Windows only — on macOS,
+            // `Cmd+=` is the conventional shortcut and the duplicate
+            // would visibly clutter the menubar.
             let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In")
                 .accelerator("CmdOrCtrl+=")
                 .build(app)?;
@@ -636,15 +729,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let zoom_in_shift = MenuItemBuilder::with_id("zoom_in", "Zoom In")
                 .accelerator("CmdOrCtrl+Shift+=")
                 .build(app)?;
-            #[cfg(not(target_os = "macos"))]
-            let zoom_in_numpad = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-                .accelerator("CmdOrCtrl+NumpadPlus")
-                .build(app)?;
 
             let view = {
                 let b = SubmenuBuilder::new(app, "View").items(&[&zoom_in, &zoom_out, &zoom_reset]);
                 #[cfg(not(target_os = "macos"))]
-                let b = b.items(&[&zoom_in_shift, &zoom_in_numpad]);
+                let b = b.items(&[&zoom_in_shift]);
                 b.build()?
             };
             let menu = MenuBuilder::new(app).items(&[&view]).build()?;
@@ -681,6 +770,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tray_builder.build(app)?;
 
             app.on_menu_event(|app, event| {
+                // Zoom-in goes through step_zoom_up (shared with the zoom_in
+                // command) so the menu and the numpad fix can't desync.
+                if event.id().as_ref() == "zoom_in" {
+                    if let Err(e) = step_zoom_up(app) {
+                        eprintln!("set_zoom failed: {e}");
+                    }
+                    return;
+                }
                 let Some(window) = app.get_webview_window("main") else {
                     return;
                 };
@@ -689,7 +786,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // future menu click — the inner f64 is independently valid.
                 let mut zoom = state.0.lock().unwrap_or_else(|e| e.into_inner());
                 *zoom = match event.id().as_ref() {
-                    "zoom_in" => (*zoom + ZOOM_STEP).min(ZOOM_MAX),
                     "zoom_out" => (*zoom - ZOOM_STEP).max(ZOOM_MIN),
                     "zoom_reset" => 1.0,
                     _ => return,
@@ -721,6 +817,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     handle_deep_link(&handle, url.as_str());
                 }
             });
+            // On Linux/Windows a first-launch URL arrives on argv and is
+            // stored by the deep-link plugin during plugin init, before the
+            // `on_open_url` listener above is registered, so the emitted
+            // event is missed. Read the stored launch URL here; the main
+            // window exists by this point. macOS delivers via
+            // `RunEvent::Opened` after setup, so skip there to avoid
+            // handling the same link twice.
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            match app.deep_link().get_current() {
+                Ok(Some(urls)) => {
+                    let launch_handle = app.handle().clone();
+                    for url in urls {
+                        handle_deep_link(&launch_handle, url.as_str());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("deep-link: get_current failed: {e}"),
+            }
 
             // Background updater checks. Spawned (not awaited) so launch isn't
             // blocked by network — if a new version is available the dialog
@@ -786,6 +900,22 @@ mod tests {
         );
         // Hot-reload and release keep following the server target.
         assert_eq!(api_base_for(None, target, false), target);
+    }
+
+    #[test]
+    fn main_window_disables_tauri_drag_drop_handler() {
+        // PIDESKAPP-87: Tauri's native handler replaces the WebView2 drop
+        // target on Windows, so HTML5 drag and drop never reaches the page.
+        // The window is built only in `setup`, so the builder call is the
+        // fix. The needle is concatenated so this test's own source does
+        // not satisfy the assertion.
+        let needle = concat!(".disable_drag_drop", "_handler()");
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains(needle),
+            "main window builder must call {needle}: the shared web UI drags \
+             board cards and drops files through HTML5 drag and drop"
+        );
     }
 
     #[test]
@@ -877,6 +1007,10 @@ mod tests {
             "javascript:alert(1)",
             "mailto:sales@example.com",
             "tauri://elsewhere/x",
+            // The web flows reserve `about:blank` / "" synchronously, then
+            // steer the tab after an await. The shell never creates a second
+            // window, so a blank reservation is always refused (PIDESKAPP-186).
+            "about:blank",
         ] {
             assert_eq!(new_window(u, "tauri://localhost"), None, "{u}");
         }
@@ -977,6 +1111,80 @@ mod tests {
     }
 
     #[test]
+    fn zoom_fix_catches_numpad_plus_and_routes_to_the_command() {
+        // PIDESKAPP-51: the CmdOrCtrl+NumpadPlus menu accelerator can never
+        // fire (muda collapses NumpadAdd onto the main-row `+`), so the
+        // script catches the physical numpad key in the page and routes it
+        // to the zoom_in command, which steps the shared ZoomState. The
+        // script content is behaviorally covered by
+        // desktop/tests/test_zoom_numpad_fix.py; these assert the
+        // invariants it is built on.
+        let script = ZOOM_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("NumpadAdd"),
+            "physical numpad key, not the main-row plus"
+        );
+        assert!(
+            script.contains("zoom_in") && script.contains("__TAURI__"),
+            "routes to the Rust command"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_ZOOM_FIX__"),
+            "idempotency guard against double registration"
+        );
+        assert!(
+            !script.contains("NumpadSubtract"),
+            "zoom-out stays out of scope"
+        );
+    }
+
+    #[test]
+    fn linux_edit_fix_drives_undo_redo_for_plain_fields_only() {
+        // PIDESKAPP-52: the script runs on every UI navigation, drives
+        // the browser's own edit commands for plain fields, and must
+        // never touch other elements — Tiptap editors keep their own
+        // ProseMirror history (and their own Mod+Z keymap), so anything
+        // not INPUT/TEXTAREA must be ignored. The script content is
+        // behaviorally covered by desktop/tests/test_linux_undo_fix.py;
+        // these assert the invariants it is built on.
+        let script = LINUX_EDIT_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("TEXTAREA") && script.contains("INPUT"),
+            "plain-field targets"
+        );
+        assert!(
+            script.contains("\"undo\"") && script.contains("\"redo\""),
+            "both directions"
+        );
+        assert!(
+            script.contains("KeyZ") && script.contains("KeyY"),
+            "Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_LINUX_EDIT_FIX__"),
+            "idempotency guard against double registration"
+        );
+    }
+
+    #[test]
     fn marketing_routes_bounce_too() {
         for p in ["/home", "/docs", "/pricing"] {
             let url = Url::parse(&format!("https://pidash.example.com{p}")).unwrap();
@@ -985,5 +1193,44 @@ mod tests {
                 "{p}"
             );
         }
+    }
+
+    #[test]
+    fn launch_deep_link_is_read_via_get_current_on_setup() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("read main.rs");
+        let production = src.split("\nmod tests {").next().unwrap_or(&src);
+        assert!(
+            production.contains("get_current"),
+            "setup never reads the launch URL via get_current"
+        );
+        let on_open = production
+            .find("on_open_url")
+            .expect("on_open_url registration missing");
+        let get_cur = production
+            .find("get_current")
+            .expect("get_current read missing");
+        assert!(
+            get_cur > on_open,
+            "launch URL must be read after on_open_url is registered"
+        );
+        let build = production
+            .find("window.build()")
+            .expect("main window build missing");
+        assert!(
+            build < get_cur,
+            "launch URL must be handled after the main window exists"
+        );
+        let window = get_cur.saturating_sub(600);
+        let gate = &production[window..get_cur];
+        assert!(
+            gate.contains("target_os") && gate.contains("linux") && gate.contains("windows"),
+            "launch URL read must be gated to Linux/Windows, got: {gate:?}"
+        );
+        let tail = &production[get_cur..(get_cur + 800).min(production.len())];
+        assert!(
+            tail.contains("handle_deep_link"),
+            "launch URLs must be passed to handle_deep_link"
+        );
     }
 }

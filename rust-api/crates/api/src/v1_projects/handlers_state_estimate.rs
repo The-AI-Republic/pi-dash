@@ -129,6 +129,8 @@ struct MachineTokenLookup {
     workspace_id: Uuid,
     dev_machine_id: Option<Uuid>,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One project lite row for `expand=project` (direct columns + cover asset FK).
@@ -541,6 +543,7 @@ async fn authenticate_machine_token(
             machine_token::Column::WorkspaceId,
             machine_token::Column::DevMachineId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .filter(machine_token::Column::TokenHash.eq(presented_hash.clone()))
         .into_model::<MachineTokenLookup>()
@@ -552,6 +555,7 @@ async fn authenticate_machine_token(
         workspace_id,
         dev_machine_id,
         revoked_at,
+        expires_at,
     }) = row
     else {
         return Err(HandlerError::InvalidToken);
@@ -570,9 +574,14 @@ async fn authenticate_machine_token(
         token_hash: presented_hash.clone(),
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked,
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
-    token_kernel::validate_machine_token_static(Some(&kernel_row), &presented_hash)
-        .map_err(|_| HandlerError::InvalidToken)?;
+    token_kernel::validate_machine_token_static(
+        Some(&kernel_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| HandlerError::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: any active membership row.
     // A non-member is revoked first, then denied (`core/permissions.py:28-36`).
     let member: Option<Uuid> = workspace_members::Entity::find()
@@ -2007,7 +2016,7 @@ async fn create_state_inner(
     let external_source = input.external_source.clone().flatten();
     let external_id = input.external_id.clone().flatten();
     let insert = pidash_services::domain::projects::states::create(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::projects::states::NewState {
             project_id: gate.project_id,
             workspace_id,
@@ -2024,7 +2033,6 @@ async fn create_state_inner(
             created_by: gate.actor.id,
             updated_by: None,
             now,
-            v1: true,
         },
     )
     .await;
@@ -2087,9 +2095,12 @@ fn micros_now() -> chrono::DateTime<chrono::Utc> {
 /// on every sibling in the project (soft-deleted and triage rows keep theirs,
 /// via the default-manager scope in the domain twin).
 async fn run_default_flip(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), HandlerError> {
-    domain_projects::states::clear_project_defaults(pool, project_id)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    domain_projects::states::clear_project_defaults(
+        &pidash_db::pool::sea_orm_connection(pool),
+        project_id,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     Ok(())
 }
 
@@ -2448,7 +2459,7 @@ async fn patch_state_inner(
     row.updated_at = micros_now();
     row.updated_by_id = Some(gate.actor.id);
     match pidash_services::domain::projects::states::save(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::projects::states::SaveState {
             id: row.id,
             updated_at: row.updated_at,
@@ -2593,9 +2604,14 @@ async fn delete_state_inner(
         ));
     }
     let now = micros_now();
-    pidash_services::domain::projects::states::soft_delete(&pool, state_id, gate.actor.id, now)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    pidash_services::domain::projects::states::soft_delete(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        state_id,
+        gate.actor.id,
+        now,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
     // then enqueue — same order as the mixin, shared helper.
     super::handlers_project::enqueue_soft_delete(&pool, "state", &state_id).await;

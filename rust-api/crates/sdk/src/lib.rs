@@ -55,8 +55,11 @@ pub mod state {
     pub use pidash_services::extensions::CloudAgentToolsetsSeam;
     pub use pidash_services::extensions::CredentialError;
     pub use pidash_services::extensions::CredentialUnavailable;
+    pub use pidash_services::extensions::ExecuteModelInputs;
     pub use pidash_services::extensions::ExtraToolset;
     pub use pidash_services::extensions::NoExtraToolsets;
+    pub use pidash_services::extensions::ResolvedRunModel;
+    pub use pidash_services::extensions::RunModelKey;
     pub use pidash_services::extensions::SeamFuture;
     pub use pidash_services::extensions::TitleError;
     pub use pidash_services::extensions::TitleRequest;
@@ -107,6 +110,13 @@ pub mod domain {
     pub use pidash_services::domain::workspaces::members::add_with_active;
     // Renamed: the flat `deactivate_by_workspace` is the projects twin
     // (UPDATE project_members); this one writes workspace_members.
+    pub use pidash_services::domain::issue_assignment::list_project_runners;
+    pub use pidash_services::domain::issue_assignment::resolve_pod_ref;
+    pub use pidash_services::domain::issue_assignment::resolve_runner_ref;
+    pub use pidash_services::domain::issue_assignment::runner_list_row_to_value;
+    pub use pidash_services::domain::issue_assignment::ResolveError;
+    pub use pidash_services::domain::issue_assignment::RunnerListParams;
+    pub use pidash_services::domain::issue_assignment::RunnerListRow;
     pub use pidash_services::domain::workspaces::members::deactivate_by_workspace as deactivate_workspace_members_by_workspace;
     pub use pidash_services::domain::workspaces::members::deactivate_without_updated_by;
     pub use pidash_services::domain::workspaces::members::overwrite;
@@ -223,15 +233,26 @@ pub mod read {
     pub use pidash_services::read::requested_names;
     pub use pidash_services::read::resolve_workpad_state;
     pub use pidash_services::read::search_issues;
-    pub use pidash_services::read::search_issues_sql;
+    pub use pidash_services::read::search_issues_statement;
     pub use pidash_services::read::state_row_from;
     pub use pidash_services::read::workpad_stripped;
     pub use pidash_services::read::workspace_of;
     pub use pidash_services::read::workspace_row;
     pub use pidash_services::read::workspace_slug;
+    // PIDASHCONV-1723: dispatch_wait render seam for MCP pidash_get_issue
+    // (design §14.3). Overlay calls fetch_active_dispatch_run then
+    // build_dispatch_wait with the viewer for `releasable`.
+    pub use pidash_services::domain::issue_assignment::build_dispatch_wait;
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body;
+    // PIDASHCONV-1724: by-id sibling so the overlay can build the
+    // refusal body from an issue id without naming an issues::Model.
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body_by_id;
+    pub use pidash_services::domain::issue_assignment::fetch_active_dispatch_run;
+    pub use pidash_services::domain::issue_assignment::RunWaitInputs;
     pub use pidash_services::read::ActorDetailView;
     pub use pidash_services::read::AssetRow;
     pub use pidash_services::read::BlockerRows;
+    pub use pidash_services::read::CommentDbRow;
     pub use pidash_services::read::CommentReactionView;
     pub use pidash_services::read::CommentRow;
     pub use pidash_services::read::CommentView;
@@ -241,26 +262,24 @@ pub mod read {
     pub use pidash_services::read::Error;
     pub use pidash_services::read::IssueFlatView;
     pub use pidash_services::read::IssueSearchParams;
+    pub use pidash_services::read::IssueSearchRow;
     pub use pidash_services::read::IssueSearchSort;
     pub use pidash_services::read::IssueSearchStatus;
     pub use pidash_services::read::OwnedAssigneeRow;
     pub use pidash_services::read::OwnedRelationItem;
+    pub use pidash_services::read::PrLinkDbRow;
     pub use pidash_services::read::ProfileRow;
     pub use pidash_services::read::ProjectLiteView;
     pub use pidash_services::read::RenderRequest;
     pub use pidash_services::read::StateRow;
     pub use pidash_services::read::StateRowTuple;
     pub use pidash_services::read::UserShape;
+    pub use pidash_services::read::WorkpadDbRow;
     pub use pidash_services::read::WorkspaceLiteView;
     pub use pidash_services::read::WriteProject;
     pub use pidash_services::read::COMMENT_COLUMNS;
-    pub use pidash_services::read::FULL_ROW_COLUMNS;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
     pub use pidash_services::read::ISSUE_SELECT_COLS;
-    pub use pidash_services::read::PR_DETAIL_SQL;
-    pub use pidash_services::read::PR_LINK_BY_ID_SQL;
-    pub use pidash_services::read::PR_LINK_LIST_SQL;
-    pub use pidash_services::read::PR_LIST_SQL;
     pub use pidash_services::v1_projects::ser_workflow::state_base_map;
     pub use pidash_services::v1_work_items::shape_issue;
     pub use pidash_services::v1_work_items::shape_issue::issue_url;
@@ -303,7 +322,10 @@ pub mod ops {
     pub use pidash_jobs::orchestration::run_work_item_id;
     pub use pidash_jobs::orchestration::HandoffInlineDeps;
     pub use pidash_jobs::orchestration::HandoffStore;
+    pub use pidash_jobs::runner_enroll::bounce_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::fire_revoke_bundle;
+    pub use pidash_jobs::runner_enroll::overlay_store_deps;
+    pub use pidash_jobs::runner_enroll::recreate_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::revoke as runners_revoke; // renamed: `revoke` is the services revoke module.
     pub use pidash_jobs::runner_enroll::RevokeBundle;
     pub use pidash_jobs::runner_enroll::RevokeCollected;
@@ -442,9 +464,16 @@ pub mod hooks {
     pub use pidash_jobs::hooks::TransitionHook;
     pub use pidash_jobs::issue_transition::PodDrain;
     pub use pidash_jobs::issue_transition::PublishEffectsDrain;
+    // PIDASHCONV-1724: transition outcome visibility for pidash_update_issue
+    // (dispatched_run_id / run_refusal). The overlay wraps IssueTransitionHook
+    // in a recording decorator and reads these types after operations::issues::update
+    // fires; FireRequest is the fire input, FireOutcome the fire output, and
+    // TransitionOutcome carries created_run / reason.
     pub use pidash_services::domain::activity::TaskEnqueueHook;
     pub use pidash_services::domain::issues_move::MoveAdmissionCache;
     pub use pidash_services::domain::transition::IssueTransitionHook;
+    pub use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+    pub use pidash_types::orchestration::TransitionOutcome;
 }
 
 /// The serializer step of the v1 write endpoints: validate the payload,
@@ -491,6 +520,7 @@ pub mod compat {
     pub use pidash_api::space::sanitize::sanitize_html;
     pub use pidash_api::space::sanitize::strip_tags;
     pub use pidash_api::space::sanitize::Sanitize;
+    pub use pidash_api::v1_work_items::handlers_actions::dispatch_deps_for_ids;
     pub use pidash_api::v1_work_items::handlers_actions::gate_fn;
     pub use pidash_api::v1_work_items::handlers_actions::profile_fn;
     pub use pidash_api::v1_work_items::handlers_actions::LiveMatcher;
@@ -754,7 +784,9 @@ pub mod jobs {
     pub use pidash_jobs::integrations::github_sync::TASK_NAMES as GITHUB_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::license::tasks::TASK_NAME;
     pub use pidash_jobs::loop_scan::TASK_NAMES as LOOP_SCAN_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
+    pub use pidash_jobs::orchestration::bounce_issue_no_eligible_runner;
     pub use pidash_jobs::orchestration::create_and_dispatch_run;
+    pub use pidash_jobs::orchestration::dispatch_continuation_run;
     pub use pidash_jobs::orchestration::preflight_eligibility_or_bounce;
     pub use pidash_jobs::orchestration::runner_seams::complete_project_move_handoff_live;
     pub use pidash_jobs::orchestration::StoreDeps;

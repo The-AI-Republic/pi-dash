@@ -249,7 +249,7 @@ pub async fn chat_append_event<R: Runtime>(
     let paths = AppPaths::resolve(&app)?;
     let mut conn = open(&paths, &account)?;
     let now = now_millis();
-    let tx = conn.transaction().map_err(sql_err)?;
+    let tx = begin_write(&mut conn).map_err(sql_err)?;
 
     let exists: bool = tx
         .query_row(
@@ -316,7 +316,16 @@ pub async fn chat_set_thread_id<R: Runtime>(
     engine_thread_id: String,
 ) -> Result<(), String> {
     let paths = AppPaths::resolve(&app)?;
-    let conn = open(&paths, &account)?;
+    set_thread_id(&paths, &account, &session_id, &engine_thread_id)
+}
+
+fn set_thread_id(
+    paths: &AppPaths,
+    account: &str,
+    session_id: &str,
+    engine_thread_id: &str,
+) -> Result<(), String> {
+    let conn = open(paths, account)?;
     let changed = conn
         .execute(
             "UPDATE sessions SET engine_thread_id = ?2, updated_at = ?3 WHERE id = ?1",
@@ -465,6 +474,17 @@ fn open(paths: &AppPaths, account: &str) -> Result<Connection, String> {
         restrict_file(Path::new(&sidecar));
     }
     Ok(conn)
+}
+
+/// Start a transaction that reads and then writes.
+///
+/// `IMMEDIATE` takes the write lock up front. A deferred transaction would
+/// start as a reader, and in WAL mode its first write fails at once with
+/// `SQLITE_BUSY_SNAPSHOT` ("database is locked") if another connection
+/// committed after its reads; the busy timeout does not retry that case.
+/// Taking the lock at `BEGIN` makes overlapping history writes wait their turn.
+fn begin_write(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
 }
 
 /// Create the schema on first open and apply migrations on later ones.
@@ -923,5 +943,54 @@ mod tests {
             .unwrap()
             .unwrap_or(false);
         assert!(!exists);
+    }
+
+    /// A history write that commits while an append is between its reads and
+    /// its insert (`chat_set_thread_id` landing during `chat_append_event`)
+    /// must wait for the append, not make the append fail with
+    /// "database is locked".
+    #[test]
+    fn overlapping_thread_id_write_does_not_fail_an_append() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let session = create(&paths, "user-1", new_session());
+
+        // The append's opening reads, exactly as chat_append_event does them.
+        let mut conn = open(&paths, "user-1").unwrap();
+        let tx = begin_write(&mut conn).unwrap();
+        let next_seq: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id=?1",
+                params![session.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // The thread-id write arrives on its own connection mid-append.
+        let writer = {
+            let paths = paths.clone();
+            let id = session.id.clone();
+            std::thread::spawn(move || set_thread_id(&paths, "user-1", &id, "thread-1"))
+        };
+        // Give the other write time to commit if nothing holds it off.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let inserted = tx.execute(
+            "INSERT INTO events (id,session_id,seq,role,content,created_at) \
+             VALUES (?1,?2,?3,'assistant','reply',?4)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                session.id,
+                next_seq,
+                now_millis()
+            ],
+        );
+        assert!(inserted.is_ok(), "append failed: {inserted:?}");
+        tx.commit().unwrap();
+
+        assert_eq!(writer.join().unwrap(), Ok(()));
+        assert_eq!(count_events(&paths, "user-1", &session.id), 1);
+        let stored = list_sessions(&paths, "user-1");
+        assert_eq!(stored[0].engine_thread_id.as_deref(), Some("thread-1"));
     }
 }

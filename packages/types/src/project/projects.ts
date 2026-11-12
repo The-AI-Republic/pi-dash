@@ -79,6 +79,10 @@ export interface IProject extends IPartialProject {
   agent_default_interval_seconds?: number;
   agent_review_default_interval_seconds?: number;
   agent_test_default_interval_seconds?: number;
+  /** Lost-runner rule (§6.6): what happens when a dedicated runner is
+   * revoked or deleted. `fail_to_backlog` (default) fails the run and
+   * moves the issue to Backlog; `fall_back` falls back to the pod. */
+  dedicated_runner_lost_action?: "fail_to_backlog" | "fall_back";
 }
 
 export type TProjectAnalyticsCountParams = {

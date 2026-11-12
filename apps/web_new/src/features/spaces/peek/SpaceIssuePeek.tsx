@@ -23,6 +23,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { RichTextView, hasStoredDescriptionContent } from "../../../shared/editor/index.js";
 import { PeekPanel } from "../../../shared/shell/PeekPanel.js";
+import { shareableAddress } from "../../../shared/shell/shareLink.js";
 import { spaceRuntime } from "../api/client.js";
 import { spaceIssueDetailQueryOptions, spaceViewerQueryOptions } from "../api/queries.js";
 import type { SpaceBoardSearch } from "../lib/address.js";
@@ -143,12 +144,20 @@ export function SpaceIssuePeek({
   const title = headerIssue?.name ?? "";
   const copyLink = React.useCallback((): void => {
     const writeText = globalThis.navigator?.clipboard?.writeText;
-    if (typeof writeText !== "function" || typeof globalThis.window === "undefined") {
+    const location = globalThis.window?.location;
+    if (typeof writeText !== "function" || location === undefined) {
+      notifySpaceCopyFailure();
+      return;
+    }
+    let address: string;
+    try {
+      address = shareableAddress(`${location.pathname}${location.search ?? ""}${location.hash ?? ""}`);
+    } catch {
       notifySpaceCopyFailure();
       return;
     }
     writeText
-      .call(globalThis.navigator.clipboard, globalThis.window.location.href)
+      .call(globalThis.navigator.clipboard, address)
       .then(() => notifySpaceCopySuccess())
       .catch(() => notifySpaceCopyFailure());
   }, []);

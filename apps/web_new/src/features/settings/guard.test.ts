@@ -35,6 +35,7 @@ const ME = {
 /** The gate reads me, then profile, then workspaces (the sidebar warm). */
 function queryClient(fixtures: { me?: unknown; profile?: unknown; workspaces?: unknown }): QueryClient {
   return {
+    getQueryState: () => undefined,
     ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
       const key = options.queryKey[1];
       const value = fixtures[key as "me" | "profile" | "workspaces"];

@@ -47,6 +47,6 @@ it("settles a confirmation queued while the chunk loads when the host unmounts",
   expect(settled).toBe(false);
   first.unmount();
   registerRuntimeSignOutHooks(null);
-  await expect(pending).resolves.toEqual({ deleteChatHistory: false });
+  await expect(pending).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   gate.release();
 });

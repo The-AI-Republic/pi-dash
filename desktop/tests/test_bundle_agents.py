@@ -36,28 +36,38 @@ def archive_bytes(archive, members):
     return output.getvalue()
 
 
-def pins_file(directory, tag="engine-test"):
-    """A pin file covering every Codex asset the bundle can download."""
-    lines = [f"tag {tag}"]
-    for target in ("universal-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
-        for architecture in bundle.targets(target):
-            for repo, archive, _, _ in bundle.assets(architecture):
-                if repo == "openai/codex":
-                    lines.append(f"{hashlib.sha256(archive.encode()).hexdigest()}  {archive}")
-    path = Path(directory) / "ENGINE_SHA256"
-    path.write_text("\n".join(sorted(set(lines), key=lambda l: not l.startswith("tag"))) + "\n")
-    return path
-
-
 class BundleAgentTests(unittest.TestCase):
     def test_exact_linux_and_windows_asset_names(self):
         self.assertEqual(
-            bundle.assets("x86_64-unknown-linux-gnu")[1][1],
-            "codex-x86_64-unknown-linux-musl.tar.gz",
+            bundle.assets("x86_64-unknown-linux-gnu"),
+            [
+                (
+                    "The-AI-Republic/pi-dash",
+                    "pidash-x86_64-unknown-linux-gnu.tar.xz",
+                    "pidash",
+                    "pidash",
+                )
+            ],
         )
         self.assertEqual(
-            bundle.assets("x86_64-pc-windows-msvc")[1][1], "codex-x86_64-pc-windows-msvc.exe.tar.gz"
+            bundle.assets("x86_64-pc-windows-msvc"),
+            [
+                (
+                    "The-AI-Republic/pi-dash",
+                    "pidash-x86_64-pc-windows-msvc.zip",
+                    "pidash.exe",
+                    "pidash.exe",
+                )
+            ],
         )
+
+    def test_no_target_stages_an_engine(self):
+        # The engine ships in the CLI release; no desktop target may carry it.
+        for target in ("universal-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
+            for architecture in bundle.targets(target):
+                for repo, _, _, destination in bundle.assets(architecture):
+                    self.assertNotEqual(repo, "openai/codex")
+                    self.assertNotIn("agent-engine", destination)
 
     def test_all_targets_produce_exact_native_filenames_and_mac_slices(self):
         for target in (
@@ -68,19 +78,13 @@ class BundleAgentTests(unittest.TestCase):
             with (
                 self.subTest(target=target),
                 tempfile.TemporaryDirectory() as directory,
-                tempfile.TemporaryDirectory() as pins_dir,
             ):
                 downloads = []
                 lipo_calls = []
 
                 def download(repo, tag, archive, pinned=None):
                     downloads.append((repo, tag, archive))
-                    if repo == "openai/codex":
-                        self.assertEqual(
-                            pinned, f"sha256:{hashlib.sha256(archive.encode()).hexdigest()}"
-                        )
-                    else:
-                        self.assertIsNone(pinned)
+                    self.assertIsNone(pinned)
                     for architecture in bundle.targets(target):
                         for expected_repo, expected_archive, member, _ in bundle.assets(
                             architecture
@@ -108,20 +112,14 @@ class BundleAgentTests(unittest.TestCase):
                     patch.object(bundle, "download", side_effect=download),
                     patch.object(bundle.subprocess, "run", side_effect=lipo),
                 ):
-                    bundle.stage(
-                        target,
-                        "pidash-test",
-                        "engine-test",
-                        directory,
-                        pins_file(pins_dir),
-                    )
+                    bundle.stage(target, "pidash-test", directory)
                 suffix = ".exe" if "windows" in target else ""
                 self.assertEqual(
                     {p.name for p in Path(directory).iterdir()},
-                    {f"pidash{suffix}", f"pidash-agent-engine{suffix}"},
+                    {f"pidash{suffix}"},
                 )
-                self.assertEqual(len(downloads), 4 if target.startswith("universal") else 2)
-                self.assertEqual(len(lipo_calls), 4 if target.startswith("universal") else 0)
+                self.assertEqual(len(downloads), 2 if target.startswith("universal") else 1)
+                self.assertEqual(len(lipo_calls), 2 if target.startswith("universal") else 0)
 
     def test_missing_or_ambiguous_executables_are_refused(self):
         for archive in ("test.tar.gz", "test.zip"):
@@ -165,20 +163,6 @@ class BundleAgentTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 bundle.download("repo/agent", "v1", "agent.tar.gz", pinned="sha256:" + "0" * 64)
-
-    def test_the_repo_pins_every_codex_asset_the_bundle_needs(self):
-        pins = bundle.engine_pins(bundle.default_engine_tag())
-        for target in ("universal-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
-            for architecture in bundle.targets(target):
-                for repo, archive, _, _ in bundle.assets(architecture):
-                    if repo == "openai/codex":
-                        self.assertIn(archive, pins)
-
-    def test_a_missing_or_stale_pin_file_stops_the_bundle(self):
-        with tempfile.TemporaryDirectory() as directory:
-            stale = pins_file(directory, tag="rust-v0.0.1")
-            with self.assertRaises(ValueError):
-                bundle.stage("x86_64-unknown-linux-gnu", "pidash-test", "engine-test", directory, stale)
 
 
 if __name__ == "__main__":

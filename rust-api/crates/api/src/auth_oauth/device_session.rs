@@ -75,6 +75,35 @@ use crate::assistant::common::{
 use crate::state::AppState;
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
+use pidash_db::redis::client_from_settings;
+use pidash_services::runner_enroll::dispatch_rules::PauseEffects;
+
+/// Drain post-commit pause effects after a device-session transaction commits.
+async fn drain_pause_effects(pool: &sqlx::PgPool, state: &AppState, effects: &PauseEffects) {
+    if effects.drain_pod_ids.is_empty() && effects.drain_runner_ids.is_empty() {
+        return;
+    }
+    let redis = client_from_settings(state.settings());
+    for pod_id in &effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner_id,
+        )
+        .await;
+    }
+}
+
 /// `api/urls/auth.py:43-46`, under the `api/v1/` include.
 pub const WORKSPACES_PATH: &str = "/api/v1/auth/workspaces/";
 /// `api/urls/auth.py:38-42`.
@@ -262,9 +291,9 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
 }
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
-/// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `token_hash`, unrevoked, not past its 60-day idle expiry, dev-machine
+/// unrevoked, workspace member (a non-member's token is revoked, then
+/// rejected) — then stamp `last_used_at`.
 #[allow(clippy::result_large_err)]
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
@@ -296,6 +325,12 @@ async fn authenticate_machine(
             .unwrap_or(None);
         match row {
             Some(m) if m.revoked_at.is_some() => return Err(invalid_token()),
+            // `MachineToken.is_expired()`: at-or-past expiry refuses (the same
+            // opaque denial as every other `mt_` arm here); Django order is
+            // revoked, then expired, then machine-revoked (#2910).
+            Some(m) if m.expires_at.is_some_and(|expires| expires <= now) => {
+                return Err(invalid_token())
+            }
             Some(_) => {}
             None => return Err(invalid_token()),
         }
@@ -694,10 +729,18 @@ async fn post_machine_token(
     )
     .await;
     match outcome {
-        Ok((dev_machine_id, host_label, raw, engine_sign_in_state, engine_credential)) => {
+        Ok((
+            dev_machine_id,
+            host_label,
+            raw,
+            engine_sign_in_state,
+            engine_credential,
+            pause_effects,
+        )) => {
             if tx.commit().await.is_err() {
                 return Failure::server_error().into_response();
             }
+            drain_pause_effects(&pool, &state, &pause_effects).await;
             let cred_opt: Option<(String, String)> = engine_credential.clone();
             json_response(
                 StatusCode::CREATED,
@@ -781,7 +824,17 @@ async fn exchange_in_transaction(
     workspace_id: Uuid,
     params: &MachineTokenParams,
     now: DateTime<Utc>,
-) -> Result<(Uuid, String, String, String, Option<(String, String)>), Response> {
+) -> Result<
+    (
+        Uuid,
+        String,
+        String,
+        String,
+        Option<(String, String)>,
+        PauseEffects,
+    ),
+    Response,
+> {
     // `_get_or_create_dev_machine` (`device.py:88-109`): lock, then
     // create-or-retry through the Done-layer kernels.
     let locked = {
@@ -940,6 +993,7 @@ async fn exchange_in_transaction(
     // try to issue. Nothing when no grant, machine revoked, silent and
     // !allowed, or instance_can_serve false. Swallow silent refusal.
     let mut engine_cred: Option<(String, String)> = None;
+    let mut pause_effects = PauseEffects::default();
     let mut engine_state = {
         use sea_orm::EntityTrait;
         let m = pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
@@ -997,7 +1051,10 @@ async fn exchange_in_transaction(
                 m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
             };
             if !machine_revoked
-                && pidash_services::domain::engine_credential::instance_can_serve_engine(settings)
+                && pidash_services::domain::engine_credential::engine_profile_for_user_available(
+                    settings,
+                )
+                .0
             {
                 let silent = !interactive_approval;
                 // Check silent allowed via machine's current state.
@@ -1012,7 +1069,7 @@ async fn exchange_in_transaction(
                     if let Some(m) = machine_for_silent {
                         pidash_services::domain::engine_credential::silent_issue_allowed(
                             &pidash_db::orm_tx::TxConn::new(tx) as &_,
-                            &m,
+                            m.id,
                             now,
                         )
                         .await
@@ -1028,9 +1085,9 @@ async fn exchange_in_transaction(
                     let issued =
                         pidash_services::domain::engine_credential::issue_engine_credential(
                             &dbc,
+                            secret_key,
                             user_id,
                             params.dev_machine_id,
-                            secret_key,
                             silent,
                             now,
                         )
@@ -1058,6 +1115,7 @@ async fn exchange_in_transaction(
                             })
                             .unwrap_or_else(|| engine_state.clone())
                         };
+                        pause_effects = ic.pause_effects;
                     }
                     // Silent refusal is swallowed.
                 }
@@ -1086,6 +1144,7 @@ async fn exchange_in_transaction(
         raw,
         engine_state,
         engine_cred,
+        pause_effects,
     ))
 }
 
@@ -1155,6 +1214,7 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
             {
                 return Failure::server_error().into_response();
             }
+            let mut revoke_effects = PauseEffects::default();
             if let Some(mid) = machine_id_opt {
                 // _machine_has_live_token: revoked_at IS NULL AND (expires_at IS NULL OR > now)
                 let has_live = {
@@ -1178,18 +1238,22 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                     count > 0
                 };
                 if !has_live {
-                    let _ = pidash_services::domain::engine_credential::revoke_engine_credential(
-                        &pidash_db::orm_tx::TxConn::new(&mut tx),
-                        mid,
-                        pidash_services::domain::engine_credential::revoke_reason::SIGNED_OUT,
-                        now,
-                    )
-                    .await;
+                    let (_revoked, effects) =
+                        pidash_services::domain::engine_credential::revoke_engine_credential(
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
+                            mid,
+                            "signed_out",
+                            now,
+                        )
+                        .await
+                        .unwrap_or((false, PauseEffects::default()));
+                    revoke_effects = effects;
                 }
             }
             if tx.commit().await.is_err() {
                 return Failure::server_error().into_response();
             }
+            drain_pause_effects(&pool, &state, &revoke_effects).await;
         }
         Caller::Api { raw, .. } => {
             // `request.auth` is the raw token string

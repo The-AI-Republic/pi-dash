@@ -1,9 +1,12 @@
-//! api-v1 CLI runner delete (D-22, stage 5, PIDASHCONV-538).
+//! api-v1 CLI runner delete + list (D-22, stage 5, PIDASHCONV-538; list NEWPIDASH-146).
 //!
 //! Ports the one unit this domain still needs after D-17 merged the auth
 //! half (PIDASHCONV-342 #808, PIDASHCONV-343 #817):
 //! `RunnerDeleteEndpoint` (`api/views/runner.py:29-57`,
-//! `DELETE /api/v1/runners/<runner_id>/`; route `api/urls/runner.py:9-14`).
+//! `DELETE /api/v1/runners/<runner_id>/`; route `api/urls/runner.py:9-14`)
+//! and the dedicated-runner CLI list (`RunnerListAPIEndpoint`,
+//! `GET /api/v1/workspaces/<slug>/runners/`; route `api/urls/runner.py:16-20`,
+//! f92fe3c0 NEWPIDASH-146).
 //!
 //! * [`runner`] — the DELETE handler (auth → lookup → guards →
 //!   purge-flag parse → `delete_runner` service → 204).
@@ -22,15 +25,22 @@ use crate::state::AppState;
 
 /// `api/urls/runner.py:10-14` under the `api/v1/` include.
 pub const RUNNER_DELETE_PATH: &str = "/api/v1/runners/{runner_id}/";
+/// `api/urls/runner.py:16-20` under the `api/v1/` include (f92fe3c0).
+pub const WORKSPACE_RUNNERS_LIST_PATH: &str = "/api/v1/workspaces/{slug}/runners/";
 
-/// Domain router: the DELETE-owned runner path. Registration is the
+/// Domain router: the DELETE-owned + GET-owned runner paths. Registration is the
 /// cutover granularity — sibling `api/v1/` paths have no Rust route and
 /// keep proxying to Django through the fallback.
 pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        RUNNER_DELETE_PATH,
-        owned_delete(axum::routing::delete(runner::delete_runner)),
-    )
+    Router::new()
+        .route(
+            RUNNER_DELETE_PATH,
+            owned_delete(axum::routing::delete(runner::delete_runner)),
+        )
+        .route(
+            WORKSPACE_RUNNERS_LIST_PATH,
+            owned_list(axum::routing::get(runner::list_runners)),
+        )
 }
 
 /// A DELETE-owned path (the pilot `owned()` pattern): DELETE serves from
@@ -44,6 +54,23 @@ fn owned_delete(
         .post(crate::edge::proxy)
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
+        .head(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+/// A GET-owned path: GET serves from Rust, every other method proxies to Django
+/// (`http_method_names=["get"]`, `api/urls/runner.py:18`). HEAD is served by
+/// Django via `View.setup head=get` and by Rust via axum's `get` handling;
+/// the inventory records HEAD as proxied to Django so the 405/200 pair stays
+/// byte-exact.
+fn owned_list(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    router
+        .post(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
         .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }

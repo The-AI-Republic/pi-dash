@@ -3830,7 +3830,7 @@ impl GitStore for ReviewStore {
         // `project.save(update_fields=...)`: only the changed columns
         // plus `updated_at` (`services.py:341-348`).
         pidash_services::domain::projects::save_bind_project_update(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             plan.project_id,
             plan.repo_url_update.as_deref(),
             plan.base_branch_update.as_deref(),

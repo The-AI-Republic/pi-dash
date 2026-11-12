@@ -428,28 +428,15 @@ impl From<IntakeWithCount> for IntakeRow {
 // Fetches (same WHERE semantics as the queries layer)
 // ---------------------------------------------------------------------------
 
-/// `IntakeViewSet.get_queryset` (`base.py:60-70`) executed: the tenant
-/// filter with the `pending_issue_count` annotation (`:68`,
-/// `Count("issue_intake", filter=status=-2)` over the soft-delete-scoped
-/// reverse manager — the `deleted_at IS NULL` sits in the `ON` clause,
-/// exactly like Django's annotation join), `Meta.ordering` (`name` ASC)
-/// and, for list, `.first()` (`:74` → `LIMIT 1`).
-///
-/// `pk` scopes to one row (`retrieve` / `partial_update` / `destroy`
-/// tenant lookup); `None` takes the first row in name order (`list`).
-pub async fn fetch_intake(
-    pool: &PgPool,
+/// Build the `fetch_intake` select (extracted for the alias regression
+/// test; see `intake_select_uses_joined_aliases`).
+fn build_intake_select(
     slug: &str,
     project_id: &Uuid,
     pk: Option<Uuid>,
     include_deleted: bool,
-) -> Result<Option<(IntakeRow, i64)>, Denial> {
-    use sea_orm::sea_query::{Alias, Expr, Func, Order};
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    // Django `Count("issue_intake", filter=status=-2)` over the soft-delete
-    // scoped reverse manager: LEFT JOIN with `deleted_at IS NULL` in the ON
-    // clause, `COUNT(ii.id) FILTER (WHERE ii.status = -2)`. One sea-query
-    // statement, decoded by name into `IntakeWithCount`.
+) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Alias, Expr, Func, JoinType, Order};
     let mut stmt = sea_orm::sea_query::Query::select();
     stmt.expr(Expr::col((Alias::new("i"), Alias::new("id"))))
         .expr(Expr::col((Alias::new("i"), Alias::new("created_at"))))
@@ -475,15 +462,17 @@ pub async fn fetch_intake(
             Alias::new("pending_issue_count"),
         )
         .from_as(Alias::new("intakes"), Alias::new("i"))
-        .join(
+        .join_as(
             JoinType::InnerJoin,
             Alias::new("workspaces"),
+            Alias::new("w"),
             Expr::col((Alias::new("w"), Alias::new("id")))
                 .equals((Alias::new("i"), Alias::new("workspace_id"))),
         )
-        .join(
+        .join_as(
             JoinType::LeftJoin,
             Alias::new("intake_issues"),
+            Alias::new("ii"),
             Expr::col((Alias::new("i"), Alias::new("id")))
                 .equals((Alias::new("ii"), Alias::new("intake_id")))
                 .and(Expr::col((Alias::new("ii"), Alias::new("deleted_at"))).is_null()),
@@ -502,6 +491,31 @@ pub async fn fetch_intake(
     stmt.group_by_col((Alias::new("i"), Alias::new("id")))
         .order_by((Alias::new("i"), Alias::new("name")), Order::Asc)
         .limit(1);
+    stmt
+}
+
+/// `IntakeViewSet.get_queryset` (`base.py:60-70`) executed: the tenant
+/// filter with the `pending_issue_count` annotation (`:68`,
+/// `Count("issue_intake", filter=status=-2)` over the soft-delete-scoped
+/// reverse manager — the `deleted_at IS NULL` sits in the `ON` clause,
+/// exactly like Django's annotation join), `Meta.ordering` (`name` ASC)
+/// and, for list, `.first()` (`:74` → `LIMIT 1`).
+///
+/// `pk` scopes to one row (`retrieve` / `partial_update` / `destroy`
+/// tenant lookup); `None` takes the first row in name order (`list`).
+pub async fn fetch_intake(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    pk: Option<Uuid>,
+    include_deleted: bool,
+) -> Result<Option<(IntakeRow, i64)>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // Django `Count("issue_intake", filter=status=-2)` over the soft-delete
+    // scoped reverse manager: LEFT JOIN with `deleted_at IS NULL` in the ON
+    // clause, `COUNT(ii.id) FILTER (WHERE ii.status = -2)`. One sea-query
+    // statement, decoded by name into `IntakeWithCount`.
+    let stmt = build_intake_select(slug, project_id, pk, include_deleted);
     let statement = sea_orm::DbBackend::Postgres.build(&stmt);
     let result = db
         .query_one(statement)
@@ -1363,6 +1377,43 @@ mod tests {
         assert_eq!(python_str(&json!(["x"])), "['x']");
         assert_eq!(python_str(&json!({"a": 1})), "{'a': 1}");
         assert_eq!(python_str(&json!(null)), "None");
+    }
+
+    /// NEWPIDASH-138: the SeaORM list query qualifies joined columns as
+    /// `w` / `ii`, so the joins must alias the tables the same way.
+    /// Without `join_as` Postgres answers
+    /// `missing FROM-clause entry for table "w"` and the handler maps
+    /// the error to 500, while Django's ORM join answers 200.
+    #[test]
+    fn intake_select_uses_joined_aliases() {
+        let project_id =
+            Uuid::parse_str("40ffd807-0000-4000-8000-000000000000").expect("fixed test UUID");
+        let stmt = build_intake_select("parity-ws", &project_id, None, false);
+        let sql = sea_orm::DbBackend::Postgres.build(&stmt).sql;
+        assert!(
+            sql.contains(r#"AS "w""#),
+            "workspaces join must alias as w: {sql}"
+        );
+        assert!(
+            sql.contains(r#"AS "ii""#),
+            "intake_issues join must alias as ii: {sql}"
+        );
+        assert!(
+            !sql.contains(r#"JOIN "workspaces" ON"#),
+            "bare workspaces join would miss the w alias: {sql}"
+        );
+        assert!(
+            !sql.contains(r#"JOIN "intake_issues" ON"#),
+            "bare intake_issues join would miss the ii alias: {sql}"
+        );
+        assert!(
+            sql.contains(r#""w"."slug""#),
+            "tenant filter must use w: {sql}"
+        );
+        assert!(
+            sql.contains(r#""ii"."status""#),
+            "pending annotation must use ii: {sql}"
+        );
     }
 
     /// `IntakeSerializer` key order follows `INTAKE_KEY_ORDER`

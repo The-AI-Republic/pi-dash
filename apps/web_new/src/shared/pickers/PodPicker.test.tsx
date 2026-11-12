@@ -427,7 +427,7 @@ describe("PodPicker", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("hides engine runners and names each runner's machine and state", async () => {
+  it("names engine runners by their machine and lists every runner's state", async () => {
     const engine = runnerRow({
       id: RUNNER_MAC,
       name: "builtin-mbp-acme-ACME",
@@ -445,7 +445,9 @@ describe("PodPicker", () => {
     renderPicker({}, queryClient);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     const ownRow = await screen.findByRole("option", { name: /gpu-box/ });
-    expect(screen.queryByRole("option", { name: /builtin-mbp|Built-in engine/ })).not.toBeInTheDocument();
+    const engineRow = await screen.findByRole("option", { name: /Built-in engine/ });
+    expect(engineRow.textContent).toContain("Built-in engine · Work laptop");
+    expect(engineRow.textContent).toContain("offline");
     expect(ownRow.textContent).toContain("gpu-host");
     expect(ownRow.textContent).toContain("online · idle");
   });

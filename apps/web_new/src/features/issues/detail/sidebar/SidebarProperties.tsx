@@ -5,8 +5,9 @@
 // ISS-148–159). Rows A: state, assignees, runs on, priority, created by.
 // Rows B: start and due dates, estimate, modules, cycle, parent and
 // labels. Each editable row writes one property with an optimistic
-// PATCH; guests, archived items and synced items render the same rows
-// with every control disabled (the archived pattern from §17, ISS-220).
+// PATCH; guests and archived items render the same rows with every
+// control disabled (the archived pattern from §17, ISS-220). Synced
+// items keep their workflow rows editable; only title/description lock.
 // The pickers read lazily on open, except that a row already carrying a
 // value preloads the list that names it so the first paint is accurate.
 // The workspace directory loads eagerly when a creator or an assignee
@@ -69,7 +70,7 @@ export interface SidebarPropertiesProps {
   issue: Issue;
   /** Project row carrying the agent options and the feature switches. */
   project: SidebarProject;
-  /** Project member/admin on a live project. Archived and synced items always read. */
+  /** Project member/admin on a live project. Archived items always read. */
   editable: boolean;
 }
 
@@ -80,7 +81,7 @@ export function SidebarProperties({
   project,
   editable,
 }: SidebarPropertiesProps): React.ReactElement {
-  const disabled = !editable || issue.archived_at !== null || issue.is_synced;
+  const disabled = !editable || issue.archived_at !== null;
   const update = useUpdateIssue({
     workspaceSlug,
     projectId,

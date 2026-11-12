@@ -227,6 +227,22 @@ class RunnerPodDispatch(models.TextChoices):
     POD_MEMBER = "pod_member", "Pod work on"
 
 
+class PinKind(models.TextChoices):
+    """Why a queued run is pinned (dedicated-runner design §6.4).
+
+    ``LOCALITY`` is a best-effort session-continuity hint set by the system;
+    it may be dropped at any time. ``DEDICATED`` means the issue has a
+    dedicated runner: a user choice, never dropped by the system without a
+    rule in the design (and since H-13, never released to the pod at all).
+    The kind is stamped at creation from the issue's assignment; it is
+    rewritten only by the re-point step (§13.2). Managed runs keep their
+    own ``executor_kind`` marker and get no third kind.
+    """
+
+    LOCALITY = "locality", "Locality hint"
+    DEDICATED = "dedicated", "Dedicated runner"
+
+
 class EngineAutoPauseReason(models.TextChoices):
     """Why the server paused a machine's built-in engine on its own.
 
@@ -884,14 +900,47 @@ class Runner(models.Model):
                 affected_run_ids = [pk for pk, _ in active_runs]
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
+            # (3) Unpin QUEUED follow-ups so they flow back into the pod
+            # queue (locality only). Dedicated pins are owned by the issue:
+            # per issue dedicated to this runner — whether or not it has a
+            # queued dedicated run (§13.1) — apply the project's
+            # lost-runner handling, which clears the assignment. The
+            # revoking transaction itself (§13.1).
+            from pi_dash.db.models.issue import Issue
+
+            dedicated_issue_ids = list(
+                Issue.objects.filter(assigned_runner=self).values_list("pk", flat=True)
+            )
+            dedicated_issue_ids.extend(
+                AgentRun.objects.filter(
+                    pinned_runner=self,
+                    status=AgentRunStatus.QUEUED,
+                    pin_kind="dedicated",
+                ).values_list("work_item_id", flat=True)
+            )
             pinned_pod_ids = list(
-                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).values_list(
+                AgentRun.objects.filter(
+                    pinned_runner=self,
+                    status=AgentRunStatus.QUEUED,
+                    pin_kind__isnull=False,
+                ).exclude(pin_kind="dedicated").values_list(
                     "pod_id", flat=True
                 )
             )
             if pinned_pod_ids:
-                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).update(pinned_runner=None)
+                AgentRun.objects.filter(
+                    pinned_runner=self, status=AgentRunStatus.QUEUED
+                ).exclude(pin_kind="dedicated").update(pinned_runner=None)
                 affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
+            if dedicated_issue_ids:
+                from pi_dash.runner.services.issue_assignment import (
+                    apply_lost_runner_policy,
+                )
+
+                for issue_id in dict.fromkeys(i for i in dedicated_issue_ids if i is not None):
+                    issue = Issue.objects.filter(pk=issue_id).first()
+                    if issue is not None:
+                        apply_lost_runner_policy(issue, reason=reason)
 
         def _complete_project_move_handoffs(run_ids=tuple(affected_run_ids)):
             from pi_dash.orchestration.service import (
@@ -1249,6 +1298,15 @@ class AgentRun(models.Model):
         blank=True,
         related_name="pinned_agent_runs",
     )
+    # Why the run is pinned (design §6.4). Meaningful only while
+    # ``pinned_runner`` is set; an unpinned run keeps the default. Existing
+    # rows default to ``locality``, which is what every non-managed pin is
+    # today — no backfill.
+    pin_kind = models.CharField(
+        max_length=16,
+        choices=PinKind.choices,
+        default=PinKind.LOCALITY,
+    )
     work_item = models.ForeignKey(
         "db.Issue",
         on_delete=models.SET_NULL,
@@ -1413,6 +1471,10 @@ class AgentRun(models.Model):
                 fields=["status", "terminal_capacity_released_at", "ended_at"],
                 name="agent_run_term_capacity_idx",
             ),
+            # Last-served lookup for the matcher's alternation (design
+            # §6.5/§10.2): the runner's most recent assigned run. Built
+            # concurrently in runner 0039.
+            models.Index(fields=["runner", "-assigned_at"], name="agent_run_runner_assigned_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -1450,6 +1512,12 @@ class AgentRun(models.Model):
                     )
                 ),
                 name="agent_run_one_active_per_work_item",
+            ),
+            # I5 (design §6.2/§6.5): only machine (local) runs carry a
+            # dedicated pin; Cloud Agent runs have no runner at all.
+            models.CheckConstraint(
+                check=models.Q(pin_kind=PinKind.LOCALITY) | models.Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER),
+                name="agent_run_dedicated_pin_is_local",
             ),
         ]
 

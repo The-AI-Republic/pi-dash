@@ -17,8 +17,11 @@
 //!   permission `EXISTS`;
 //! - rich (`filters`) and legacy (`issue_filters`) predicates;
 //! - the relation joins: INNER when a compiled rich leaf filters through
-//!   the relation or the m2m group needs it, LEFT otherwise. The decision
-//!   is structural (which declared relation leaf compiled to a predicate),
+//!   the relation, LEFT otherwise (an m2m group key only guards its
+//!   join's `deleted_at` in the WHERE, exactly like Django's LEFT OUTER
+//!   JOIN + `isnull` filter, so linkless rows survive with the NULL
+//!   group key that feeds the "None" bucket). The decision is
+//!   structural (which declared relation leaf compiled to a predicate),
 //!   not a text search. Legacy predicates never upgrade a join, exactly as
 //!   before (a positive predicate over a LEFT join keeps the same rows);
 //! - the annotation subqueries, order keys, group expressions, windows and
@@ -167,8 +170,25 @@ impl RelationTable {
     }
 }
 
-/// M2M group filters (`GROUP_FILTER_MAPPER`): grouping by this raw field
-/// forces an INNER join on the relation.
+/// M2M group filters (`GROUP_FILTER_MAPPER` in `utils/grouper.py`):
+/// an m2m group key (group or sub-group) filters its join's
+/// `deleted_at`, with the LEFT join Django emits (`LEFT OUTER JOIN`
+/// plus `alias.deleted_at IS NULL`): linkless issues survive with a
+/// NULL group key — the "None" bucket — while rows whose only links
+/// are soft-deleted drop out.
+fn m2m_group_deleted_at(group: &str) -> Option<Expr> {
+    Some(match group {
+        "assignees__id" => col("issue_assignee", issue_assignees::Column::DeletedAt),
+        "labels__id" => col("label_issue", issue_labels::Column::DeletedAt),
+        "issue_module__module_id" => col("issue_module", module_issues::Column::DeletedAt),
+        _ => return None,
+    })
+}
+
+/// Whether the raw group/sub-group names this relation alias. The inverse
+/// of `m2m_group_deleted_at`: used to know if the alias needs a join at
+/// all (NEWPIDASH-132 conditional joins). A grouped alias is joined LEFT
+/// (NEWPIDASH-131), never INNER on the group alone.
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -184,7 +204,7 @@ fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &
 #[derive(Debug, Clone)]
 pub struct IssueSet {
     base: SelectStatement,
-    /// The relation aliases a rich leaf or the m2m group joins INNER.
+    /// The relation aliases a rich leaf joins INNER.
     pub referenced: Vec<&'static str>,
 }
 
@@ -232,7 +252,7 @@ fn rich_condition(
                 for leaf in leaves {
                     let name = super::leaf_name(&leaf.field, leaf.lookup);
                     let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !matches!(expr, SimpleExpr::Custom(_)) {
+                    if !pidash_db::filterset::is_constant(&expr) {
                         if let Some(alias) = relation_alias(&name) {
                             used.insert(alias);
                         }
@@ -262,6 +282,57 @@ fn relation_alias(name: &str) -> Option<&'static str> {
         FilterKind::Relation { join_table, .. } => Some(join_table),
         _ => None,
     }
+}
+
+/// Map a legacy `issue_filters` predicate name to the relation alias it
+/// references (for conditional JOIN promotion). Returns the alias if the
+/// predicate filters through that relation; `is_null` predicates are
+/// nullable references (LEFT join), `__in` predicates are positive
+/// references (LEFT in the current port, kept LEFT for parity with the
+/// legacy-never-upgrades rule, but still a join).
+fn legacy_alias_for_predicate(name: &str) -> Option<&'static str> {
+    if let Some(path) = name.strip_suffix("__isnull") {
+        return Some(match path {
+            "labels" | "label_issue__deleted_at" => "label_issue",
+            "assignees" | "issue_assignee__deleted_at" => "issue_assignee",
+            "issue_cycle__cycle_id" | "issue_cycle__deleted_at" => "issue_cycle",
+            "issue_module__module_id" | "issue_module__deleted_at" => "issue_module",
+            "issue_subscribers__deleted_at" => "issue_subscribers",
+            "issue_mention__mention__id" => "issue_mention",
+            _ => return None,
+        });
+    }
+    Some(match name {
+        "labels__in" => "label_issue",
+        "assignees__in" => "issue_assignee",
+        "issue_mention__mention__id__in" => "issue_mention",
+        "issue_cycle__cycle_id__in" => "issue_cycle",
+        "issue_module__module_id__in" => "issue_module",
+        "issue_subscribers__subscriber_id__in" => "issue_subscribers",
+        "issue_intake__status__in" => "issue_intake",
+        _ => return None,
+    })
+}
+
+/// Compute which relation aliases legacy predicates reference (for
+/// conditional joins). Uses the same `issue_filters_get` dispatcher the
+/// condition builder uses.
+fn legacy_referenced_aliases(query: &QueryMap) -> BTreeSet<&'static str> {
+    let flat: HashMap<String, String> = query
+        .keys()
+        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
+        .collect();
+    let today = chrono::Utc::now().date_naive();
+    let Ok(legacy) = pidash_db::issue_filters::issue_filters_get(&flat, "", today) else {
+        return BTreeSet::new();
+    };
+    let mut out = BTreeSet::new();
+    for (name, _) in legacy.predicates() {
+        if let Some(alias) = legacy_alias_for_predicate(name) {
+            out.insert(alias);
+        }
+    }
+    out
 }
 
 /// The legacy `issue_filters(query_params, "GET")` predicates, ANDed in
@@ -313,9 +384,39 @@ fn finish_set(
     }
     let mut referenced = Vec::new();
     if layers.rich || layers.legacy {
+        let legacy_used = if layers.legacy {
+            legacy_referenced_aliases(query)
+        } else {
+            BTreeSet::new()
+        };
+        // `GROUP_FILTER_MAPPER`: an m2m group key guards its join's
+        // `deleted_at` in the WHERE (LEFT join, so linkless rows keep
+        // the NULL group key that feeds the "None" bucket).
+        for group in [group_by, sub_group_by].into_iter().flatten() {
+            if let Some(deleted_at) = m2m_group_deleted_at(group) {
+                cond = cond.add(deleted_at.is_null());
+            }
+        }
         for (table, alias) in RELATION_JOINS {
             let grouped = group_join_alias(group_by, sub_group_by, alias);
-            let inner = used.contains(alias) || grouped;
+            let rich = used.contains(alias);
+            let legacy_need = legacy_used.contains(alias);
+            let needs_join = rich || grouped || legacy_need;
+            // `issue_cycle` must always be joined: cycle-name ordering
+            // (`order_expr` with `Some("issue_cycle")`) resolves to
+            // `OrderJoins::Bridge("issue_cycle")`, which references
+            // `issue_cycle` in FROM. Skipping it breaks that invariant
+            // (`missing FROM-clause entry`, 500 on
+            // `order_by=issue_cycle__cycle__name`).
+            let always_join = *alias == "issue_cycle";
+            if !needs_join && !always_join {
+                continue;
+            }
+            // NEWPIDASH-131: a grouped m2m alias is joined LEFT (Django's
+            // LEFT OUTER JOIN + `deleted_at IS NULL`); only a rich leaf
+            // upgrades to INNER. NEWPIDASH-132: unreferenced aliases are
+            // skipped entirely.
+            let inner = rich;
             if inner {
                 referenced.push(*alias);
             }
@@ -409,8 +510,8 @@ pub fn issue_set(
 }
 
 /// The archived set (`archive.py:98-116`): non-epic types, archived rows,
-/// this project and workspace, optional top-level filter, then the same
-/// rich + legacy stacks and relation joins. The state join carries no
+/// this project and workspace, optional top-level filter, the guest
+/// `created_by` scope (PDASHOSS01-323), then the same rich + legacy stacks and relation joins. The state join carries no
 /// soft-delete guard and there is no projects join.
 pub fn archive_issue_set(
     gate: &Gate,
@@ -453,6 +554,11 @@ pub fn archive_issue_set(
         .add(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug));
     if !show_sub_issues {
         cond = cond.add(issue(issues::Column::ParentId).is_null());
+    }
+    // Guests without `guest_view_all_features` read only their own
+    // archived issues (PDASHOSS01-323).
+    if gate.guest_scoped {
+        cond = cond.add(issue(issues::Column::CreatedById).eq(gate.user_id));
     }
     finish_set(
         stmt,
@@ -603,6 +709,7 @@ fn zoned_date(column: issues::Column, tz: &Tz) -> SimpleExpr {
 fn date_term(term: &str, tz: &Tz) -> Option<SimpleExpr> {
     Some(match term {
         "created_at__date" => zoned_date(issues::Column::CreatedAt, tz),
+        "updated_at__date" => zoned_date(issues::Column::UpdatedAt, tz),
         "completed_at__date" => zoned_date(issues::Column::CompletedAt, tz),
         "start_date" => issue(issues::Column::StartDate).into(),
         "target_date" => issue(issues::Column::TargetDate).into(),
@@ -957,6 +1064,7 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
         .column((a("issue"), issues::Column::ParentId))
         .column((a("issue"), issues::Column::TypeId))
         .column((a("issue"), issues::Column::AssignedPodId))
+        .column((a("issue"), issues::Column::AssignedRunnerId))
         .column((a("issue"), issues::Column::AgentExecutor))
         .column((a("issue"), issues::Column::CreatedAt))
         .column((a("issue"), issues::Column::UpdatedAt))
@@ -1199,25 +1307,19 @@ pub fn order_expr(
 /// then `created_at DESC`; the default branch resolves the raw param with
 /// a `created_at DESC` tiebreak unless the param mentions `created_at`.
 /// No `NULLS LAST` anywhere. `created_at` here is the output column.
-pub fn flat_order(
-    stmt: &mut SelectStatement,
+/// The flat order as an expression: `(expr, order, created_at tiebreak,
+/// joins)`. Shared by [`flat_order`] (raw `ORDER BY` expr, for the text
+/// engine's unpaginated probe) and [`flat_list_rows`] (selected
+/// `__order_key`, required under `DISTINCT`).
+fn flat_order_key(
     out_param: &str,
     orig_param: &str,
-) -> Result<OrderJoins, Denial> {
-    let created_at_desc = |stmt: &mut SelectStatement| {
-        stmt.order_by(a("created_at"), Order::Desc);
-    };
+) -> Result<(SimpleExpr, Order, bool, OrderJoins), Denial> {
     match out_param {
         "priority_order" | "-priority_order" => {
-            stmt.order_by_expr(priority_case(), Order::Asc);
-            created_at_desc(stmt);
-            return Ok(OrderJoins::None);
+            Ok((priority_case(), Order::Asc, true, OrderJoins::None))
         }
-        "state_order" | "-state_order" => {
-            stmt.order_by_expr(state_case(), Order::Asc);
-            created_at_desc(stmt);
-            return Ok(OrderJoins::None);
-        }
+        "state_order" | "-state_order" => Ok((state_case(), Order::Asc, true, OrderJoins::None)),
         "min_values" | "-min_values" => {
             let sub = min_order_subquery(orig_param.trim_start_matches('-'))?;
             let order = if out_param.starts_with('-') {
@@ -1225,18 +1327,31 @@ pub fn flat_order(
             } else {
                 Order::Asc
             };
-            stmt.order_by_expr(sub, order);
-            created_at_desc(stmt);
-            return Ok(OrderJoins::None);
+            Ok((sub, order, true, OrderJoins::None))
         }
-        _ => {}
+        _ => {
+            let key = order_expr(out_param, orig_param, Some("issue_cycle"), false)?;
+            Ok((
+                key.expr.clone(),
+                key.order(),
+                !orig_param.contains("created_at"),
+                key.joins,
+            ))
+        }
     }
-    let key = order_expr(out_param, orig_param, Some("issue_cycle"), false)?;
-    stmt.order_by_expr(key.expr.clone(), key.order());
-    if !orig_param.contains("created_at") {
-        created_at_desc(stmt);
+}
+
+pub fn flat_order(
+    stmt: &mut SelectStatement,
+    out_param: &str,
+    orig_param: &str,
+) -> Result<OrderJoins, Denial> {
+    let (expr, order, tiebreak, joins) = flat_order_key(out_param, orig_param)?;
+    stmt.order_by_expr(expr, order);
+    if tiebreak {
+        stmt.order_by(a("created_at"), Order::Desc);
     }
-    Ok(key.joins)
+    Ok(joins)
 }
 
 // ---- grouping ------------------------------------------------------------------
@@ -1356,26 +1471,58 @@ pub fn grouped_page(
     offset: i64,
     stop: i64,
 ) -> Result<SelectStatement, Denial> {
-    let mut window = WindowStatement::new();
-    window.add_partition_by(group_expr(group_by)?);
-    if let Some(sub) = sub_group_by {
-        window.add_partition_by(group_expr(sub)?);
-    }
-    window
-        .order_by_expr_with_nulls(key.expr.clone(), key.order(), NullOrdering::Last)
-        .order_by((a("issue"), issues::Column::CreatedAt), Order::Desc);
+    // G01: DISTINCT before window. Fan-out rows from unconditional
+    // relation joins share identical output columns; dedup must happen
+    // before `ROW_NUMBER()` or the window assigns different numbers
+    // to duplicates and inflates `count`. We build a DISTINCT
+    // subselect (inner) with `__order_key`, then window over it so
+    // one row per issue per group bucket is numbered.
     let mut inner = set.select();
     key.joins.apply(&mut inner);
-    inner.distinct();
     annotate(&mut inner, ann);
     group_member(&mut inner, group_by);
-    inner
-        .expr_as(key.expr.clone(), a("__order_key"))
-        .expr_window_as(Func::cust(a("ROW_NUMBER")), window, a("__rn"));
+    if let Some(sub) = sub_group_by {
+        group_member(&mut inner, sub);
+    }
+    inner.expr_as(key.expr.clone(), a("__order_key")).distinct();
+    // Partition/order on the deduped output columns (`__dedup` alias):
+    // each group field's output column name equals the field name for
+    // every group_by the engine accepts (labels__id, assignees__id,
+    // issue_module__module_id, state_id, priority, cycle_id,
+    // project_id, state__group, target_date, start_date, created_by).
+    // `__order_key` and `created_at` carry the global order.
+    let mut window = WindowStatement::new();
+    if group_expr(group_by).is_err() {
+        return Err(Denial::ServerError);
+    }
+    if let Some(sub) = sub_group_by {
+        if group_expr(sub).is_err() {
+            return Err(Denial::ServerError);
+        }
+    }
+    window.add_partition_by(Expr::col((Alias::new("__dedup"), Alias::new(group_by))).into());
+    if let Some(sub) = sub_group_by {
+        window.add_partition_by(Expr::col((Alias::new("__dedup"), Alias::new(sub))).into());
+    }
+    window
+        .order_by_expr_with_nulls(
+            Expr::col((Alias::new("__dedup"), Alias::new("__order_key"))).into(),
+            key.order(),
+            NullOrdering::Last,
+        )
+        .order_by(
+            (Alias::new("__dedup"), Alias::new("created_at")),
+            Order::Desc,
+        );
+    let mut windowed = Query::select();
+    windowed
+        .column(Asterisk)
+        .expr_window_as(Func::cust(a("ROW_NUMBER")), window, a("__rn"))
+        .from_subquery(inner, a("__dedup"));
     let mut outer = Query::select();
     outer
         .column(Asterisk)
-        .from_subquery(inner, a("__w"))
+        .from_subquery(windowed, a("__w"))
         .and_where(col("__w", a("__rn")).gt(offset))
         .and_where(col("__w", a("__rn")).lte(stop))
         .order_by_with_nulls(
@@ -1437,7 +1584,17 @@ pub fn flat_list_rows(
     orig_param: &str,
 ) -> Result<SelectStatement, Denial> {
     let mut stmt = set.select();
-    let joins = flat_order(&mut stmt, out_param, orig_param)?;
+    stmt.distinct();
+    // `flat_page` pattern: the order expr must be selected as
+    // `__order_key` so `ORDER BY` on the alias is valid under `DISTINCT`
+    // (raw `ORDER BY <expr>` 500s: "for SELECT DISTINCT, ORDER BY
+    // expressions must appear in select list").
+    let (expr, order, tiebreak, joins) = flat_order_key(out_param, orig_param)?;
+    stmt.expr_as(expr, a("__order_key"));
+    stmt.order_by(a("__order_key"), order);
+    if tiebreak {
+        stmt.order_by(a("created_at"), Order::Desc);
+    }
     joins.apply(&mut stmt);
     annotate(
         &mut stmt,
@@ -1455,6 +1612,7 @@ pub fn flat_list_rows(
 /// The flat `fields=`/`expand=` branch rows, `-created_at`.
 pub fn serializer_rows(set: &IssueSet) -> SelectStatement {
     let mut stmt = set.select();
+    stmt.distinct();
     serializer_columns(&mut stmt);
     stmt.order_by((a("issue"), issues::Column::CreatedAt), Order::Desc);
     stmt
@@ -1464,6 +1622,7 @@ pub fn serializer_rows(set: &IssueSet) -> SelectStatement {
 /// assignee filter, plus `description_html`, by `updated_at`.
 pub fn v2_rows(set: &IssueSet, limit: i64, offset: i64) -> Result<SelectStatement, Denial> {
     let mut stmt = set.select();
+    stmt.distinct();
     annotate(
         &mut stmt,
         Annotations {
@@ -1725,21 +1884,27 @@ mod tests {
         assert!(
             text.contains(r#""issue"."created_by_id" = '00000000-0000-0000-0000-000000000000'"#)
         );
-        // Every relation joins LEFT when no rich leaf filters through it.
+        // Conditional joins: with no rich/legacy filter and no group,
+        // no relation joins are rendered (intake stays for count_filter).
+        // Exception: `issue_cycle` is always joined (LEFT) — the cycle-name
+        // order bridge requires it in FROM (review defect 2).
         for (table, alias) in [
             ("issue_assignees", "issue_assignee"),
-            ("cycle_issues", "issue_cycle"),
             ("module_issues", "issue_module"),
             ("issue_mentions", "issue_mention"),
             ("issue_labels", "label_issue"),
             ("issue_subscribers", "issue_subscribers"),
-            ("intake_issues", "issue_intake"),
         ] {
             assert!(
-                text.contains(&format!(r#"LEFT JOIN "{table}" AS "{alias}""#)),
-                "{alias}"
+                !text.contains(&format!(r#""{table}" AS "{alias}""#)),
+                "unexpected join for {alias} in {text}"
             );
         }
+        assert!(
+            text.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#),
+            "cycle must always be joined for the order bridge: {text}"
+        );
+        assert!(text.contains(r#"LEFT JOIN "intake_issues" AS "issue_intake""#));
         assert!(set.referenced.is_empty());
         // Detail and NO_GUEST skip the guest scope; V2 renders no joins.
         let detail = issue_set(
@@ -1774,10 +1939,10 @@ mod tests {
     }
 
     #[test]
-    fn joins_are_inner_for_rich_relation_leaves_and_m2m_groups() {
+    fn joins_are_inner_for_rich_relation_leaves_and_left_for_m2m_groups() {
         let rich = query(&[(
             "filters",
-            r#"{"or":[{"label_id":"00000000-0000-0000-0000-000000000001"},{"assignee_id":""}]}"#,
+            r#"{"or":[{"label_id":"00000000-0000-0000-0000-000000000001"}]}"#,
         )]);
         let set = issue_set(
             &gate(false),
@@ -1790,14 +1955,43 @@ mod tests {
             FilterLayers::FULL,
         )
         .expect("set");
-        // The label leaf filters (INNER); the empty assignee leaf is
-        // match-all but the assignee group forces INNER anyway.
-        assert_eq!(set.referenced, vec!["issue_assignee", "label_issue"]);
+        // The label leaf filters (INNER); the assignee group key only
+        // guards the LEFT join's `deleted_at` — linkless issues keep
+        // their NULL key.
+        assert_eq!(set.referenced, vec!["label_issue"]);
         let text = sql(&count_distinct(&set));
         assert!(text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#));
-        assert!(text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#));
+        assert!(text.contains(r#"LEFT JOIN "issue_assignees" AS "issue_assignee""#));
+        assert!(text.contains(r#""issue_assignee"."deleted_at" IS NULL"#));
+        // Unreferenced relations are skipped (NEWPIDASH-132 conditional
+        // joins); only the rich leaf, the grouped alias and the cycle
+        // order-bridge join are present.
+        assert!(!text.contains(r#""module_issues" AS "issue_module""#));
+        assert!(!text.contains(r#""issue_subscribers" AS "issue_subscribers""#));
+        assert!(!text.contains(r#""issue_mentions" AS "issue_mention""#));
+        // Cycle join is always present (LEFT) for the order bridge.
         assert!(text.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#));
-        // Legacy predicates never upgrade a join.
+        // A bare m2m group (no leaves) still LEFTs the joins and guards
+        // them, group and sub-group alike.
+        let bare = issue_set(
+            &gate(false),
+            "w",
+            &query(&[]),
+            Some("labels__id"),
+            Some("issue_module__module_id"),
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(bare.referenced.is_empty());
+        let text = sql(&count_distinct(&bare));
+        assert!(text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#));
+        assert!(text.contains(r#"LEFT JOIN "module_issues" AS "issue_module""#));
+        assert!(text.contains(r#""label_issue"."deleted_at" IS NULL"#));
+        assert!(text.contains(r#""issue_module"."deleted_at" IS NULL"#));
+        // Legacy predicates never upgrade a join; only the referenced
+        // alias is joined (cycle stays: always-joined order bridge).
         let legacy = query(&[("labels", "00000000-0000-0000-0000-000000000001")]);
         let set = issue_set(
             &gate(false),
@@ -1811,7 +2005,12 @@ mod tests {
         )
         .expect("set");
         assert!(set.referenced.is_empty());
-        assert!(sql(&count_distinct(&set)).contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#));
+        let legacy_text = sql(&count_distinct(&set));
+        assert!(legacy_text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#));
+        // Other relations are skipped for a labels-only legacy filter
+        // (cycle stays: always-joined order bridge).
+        assert!(!legacy_text.contains(r#""issue_assignees" AS "issue_assignee""#));
+        assert!(legacy_text.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#));
     }
 
     #[test]
@@ -1879,6 +2078,117 @@ mod tests {
     }
 
     #[test]
+    fn flat_list_rows_orders_by_selected_order_key() {
+        // Review defect 1: `SELECT DISTINCT ... ORDER BY <raw expr>` is a
+        // Postgres 500. The flat rows must select the order expr as
+        // `__order_key` and order by the alias (the `flat_page` pattern).
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &query(&[]),
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        for (out_param, orig_param) in [
+            ("priority_order", "priority"),
+            ("-priority_order", "-priority"),
+            ("state_order", "state__group"),
+            ("min_values", "labels__name"),
+            ("-min_values", "-labels__name"),
+            ("-created_at", "-created_at"),
+            ("issue_cycle__cycle__name", "issue_cycle__cycle__name"),
+        ] {
+            let text = sql(&flat_list_rows(&set, out_param, orig_param).expect("flat rows"));
+            assert!(
+                text.contains("SELECT DISTINCT"),
+                "distinct missing for {out_param}: {text}"
+            );
+            assert!(
+                text.contains(r#"AS "__order_key""#),
+                "order key not selected for {out_param}: {text}"
+            );
+            let order_at = text.find("ORDER BY").expect("order by");
+            let order_clause = &text[order_at..];
+            assert!(
+                order_clause.contains(r#""__order_key""#),
+                "order by must reference __order_key for {out_param}: {order_clause}"
+            );
+            assert!(
+                !order_clause.contains("CASE WHEN"),
+                "raw CASE in ORDER BY under DISTINCT for {out_param}: {order_clause}"
+            );
+        }
+    }
+
+    #[test]
+    fn cycle_bridge_renders_over_always_joined_from() {
+        // Review defect 2: with conditional joins, `Bridge("issue_cycle")`
+        // referenced a table that was not in FROM (500). The bridge joins
+        // `__order_c` over `issue_cycle`, which must always be joined.
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &query(&[]),
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        let key = order_expr(
+            "issue_cycle__cycle__name",
+            "issue_cycle__cycle__name",
+            Some("issue_cycle"),
+            false,
+        )
+        .expect("key");
+        let text = sql(&flat_page(
+            &set,
+            Annotations {
+                arrays: true,
+                skip_array: None,
+                assignee_active_member: false,
+                module_archived_guard: true,
+                scalar_counts: true,
+            },
+            &key,
+            10,
+            0,
+        )
+        .expect("page"));
+        assert!(
+            text.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#),
+            "bridge source missing from FROM: {text}"
+        );
+        assert!(
+            text.contains(r#"LEFT JOIN "cycles" AS "__order_c""#),
+            "bridge join missing: {text}"
+        );
+        assert!(
+            text.contains(r#""__order_c"."name" AS "__order_key""#),
+            "order key must select the cycle name: {text}"
+        );
+        let flat =
+            sql(
+                &flat_list_rows(&set, "issue_cycle__cycle__name", "issue_cycle__cycle__name")
+                    .expect("flat rows"),
+            );
+        assert!(
+            flat.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#),
+            "flat rows bridge source missing: {flat}"
+        );
+        assert!(
+            flat.contains(r#"LEFT JOIN "cycles" AS "__order_c""#),
+            "flat rows bridge join missing: {flat}"
+        );
+    }
+
+    #[test]
     fn grouped_page_windows_and_totals_render() {
         let set = issue_set(
             &gate(false),
@@ -1902,9 +2212,16 @@ mod tests {
         let page = sql(
             &grouped_page(&set, "labels__id", Some("priority"), ann, &key, 0, 3).expect("page"),
         );
-        assert!(page.contains(r#"ROW_NUMBER() OVER ( PARTITION BY "label_issue"."label_id", "issue"."priority" ORDER BY "issue"."created_at" DESC NULLS LAST, "issue"."created_at" DESC ) AS "__rn""#), "{page}");
+        // G01: window over deduped subquery, partitions on output columns.
+        assert!(
+            page.contains(
+                r#"ROW_NUMBER() OVER ( PARTITION BY "__dedup"."labels__id", "__dedup"."priority"#
+            ),
+            "{page}"
+        );
         assert!(page.contains(r#""label_issue"."label_id" AS "labels__id""#));
         assert!(page.contains(r#"WHERE "__w"."__rn" > 0 AND "__w"."__rn" <= 3"#));
+        assert!(page.contains("FROM (SELECT DISTINCT"), "{page}");
         let totals = sql(&sub_totals(&set, "labels__id", "priority").expect("totals"));
         assert!(totals.contains(r#"COUNT(DISTINCT (CASE WHEN"#), "{totals}");
         assert!(totals.ends_with(r#"GROUP BY "bucket", "sub""#));
@@ -1927,6 +2244,17 @@ mod tests {
             .expect("expr"),
         );
         assert!(text.contains(r#"CAST(("issue"."created_at" AT TIME ZONE 'Asia/Kolkata') AS date) >= CAST('2026-01-02' AS date)"#), "{text}");
+        // PDASHOSS01-312: the `updated_at` filter predicates its own column.
+        let text = render(
+            legacy_expr(
+                "updated_at__date__lte",
+                &FilterValue::Day(chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day")),
+                &tz,
+            )
+            .expect("expr"),
+        );
+        assert!(text.contains(r#"CAST(("issue"."updated_at" AT TIME ZONE 'Asia/Kolkata') AS date) <= CAST('2026-01-12' AS date)"#), "{text}");
+        assert!(!text.contains("created_at"), "{text}");
         let text = render(
             legacy_expr(
                 "name__icontains",
@@ -1946,6 +2274,74 @@ mod tests {
         assert_eq!(
             render(legacy_expr("state__in", &FilterValue::Uuids(vec![]), &tz).expect("expr")),
             "SELECT 1 WHERE FALSE"
+        );
+    }
+
+    #[test]
+    fn empty_relation_leaves_do_not_inner_join() {
+        // PIDASHCONV-1716: an empty/null relation leaf compiles to the
+        // match-all constant (`1 = 1`) and must not mark its alias as
+        // "used". Without grouping, `finish_set` must not join the
+        // relation table at all (so unassigned/unlabelled issues survive).
+        // Before the fix, `compile_leaf` returned
+        // `SimpleExpr::Keyword(_)` while `rich_condition` only skipped
+        // `SimpleExpr::Custom(_)`, so the empty leaf INNER-joined.
+        let empty_assignee = query(&[("filters", r#"{"assignee_id":""}"#)]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &empty_assignee,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(set.referenced.is_empty(), "referenced={:?}", set.referenced);
+        let text = sql(&count_distinct(&set));
+        assert!(
+            !text.contains(r#"JOIN "issue_assignees" AS "issue_assignee""#),
+            "empty assignee leaf must not join issue_assignees: {text}"
+        );
+        let empty_labels = query(&[("filters", r#"{"label_id__in":""}"#)]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &empty_labels,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(set.referenced.is_empty(), "referenced={:?}", set.referenced);
+        let text = sql(&count_distinct(&set));
+        assert!(
+            !text.contains(r#"JOIN "issue_labels" AS "label_issue""#),
+            "empty label leaf must not join issue_labels: {text}"
+        );
+        // Filled leaf still INNER-joins (regression check).
+        let filled = query(&[(
+            "filters",
+            r#"{"assignee_id":"00000000-0000-0000-0000-000000000001"}"#,
+        )]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &filled,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        let text = sql(&count_distinct(&set));
+        assert!(
+            text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#),
+            "filled assignee leaf must INNER JOIN: {text}"
         );
     }
 }

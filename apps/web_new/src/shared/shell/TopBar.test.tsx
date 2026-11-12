@@ -167,12 +167,13 @@ describe("TopBar platform chrome", () => {
     expect(header.className).not.toContain("select-none");
   });
 
-  it("syncs the window title through the desktop drag region", () => {
+  it("syncs the window title on desktop with no drag region", () => {
     const setTitle = vi.fn();
     platform.window = { trafficLightInset: true, setTitle };
     renderBar();
     const header = screen.getByRole("banner");
-    expect(header).toHaveAttribute("data-tauri-drag-region", "true");
+    expect(header).not.toHaveAttribute("data-tauri-drag-region");
+    expect(header.className).not.toContain("select-none");
     expect(header.className).toContain("pl-20");
     expect(setTitle).toHaveBeenCalledWith("Atlas — Pi Dash");
   });

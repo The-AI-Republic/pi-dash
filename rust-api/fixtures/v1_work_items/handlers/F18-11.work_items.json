@@ -1512,7 +1512,8 @@
         "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
         "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
         "outcome": "progressed",
-        "stop_ticking": false
+        "stop_ticking": false,
+        "run_kind": "issue"
       }
     },
     "yield_stop_true": {
@@ -1528,7 +1529,8 @@
         "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
         "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
         "outcome": "done",
-        "stop_ticking": true
+        "stop_ticking": true,
+        "run_kind": "issue"
       }
     },
     "yield_bad_stop_ticking": {

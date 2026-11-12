@@ -100,7 +100,8 @@ use uuid::Uuid;
 
 use pidash_db::entity::{
     comment_reactions, cycles, estimate_points, estimates, issue_activities, issue_comments,
-    issue_reactions, issue_subscribers, issues, labels, modules, projects, states, users,
+    issue_reactions, issue_subscribers, issues, labels, modules, pod, projects, runner, states,
+    users,
 };
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::Pools;
@@ -121,7 +122,7 @@ use pidash_services::tasks_webhooks::activity_misc::{
 };
 use pidash_services::tasks_webhooks::activity_tracks::{
     DescriptionLatest, EstimatePointRef, IssueActivityDraft, IssueSubscriberDraft, LabelRef,
-    ParentRef, StateRef, TrackFrame, UserRef,
+    ParentRef, PodRef, RunnerRef, StateRef, TrackFrame, UserRef,
 };
 
 use crate::queue::{enqueue, NewJob};
@@ -256,7 +257,11 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
         Some(Value::String(s)) => s.clone(),
         _ => return Err(format!("{ISSUE_ACTIVITY_TASK}: 'type' must be a string")),
     };
-    // Raw JSON-string-or-None payloads (never parsed here).
+    // Raw JSON payloads (never parsed here). Producers send JSON strings,
+    // except the app destroy which sends current_instance={} as a dict
+    // (base.py:747); the Python delete handler ignores it, so the job
+    // succeeds there. Accept objects/arrays by dumping to JSON text; scalars
+    // still reject (Python json.loads would fail on them too).
     let raw_string = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
         match value {
             None | Some(Value::Null) => Ok(None),
@@ -266,8 +271,23 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
             )),
         }
     };
-    let requested_data = raw_string(raw(1, "requested_data")?, "requested_data")?;
-    let current_instance = raw_string(raw(2, "current_instance")?, "current_instance")?;
+    let raw_json = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(Value::Object(_)) | Some(Value::Array(_)) => value
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| {
+                    format!("{ISSUE_ACTIVITY_TASK}: '{name}' must be a string or null: {error}")
+                }),
+            Some(_) => Err(format!(
+                "{ISSUE_ACTIVITY_TASK}: '{name}' must be a string or null"
+            )),
+        }
+    };
+    let requested_data = raw_json(raw(1, "requested_data")?, "requested_data")?;
+    let current_instance = raw_json(raw(2, "current_instance")?, "current_instance")?;
     // Ids are stringified before the uuid guard (`str(project_id)`), so any
     // scalar binds here and fails the guard later; collections reject.
     let id_string = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
@@ -885,6 +905,18 @@ struct CreatedIssueRow {
 }
 
 #[derive(Debug, Clone, FromQueryResult)]
+struct RunnerRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct PodRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
 struct CommentReactionRow {
     id: Uuid,
     comment_id: Uuid,
@@ -927,7 +959,7 @@ fn scalar_id(payload: Option<&Value>, key: &str) -> Option<String> {
     })
 }
 
-/// The snapshot bundle the update dispatcher feeds the twelve `track_*`
+/// The snapshot bundle the update dispatcher feeds the `track_*`
 /// helpers through [`UpdateResolvers`], plus the side-write keys.
 struct UpdateSnapshots {
     parents: HashMap<String, ParentRef>,
@@ -935,6 +967,8 @@ struct UpdateSnapshots {
     labels: HashMap<String, LabelRef>,
     users: HashMap<String, UserRef>,
     estimates: HashMap<String, EstimatePointRef>,
+    runners: HashMap<String, RunnerRef>,
+    pods: HashMap<String, PodRef>,
     latest: Option<(Uuid, DescriptionLatest)>,
 }
 
@@ -1135,6 +1169,78 @@ async fn fetch_update_snapshots(
             );
         }
     }
+    // Runner ids (`assigned_runner_id or assigned_runner`, both sides)
+    // — `filter(pk=...).first()`, invalid UUIDs coerce to `None` in the
+    // planner (not fatal), so unparseable ids simply miss here.
+    let mut runner_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_runner_id", "assigned_runner"] {
+            if let Some(id) = scalar_id(payload, key) {
+                runner_ids.insert(id);
+            }
+        }
+    }
+    let runner_list: Vec<String> = runner_ids.into_iter().collect();
+    let mut runners = HashMap::new();
+    if !runner_list.is_empty() {
+        let parsed = parse_snapshot_ids(&runner_list);
+        if !parsed.is_empty() {
+            let models = runner::Entity::find()
+                .select_only()
+                .columns([runner::Column::Id, runner::Column::Name])
+                .filter(runner::Column::Id.is_in(parsed))
+                .into_model::<RunnerRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                runners.insert(
+                    key.clone(),
+                    RunnerRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
+    // Pod ids (`assigned_pod_id or assigned_pod`, both sides) — same
+    // shape, scoped to non-deleted pods.
+    let mut pod_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_pod_id", "assigned_pod"] {
+            if let Some(id) = scalar_id(payload, key) {
+                pod_ids.insert(id);
+            }
+        }
+    }
+    let pod_list: Vec<String> = pod_ids.into_iter().collect();
+    let mut pods = HashMap::new();
+    if !pod_list.is_empty() {
+        let parsed = parse_snapshot_ids(&pod_list);
+        if !parsed.is_empty() {
+            let models = pod::Entity::find()
+                .select_only()
+                .columns([pod::Column::Id, pod::Column::Name])
+                .filter(pod::Column::Id.is_in(parsed))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_model::<PodRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                pods.insert(
+                    key.clone(),
+                    PodRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
     // Latest activity for `track_description` (`:89`). `actor_id`
     // stringifies like `str(...)` (`None` → `"None"`); a null `field`
     // behaves as not-`"description"`, rendered as `""`. A missing issue
@@ -1166,6 +1272,8 @@ async fn fetch_update_snapshots(
         labels,
         users,
         estimates,
+        runners,
+        pods,
         latest,
     })
 }
@@ -1393,6 +1501,8 @@ async fn collect_rows(
                 label: &|id| snapshots.labels.get(id).cloned(),
                 user: &|id| snapshots.users.get(id).cloned(),
                 estimate: &|id| snapshots.estimates.get(id).cloned(),
+                runner: &|id| snapshots.runners.get(id).cloned(),
+                pod: &|id| snapshots.pods.get(id).cloned(),
                 description_latest: snapshots.latest.as_ref().map(|(_, latest)| latest.clone()),
             };
             let outcome = plan_update_issue(requested, current, frame, &resolvers).map_err(fail)?;
@@ -1945,19 +2055,22 @@ async fn persist(
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
     for subscriber in &collected.subscribers {
-        // One statement per subscriber, any conflict ignored. Only the six
-        // Django-fillable columns are listed (id/created_at/updated_at stay
-        // unset, exactly as the old `INSERT` omitted them) — byte-identical
-        // shape, no Django behavior smuggled in.
+        // One statement per subscriber, any conflict ignored. Django's
+        // `bulk_create(ignore_conflicts=True)` fills `id` (uuid4 default)
+        // and `created_at`/`updated_at` (`auto_now_add`/`auto_now` in
+        // `db/mixins.py`) client-side, so set the same stamps here.
         let db = pidash_db::pool::sea_orm_connection(pool);
         issue_subscribers::Entity::insert_many(vec![issue_subscribers::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            deleted_at: Set(None),
             subscriber_id: Set(lookup_uuid(&subscriber.subscriber_id, "subscribers")?),
             issue_id: Set(lookup_uuid(&subscriber.issue_id, "subscribers")?),
             workspace_id: Set(lookup_uuid(&subscriber.workspace_id, "subscribers")?),
             project_id: Set(lookup_uuid(&subscriber.project_id, "subscribers")?),
             created_by_id: Set(Some(lookup_uuid(&subscriber.created_by_id, "subscribers")?)),
             updated_by_id: Set(Some(lookup_uuid(&subscriber.updated_by_id, "subscribers")?)),
-            ..Default::default()
         }])
         .on_conflict(
             sea_orm::sea_query::OnConflict::new()
@@ -2298,6 +2411,36 @@ mod tests {
         assert!(
             bind_issue_activity(&json!(["t", null, null, null, null, null]), &json!({})).is_err()
         );
+    }
+
+    // NEWPIDASH-134 · the app destroy enqueues current_instance={} (a dict,
+    // base.py:747); the Python delete handler ignores it, so the job must
+    // bind and write the deleted row. Objects dump to JSON text.
+    #[test]
+    fn bind_accepts_deleted_empty_object() {
+        let kwargs = json!({
+            "type": "issue.activity.deleted",
+            "requested_data": "{\"issue_id\": \"11111111-1111-4111-8111-111111111111\"}",
+            "current_instance": {},
+            "issue_id": "11111111-1111-4111-8111-111111111111",
+            "actor_id": "22222222-2222-4222-8222-222222222222",
+            "project_id": "33333333-3333-4333-8333-333333333333",
+            "epoch": 1750000000.0,
+            "subscriber": false,
+            "notification": true,
+            "origin": "https://app.example",
+        });
+        let call = bind_issue_activity(&json!([]), &kwargs).expect("deleted binds");
+        assert_eq!(call.activity_type, "issue.activity.deleted");
+        assert_eq!(call.current_instance.as_deref(), Some("{}"));
+        // Scalars still reject (Python json.loads would fail on them too).
+        let bad = json!({
+            "type": "issue.activity.deleted",
+            "requested_data": "{\"issue_id\": \"x\"}",
+            "current_instance": 5,
+            "epoch": 1750000000.0,
+        });
+        assert!(bind_issue_activity(&json!([]), &bad).is_err());
     }
 
     // FX-ACT-03 · redis origin TTL.

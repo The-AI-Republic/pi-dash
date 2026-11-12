@@ -175,6 +175,8 @@ impl FireTickSeam for LiveFireTickSeam {
                 issue_id,
                 &triggered_by,
                 actor,
+                false,
+                false,
             )
             .await
             .map_err(|error| match error {

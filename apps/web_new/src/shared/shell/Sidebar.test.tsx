@@ -171,6 +171,13 @@ describe("Sidebar", () => {
     expect(account).not.toContainElement(update);
   });
 
+  it("renders the About control beside the account row when provided (DESK-028)", () => {
+    render(sidebar({ aboutControl: <span>about entry</span> }));
+    const account = screen.getByTestId("sidebar-user-menu");
+    const about = screen.getByText("about entry");
+    expect(account).not.toContainElement(about);
+  });
+
   it("renders the user menu with no plan badge in the footer (NEWFRONT-1045)", () => {
     render(sidebar());
     const menu = screen.getByTestId("sidebar-user-menu");

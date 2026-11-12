@@ -107,9 +107,9 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView,
+    AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
 };
 use pidash_services::orchestration::entries::{
     fire_state_transition, handle_issue_state_transition, BindingView, EntriesSeam, FireOutcome,
@@ -1400,6 +1400,27 @@ fn project_lock_query(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::pr
         .lock_exclusive()
 }
 
+/// The transition target lookup (`State.objects.get(pk=..., project_id=...)`
+/// in `tools.py:320-345`): the live, non-triage state row in the run's
+/// project, projecting every `IssueStateView` field (`id`, `name`,
+/// `group`) so the `FromQueryResult` decode succeeds. Extracted so a
+/// unit test can pin the projection.
+fn transition_state_query(
+    target_id: Uuid,
+    project_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::states::Entity> {
+    use pidash_db::entity::states as st_entity;
+    st_entity::Entity::find()
+        .filter(st_entity::Column::Id.eq(target_id))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+        .select_only()
+        .column(st_entity::Column::Id)
+        .column(st_entity::Column::Name)
+        .column(st_entity::Column::Group)
+}
+
 /// `pidash_create_project_issue` (`tools.py:345-371`) through
 /// `Issue.save` (`db/models/issue.py:267-341`): lock the scheduler
 /// project, resolve the default/backlog state (plus the save-time
@@ -1556,11 +1577,16 @@ async fn op_create_project_issue(
         workpad: String::new(),
         created_via: Some("cloud_agent".to_owned()),
         assigned_pod_id: None,
+        // The tool create path accepts no dedicated runner (design §7: the
+        // web app and v1 surfaces own the write path); always NULL here.
+        assigned_runner_id: None,
         agent_executor: None,
     };
     // Inert: the fire is skipped (the caller drives it post-commit).
     let fire = domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(scope.creator_id),
         moved_by_run: None,
         now,
@@ -1712,6 +1738,42 @@ where
         emit_logs(&out.outcome.logs);
         Ok(out.outcome.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+        use pidash_services::orchestration::creation::CreationError;
+        use sea_orm::EntityTrait;
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let issue = pidash_db::entity::issues::Entity::find_by_id(issue_id)
+            .one(&conn)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?
+            .ok_or_else(|| CreationError::Db("issue not found".to_owned()))?;
+        if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+            &conn,
+            &issue,
+            Some(creator_id),
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?
+        {
+            return Ok(Some(code.to_owned()));
+        }
+        let has = pidash_services::orchestration::dispatch::PodRunnerMatcher::pod_has_runner_for_issue_principal(
+            &self.matcher, pod_id, issue_id, Some(creator_id), true, true,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(if has {
+            None
+        } else {
+            Some("no_eligible_runner_in_pod".to_owned())
+        })
+    }
 }
 
 /// The [`StoreDeps`] behind the create fire: the transition shape
@@ -1800,6 +1862,35 @@ where
 
     async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
         self.store.state(state_id).await
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        CreationSeam::dedicated_pin(&mut self.store, args).await
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        CreationSeam::insert_system_comment(&mut self.store, comment).await
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        CreationSeam::clear_parent_thread(&mut self.store, run_id).await
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        CreationSeam::pod_once_started_comment(&mut self.store, issue_id, pod_id, actor_id, now)
+            .await
     }
 
     async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -2153,6 +2244,8 @@ async fn fire_create_transition(
         prev_state_id: None,
         current_state_id: Some(current_state_id),
         dispatch_immediate: true,
+        pod_once: false,
+
         moved_by_run: None,
         now,
         // Caller-drawn jitter (L5 quirk-5): none, like the v1 create
@@ -2251,6 +2344,17 @@ impl PreflightSeam for BinPreflight {
             "tool transition reached preflight: agent moves never dispatch_now".to_owned(),
         ))
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        _issue_id: Uuid,
+        _creator_id: Uuid,
+        _pod_id: Uuid,
+    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+        Err(pidash_services::orchestration::creation::CreationError::Db(
+            "tool transition reached preflight: agent moves never dispatch_now".to_owned(),
+        ))
+    }
 }
 
 /// What a state-changing transition hands its caller for the
@@ -2331,15 +2435,8 @@ async fn op_transition_current_issue<'a>(
             }),
         );
     };
-    use pidash_db::entity::{issues as issue_entity, states as st_entity};
-    let target = st_entity::Entity::find()
-        .filter(st_entity::Column::Id.eq(target_id))
-        .filter(st_entity::Column::ProjectId.eq(scope.project_id))
-        .filter(st_entity::Column::DeletedAt.is_null())
-        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
-        .select_only()
-        .column(st_entity::Column::Id)
-        .column(st_entity::Column::Name)
+    use pidash_db::entity::issues as issue_entity;
+    let target = transition_state_query(target_id, scope.project_id)
         .into_model::<IssueStateView>()
         .one(&tx_conn(&mut tx))
         .await
@@ -2405,8 +2502,9 @@ async fn op_transition_current_issue<'a>(
     }
     // The orchestration states: `None` when stateless (or on a dangling
     // from-pointer, the `select_related` miss). The target group comes
-    // from a second read — the ported target lookup projects id+name
-    // only.
+    // from a second read — the ported target lookup projects id+name+group
+    // (decoding `IssueStateView`), and this re-read supplies the fresh
+    // orchestration view plus the TOCTOU existence check below.
     let from_state = match from_state_id {
         Some(id) => match state_view_tx(&mut tx, id).await {
             Ok(view) => view,
@@ -2492,6 +2590,7 @@ async fn drive_transition<'a>(
         now,
         jitter_secs: 0.0,
         created_by: None,
+        pod_once: false,
     };
     let mut store = LiveCreationStore::new(tx, &ctx.pool, deps);
     let mut preflight = BinPreflight;
@@ -2548,7 +2647,7 @@ fn member_pool_stmt(creator_id: Uuid, workspace_slug: &str) -> sea_orm::sea_quer
         states as st_entity, workspaces as ws_entity,
     };
     sea_orm::sea_query::Query::select()
-        .expr_as(Expr::col(i_entity::Column::Id), "id")
+        .expr_as(Expr::col((i_entity::Entity, i_entity::Column::Id)), "id")
         .from(i_entity::Entity)
         .join(
             JoinType::LeftJoin,
@@ -2678,6 +2777,12 @@ async fn resolve_tx<C: sea_orm::ConnectionTrait>(
             .filter(i_entity::Column::SequenceId.eq(sequence));
     }
     let row = query
+        .select_only()
+        .column(i_entity::Column::Id)
+        .column(i_entity::Column::WorkspaceId)
+        .column(i_entity::Column::ProjectId)
+        .column(i_entity::Column::SequenceId)
+        .column_as(proj_entity::Column::Identifier, "identifier")
         .limit(1)
         .into_model::<ResolvedIssueRow>()
         .one(conn)
@@ -3009,7 +3114,10 @@ async fn grouped_tx(
     scope: &ToolScope,
     source: &rel::ResolvedIssue,
 ) -> Result<Value, ToolExecError> {
-    use pidash_db::entity::{issue_relations as rel_entity, issues as i_entity};
+    use pidash_db::entity::{
+        issue_relations as rel_entity, issues as i_entity, projects as proj_entity,
+        states as st_entity,
+    };
     let rows = rel_entity::Entity::find()
         .filter(
             sea_orm::sea_query::Condition::any()
@@ -3061,6 +3169,13 @@ async fn grouped_tx(
                     .into(),
             )
             .join(JoinType::InnerJoin, i_entity::Relation::Projects.def())
+            .select_only()
+            .column(i_entity::Column::Id)
+            .column(i_entity::Column::SequenceId)
+            .column(i_entity::Column::Name)
+            .column_as(proj_entity::Column::Identifier, "project_identifier")
+            .column_as(st_entity::Column::Name, "state_name")
+            .column_as(st_entity::Column::Group, "state_group")
             .into_model::<GroupedIssueRow>()
             .all(&tx_conn(&mut *tx))
             .await
@@ -4033,6 +4148,27 @@ mod tests {
         assert!(sql.contains("FOR UPDATE"), "lock takes the row lock: {sql}");
     }
 
+    /// The transition target lookup projects every `IssueStateView`
+    /// field (`id`, `name`, `group`) in the run's project, excluding
+    /// soft-deleted and triage states — otherwise SeaORM's
+    /// `FromQueryResult` fails the decode and every transition call
+    /// ends the run `provider_error` (NEWPIDASH-173).
+    #[test]
+    fn transition_state_query_projects_issue_state_view() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = transition_state_query(Uuid::nil(), Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""states"."id", "states"."name", "states"."group""#),
+            "transition lookup must select id, name and group: {sql}"
+        );
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "lookup must exclude soft-deleted states: {sql}"
+        );
+    }
+
     /// The CPython `uuid.UUID(hex=...)` acceptance battery (probed on
     /// 3.12): simple, braced, lowercase-`urn:`, misplaced-hyphen, and
     /// double-braced spellings accept; uppercase `URN:`, whitespace,
@@ -4346,6 +4482,7 @@ mod live_tests {
             is_default: Set(false),
             guest_view_all_features: Set(false),
             members_can_edit_states: Set(true),
+            dedicated_runner_lost_action: Set("fail_to_backlog".to_owned()),
             archive_in: Set(0),
             close_in: Set(0),
             logo_props: Set(serde_json::json!({})),
