@@ -138,7 +138,7 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/projects/<id>/cycles/<uuid>/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
         source: "base.py:410 (CycleViewSet.retrieve)",
     },
@@ -500,7 +500,7 @@ mod tests {
     const MATRIX: &[(&str, &str, bool, bool, bool)] = &[
         ("GET", CYCLES, true, true, true),
         ("POST", CYCLES, true, true, false),
-        ("GET", CYCLE, true, true, false),
+        ("GET", CYCLE, true, true, true),
         ("PUT", CYCLE, true, true, true),
         ("PATCH", CYCLE, true, true, false),
         ("DELETE", CYCLE, true, false, false),

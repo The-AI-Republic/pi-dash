@@ -577,6 +577,7 @@ struct DetailOwned {
     latest_run: Option<RenderedAgentRun>,
     active_run: Option<RenderedAgentRun>,
     run_count: i64,
+    run_total_tokens: i64,
     blockers: pidash_services::orchestration::blockers::RelationsSummary,
 }
 
@@ -609,7 +610,8 @@ impl DetailOwned {
         let runs = agent_runs::issue_agent_runs(pool, issue_id)
             .await
             .map_err(|_| Denial::ServerError)?;
-        let (latest_run, active_run, run_count) = (runs.latest, runs.active, runs.count);
+        let (latest_run, active_run, run_count, run_total_tokens) =
+            (runs.latest, runs.active, runs.count, runs.total_tokens);
         let blockers = fetch_blockers(pool, issue_id).await?;
         Ok(Self {
             id,
@@ -651,6 +653,7 @@ impl DetailOwned {
             latest_run,
             active_run,
             run_count,
+            run_total_tokens,
             blockers,
         })
     }
@@ -710,6 +713,7 @@ impl DetailOwned {
             latest_run: self.latest_run.as_ref().map(RenderedAgentRun::detail_row),
             active_run: self.active_run.as_ref().map(RenderedAgentRun::detail_row),
             run_count: self.run_count,
+            run_total_tokens: self.run_total_tokens,
             blockers: &self.blockers,
             assigned_runner_detail: self.assigned_runner_detail.clone(),
         }
@@ -1674,6 +1678,7 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &blockers,
             assigned_runner_detail: None,
         };

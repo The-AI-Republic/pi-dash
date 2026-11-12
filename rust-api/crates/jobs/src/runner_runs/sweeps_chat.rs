@@ -1136,7 +1136,7 @@ pub async fn apply_agent_run_terminal_effects(
         finalization::TerminalEffectsOutcome::NotTerminal => None,
     };
     if let Some(plan) = capacity {
-        run_capacity_plan(seams, &plan).await?;
+        run_capacity_plan(pool, seams, &plan).await?;
         finalization::update_capacity_marker(&db, *run_id, Utc::now()).await?;
     }
     Ok(true)
@@ -1494,9 +1494,11 @@ async fn fire_pending_entry_lookup(
 }
 
 /// The capacity branch (`:184-198`): cloud runs dispatch waiting
-/// work; local runs drain runner and/or pod. Unisolated — a failure
+/// work; local runs release a stale-busy runner, then drain runner
+/// and/or pod. Unisolated — a failure
 /// propagates and the marker write below never runs.
 async fn run_capacity_plan(
+    pool: &PgPool,
     seams: &dyn RunnerRunsSeams,
     plan: &finalization::CapacityPlan,
 ) -> Result<(), SweepError> {
@@ -1507,6 +1509,14 @@ async fn run_capacity_plan(
             .map_err(SweepError::Seam),
         finalization::CapacityPlan::Local { runner_id, pod_id } => {
             if let Some(runner_id) = runner_id {
+                // `release_runner_if_idle` (PDASHOSS01-231): free a
+                // stale `busy` runner before the drains, or they can
+                // never assign it.
+                pidash_services::runner_sessions::live_drains::release_runner_if_idle(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    *runner_id,
+                )
+                .await?;
                 seams
                     .drain_runner(*runner_id)
                     .await

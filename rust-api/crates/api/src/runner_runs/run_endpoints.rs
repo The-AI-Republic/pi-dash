@@ -64,6 +64,7 @@ use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
+use pidash_services::runner_sessions::live_drains;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
@@ -1019,6 +1020,12 @@ pub async fn execute_terminal_effects(
                 .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
         } else {
             if let Some(runner_id) = capacity.runner_id {
+                // `release_runner_if_idle` (PDASHOSS01-231): every
+                // finalization path frees a stale `busy` runner before
+                // the drains, or they can never assign it.
+                live_drains::release_runner_if_idle(&orm_pool, runner_id)
+                    .await
+                    .map_err(orm_err)?;
                 ports
                     .drain_for_runner_by_id(runner_id)
                     .await

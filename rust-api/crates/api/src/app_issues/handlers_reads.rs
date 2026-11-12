@@ -1825,7 +1825,8 @@ async fn render_full(
     let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (latest, active, run_count) = (runs.latest, runs.active, runs.count);
+    let (latest, active, run_count, run_total_tokens) =
+        (runs.latest, runs.active, runs.count, runs.total_tokens);
     let blockers = fetch_relations_summary(pool, issue_id).await?;
     let ticker_row = decode_ticker(row)?;
     let policy = ProjectClockPolicy {
@@ -1910,6 +1911,7 @@ async fn render_full(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
         assigned_runner_detail,
     };
