@@ -79,16 +79,11 @@ fn sea_conn(pool: &PgPool) -> sea_orm::DatabaseConnection {
     pidash_db::pool::sea_orm_connection(pool)
 }
 
-/// One tx SeaORM handle over the audit transaction (the sqlx tx stays
-/// the owner; this only adapts statement execution onto it).
-fn tx_conn<'x>(tx: &'x mut Transaction<'_>) -> pidash_db::orm_tx::TxConn<'x> {
-    pidash_db::orm_tx::TxConn::new(tx.inner())
-}
 use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::escape_icontains;
 use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::dispatch::tool_issues::{self, ToolIssueRow};
+use pidash_services::dispatch::tool_issues::ToolIssueRow;
 use pidash_services::dispatch::tools as plan;
 use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
@@ -101,6 +96,7 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteOptions, WriteSco
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::operations::core::comments as core_comments;
 use pidash_services::operations::core::relations as core_relations;
+use pidash_services::operations::relations as relations_ops;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
@@ -749,33 +745,6 @@ async fn emit_completed(
     Ok(())
 }
 
-/// One `CURRENT_ISSUE_COMMENTS_SQL` row.
-#[derive(Clone, Debug, PartialEq, FromQueryResult)]
-struct IssueCommentRow {
-    id: Uuid,
-    comment_stripped: Option<String>,
-    created_at: DateTime<Utc>,
-}
-
-/// One `PROJECT_STATES_SQL` row.
-#[derive(Clone, Debug, PartialEq, FromQueryResult)]
-struct ProjectStateRow {
-    id: Uuid,
-    name: String,
-    group: String,
-}
-
-/// One `LINKED_REVIEWS_SQL` row.
-#[derive(Clone, Debug, PartialEq, FromQueryResult)]
-struct LinkedReviewRow {
-    id: Uuid,
-    provider: String,
-    url: String,
-    title: String,
-    state: String,
-    external_iid: String,
-}
-
 // ---------------------------------------------------------------------------
 // Shared reads
 // ---------------------------------------------------------------------------
@@ -789,22 +758,71 @@ struct LinkedReviewRow {
 /// One bound-issue row: the `_issue_data` inputs.
 pub type BoundIssue = ToolIssueRow;
 
-/// `_issue_data(issue, detail=True)` (`tools.py:160-171`).
-fn issue_detail(issue: &ToolIssueRow) -> Value {
+/// Map a shared-read issue view onto the tool row shape the brief
+/// renderers consume.
+fn tool_row_of(view: &pidash_services::operations::read::IssueView) -> ToolIssueRow {
+    ToolIssueRow {
+        id: view.id,
+        workspace_id: view.workspace_id,
+        project_id: view.project_id,
+        project_identifier: view.project_identifier.clone(),
+        sequence_id: view.sequence_id,
+        name: view.name.clone(),
+        state_name: view.state_name.clone(),
+        state_group: view.state_group.clone(),
+        priority: view.priority.clone(),
+        description_stripped: view.description_stripped.clone(),
+        workpad: view.workpad.clone().unwrap_or_default(),
+    }
+}
+
+/// `_issue_data(issue, detail=True)` (`tools.py:160-171`) over a
+/// shared-read issue view.
+fn issue_detail_view(view: &pidash_services::operations::read::IssueView) -> Value {
     let detail = plan::issue_data(
-        &issue.id.to_string(),
-        &issue.project_identifier,
-        i64::from(issue.sequence_id),
-        &issue.name,
-        issue.state_name.as_deref(),
-        issue.state_group.as_deref(),
-        &issue.priority,
+        &view.id.to_string(),
+        &view.project_identifier,
+        i64::from(view.sequence_id),
+        &view.name,
+        view.state_name.as_deref(),
+        view.state_group.as_deref(),
+        &view.priority,
         Some((
-            issue.description_stripped.as_deref().unwrap_or(""),
-            issue.workpad.as_str(),
+            view.description_stripped.as_deref().unwrap_or(""),
+            view.workpad.as_deref().unwrap_or(""),
         )),
     );
     serde_json::to_value(detail).expect("issue detail serializes")
+}
+
+/// The grouped relations for the run's source over the shared read
+/// (`relations.py:280-312`), narrowed to the run's visible pool and
+/// rendered with `operations::relations`' renderer.
+async fn tool_grouped(
+    conn: &impl sea_orm::ConnectionTrait,
+    scope: &ToolScope,
+    source: &rel::ResolvedIssue,
+) -> Result<Value, pidash_services::operations::core::CoreError> {
+    let visibility = pidash_services::operations::read::Visibility {
+        creator: scope.creator_id,
+        slug: workspace_slug_str(scope).to_owned(),
+    };
+    let grouped =
+        pidash_services::operations::read::grouped_relations(conn, source, Some(&visibility))
+            .await?;
+    let mut out = serde_json::Map::with_capacity(grouped.map.len());
+    for (relation, items) in grouped.map.iter() {
+        out.insert(
+            relation.clone(),
+            Value::Array(
+                items
+                    .iter()
+                    .map(relations_ops::render_grouped_item_ref)
+                    .collect(),
+            ),
+        );
+    }
+    Ok(Value::Object(out))
 }
 
 /// Read the bound issue, if the run has one. A missing row reads as
@@ -818,10 +836,10 @@ async fn bound_issue(
     let Some(issue_id) = work_item_id else {
         return Ok(None);
     };
-    let row = tool_issues::bound_issue(db, issue_id)
+    let view = pidash_services::operations::read::issue_by_id(db, issue_id, None, false)
         .await
-        .map_err(orm_error)?;
-    Ok(row)
+        .map_err(core_error)?;
+    Ok(view.map(|view| tool_row_of(&view)))
 }
 
 // ---------------------------------------------------------------------------
@@ -830,11 +848,19 @@ async fn bound_issue(
 
 /// `pidash_get_current_issue` (`tools.py:200-202`).
 async fn op_get_current_issue(ctx: &ToolCtx, scope: &ToolScope) -> Result<Value, ToolExecError> {
-    let issue = bound_issue(&ctx.orm, scope.work_item_id).await?;
-    let Some(issue) = issue else {
+    // The shared read (NEWPIDASH-190 §4.6): the bound-issue lookup has
+    // no `deleted_at` filter, which the shared `issue_by_id` preserves
+    // with `live_only: false`.
+    let Some(work_item_id) = scope.work_item_id else {
         return Err(ToolExecError::AttributeError { attribute: "id" });
     };
-    Ok(issue_detail(&issue))
+    let view = pidash_services::operations::read::issue_by_id(&ctx.orm, work_item_id, None, false)
+        .await
+        .map_err(core_error)?;
+    let Some(view) = view else {
+        return Err(ToolExecError::AttributeError { attribute: "id" });
+    };
+    Ok(issue_detail_view(&view))
 }
 
 /// `pidash_list_current_issue_comments` (`tools.py:204-213`).
@@ -849,17 +875,14 @@ async fn op_list_current_issue_comments(
     };
     // A hard-deleted bound issue still lists (the related manager
     // filters comments, not the issue): no liveness probe here.
-    use pidash_db::entity::issue_comments as ic_entity;
-    let db = sea_conn(&ctx.pool);
-    let rows = ic_entity::Entity::find()
-        .filter(ic_entity::Column::IssueId.eq(work_item_id))
-        .filter(ic_entity::Column::DeletedAt.is_null())
-        .order_by_desc(ic_entity::Column::CreatedAt)
-        .limit(50)
-        .into_model::<IssueCommentRow>()
-        .all(&db)
-        .await
-        .map_err(orm_error)?;
+    let rows = pidash_services::operations::read::list_comments(
+        &ctx.orm,
+        work_item_id,
+        pidash_services::operations::read::ListOrder::Desc,
+        50,
+    )
+    .await
+    .map_err(core_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(plan::comment_row(
@@ -874,17 +897,9 @@ async fn op_list_current_issue_comments(
 
 /// `pidash_list_project_states` (`tools.py:215-225`).
 async fn op_list_project_states(ctx: &ToolCtx, scope: &ToolScope) -> Result<Value, ToolExecError> {
-    use pidash_db::entity::states as st_entity;
-    let db = sea_conn(&ctx.pool);
-    let rows = st_entity::Entity::find()
-        .filter(st_entity::Column::ProjectId.eq(scope.project_id))
-        .filter(st_entity::Column::DeletedAt.is_null())
-        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
-        .order_by_asc(st_entity::Column::Sequence)
-        .into_model::<ProjectStateRow>()
-        .all(&db)
+    let rows = pidash_services::operations::read::list_states(&ctx.orm, scope.project_id, false)
         .await
-        .map_err(orm_error)?;
+        .map_err(core_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(plan::StateRow {
@@ -904,14 +919,14 @@ async fn op_search_project_issues(
     query: &str,
     limit: i64,
 ) -> Result<Value, ToolExecError> {
-    let rows = tool_issues::search_project_issues(
+    let rows = pidash_services::operations::read::search_issues(
         &ctx.orm,
-        scope.project_id,
+        Some(scope.project_id),
         &escape_icontains(query),
         u64::try_from(limit).unwrap_or(0),
     )
     .await
-    .map_err(orm_error)?;
+    .map_err(core_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let detail = plan::issue_data(
@@ -941,13 +956,16 @@ async fn op_get_project_issue(
             value: issue_id.to_owned(),
         });
     };
-    let row = tool_issues::project_issue(&ctx.orm, id, scope.project_id)
-        .await
-        .map_err(orm_error)?;
-    let Some(row) = row else {
+    // `project_issue` filters out soft-deleted rows (`live_only:
+    // true`); a miss reads as the tool `DoesNotExist`.
+    let view =
+        pidash_services::operations::read::issue_by_id(&ctx.orm, id, Some(scope.project_id), true)
+            .await
+            .map_err(core_error)?;
+    let Some(view) = view else {
         return Err(ToolExecError::Missing { model: "Issue" });
     };
-    Ok(issue_detail(&row))
+    Ok(issue_detail_view(&view))
 }
 
 /// `pidash_list_linked_code_reviews` (`tools.py:253-272`): a run with
@@ -960,17 +978,13 @@ async fn op_list_linked_code_reviews(
     let Some(work_item_id) = scope.work_item_id else {
         return Ok(Value::Array(Vec::new()));
     };
-    use pidash_db::entity::git_code_review_links as gc_entity;
-    let db = sea_conn(&ctx.pool);
-    let rows = gc_entity::Entity::find()
-        .filter(gc_entity::Column::IssueId.eq(work_item_id))
-        .filter(gc_entity::Column::DeletedAt.is_null())
-        .order_by_desc(gc_entity::Column::CreatedAt)
-        .limit(plan::LINKED_REVIEWS_LIMIT as u64)
-        .into_model::<LinkedReviewRow>()
-        .all(&db)
-        .await
-        .map_err(orm_error)?;
+    let rows = pidash_services::operations::read::linked_reviews(
+        &ctx.orm,
+        work_item_id,
+        plan::LINKED_REVIEWS_LIMIT as u64,
+    )
+    .await
+    .map_err(core_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(plan::LinkedReviewRow {
@@ -979,7 +993,7 @@ async fn op_list_linked_code_reviews(
             url: row.url.clone(),
             title: row.title.clone(),
             state: row.state.clone(),
-            number: row.external_iid.clone(),
+            number: row.number.clone(),
         });
     }
     serde_json::to_value(out)
@@ -1056,7 +1070,7 @@ async fn op_add_current_issue_comment(
 }
 
 /// The bound-issue read over a [`WriteTxn`] (same shape as
-/// [`bound_issue`]): the domain connection joins the SeaORM query
+/// [`bound_issue`]): the shared read joins the SeaORM query
 /// directly, so no sqlx statement is needed.
 async fn bound_issue_wtxn(
     txn: &WriteTxn,
@@ -1065,15 +1079,36 @@ async fn bound_issue_wtxn(
     let Some(issue_id) = work_item_id else {
         return Ok(None);
     };
-    let row = tool_issues::bound_issue(&txn.connection(), issue_id)
-        .await
-        .map_err(orm_error)?;
-    Ok(row)
+    let view =
+        pidash_services::operations::read::issue_by_id(&txn.connection(), issue_id, None, false)
+            .await
+            .map_err(core_error)?;
+    Ok(view.map(|view| tool_row_of(&view)))
 }
 
 /// A SeaORM read failure as the tool error the old sqlx read raised: the
 /// wrapped sqlx error when there is one (so Postgres codes still classify),
 /// otherwise its message.
+/// A shared-core error as the tool error the write ops map it to: a
+/// request refusal is an `InvalidArg`, a row miss the `DoesNotExist`,
+/// and a database failure the wrapped sqlx error.
+fn core_error(error: pidash_services::operations::core::CoreError) -> ToolExecError {
+    match error {
+        pidash_services::operations::core::CoreError::Request(message) => {
+            ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
+        }
+        pidash_services::operations::core::CoreError::Missing(model) => {
+            ToolExecError::Missing { model }
+        }
+        pidash_services::operations::core::CoreError::Db(domain_error) => {
+            ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
+        }
+        pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+            ToolExecError::Db(sqlx_error)
+        }
+    }
+}
+
 fn orm_error(error: sea_orm::DbErr) -> ToolExecError {
     match error {
         sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
@@ -2402,15 +2437,6 @@ async fn resolve_by_identifier_tx<C: sea_orm::ConnectionTrait>(
     .await
 }
 
-/// One pair/grouped row.
-#[derive(Clone, Debug, PartialEq, FromQueryResult)]
-struct IssuePairRow {
-    id: Uuid,
-    issue_id: Uuid,
-    related_issue_id: Uuid,
-    relation_type: String,
-}
-
 /// `pidash_relate_issues` (`tools.py:416-424` over
 /// `relations.py:180-232`): per-target verdict loop with a savepointed
 /// insert on `Create` (23505 re-reads and re-verdicts, quirk 5
@@ -2502,7 +2528,9 @@ async fn op_relate_issues(
     };
     let mut map = serde_json::to_value(result)
         .map_err(|error| plan::ToolCallFailure::Failed(error.to_string()))?;
-    let grouped = grouped_tx(&txn.connection(), scope, &source).await?;
+    let grouped = tool_grouped(&txn.connection(), scope, &source)
+        .await
+        .map_err(core_error)?;
     map = plan::with_grouped_relations(map.as_object().cloned().unwrap_or_default(), grouped);
     Ok(map)
 }
@@ -2601,111 +2629,11 @@ async fn op_unrelate_issues(
     };
     let mut map = serde_json::to_value(result)
         .map_err(|error| plan::ToolCallFailure::Failed(error.to_string()))?;
-    let grouped = grouped_tx(&txn.connection(), scope, &source).await?;
+    let grouped = tool_grouped(&txn.connection(), scope, &source)
+        .await
+        .map_err(core_error)?;
     map = plan::with_grouped_relations(map.as_object().cloned().unwrap_or_default(), grouped);
     Ok(map)
-}
-
-/// `grouped_relations` (`relations.py:280-313`) over the audit
-/// transaction: the live rows touching the source plus the visible
-/// pool narrowed to the wanted other ends, shaped by the ported
-/// assembler.
-async fn grouped_tx<C: sea_orm::ConnectionTrait>(
-    conn: &C,
-    scope: &ToolScope,
-    source: &rel::ResolvedIssue,
-) -> Result<Value, ToolExecError> {
-    use pidash_db::entity::{
-        issue_relations as rel_entity, issues as i_entity, projects as proj_entity,
-        states as st_entity,
-    };
-    let rows = rel_entity::Entity::find()
-        .filter(
-            sea_orm::sea_query::Condition::any()
-                .add(rel_entity::Column::IssueId.eq(source.id))
-                .add(rel_entity::Column::RelatedIssueId.eq(source.id)),
-        )
-        .filter(rel_entity::Column::WorkspaceId.eq(source.workspace_id))
-        .filter(
-            Expr::col(rel_entity::Column::IssueId)
-                .ne(Expr::col(rel_entity::Column::RelatedIssueId)),
-        )
-        .filter(rel_entity::Column::DeletedAt.is_null())
-        .into_model::<IssuePairRow>()
-        .all(conn)
-        .await
-        .map_err(orm_error)?;
-    let pair_rows: Vec<rel::PairRow> = rows
-        .into_iter()
-        .map(|row| rel::PairRow {
-            id: row.id,
-            issue_id: row.issue_id,
-            related_issue_id: row.related_issue_id,
-            relation_type: row.relation_type,
-        })
-        .collect();
-    let mut wanted: Vec<Uuid> = Vec::new();
-    for row in &pair_rows {
-        let other = if row.issue_id == source.id {
-            row.related_issue_id
-        } else {
-            row.issue_id
-        };
-        if !wanted.contains(&other) {
-            wanted.push(other);
-        }
-    }
-    let mut pool: Vec<rel::GroupedIssue> = Vec::new();
-    if !wanted.is_empty() {
-        let pool_query = member_pool_stmt(scope.creator_id, workspace_slug_str(scope));
-        let rows = i_entity::Entity::find()
-            .filter(i_entity::Column::Id.in_subquery(pool_query))
-            .filter(i_entity::Column::Id.is_in(wanted.clone()))
-            .filter(i_entity::Column::WorkspaceId.eq(source.workspace_id))
-            .join(
-                JoinType::LeftJoin,
-                i_entity::Entity::belongs_to(pidash_db::entity::states::Entity)
-                    .from(i_entity::Column::StateId)
-                    .to(pidash_db::entity::states::Column::Id)
-                    .into(),
-            )
-            .join(JoinType::InnerJoin, i_entity::Relation::Projects.def())
-            .select_only()
-            .column(i_entity::Column::Id)
-            .column(i_entity::Column::SequenceId)
-            .column(i_entity::Column::Name)
-            .column_as(proj_entity::Column::Identifier, "project_identifier")
-            .column_as(st_entity::Column::Name, "state_name")
-            .column_as(st_entity::Column::Group, "state_group")
-            .into_model::<GroupedIssueRow>()
-            .all(conn)
-            .await
-            .map_err(orm_error)?;
-        for row in rows {
-            pool.push(rel::GroupedIssue {
-                id: row.id,
-                project_identifier: row.project_identifier,
-                sequence_id: row.sequence_id,
-                name: row.name,
-                state_name: row.state_name,
-                state_group: row.state_group,
-            });
-        }
-    }
-    let grouped = rel::grouped_relations(&source.id, &pair_rows, &pool);
-    serde_json::to_value(grouped)
-        .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
-}
-
-/// One grouped-pool row.
-#[derive(Clone, Debug, PartialEq, FromQueryResult)]
-struct GroupedIssueRow {
-    id: Uuid,
-    project_identifier: String,
-    sequence_id: i32,
-    name: String,
-    state_name: Option<String>,
-    state_group: Option<String>,
 }
 
 /// `pidash_list_issue_relations` (`tools.py:433-448`): the explicit
@@ -2717,19 +2645,12 @@ async fn op_list_issue_relations(
     scope: &ToolScope,
     issue_arg: &str,
 ) -> Result<Value, ToolExecError> {
-    // The resolve/grouped helpers run over a transaction; the read
-    // path holds none, so list inside a scratch transaction that always
-    // rolls back (read-only shape — the rollback is a formality).
-    let mut tx = Transaction::begin(&ctx.pool).await?;
+    // The read path holds no transaction: resolve_refs_tx and the
+    // grouped read both take plain connections.
     let source = match plan::relations_source(issue_arg, scope.work_item_id)? {
         plan::RelationsSource::Ref(reference) => {
-            let (found, unresolved) = resolve_refs_tx(
-                &tx_conn(&mut tx),
-                scope,
-                std::slice::from_ref(&reference),
-                false,
-            )
-            .await?;
+            let (found, unresolved) =
+                resolve_refs_tx(&ctx.orm, scope, std::slice::from_ref(&reference), false).await?;
             if !unresolved.is_empty() {
                 let refs: Vec<&str> = unresolved.iter().map(String::as_str).collect();
                 return Err(
@@ -2756,9 +2677,10 @@ async fn op_list_issue_relations(
             }
         }
     };
-    let grouped = grouped_tx(&tx_conn(&mut tx), scope, &source).await;
-    let _ = tx.rollback().await;
-    Ok(plan::issue_relations_result(&source.identifier(), grouped?))
+    let grouped = tool_grouped(&ctx.orm, scope, &source)
+        .await
+        .map_err(core_error)?;
+    Ok(plan::issue_relations_result(&source.identifier(), grouped))
 }
 
 /// Publish one `_log_activity` emit transactionally (the

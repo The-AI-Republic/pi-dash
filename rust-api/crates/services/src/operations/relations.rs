@@ -5,8 +5,6 @@
 //! PIDASHCONV-1649): `_write` over `relate` / `unrelate`
 //! (`views/issue.py:3163-3194`, `orchestration/relations.py`).
 
-use std::collections::HashMap;
-
 use chrono::Utc;
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
@@ -17,10 +15,9 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::entity::{issue_relations, issues, project_members, projects, states, workspaces};
+use pidash_db::entity::{issues, project_members, projects, states, workspaces};
 
 use crate::domain::WriteCtx;
-use crate::v1_work_items::queries_sub::actual_relation;
 use crate::v1_work_items::tasks as work_tasks;
 
 use super::common::db_error;
@@ -46,15 +43,6 @@ pub const RELATION_TYPES: &[&str] = &[
     "implemented_by",
     "implements",
 ];
-
-/// Types stored with the ends swapped under their forward name
-/// (`orchestration/relations.py:70`). Note the four members — the agent
-/// vocabulary reverses `implements` too, unlike the endpoint POST's
-/// three-member set (`views/issue.py:3077`).
-const AGENT_REVERSE_TYPES: &[&str] = &["blocking", "start_after", "finish_after", "implements"];
-
-/// Per-type cap on grouped lists (`orchestration/relations.py:74`).
-const GROUP_LIMIT: usize = 100;
 
 /// Python `str.strip()` with no argument: ASCII whitespace plus every
 /// `str.isspace()` character. Rust `char::is_whitespace` (the Unicode
@@ -567,46 +555,6 @@ pub async fn fetch_source(
     })
 }
 
-/// `get_inverse_relation` (`utils/issue_relation_mapper.py:5-16`):
-/// unknown wires fall through unchanged.
-fn inverse_relation(relation_type: &str) -> &str {
-    match relation_type {
-        "start_after" => "start_before",
-        "finish_after" => "finish_before",
-        "blocked_by" => "blocking",
-        "blocking" => "blocked_by",
-        "start_before" => "start_after",
-        "finish_before" => "finish_after",
-        "implemented_by" => "implements",
-        "implements" => "implemented_by",
-        other => other,
-    }
-}
-
-/// One live pair row for viewpoint classification.
-struct PairRow {
-    issue_id: Uuid,
-    related_issue_id: Uuid,
-    relation_type: String,
-}
-
-/// `_type_from` (`relations.py:100-114`): the relation a row expresses,
-/// named from the viewpoint's side. Rows stored under a reverse name
-/// (which the UI never writes but older data may hold) normalize first.
-fn type_from(row: &PairRow, viewpoint_id: &Uuid) -> String {
-    let mut stored = row.relation_type.as_str();
-    let (mut issue_id, mut related_id) = (row.issue_id, row.related_issue_id);
-    if AGENT_REVERSE_TYPES.contains(&stored) {
-        stored = actual_relation(stored);
-        std::mem::swap(&mut issue_id, &mut related_id);
-    }
-    if issue_id == *viewpoint_id {
-        stored.to_owned()
-    } else {
-        inverse_relation(stored).to_owned()
-    }
-}
-
 /// The related-objects sweep payload (`SoftDeleteModel.delete()` calls
 /// `.delay(app_label, model_name, pk, using=None)`): positionals
 /// `("db", model, pk)`, kwargs `{"using": null}`.
@@ -659,125 +607,67 @@ pub fn render_grouped_item(item: &GroupedItem) -> Value {
 /// `grouped_relations` (`relations.py:280-312`): every live relation of
 /// the source, grouped by type from its side, narrowed to the visible
 /// pool, sorted by `(project.identifier, sequence_id)`, capped at
-/// [`GROUP_LIMIT`] per type. Every type key is always present, in
-/// [`RELATION_TYPES`] order.
+/// Every type key is always present, in
+/// [`RELATION_TYPES`] order. The read lives in the shared read module
+/// ([`crate::operations::read::grouped_relations`]); the render below
+/// is this module's.
 pub async fn grouped_relations(
     pool: &PgPool,
     slug: &str,
     user_id: &Uuid,
     source: &SourceIssue,
 ) -> Result<Map<String, Value>, Error> {
+    let _ = slug;
+    let _ = user_id;
     let db = pidash_db::pool::sea_orm_connection(pool);
-    #[derive(Debug, Clone, FromQueryResult)]
-    struct RawPair {
-        issue_id: Uuid,
-        related_issue_id: Uuid,
-        relation_type: String,
-    }
-    let rows = issue_relations::Entity::find()
-        .select_only()
-        .columns([
-            issue_relations::Column::IssueId,
-            issue_relations::Column::RelatedIssueId,
-            issue_relations::Column::RelationType,
-        ])
-        .filter(issue_relations::Column::DeletedAt.is_null())
-        .filter(
-            Condition::any()
-                .add(issue_relations::Column::IssueId.eq(source.id))
-                .add(issue_relations::Column::RelatedIssueId.eq(source.id)),
-        )
-        .filter(issue_relations::Column::WorkspaceId.eq(source.workspace_id))
-        .filter(
-            Condition::any()
-                .add(issue_relations::Column::IssueId.ne(source.id))
-                .add(issue_relations::Column::RelatedIssueId.ne(source.id)),
-        )
-        .into_model::<RawPair>()
-        .all(&db)
+    let resolved = crate::orchestration::relations::ResolvedIssue {
+        id: source.id,
+        workspace_id: source.workspace_id,
+        project_id: source.project_id,
+        project_identifier: source.project_identifier.clone(),
+        sequence_id: source.sequence_id,
+    };
+    let grouped = crate::operations::read::grouped_relations(&db, &resolved, None)
         .await
-        .map_err(|error| db_error(error, "grouped-rows"))?;
-    let mut other_by_type: HashMap<&str, std::collections::HashSet<Uuid>> = HashMap::new();
-    for relation in RELATION_TYPES {
-        other_by_type.insert(*relation, std::collections::HashSet::new());
-    }
-    for row in &rows {
-        let issue_id = row.issue_id;
-        let related_id = row.related_issue_id;
-        let relation_type = row.relation_type.clone();
-        let other = if issue_id == source.id {
-            related_id
-        } else {
-            issue_id
-        };
-        // The viewpoint probe has no id (unneeded for classification).
-        let probe = PairRow {
-            issue_id,
-            related_issue_id: related_id,
-            relation_type,
-        };
-        let relation = type_from(&probe, &source.id);
-        if let Some(bucket) = other_by_type.get_mut(relation.as_str()) {
-            bucket.insert(other);
-        }
-    }
-    let wanted: Vec<Uuid> = other_by_type
-        .values()
-        .flat_map(|bucket| bucket.iter().copied())
-        .collect();
-    let mut others: HashMap<Uuid, GroupedItem> = HashMap::new();
-    if !wanted.is_empty() {
-        #[derive(Debug, Clone, FromQueryResult)]
-        struct PoolRow {
-            id: Uuid,
-            name: String,
-            sequence_id: i32,
-            project_identifier: String,
-            state_name: Option<String>,
-            state_group: Option<String>,
-        }
-        let pool_rows = visible_pool_query(slug, user_id)
-            .select_only()
-            .columns([
-                issues::Column::Id,
-                issues::Column::Name,
-                issues::Column::SequenceId,
-            ])
-            .column_as(projects::Column::Identifier, "project_identifier")
-            .column_as(states::Column::Name, "state_name")
-            .column_as(states::Column::Group, "state_group")
-            .filter(issues::Column::Id.is_in(wanted.clone()))
-            .filter(issues::Column::WorkspaceId.eq(source.workspace_id))
-            .into_model::<PoolRow>()
-            .all(&db)
-            .await
-            .map_err(|error| db_error(error, "grouped-pool"))?;
-        for row in pool_rows {
-            let item = GroupedItem {
-                id: row.id,
-                project_identifier: row.project_identifier,
-                sequence_id: row.sequence_id,
-                name: row.name,
-                state_name: row.state_name,
-                state_group: row.state_group,
-            };
-            others.insert(item.id, item);
-        }
-    }
+        .map_err(|error| match error {
+            crate::operations::core::CoreError::Request(message) => Error::BadError(message),
+            crate::operations::core::CoreError::Missing(_model) => Error::ServerError,
+            crate::operations::core::CoreError::Db(_) => Error::ServerError,
+            crate::operations::core::CoreError::Sqlx(_) => Error::ServerError,
+        })?;
     let mut out = Map::with_capacity(RELATION_TYPES.len());
-    for relation in RELATION_TYPES {
-        let bucket = other_by_type.get(*relation).expect("seeded types");
-        let mut items: Vec<&GroupedItem> = bucket.iter().filter_map(|id| others.get(id)).collect();
-        items.sort_by(|a, b| {
-            (&a.project_identifier, a.sequence_id).cmp(&(&b.project_identifier, b.sequence_id))
-        });
-        items.truncate(GROUP_LIMIT);
+    for (relation, items) in grouped.map.iter() {
         out.insert(
-            (*relation).to_owned(),
-            Value::Array(items.iter().map(|item| render_grouped_item(item)).collect()),
+            relation.clone(),
+            Value::Array(items.iter().map(render_grouped_item_ref).collect()),
         );
     }
     Ok(out)
+}
+
+/// The grouped-item renderer shared by the ops and agent wrappers
+/// (`relations.py:269-277`).
+pub fn render_grouped_item_ref(item: &crate::operations::read::GroupedItem) -> Value {
+    let mut out = Map::with_capacity(5);
+    out.insert("id".to_owned(), Value::String(item.id.to_string()));
+    out.insert(
+        "identifier".to_owned(),
+        Value::String(format!("{}-{}", item.project_identifier, item.sequence_id)),
+    );
+    out.insert("name".to_owned(), Value::String(item.name.clone()));
+    out.insert(
+        "state".to_owned(),
+        item.state_name
+            .as_deref()
+            .map_or(Value::Null, |name| Value::String(name.to_owned())),
+    );
+    out.insert(
+        "state_group".to_owned(),
+        item.state_group
+            .as_deref()
+            .map_or(Value::Null, |group| Value::String(group.to_owned())),
+    );
+    Value::Object(out)
 }
 
 /// The `_write` refs read (`views/issue.py:3167-3174`): `request.data.get`
@@ -1504,46 +1394,6 @@ mod tests {
         assert_eq!(
             crate::orchestration::relations::stored_edge(source, "relates_to", target),
             (source, target, "relates_to".to_owned())
-        );
-        assert_eq!(inverse_relation("blocked_by"), "blocking");
-        assert_eq!(inverse_relation("blocking"), "blocked_by");
-        assert_eq!(inverse_relation("implements"), "implemented_by");
-        assert_eq!(inverse_relation("duplicate"), "duplicate");
-        assert_eq!(inverse_relation("bogus"), "bogus");
-    }
-
-    #[test]
-    fn type_from_matrix() {
-        let viewpoint = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
-        let other = Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid");
-        let row = |issue: Uuid, related: Uuid, stored: &str| PairRow {
-            issue_id: issue,
-            related_issue_id: related,
-            relation_type: stored.to_owned(),
-        };
-        // Stored forward, viewed from the issue side.
-        assert_eq!(
-            type_from(&row(viewpoint, other, "blocked_by"), &viewpoint),
-            "blocked_by"
-        );
-        // Same row from the other side inverts.
-        assert_eq!(
-            type_from(&row(viewpoint, other, "blocked_by"), &other),
-            "blocking"
-        );
-        // Symmetric types read the same both ways.
-        assert_eq!(
-            type_from(&row(viewpoint, other, "relates_to"), &other),
-            "relates_to"
-        );
-        // Legacy reverse-stored rows normalize (swap + actual).
-        assert_eq!(
-            type_from(&row(viewpoint, other, "blocking"), &other),
-            "blocked_by"
-        );
-        assert_eq!(
-            type_from(&row(viewpoint, other, "blocking"), &viewpoint),
-            "blocking"
         );
     }
 
