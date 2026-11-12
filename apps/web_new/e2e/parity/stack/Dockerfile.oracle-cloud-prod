@@ -1,0 +1,87 @@
+# The cloud-edition parity oracle as a production build (NEWFRONT-436): the
+# old app (apps/web) with the private overlay copied on top, compiled once
+# and served as static files by nginx. Selected with
+# PARITY_ORACLE_EDITION=cloud (see README.md); Dockerfile.oracle-prod is the
+# OSS variant.
+#
+# Build context is the repo root. The layering mirrors Dockerfile.oracle-prod
+# with one added layer: after the OSS sources are copied and installed, the
+# staged overlay (ee-overlay/apps/web plus ee-overlay/packages, copied from
+# the runner-local overlay checkout into .cloud-staging/ at bring-up; never
+# committed) lands on the matching OSS paths, the same COPY-on-top the
+# overlay's own docker/Dockerfile.web performs. Only the old app's inputs
+# plus the staging directory are ever copied in: apps/web_new, the new
+# packages (kit, api-client), apps/api and the e2e specs stay out, so edits
+# outside the old app and the overlay reuse every layer.
+#
+# The overlay COPY sits between the install and the package builds on
+# purpose. The overlay replaces sources (never manifests), so the install
+# layer stays cached across overlay edits; the tsdown and app builds run
+# after it, so replaced package files (services ee/init, i18n locales)
+# compile into the bundle instead of the OSS ones they shadow.
+#
+# Like Dockerfile.oracle-prod, the shared-package builds skip `.d.ts`
+# generation (pre-existing TS2742 in packages/propel; fixing old-frontend
+# code is outside this harness' paths) and the workspace install cannot be
+# frozen.
+FROM node:22-alpine AS build
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+RUN apk add --no-cache libc6-compat && corepack enable
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json .npmrc ./
+COPY pi-symbol-light.svg pi-symbol-dark.svg ./
+COPY packages/constants packages/constants
+COPY packages/editor packages/editor
+COPY packages/hooks packages/hooks
+COPY packages/i18n packages/i18n
+COPY packages/propel packages/propel
+COPY packages/services packages/services
+COPY packages/shared-state packages/shared-state
+COPY packages/tailwind-config packages/tailwind-config
+COPY packages/types packages/types
+COPY packages/typescript-config packages/typescript-config
+COPY packages/ui packages/ui
+COPY packages/utils packages/utils
+COPY apps/web apps/web
+
+# The workspace is partial here, so the lockfile cannot be frozen.
+RUN pnpm install --no-frozen-lockfile
+
+# The overlay layer: cloud files on top of the matching OSS paths.
+COPY apps/web_new/e2e/parity/stack/.cloud-staging/ee-overlay/apps/web/ apps/web/
+COPY apps/web_new/e2e/parity/stack/.cloud-staging/ee-overlay/packages/ packages/
+
+RUN pnpm --filter "web^..." --filter "!web" exec sh -c 'if [ -f tsdown.config.ts ]; then tsdown --no-dts; else echo "skip: no tsdown build in $PWD"; fi'
+
+# Vite inlines these at build time. Empty base keeps API calls same-origin;
+# the stack's proxy routes them to Django. Paths match apps/web/Dockerfile.web.
+ENV VITE_API_BASE_URL=""
+ENV VITE_WEB_BASE_URL=""
+ENV VITE_ADMIN_BASE_URL=""
+ENV VITE_ADMIN_BASE_PATH="/god-mode"
+ENV VITE_SPACE_BASE_URL=""
+ENV VITE_SPACE_BASE_PATH="/spaces"
+ENV VITE_LIVE_BASE_URL=""
+ENV VITE_LIVE_BASE_PATH="/live"
+# The catalog UI release gate, browser side. The cloud oracle always serves
+# the catalog; the server-side twin (OPENHUB_APPS_ENABLED on api-cloud) is
+# flipped together with it.
+ENV VITE_OPENHUB_APPS_ENABLED="1"
+# The cloud bundle (overlay on top of the OSS sources) is larger than the
+# OSS one and dies at Node's default heap limit (about 2 GiB) inside the
+# stack's Docker VM, which has no room to grow the VM itself. CI builds the
+# same app with a 4 GiB heap; give the build an explicit ceiling.
+ENV NODE_OPTIONS="--max-old-space-size=3072"
+RUN pnpm --filter=web build
+
+FROM nginx:1.27-alpine
+# The stack's own server config, not the OSS one: the cloud bundle
+# prerenders its marketing surface, and the OSS config 301s prerendered
+# directory URLs to the oracle's unreachable internal host:port (see
+# nginx-oracle-cloud.conf).
+COPY apps/web_new/e2e/parity/stack/nginx-oracle-cloud.conf /etc/nginx/nginx.conf
+COPY --from=build /app/apps/web/build/client /usr/share/nginx/html
+EXPOSE 3000
+CMD ["nginx", "-g", "daemon off;"]

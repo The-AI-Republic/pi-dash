@@ -9,14 +9,19 @@ emails) while SMTP is configured and magic login enabled; otherwise
 ``CREDENTIAL``.
 """
 
+import os
 import uuid
 
 import pytest
+import redis
 
 from _harness.checks import require_keys
 from _harness.settings import database_url
+from _harness.throttle import seed_throttle_window
 
 from .conftest import _unique_email
+
+DENIED_BODY = '{"error_code":5900,"error_message":"RATE_LIMIT_EXCEEDED"}'
 
 
 def _check(anon, path, email):
@@ -140,3 +145,24 @@ def test_throttle_malformed_forwarded_chain_is_own_bucket(anon, path):
     assert res.json() == {"error_code": 5900, "error_message": "RATE_LIMIT_EXCEEDED"}
     res = anon.post(path, json={"email": email}, headers={"X-Forwarded-For": ", 9.9.9.9"})
     assert res.status_code == 200, f"malformed-xff: {res.status_code} {res.text[:200]!r}"
+
+
+@pytest.mark.parametrize("path", ["/auth/email-check/", "/auth/spaces/email-check/"])
+def test_throttled_retry_after_is_ceiled(anon, path):
+    # NEWPIDASH-16: the 429 carries Retry-After = ceil(wait). The seeded
+    # window (30 timestamps 0.2s old) makes the true wait ~59.8s, so DRF
+    # answers '60'; a missing header fails outright.
+    rdb = redis.Redis.from_url(os.environ["REDIS_URL"], socket_timeout=5)
+    ident = f"ec16-{uuid.uuid4().hex}"
+    seed_throttle_window(rdb, "authentication", ident)
+    try:
+        res = anon.post(
+            path,
+            json={"email": "n16-throttle@example.com"},
+            headers={"X-Forwarded-For": ident},
+        )
+    finally:
+        rdb.close()
+    assert res.status_code == 429, res.text[:200]
+    assert res.text == DENIED_BODY, res.text[:200]
+    assert res.headers.get("retry-after") == "60", res.headers.get("retry-after")

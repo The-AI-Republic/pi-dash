@@ -20,8 +20,8 @@
 //! value with `Max-Age=0` and the epoch expiry; saves carry `Path=/`,
 //! `SameSite=Lax`, the configured domain, and `Secure`/`HttpOnly` only when
 //! truthy; browser-close sessions omit `Max-Age`/`expires`; saves are
-//! skipped for 5xx responses; a failed save is a 500 (Django raises
-//! `SessionInterrupted` there).
+//! skipped for 5xx responses; a save that misses its row is Django's
+//! 400 page (`SessionInterrupted`), any other failed save a 500.
 //!
 //! The `#[cfg(test)]` suite replays the `middleware` vectors of
 //! `rust-api/fixtures/auth_session/FX-AUTH-05.guards.json` (recorded by
@@ -477,8 +477,8 @@ mod tests {
 
     #[tokio::test]
     async fn save_failure_answers_500() {
-        // Django raises SessionInterrupted on the concurrent-delete
-        // UpdateError; the layer answers an empty 500 instead.
+        // A generic save failure (not the update-miss kind, which is
+        // Django's 400 page) answers an empty 500.
         #[derive(Debug, Clone)]
         struct FailingStore;
         impl SessionStore for FailingStore {
@@ -499,7 +499,7 @@ mod tests {
             ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<String, StoreError>> + Send>,
             > {
-                Box::pin(async move { Err(StoreError("concurrent delete".to_string())) })
+                Box::pin(async move { Err(StoreError::Other("disk on fire".to_string())) })
             }
         }
         let cfg = SessionConfig {

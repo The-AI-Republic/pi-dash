@@ -1,4 +1,6 @@
-//! Read-only v1 scheduler endpoints (stage 8 drift, PIDASHCONV-1061).
+//! v1 scheduler endpoints: reads (stage 8 drift, PIDASHCONV-1061), the
+//! binding / definition writes PDASHOSS01-278 added, and the create /
+//! install / uninstall / delete writes of PDASHOSS01-318 ([`writes`]).
 //!
 //! Ports `apps/api/pi_dash/api/views/scheduler.py`,
 //! `api/serializers/scheduler.py` and `api/urls/scheduler.py` (04920ea3,
@@ -59,23 +61,31 @@
 
 pub mod handlers;
 pub mod perms;
+pub mod service;
+pub mod writes;
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use chrono_tz::Tz;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+};
 use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::state::AppState;
 pub use pidash_compat::response::{json_ok, SERVER_ERROR_BODY};
+use pidash_db::entity::{
+    api_tokens, dev_machine, machine_token, project_members, users, workspace_members, workspaces,
+};
 
 /// Domain router: the four scheduler paths in
 /// [`handlers::routes`]. Owned GETs serve from Rust (cutover granularity);
 /// everything else keeps proxying to Django through the edge fallback.
 pub fn routes() -> axum::Router<AppState> {
-    handlers::routes()
+    handlers::routes().merge(writes::routes())
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +110,8 @@ pub const BINDING_NOT_FOUND_BODY: &str =
     r#"{"detail":"No SchedulerBinding matches the given query."}"#;
 /// `handle_exception`'s `KeyError` branch (unknown `user_timezone`).
 pub const MISSING_KEY_BODY: &str = r#"{"error":"The required key does not exist."}"#;
+/// `handle_exception`'s `ObjectDoesNotExist` branch.
+pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -128,10 +140,19 @@ pub enum Denial {
     BadError(String),
     /// 500, generic branch.
     ServerError,
+    /// 403, `@allow_permission` refusal
+    /// ([`crate::permissions::PERMISSION_DENIED_BODY`]).
+    RoleDenied,
+    /// 404, `handle_exception`'s `ObjectDoesNotExist` branch.
+    ObjectNotFound,
+    /// A view-built body with its status (write 400/409/412s).
+    Body(StatusCode, Value),
+    /// A response the web app's shared write path already rendered.
+    App(Box<Response>),
 }
 
 impl Denial {
-    fn status_and_body(&self) -> (StatusCode, String) {
+    pub(crate) fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
             Denial::InvalidToken => (StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned()),
@@ -157,12 +178,29 @@ impl Denial {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
             ),
+            Denial::RoleDenied => (
+                StatusCode::FORBIDDEN,
+                crate::permissions::PERMISSION_DENIED_BODY.to_owned(),
+            ),
+            Denial::ObjectNotFound => (StatusCode::NOT_FOUND, OBJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::Body(status, body) => (
+                *status,
+                serde_json::to_string(body).expect("serializable denial"),
+            ),
+            // Rendered by the caller; `into_response` returns it as is.
+            Denial::App(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                SERVER_ERROR_BODY.to_owned(),
+            ),
         }
     }
 }
 
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
+        if let Denial::App(response) = self {
+            return *response;
+        }
         let (status, body) = self.status_and_body();
         Response::builder()
             .status(status)
@@ -233,8 +271,11 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ =
-            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -249,23 +290,39 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookupRow {
+    token: String,
+    is_active: bool,
+    expired_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: uuid::Uuid,
+}
+
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(String, bool, Option<chrono::DateTime<chrono::Utc>>, uuid::Uuid)> =
-        sqlx::query_as(
-            r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-        )
-        .bind(presented)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Token,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+            api_tokens::Column::UserId,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented.to_owned()))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookupRow>()
+        .one(&db)
         .await
         .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
+    let user_id = row.user_id;
     let now_unix = chrono::Utc::now().timestamp();
     let row = pidash_auth::token::ApiTokenRow {
-        token,
-        is_active,
-        expired_at_unix: expired_at.map(|dt| dt.timestamp()),
+        token: row.token,
+        is_active: row.is_active,
+        expired_at_unix: row.expired_at.map(|dt| dt.timestamp()),
     };
     pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
         .map_err(|_| Denial::InvalidToken)?;
@@ -278,14 +335,16 @@ async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid,
 
 /// One `machine_token` + `dev_machine` lookup row: hash, user, dev machine,
 /// workspace, token revoke, dev-machine revoke flag.
-type MachineTokenLookupRow = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-);
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookupRow {
+    token_hash: String,
+    user_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (`NEWPIDASH-50`); judged by the token kernel.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    dev_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
 /// The machine-token path (`api_authentication.py:47-70`, table
 /// `machine_token`): HMAC lookup, revoke checks, dev-machine check, then
@@ -296,48 +355,71 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookupRow> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
-    )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
-    else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::TokenHash,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
+        ])
+        .column_as(
+            sea_query::Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
+            "dev_revoked_at",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(presented_hash.clone()))
+        .into_model::<MachineTokenLookupRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "machine-token-lookup"))?;
+    let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
+    let user_id = row.user_id;
+    let workspace_id = row.workspace_id;
     let static_row = pidash_auth::token::MachineTokenRow {
-        token_hash,
-        revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
-        dev_machine_revoked: dev_revoked.unwrap_or(false),
+        token_hash: row.token_hash,
+        revoked_at_unix: row.revoked_at.map(|dt| dt.timestamp()),
+        dev_machine_revoked: row.dev_revoked_at.is_some(),
+        expires_at_unix: row.expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: active row, any role. A
     // non-member is revoked first, then denied — exactly like Python.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    let member = workspace_members::Entity::find()
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .exists(&db)
+        .await
+        .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
-        let _ =
-            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
-                .await;
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
+        .await;
         return Err(Denial::InvalidToken);
     }
     let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &presented_hash,
     )
     .await;
@@ -348,13 +430,19 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    #[derive(FromQueryResult)]
+    struct TimezoneRow {
+        user_timezone: Option<String>,
+    }
+    let name = users::Entity::find_by_id(*user_id)
+        .select_only()
+        .columns([users::Column::UserTimezone])
+        .into_model::<TimezoneRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))?;
+    Ok(name.and_then(|row| row.user_timezone))
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -411,18 +499,36 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
+    let workspace_id = workspace_id_by_slug(&pool, slug).await?;
     Ok(Preamble {
         pool,
         actor,
         workspace_id,
     })
+}
+
+/// The workspace id for a slug: `None` when unknown. Shared by the v1
+/// [`preamble`] and the [`service`](crate::v1_schedulers::service)
+/// entries, so the unknown-slug 403 trap has one implementation.
+pub(crate) async fn workspace_id_by_slug(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find()
+        .select_only()
+        .columns([workspaces::Column::Id])
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .into_model::<WorkspaceIdRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| row.id))
+}
+
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceIdRow {
+    id: uuid::Uuid,
 }
 
 /// `_rewrite_project_kwarg` (`api/views/base.py:51-98`): a slug-or-UUID
@@ -442,10 +548,12 @@ pub async fn rewrite_project_id(
     };
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
-        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
-            .await
-            .map_err(|error| db_error(error, "project-resolve"))?
-            .ok_or(Denial::ProjectNotFound),
+        ProjectLookup::Identifier(_) => {
+            q::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
+                .await
+                .map_err(|error| db_error(error, "project-resolve"))?
+                .ok_or(Denial::ProjectNotFound)
+        }
     }
 }
 
@@ -463,15 +571,15 @@ pub async fn require_workspace_entity(
     let is_member = match workspace_id {
         None => false,
         Some(wid) => {
-            sqlx::query_scalar(
-                r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
-            )
-            .bind(wid)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "ws-member"))?
-            .unwrap_or(false)
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            workspace_members::Entity::find()
+                .filter(workspace_members::Column::WorkspaceId.eq(*wid))
+                .filter(workspace_members::Column::MemberId.eq(*user_id))
+                .filter(workspace_members::Column::IsActive.eq(true))
+                .filter(workspace_members::Column::DeletedAt.is_null())
+                .exists(&db)
+                .await
+                .map_err(|error| db_error(error, "ws-member"))?
         }
     };
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
@@ -512,16 +620,16 @@ pub async fn require_project_entity(
     let is_member = match workspace_id {
         None => false,
         Some(wid) => {
-            sqlx::query_scalar(
-                r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL)"#,
-            )
-            .bind(wid)
-            .bind(user_id)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "project-member"))?
-            .unwrap_or(false)
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            project_members::Entity::find()
+                .filter(project_members::Column::WorkspaceId.eq(*wid))
+                .filter(project_members::Column::MemberId.eq(*user_id))
+                .filter(project_members::Column::ProjectId.eq(*project_id))
+                .filter(project_members::Column::IsActive.eq(true))
+                .filter(project_members::Column::DeletedAt.is_null())
+                .exists(&db)
+                .await
+                .map_err(|error| db_error(error, "project-member"))?
         }
     };
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
@@ -640,6 +748,21 @@ pub fn owned(
 ) -> axum::routing::MethodRouter<AppState> {
     get_handler
         .post(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+/// An owned GET + POST path (the two list routes, whose POST is a
+/// PDASHOSS01-318 write): every other method falls through to Django.
+pub fn owned_get_post(
+    get_handler: axum::routing::MethodRouter<AppState>,
+    post_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    get_handler
+        .merge(post_handler)
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)

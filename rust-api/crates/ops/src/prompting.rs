@@ -43,6 +43,10 @@ async fn connect_primary() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
     Ok(pools.primary().clone())
 }
 
+fn db_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::sea_orm_connection(pool)
+}
+
 /// `reseed_{default,review,test}_template [--force]`
 /// (`reseed_*_template.py:24-26`): `seed_*(force)` + the
 /// `"<name> template: <result>"` line on stdout.
@@ -54,7 +58,8 @@ pub async fn run_reseed(
     use pidash_services::prompting::seed::{ExistingTemplate, SeedOutcome};
 
     let pool = connect_primary().await?;
-    let existing_row = pidash_db::ops::prompting::fetch_global_template(&pool, kind.name()).await?;
+    let db = db_conn(&pool);
+    let existing_row = pidash_db::ops::prompting::fetch_global_template(&db, kind.name()).await?;
     let existing = existing_row.as_ref().map(|row| ExistingTemplate {
         body: row.body.clone(),
         version: Some(row.version),
@@ -63,7 +68,7 @@ pub async fn run_reseed(
     match (plan.outcome, plan.version) {
         (SeedOutcome::Created, Some(_)) => {
             pidash_db::ops::prompting::insert_global_template(
-                &pool,
+                &db,
                 uuid::Uuid::new_v4(),
                 kind.name(),
                 &plan.body,
@@ -72,7 +77,7 @@ pub async fn run_reseed(
         }
         (SeedOutcome::Refreshed, Some(version)) => {
             let row = existing_row.expect("refresh plans only exist over a loaded row");
-            pidash_db::ops::prompting::refresh_global_template(&pool, row.id, &plan.body, version)
+            pidash_db::ops::prompting::refresh_global_template(&db, row.id, &plan.body, version)
                 .await?;
         }
         _ => {}
@@ -90,7 +95,8 @@ pub async fn run_revalidate(args: RevalidateArgs) -> Result<(), Box<dyn std::err
     use pidash_services::prompting::seed::RevalidateAction;
 
     let pool = connect_primary().await?;
-    let rows = pidash_db::ops::prompting::fetch_active_overrides(&pool).await?;
+    let db = db_conn(&pool);
+    let rows = pidash_db::ops::prompting::fetch_active_overrides(&db).await?;
     let inputs: Vec<ActiveOverride> = rows
         .iter()
         .map(|row| ActiveOverride {
@@ -108,12 +114,12 @@ pub async fn run_revalidate(args: RevalidateArgs) -> Result<(), Box<dyn std::err
         match step.action {
             RevalidateAction::Flag => {
                 let id: uuid::Uuid = step.id.parse()?;
-                pidash_db::ops::prompting::set_needs_attention(&pool, id, true).await?;
+                pidash_db::ops::prompting::set_needs_attention(&db, id, true).await?;
                 println!("{}", step.line.as_deref().unwrap_or_default());
             }
             RevalidateAction::Clear => {
                 let id: uuid::Uuid = step.id.parse()?;
-                pidash_db::ops::prompting::set_needs_attention(&pool, id, false).await?;
+                pidash_db::ops::prompting::set_needs_attention(&db, id, false).await?;
             }
             RevalidateAction::Keep => {}
         }

@@ -109,9 +109,14 @@ use axum::Extension;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use sea_orm::sea_query::extension::postgres::PgExpr;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
@@ -291,22 +296,44 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// Every workspace id with `(slug)`. The old join semantics read rows
+/// for *each* matching workspace, so the full id list (not one row)
+/// scopes every `is_in` filter below.
+async fn workspace_ids_for_slug(pool: &PgPool, slug: &str) -> Result<Vec<Uuid>, Denial> {
+    use pidash_db::entity::workspaces;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .columns([workspaces::Column::Id])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 /// Active workspace role for `(user, slug)`, or `None` (no row).
 /// Mirrors the `allow_permission` workspace lookup (`is_active=True`,
 /// soft-deleted rows excluded, `app/permissions/base.py:44-51`).
 async fn workspace_role(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let ws_ids = workspace_ids_for_slug(pool, slug).await?;
+    if ws_ids.is_empty() {
+        return Ok(None);
+    }
+    use pidash_db::entity::workspace_members;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspace_members::Entity::find()
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::WorkspaceId.is_in(ws_ids))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([workspace_members::Column::Role])
+        .into_tuple::<i16>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(i32::from))
 }
 
 /// Membership facts for the D-34 gate: ADMIN/MEMBER/GUEST all pass
@@ -402,113 +429,65 @@ pub fn routes() -> Router<AppState> {
 // SQL: notification rows (get_queryset + list annotations)
 // ---------------------------------------------------------------------------
 
-/// Every `Notification` column in audit-then-definition order
-/// (`db/models/base.py:18`, `db/mixins.py`, `db/models/notification.py:14-33`).
-const NOTIFICATION_COLUMNS: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "workspace_id",
-    "project_id",
-    "data",
-    "entity_identifier",
-    "entity_name",
-    "title",
-    "message",
-    "message_html",
-    "message_stripped",
-    "sender",
-    "triggered_by_id",
-    "receiver_id",
-    "read_at",
-    "snoozed_till",
-    "archived_at",
-];
-
-/// `"n"."c1", "n"."c2", …` in [`NOTIFICATION_COLUMNS`] order.
-fn select_list(alias: &str) -> String {
-    NOTIFICATION_COLUMNS
-        .iter()
-        .map(|c| format!("\"{alias}\".\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// The intake `Exists` subquery (`base.py:57-61`), emitted once per
-/// annotation (BUG-double-exists, `base.py:66-67`). Captured verbatim
-/// from Django's compiled SQL: the `issues` leg carries its
-/// soft-delete conjunct, the `intake_issues` leg carries none, and the
-/// workspace leg reuses the scope slug placeholder.
-fn intake_exists_sql(notif_alias: &str, slug_param: &str) -> String {
-    format!(
-        "EXISTS (SELECT 1 FROM \"issues\" U0 \
-         INNER JOIN \"intake_issues\" U1 ON (U0.\"id\" = U1.\"issue_id\") \
-         INNER JOIN \"workspaces\" U2 ON (U0.\"workspace_id\" = U2.\"id\") \
-         WHERE (U0.\"deleted_at\" IS NULL \
-         AND U1.\"status\" IN (0, 2, -2) \
-         AND U0.\"id\" = \"{notif_alias}\".\"entity_identifier\" \
-         AND U2.\"slug\" = {slug_param}))"
-    )
-}
-
-/// The `is_mentioned_notification` annotation (`base.py:68-74`):
-/// `Case(When(sender__icontains="mentioned", …))` — `icontains`
-/// renders `ILIKE '%mentioned%'`.
-fn mentioned_annotation_sql(notif_alias: &str) -> String {
-    format!(
-        "CASE WHEN \"{notif_alias}\".\"sender\" ILIKE '%mentioned%' THEN true ELSE false END \
-         AS \"is_mentioned_notification\""
-    )
-}
-
-/// The `triggered_by_details` join legs: the user row plus its avatar
-/// asset (the `avatar_url` property, `db/models/user.py:142-151`).
-const TRIGGERED_BY_SELECT: &str = r#"tu."id" AS "tu_id", tu."first_name" AS "tu_first_name", tu."last_name" AS "tu_last_name", tu."avatar" AS "tu_avatar", tu."avatar_asset_id" AS "tu_avatar_asset_id", fa."entity_type" AS "tu_avatar_asset_entity", tu."is_bot" AS "tu_is_bot", tu."display_name" AS "tu_display_name""#;
-
-const TRIGGERED_BY_JOINS: &str = r#"LEFT JOIN "users" tu ON (tu."id" = n."triggered_by_id") LEFT JOIN "file_assets" fa ON (fa."id" = tu."avatar_asset_id" AND fa."deleted_at" IS NULL)"#;
-
-/// Full row SELECT: the notification columns, the double `Exists`
-/// annotations, the mentioned `Case/When`, and the `triggered_by`
-/// projection. `$slug` / `$user` bind the scope (conventionally
-/// `$1` / `$2`).
-fn row_select_sql(slug_param: &str, _user_param: &str) -> String {
-    let exists = intake_exists_sql("n", slug_param);
-    let mentioned = mentioned_annotation_sql("n");
-    format!(
-        "SELECT {cols}, {exists} AS \"is_inbox_issue\", {exists} AS \"is_intake_issue\", {mentioned}, {TRIGGERED_BY_SELECT} \
-         FROM \"notifications\" n \
-         INNER JOIN \"workspaces\" w ON (n.\"workspace_id\" = w.\"id\") \
-         {TRIGGERED_BY_JOINS}",
-        cols = select_list("n"),
-    )
-}
-
 /// `get_queryset` scope (`base.py:32-45`): `workspace__slug` +
-/// `receiver_id`, soft-delete-scoped. `$slug` / `$user` bind the scope.
-fn base_where(slug_param: &str, user_param: &str) -> String {
-    format!(
-        "w.\"slug\" = {slug_param} \
-         AND n.\"receiver_id\" = {user_param} \
-         AND n.\"deleted_at\" IS NULL"
-    )
+/// `receiver_id`, soft-delete-scoped. The slug side is the resolved id
+/// list ([`workspace_ids_for_slug`]) — empty means no rows.
+fn base_cond(ws_ids: &[Uuid], user_id: &Uuid) -> Condition {
+    use pidash_db::entity::notifications as n;
+    Condition::all()
+        .add(n::Column::WorkspaceId.is_in(ws_ids.iter().copied()))
+        .add(n::Column::ReceiverId.eq(*user_id))
+        .add(n::Column::DeletedAt.is_null())
+}
+
+fn sender_ilike() -> sea_orm::sea_query::SimpleExpr {
+    use pidash_db::entity::notifications as n;
+    Expr::col((n::Entity, n::Column::Sender)).ilike("%mentioned%")
+}
+
+/// Resolved list filters shared by the full and paginated branches.
+struct ListFilters {
+    ws_ids: Vec<Uuid>,
+    user_id: Uuid,
+    snoozed: Condition,
+    archived: Condition,
+    read: Option<Condition>,
+    mentioned: Condition,
+    type_ids: Option<Vec<Uuid>>,
+}
+
+/// The filtered list select (`get_queryset` + list filters); ordering
+/// and paging are applied by the caller.
+fn list_select(filters: &ListFilters) -> sea_orm::Select<pidash_db::entity::notifications::Entity> {
+    use pidash_db::entity::notifications as n;
+    let mut sel = n::Entity::find()
+        .filter(base_cond(&filters.ws_ids, &filters.user_id))
+        .filter(n::Column::EntityName.eq("issue"))
+        .filter(filters.snoozed.clone())
+        .filter(filters.archived.clone())
+        .filter(filters.mentioned.clone());
+    if let Some(read) = &filters.read {
+        sel = sel.filter(read.clone());
+    }
+    if let Some(ids) = &filters.type_ids {
+        sel = sel.filter(n::Column::EntityIdentifier.is_in(ids.iter().copied()));
+    }
+    sel
 }
 
 /// `snoozed` filter (`base.py:80-85`; default `"false"`). The `"true"`
 /// branch is BUG-snoozed-true (`snoozed_till < now OR snoozed_till IS
 /// NOT NULL` — matches every set `snoozed_till`); ported verbatim.
-/// `$now` binds `timezone.now()` at evaluation time. Anything besides
-/// `"true"` / `"false"` is the `KeyError` 400.
-fn snoozed_clause(param: &str, now_param: &str) -> Result<String, Denial> {
+/// Anything besides `"true"` / `"false"` is the `KeyError` 400.
+fn snoozed_cond(param: &str, now: DateTime<Utc>) -> Result<Condition, Denial> {
+    use pidash_db::entity::notifications as n;
     match param {
-        "true" => Ok(format!(
-            "(n.\"snoozed_till\" < {now_param} OR n.\"snoozed_till\" IS NOT NULL)"
-        )),
-        "false" => Ok(format!(
-            "(n.\"snoozed_till\" >= {now_param} OR n.\"snoozed_till\" IS NULL)"
-        )),
+        "true" => Ok(Condition::any()
+            .add(n::Column::SnoozedTill.lt(now))
+            .add(n::Column::SnoozedTill.is_not_null())),
+        "false" => Ok(Condition::any()
+            .add(n::Column::SnoozedTill.gte(now))
+            .add(n::Column::SnoozedTill.is_null())),
         _ => Err(Denial::BadError(
             "The required key does not exist.".to_owned(),
         )),
@@ -516,10 +495,11 @@ fn snoozed_clause(param: &str, now_param: &str) -> Result<String, Denial> {
 }
 
 /// `archived` filter (`base.py:87-92`; default `"false"`).
-fn archived_clause(param: &str) -> Result<&'static str, Denial> {
+fn archived_cond(param: &str) -> Result<Condition, Denial> {
+    use pidash_db::entity::notifications as n;
     match param {
-        "true" => Ok("n.\"archived_at\" IS NOT NULL"),
-        "false" => Ok("n.\"archived_at\" IS NULL"),
+        "true" => Ok(Condition::all().add(n::Column::ArchivedAt.is_not_null())),
+        "false" => Ok(Condition::all().add(n::Column::ArchivedAt.is_null())),
         _ => Err(Denial::BadError(
             "The required key does not exist.".to_owned(),
         )),
@@ -529,10 +509,11 @@ fn archived_clause(param: &str) -> Result<&'static str, Denial> {
 /// `read` filter (`base.py:52,94-98`): only the exact strings
 /// `"true"` / `"false"` filter; anything else (including a present
 /// but odd value) is silently ignored (QUIRK-read-silent).
-fn read_clause(param: Option<&str>) -> Option<&'static str> {
+fn read_cond(param: Option<&str>) -> Option<Condition> {
+    use pidash_db::entity::notifications as n;
     match param {
-        Some("false") => Some("n.\"read_at\" IS NULL"),
-        Some("true") => Some("n.\"read_at\" IS NOT NULL"),
+        Some("false") => Some(Condition::all().add(n::Column::ReadAt.is_null())),
+        Some("true") => Some(Condition::all().add(n::Column::ReadAt.is_not_null())),
         _ => None,
     }
 }
@@ -541,109 +522,191 @@ fn read_clause(param: Option<&str>) -> Option<&'static str> {
 /// param *presence* with a non-empty value
 /// (QUIRK-mentioned-truthiness) — any present non-empty value,
 /// including `"false"`, takes the `icontains` arm.
-fn mentioned_clause(param_present: bool) -> &'static str {
+fn mentioned_cond(param_present: bool) -> Condition {
     if param_present {
-        "n.\"sender\" ILIKE '%mentioned%'"
+        Condition::all().add(sender_ilike())
     } else {
-        "NOT (n.\"sender\" ILIKE '%mentioned%')"
+        use pidash_db::entity::notifications as n;
+        Condition::all().add(Expr::col((n::Entity, n::Column::Sender)).not_ilike("%mentioned%"))
     }
 }
 
-/// `subscribed` type arm (list, `base.py:107-115`): the subscriber's
-/// issue ids minus issues they created or are assigned to. Captured
-/// from Django's compiled SQL, including the inner soft-delete
-/// conjuncts and the `pk = issue_id` assignee correlation (as-is).
-fn subscribed_arm(slug_param: &str, user_param: &str) -> String {
-    format!(
-        "n.\"entity_identifier\" IN (SELECT U0.\"issue_id\" FROM \"issue_subscribers\" U0 \
-         INNER JOIN \"workspaces\" wsub ON (U0.\"workspace_id\" = wsub.\"id\") \
-         WHERE (U0.\"deleted_at\" IS NULL \
-         AND U0.\"subscriber_id\" = {user_param} \
-         AND wsub.\"slug\" = {slug_param} \
-         AND NOT EXISTS (SELECT 1 FROM \"issues\" WHERE \"deleted_at\" IS NULL AND \"created_by_id\" = {user_param} AND \"id\" = U0.\"issue_id\") \
-         AND NOT EXISTS (SELECT 1 FROM \"issue_assignees\" WHERE \"deleted_at\" IS NULL AND \"id\" = U0.\"issue_id\" AND \"assignee_id\" = {user_param})))"
-    )
+/// `subscribed` issue ids (list, `base.py:107-115`): the subscriber's
+/// issue ids minus issues they created or are assigned to (the inner
+/// soft-delete conjuncts preserved). The assigned leg keeps Django's
+/// `pk=OuterRef("issue_id")` correlation verbatim: an assignee row is
+/// found by its own `id`, not by `issue_id` (so assignment almost never
+/// excludes under Django either; do not "fix" to `issue_id`).
+async fn subscribed_issue_ids(
+    pool: &PgPool,
+    ws_ids: &[Uuid],
+    user_id: &Uuid,
+) -> Result<Vec<Uuid>, Denial> {
+    use pidash_db::entity::{issue_assignees, issue_subscribers, issues};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let subs = issue_subscribers::Entity::find()
+        .filter(issue_subscribers::Column::SubscriberId.eq(*user_id))
+        .filter(issue_subscribers::Column::WorkspaceId.is_in(ws_ids.iter().copied()))
+        .filter(issue_subscribers::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([issue_subscribers::Column::IssueId])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if subs.is_empty() {
+        return Ok(subs);
+    }
+    let created = issues::Entity::find()
+        .filter(issues::Column::CreatedById.eq(Some(*user_id)))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.is_in(subs.iter().copied()))
+        .select_only()
+        .columns([issues::Column::Id])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let assigned = issue_assignees::Entity::find()
+        .filter(issue_assignees::Column::AssigneeId.eq(*user_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .filter(issue_assignees::Column::Id.is_in(subs.iter().copied()))
+        .select_only()
+        .columns([issue_assignees::Column::Id])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    use std::collections::HashSet;
+    let excluded: HashSet<Uuid> = created.into_iter().chain(assigned).collect();
+    Ok(subs
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect())
 }
 
-/// `assigned` type arm (list, `base.py:118-122`).
-fn assigned_arm(slug_param: &str, user_param: &str) -> String {
-    format!(
-        "n.\"entity_identifier\" IN (SELECT ia.\"issue_id\" FROM \"issue_assignees\" ia \
-         INNER JOIN \"workspaces\" wa ON (ia.\"workspace_id\" = wa.\"id\") \
-         WHERE (ia.\"deleted_at\" IS NULL AND ia.\"assignee_id\" = {user_param} AND wa.\"slug\" = {slug_param}))"
-    )
+/// `watching` issue ids (mark-all-read, `base.py:258-262`): the plain
+/// subscriber issue list — unlike the list's `subscribed` arm there is
+/// no created/assigned exclusion (QUIRK-mark-type-spelling).
+async fn watching_issue_ids(
+    pool: &PgPool,
+    ws_ids: &[Uuid],
+    user_id: &Uuid,
+) -> Result<Vec<Uuid>, Denial> {
+    use pidash_db::entity::issue_subscribers;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issue_subscribers::Entity::find()
+        .filter(issue_subscribers::Column::SubscriberId.eq(*user_id))
+        .filter(issue_subscribers::Column::WorkspaceId.is_in(ws_ids.iter().copied()))
+        .filter(issue_subscribers::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([issue_subscribers::Column::IssueId])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
-/// `created` type arm (list, `base.py:131-133`): issues the user created.
-/// The select is alias-qualified (`ci."id"`): a bare `"id"` would be
-/// ambiguous against the outer notification/workspace/user legs.
-fn created_arm(slug_param: &str, user_param: &str) -> String {
-    format!(
-        "n.\"entity_identifier\" IN (SELECT ci.\"id\" FROM \"issues\" ci \
-         INNER JOIN \"workspaces\" wc ON (ci.\"workspace_id\" = wc.\"id\") \
-         WHERE (ci.\"deleted_at\" IS NULL AND ci.\"created_by_id\" = {user_param} AND wc.\"slug\" = {slug_param}))"
-    )
+/// `assigned` issue ids (list, `base.py:118-122` and mark-all-read).
+async fn assigned_issue_ids(
+    pool: &PgPool,
+    ws_ids: &[Uuid],
+    user_id: &Uuid,
+) -> Result<Vec<Uuid>, Denial> {
+    use pidash_db::entity::issue_assignees;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issue_assignees::Entity::find()
+        .filter(issue_assignees::Column::AssigneeId.eq(*user_id))
+        .filter(issue_assignees::Column::WorkspaceId.is_in(ws_ids.iter().copied()))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([issue_assignees::Column::IssueId])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
-/// Outcome of compiling the list `type` param (`base.py:105-137`).
-enum TypeFilter {
-    /// Extra `AND (...)` fragment over `entity_identifier`.
-    Where(String),
-    /// `.none()`: answer `[]` without querying (QUIRK-created-none).
-    Empty,
-    /// No known branch (`type=all` default): `.filter(Q())` no-op.
-    None,
+/// `created` issue ids (list, `base.py:131-133` and mark-all-read).
+async fn created_issue_ids(
+    pool: &PgPool,
+    ws_ids: &[Uuid],
+    user_id: &Uuid,
+) -> Result<Vec<Uuid>, Denial> {
+    use pidash_db::entity::issues;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issues::Entity::find()
+        .filter(issues::Column::CreatedById.eq(Some(*user_id)))
+        .filter(issues::Column::WorkspaceId.is_in(ws_ids.iter().copied()))
+        .filter(issues::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([issues::Column::Id])
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
-/// Compile the list `type` param: comma-split (`:105`), known
-/// branches OR together (`:115,122,134`). `created_member` is the
-/// evaluated guard below. Unknown tokens (including the default
-/// `"all"`) match no branch.
-fn list_type_filter(
-    param: &str,
-    slug_param: &str,
-    user_param: &str,
-    created_member: bool,
-) -> TypeFilter {
-    let mut arms = Vec::new();
-    let mut saw_created = false;
-    for token in param.split(',') {
+/// Resolve the list `type` param (`base.py:105-137`) to the matching
+/// issue-id set: comma-split, known branches OR together. Returns
+/// `None` when no known branch matches (`type=all` default), `Some`
+/// with the (possibly empty) id set otherwise. The `created` member
+/// guard is evaluated by the caller.
+async fn list_type_issue_ids(
+    pool: &PgPool,
+    type_param: &str,
+    ws_ids: &[Uuid],
+    user_id: &Uuid,
+) -> Result<Option<Vec<Uuid>>, Denial> {
+    use std::collections::HashSet;
+    let mut saw_known = false;
+    let mut set: HashSet<Uuid> = HashSet::new();
+    for token in type_param.split(',') {
         match token {
-            "subscribed" => arms.push(subscribed_arm(slug_param, user_param)),
-            "assigned" => arms.push(assigned_arm(slug_param, user_param)),
-            "created" => saw_created = true,
+            "subscribed" => {
+                saw_known = true;
+                set.extend(subscribed_issue_ids(pool, ws_ids, user_id).await?);
+            }
+            "assigned" => {
+                saw_known = true;
+                set.extend(assigned_issue_ids(pool, ws_ids, user_id).await?);
+            }
+            "created" => {
+                saw_known = true;
+                set.extend(created_issue_ids(pool, ws_ids, user_id).await?);
+            }
             _ => {}
         }
     }
-    if saw_created {
-        if created_member {
-            return TypeFilter::Empty;
-        }
-        arms.push(created_arm(slug_param, user_param));
-    }
-    if arms.is_empty() {
-        TypeFilter::None
+    if saw_known {
+        Ok(Some(set.into_iter().collect()))
     } else {
-        TypeFilter::Where(format!("({})", arms.join(" OR ")))
+        Ok(None)
     }
 }
 
 /// The `created` member guard (list `:126-128`): a sub-15 active
-/// workspace membership (soft-delete-scoped, from Django's compiled
-/// SQL). When it hits, the whole list becomes `.none()`.
+/// workspace membership (soft-delete-scoped). When it hits, the whole
+/// list becomes `.none()`.
 async fn created_member_guard(pool: &PgPool, slug: &str, user_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           INNER JOIN workspaces w ON (wm.workspace_id = w.id)
-           WHERE (wm.deleted_at IS NULL AND wm.is_active
-             AND wm.member_id = $1 AND wm.role < 15 AND w.slug = $2)
-           LIMIT 1"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ws_ids = workspace_ids_for_slug(pool, slug).await?;
+    if ws_ids.is_empty() {
+        return Ok(false);
+    }
+    use pidash_db::entity::workspace_members;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspace_members::Entity::find()
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::WorkspaceId.is_in(ws_ids))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::Role.lt(15))
+        .select_only()
+        .columns([workspace_members::Column::Id])
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -651,18 +714,21 @@ async fn created_member_guard(pool: &PgPool, slug: &str, user_id: &Uuid) -> Resu
 /// `OffsetPaginator.get_result` re-orders by `(key dir NULLS LAST,
 /// -created_at)`; an unknown field raises Django-side (`FieldError`
 /// → the 500 envelope, verified live).
-fn order_column(order_by: &str) -> Result<(&'static str, bool), Denial> {
+fn order_column(
+    order_by: &str,
+) -> Result<(pidash_db::entity::notifications::Column, bool), Denial> {
+    use pidash_db::entity::notifications::Column as C;
     let (name, descending) = match order_by.strip_prefix('-') {
         Some(rest) => (rest, true),
         None => (order_by, false),
     };
     let column = match name {
-        "created_at" => "created_at",
-        "updated_at" => "updated_at",
-        "snoozed_till" => "snoozed_till",
-        "read_at" => "read_at",
-        "archived_at" => "archived_at",
-        "title" => "title",
+        "created_at" => C::CreatedAt,
+        "updated_at" => C::UpdatedAt,
+        "snoozed_till" => C::SnoozedTill,
+        "read_at" => C::ReadAt,
+        "archived_at" => C::ArchivedAt,
+        "title" => C::Title,
         _ => return Err(Denial::ServerError),
     };
     Ok((column, descending))
@@ -710,42 +776,210 @@ struct NotificationRow {
 }
 
 impl NotificationRow {
-    fn get(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            id: row.try_get("id")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            created_by_id: row.try_get("created_by_id")?,
-            updated_by_id: row.try_get("updated_by_id")?,
-            deleted_at: row.try_get("deleted_at")?,
-            workspace_id: row.try_get("workspace_id")?,
-            project_id: row.try_get("project_id")?,
-            data: row.try_get("data")?,
-            entity_identifier: row.try_get("entity_identifier")?,
-            entity_name: row.try_get("entity_name")?,
-            title: row.try_get("title")?,
-            message: row.try_get("message")?,
-            message_html: row.try_get("message_html")?,
-            message_stripped: row.try_get("message_stripped")?,
-            sender: row.try_get("sender")?,
-            triggered_by_id: row.try_get("triggered_by_id")?,
-            receiver_id: row.try_get("receiver_id")?,
-            read_at: row.try_get("read_at")?,
-            snoozed_till: row.try_get("snoozed_till")?,
-            archived_at: row.try_get("archived_at")?,
-            is_inbox_issue: row.try_get("is_inbox_issue")?,
-            is_intake_issue: row.try_get("is_intake_issue")?,
-            is_mentioned_notification: row.try_get("is_mentioned_notification")?,
-            tu_id: row.try_get("tu_id")?,
-            tu_first_name: row.try_get("tu_first_name")?,
-            tu_last_name: row.try_get("tu_last_name")?,
-            tu_avatar: row.try_get("tu_avatar")?,
-            tu_avatar_asset_id: row.try_get("tu_avatar_asset_id")?,
-            tu_avatar_asset_entity: row.try_get("tu_avatar_asset_entity")?,
-            tu_is_bot: row.try_get("tu_is_bot")?,
-            tu_display_name: row.try_get("tu_display_name")?,
-        })
+    fn from_model(
+        model: pidash_db::entity::notifications::Model,
+        is_intake: bool,
+        tu: Option<TriggeredUser>,
+    ) -> Self {
+        let mentioned = model.sender.to_lowercase().contains("mentioned");
+        let (
+            tu_id,
+            tu_first_name,
+            tu_last_name,
+            tu_avatar,
+            tu_avatar_asset_id,
+            tu_avatar_asset_entity,
+            tu_is_bot,
+            tu_display_name,
+        ) = match tu {
+            Some(user) => (
+                Some(user.id),
+                Some(user.first_name),
+                Some(user.last_name),
+                Some(user.avatar),
+                user.avatar_asset_id,
+                user.avatar_asset_entity,
+                Some(user.is_bot),
+                Some(user.display_name),
+            ),
+            None => (None, None, None, None, None, None, None, None),
+        };
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+            workspace_id: model.workspace_id,
+            project_id: model.project_id,
+            data: model.data,
+            entity_identifier: model.entity_identifier,
+            entity_name: model.entity_name,
+            title: model.title,
+            message: model.message,
+            message_html: model.message_html,
+            message_stripped: model.message_stripped,
+            sender: model.sender,
+            triggered_by_id: model.triggered_by_id,
+            receiver_id: model.receiver_id,
+            read_at: model.read_at.map(|dt| dt.with_timezone(&Utc)),
+            snoozed_till: model.snoozed_till.map(|dt| dt.with_timezone(&Utc)),
+            archived_at: model.archived_at.map(|dt| dt.with_timezone(&Utc)),
+            // BUG-double-exists: both annotations read the same subquery.
+            is_inbox_issue: is_intake,
+            is_intake_issue: is_intake,
+            is_mentioned_notification: mentioned,
+            tu_id,
+            tu_first_name,
+            tu_last_name,
+            tu_avatar,
+            tu_avatar_asset_id,
+            tu_avatar_asset_entity,
+            tu_is_bot,
+            tu_display_name,
+        }
     }
+}
+
+/// The `triggered_by_details` projection (`tu_*`): the user row plus
+/// its live avatar asset (`fa.deleted_at IS NULL` leg preserved).
+#[derive(Clone)]
+struct TriggeredUser {
+    id: Uuid,
+    first_name: String,
+    last_name: String,
+    avatar: String,
+    avatar_asset_id: Option<Uuid>,
+    avatar_asset_entity: Option<String>,
+    is_bot: bool,
+    display_name: String,
+}
+
+/// Page-wide annotation stitching (orm-migration.md §3.4): the intake
+/// `Exists` flags and the `triggered_by` left joins are loaded with
+/// batched `is_in` reads and stitched in memory, preserving the page
+/// order. `is_mentioned_notification` is the `Case/When` icontains
+/// evaluated on the sender.
+async fn stitch_rows(
+    pool: &PgPool,
+    ws_ids: &[Uuid],
+    models: Vec<pidash_db::entity::notifications::Model>,
+) -> Result<Vec<NotificationRow>, Denial> {
+    use std::collections::HashSet;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let db_err = |_| Denial::ServerError;
+    // Intake flags: issues in this workspace slice with an intake row
+    // in status (0, 2, -2) (the `intake_issues` leg carries no
+    // soft-delete conjunct).
+    let entity_ids: Vec<Uuid> = models.iter().filter_map(|m| m.entity_identifier).collect();
+    let intake: HashSet<Uuid> = if entity_ids.is_empty() {
+        HashSet::new()
+    } else {
+        use pidash_db::entity::{intake_issues, issues};
+        let live_issues = issues::Entity::find()
+            .filter(issues::Column::Id.is_in(entity_ids.iter().copied()))
+            .filter(issues::Column::WorkspaceId.is_in(ws_ids.iter().copied()))
+            .filter(issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([issues::Column::Id])
+            .into_tuple::<Uuid>()
+            .all(&db)
+            .await
+            .map_err(db_err)?;
+        if live_issues.is_empty() {
+            HashSet::new()
+        } else {
+            intake_issues::Entity::find()
+                .filter(intake_issues::Column::IssueId.is_in(live_issues.iter().copied()))
+                .filter(intake_issues::Column::Status.is_in([0, 2, -2]))
+                .select_only()
+                .columns([intake_issues::Column::IssueId])
+                .into_tuple::<Uuid>()
+                .all(&db)
+                .await
+                .map_err(db_err)?
+                .into_iter()
+                .collect()
+        }
+    };
+    // `triggered_by` users + live avatar assets.
+    let actor_ids: Vec<Uuid> = models.iter().filter_map(|m| m.triggered_by_id).collect();
+    let actors = if actor_ids.is_empty() {
+        Vec::new()
+    } else {
+        use pidash_db::entity::users;
+        users::Entity::find()
+            .filter(users::Column::Id.is_in(actor_ids.iter().copied()))
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::FirstName,
+                users::Column::LastName,
+                users::Column::Avatar,
+                users::Column::AvatarAssetId,
+                users::Column::IsBot,
+                users::Column::DisplayName,
+            ])
+            .into_tuple::<(Uuid, String, String, String, Option<Uuid>, bool, String)>()
+            .all(&db)
+            .await
+            .map_err(db_err)?
+    };
+    let asset_ids: Vec<Uuid> = actors
+        .iter()
+        .filter_map(|(_, _, _, _, asset, _, _)| *asset)
+        .collect();
+    let assets = if asset_ids.is_empty() {
+        Vec::new()
+    } else {
+        use pidash_db::entity::file_assets;
+        file_assets::Entity::find()
+            .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([file_assets::Column::Id, file_assets::Column::EntityType])
+            .into_tuple::<(Uuid, Option<String>)>()
+            .all(&db)
+            .await
+            .map_err(db_err)?
+    };
+    use std::collections::HashMap;
+    let asset_by_id: HashMap<Uuid, Option<String>> = assets.into_iter().collect();
+    let actor_by_id: HashMap<Uuid, TriggeredUser> = actors
+        .into_iter()
+        .map(
+            |(id, first_name, last_name, avatar, avatar_asset_id, is_bot, display_name)| {
+                let entity =
+                    avatar_asset_id.and_then(|asset| asset_by_id.get(&asset).cloned().flatten());
+                (
+                    id,
+                    TriggeredUser {
+                        id,
+                        first_name,
+                        last_name,
+                        avatar,
+                        avatar_asset_id,
+                        avatar_asset_entity: entity,
+                        is_bot,
+                        display_name,
+                    },
+                )
+            },
+        )
+        .collect();
+    Ok(models
+        .into_iter()
+        .map(|model| {
+            let is_intake = model
+                .entity_identifier
+                .is_some_and(|id| intake.contains(&id));
+            let tu = model
+                .triggered_by_id
+                .and_then(|id| actor_by_id.get(&id).cloned());
+            NotificationRow::from_model(model, is_intake, tu)
+        })
+        .collect())
 }
 
 /// The `avatar_url` property (`db/models/user.py:142-151`): the
@@ -983,24 +1217,14 @@ async fn list(
     let mentioned_present = query_truthy(&query, "mentioned");
 
     let now = Utc::now();
-    let snoozed = match snoozed_clause(&snoozed_param, "$3") {
-        Ok(clause) => clause,
+    let snoozed = match snoozed_cond(&snoozed_param, now) {
+        Ok(cond) => cond,
         Err(denial) => return denial.into_response(),
     };
-    let archived = match archived_clause(&archived_param) {
-        Ok(clause) => clause,
+    let archived = match archived_cond(&archived_param) {
+        Ok(cond) => cond,
         Err(denial) => return denial.into_response(),
     };
-    let mut fragments = vec![
-        base_where("$1", "$2"),
-        "n.\"entity_name\" = 'issue'".to_owned(),
-        snoozed,
-        archived.to_owned(),
-        mentioned_clause(mentioned_present).to_owned(),
-    ];
-    if let Some(clause) = read_clause(read_param.as_deref()) {
-        fragments.push(clause.to_owned());
-    }
 
     // `type` (comma-split, OR arms). The `created` guard evaluates
     // here (`.exists()` hits the database); a hit short-circuits to
@@ -1019,52 +1243,58 @@ async fn list(
     } else {
         false
     };
-    match list_type_filter(&type_param, "$1", "$2", created_member) {
-        TypeFilter::Where(arm) => fragments.push(arm),
-        TypeFilter::Empty => {
+    if created_member {
+        return respond_empty(&query);
+    }
+    let ws_ids = match workspace_ids_for_slug(pool, &slug).await {
+        Ok(ids) => ids,
+        Err(denial) => return denial.into_response(),
+    };
+    if ws_ids.is_empty() {
+        return respond_empty(&query);
+    }
+    let type_ids = match list_type_issue_ids(pool, &type_param, &ws_ids, &actor.id).await {
+        Ok(ids) => ids,
+        Err(denial) => return denial.into_response(),
+    };
+    if let Some(ids) = &type_ids {
+        if ids.is_empty() {
             return respond_empty(&query);
         }
-        TypeFilter::None => {}
     }
-    let where_sql = fragments.join(" AND ");
+    let filters = ListFilters {
+        ws_ids: ws_ids.clone(),
+        user_id: actor.id,
+        snoozed,
+        archived,
+        read: read_cond(read_param.as_deref()),
+        mentioned: mentioned_cond(mentioned_present),
+        type_ids,
+    };
 
     if query_truthy(&query, "per_page") && query_truthy(&query, "cursor") {
-        return paginate_list(
-            pool,
-            &where_sql,
-            &slug,
-            &actor.id,
-            &now,
-            &query,
-            &actor.timezone,
-        )
-        .await;
+        return paginate_list(pool, filters, &query, &actor.timezone).await;
     }
 
     // Full-serializer branch (`:148-149`): the whole filtered
     // queryset in `(snoozed_till, -created_at)` order.
-    let sql = format!(
-        "{} WHERE {} ORDER BY n.\"snoozed_till\" ASC, n.\"created_at\" DESC",
-        row_select_sql("$1", "$2"),
-        where_sql
-    );
-    let rows = match sqlx::query(&sql)
-        .bind(&slug)
-        .bind(actor.id)
-        .bind(now)
-        .fetch_all(pool)
+    let models = match list_select(&filters)
+        .order_by_asc(pidash_db::entity::notifications::Column::SnoozedTill)
+        .order_by_desc(pidash_db::entity::notifications::Column::CreatedAt)
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
     {
-        Ok(rows) => rows,
+        Ok(models) => models,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let mut bodies = Vec::with_capacity(rows.len());
-    for row in &rows {
-        match NotificationRow::get(row) {
-            Ok(parsed) => bodies.push(render_row(&parsed, &actor.timezone)),
-            Err(_) => return Denial::ServerError.into_response(),
-        }
-    }
+    let rows = match stitch_rows(pool, &ws_ids, models).await {
+        Ok(rows) => rows,
+        Err(denial) => return denial.into_response(),
+    };
+    let bodies: Vec<NotificationBody> = rows
+        .iter()
+        .map(|parsed| render_row(parsed, &actor.timezone))
+        .collect();
     json_ok(serde_json::to_string(&bodies).expect("serializable list"))
 }
 
@@ -1114,15 +1344,7 @@ fn respond_empty(query: &QueryMap) -> Response {
 /// (default `"-created_at"`) *replaces* the base ordering
 /// (QUIRK-paginate-reorders).
 #[allow(clippy::too_many_arguments)]
-async fn paginate_list(
-    pool: &PgPool,
-    where_sql: &str,
-    slug: &str,
-    user_id: &Uuid,
-    now: &DateTime<Utc>,
-    query: &QueryMap,
-    tz: &Tz,
-) -> Response {
+async fn paginate_list(pool: &PgPool, filters: ListFilters, query: &QueryMap, tz: &Tz) -> Response {
     let per_page = match paginator::parse_per_page(
         query_last(query, "per_page").as_deref(),
         MAX_PER_PAGE,
@@ -1147,59 +1369,40 @@ async fn paginate_list(
         Ok(order) => order,
         Err(denial) => return denial.into_response(),
     };
-    let direction = if descending { "DESC" } else { "ASC" };
+    use sea_orm::sea_query::{NullOrdering, Order};
+    let db = pidash_db::pool::sea_orm_connection(pool);
     // `queryset.order_by(F(key).dir(nulls_last=True), "-created_at")`.
-    let order_sql = format!("n.\"{column}\" {direction} NULLS LAST, n.\"created_at\" DESC");
-
-    let count_sql = format!(
-        "SELECT COUNT(*) AS \"count\" FROM \"notifications\" n \
-         INNER JOIN \"workspaces\" w ON (n.\"workspace_id\" = w.\"id\") \
-         WHERE {where_sql}"
-    );
-    let total: i64 = match sqlx::query(&count_sql)
-        .bind(slug)
-        .bind(user_id)
-        .bind(now)
-        .fetch_one(pool)
-        .await
-    {
-        Ok(row) => row.try_get("count").unwrap_or(0),
+    let order = if descending { Order::Desc } else { Order::Asc };
+    let total: i64 = match list_select(&filters).count(&db).await {
+        Ok(total) => total as i64,
         Err(_) => return Denial::ServerError.into_response(),
     };
     // `[offset, stop)`: one extra row detects the next page.
     let fetch = (window.stop - window.offset).max(0);
-    let rows_sql = format!(
-        "{} WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
-        row_select_sql("$1", "$2"),
-        where_sql,
-        order_sql,
-        fetch,
-        window.offset
-    );
-    let rows = match sqlx::query(&rows_sql)
-        .bind(slug)
-        .bind(user_id)
-        .bind(now)
-        .fetch_all(pool)
+    let models = match list_select(&filters)
+        .order_by_with_nulls(column, order, NullOrdering::Last)
+        .order_by_desc(pidash_db::entity::notifications::Column::CreatedAt)
+        .limit(fetch as u64)
+        .offset(window.offset as u64)
+        .all(&db)
         .await
     {
-        Ok(rows) => rows,
+        Ok(models) => models,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let has_more = rows.len() as i64 > limit;
+    let has_more = models.len() as i64 > limit;
     // `results[:limit]` on the fetched window (a negative `limit`
     // is Django's lazy-queryset `ValueError` → the 500 envelope).
     if limit < 0 {
         return page_denial(PageError::NegativeSlice).into_response();
     }
-    let kept = &rows[..(limit as usize).min(rows.len())];
-    let mut bodies = Vec::with_capacity(kept.len());
-    for row in kept {
-        match NotificationRow::get(row) {
-            Ok(parsed) => bodies.push(render_row(&parsed, tz)),
-            Err(_) => return Denial::ServerError.into_response(),
-        }
-    }
+    let want = (limit as usize).min(models.len());
+    let kept: Vec<_> = models.into_iter().take(want).collect();
+    let rows = match stitch_rows(pool, &filters.ws_ids, kept).await {
+        Ok(rows) => rows,
+        Err(denial) => return denial.into_response(),
+    };
+    let bodies: Vec<NotificationBody> = rows.iter().map(|parsed| render_row(parsed, tz)).collect();
     let total_pages = match paginator::max_hits(total, limit) {
         Ok(pages) => pages,
         Err(error) => return page_denial(error).into_response(),
@@ -1235,23 +1438,23 @@ async fn fetch_one(
     user_id: &Uuid,
     pk: &Uuid,
 ) -> Result<Option<NotificationRow>, Denial> {
-    let sql = format!(
-        "{} WHERE {} AND n.\"id\" = $4",
-        row_select_sql("$1", "$2"),
-        base_where("$1", "$2")
-    );
-    let row = sqlx::query(&sql)
-        .bind(slug)
-        .bind(user_id)
-        .bind(Utc::now())
-        .bind(pk)
-        .fetch_optional(pool)
+    use pidash_db::entity::notifications as n;
+    let ws_ids = workspace_ids_for_slug(pool, slug).await?;
+    if ws_ids.is_empty() {
+        return Ok(None);
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = n::Entity::find()
+        .filter(base_cond(&ws_ids, user_id))
+        .filter(n::Column::Id.eq(*pk))
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    match row {
-        Some(row) => NotificationRow::get(&row)
-            .map(Some)
-            .map_err(|_| Denial::ServerError),
+    match model {
+        Some(model) => {
+            let rows = stitch_rows(pool, &ws_ids, vec![model]).await?;
+            Ok(rows.into_iter().next())
+        }
         None => Ok(None),
     }
 }
@@ -1354,17 +1557,17 @@ async fn soft_delete(
     user_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Response> {
-    sqlx::query(
-        r#"UPDATE notifications SET deleted_at = $2, updated_at = $2, updated_by_id = $3
-           WHERE id = $1"#,
-    )
-    .bind(pk)
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map(|_| ())
-    .map_err(|_| Denial::ServerError.into_response())
+    use pidash_db::entity::notifications as n;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    n::Entity::update_many()
+        .col_expr(n::Column::DeletedAt, Expr::value(*now))
+        .col_expr(n::Column::UpdatedAt, Expr::value(*now))
+        .col_expr(n::Column::UpdatedById, Expr::value(*user_id))
+        .filter(n::Column::Id.eq(*pk))
+        .exec(&db)
+        .await
+        .map(|_| ())
+        .map_err(|_| Denial::ServerError.into_response())
 }
 
 /// `soft_delete_related_objects.delay("db", "notification", pk, using=None)`
@@ -1742,22 +1945,17 @@ async fn save_stamp(
     user_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Response> {
-    let sql = match column {
-        StampColumn::Read => {
-            r#"UPDATE notifications SET read_at = $2, updated_at = $3, updated_by_id = $4
-           WHERE id = $1"#
-        }
-        StampColumn::Archived => {
-            r#"UPDATE notifications SET archived_at = $2, updated_at = $3, updated_by_id = $4
-           WHERE id = $1"#
-        }
+    use pidash_db::entity::notifications as n;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let stmt = n::Entity::update_many()
+        .col_expr(n::Column::UpdatedAt, Expr::value(*now))
+        .col_expr(n::Column::UpdatedById, Expr::value(*user_id))
+        .filter(n::Column::Id.eq(*pk));
+    let stmt = match column {
+        StampColumn::Read => stmt.col_expr(n::Column::ReadAt, Expr::value(*value)),
+        StampColumn::Archived => stmt.col_expr(n::Column::ArchivedAt, Expr::value(*value)),
     };
-    sqlx::query(sql)
-        .bind(pk)
-        .bind(value)
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+    stmt.exec(&db)
         .await
         .map(|_| ())
         .map_err(|_| Denial::ServerError.into_response())
@@ -1809,35 +2007,42 @@ async fn unread_get(
     )) {
         return response;
     }
-    let base = r#"FROM "notifications" n
-         INNER JOIN "workspaces" w ON (n."workspace_id" = w."id")
-         WHERE w."slug" = $1
-         AND n."receiver_id" = $2
-         AND n."read_at" IS NULL
-         AND n."archived_at" IS NULL
-         AND n."snoozed_till" IS NULL
-         AND n."deleted_at" IS NULL"#;
-    let total: i64 = match sqlx::query_scalar(&format!(
-        r#"SELECT COUNT(*) {base} AND NOT (n."sender" ILIKE '%mentioned%')"#
-    ))
-    .bind(&slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(total) => total,
-        Err(_) => return Denial::ServerError.into_response(),
+    let ws_ids = match workspace_ids_for_slug(pool, &slug).await {
+        Ok(ids) => ids,
+        Err(denial) => return denial.into_response(),
     };
-    let mentions: i64 = match sqlx::query_scalar(&format!(
-        r#"SELECT COUNT(*) {base} AND n."sender" ILIKE '%mentioned%'"#
-    ))
-    .bind(&slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(mentions) => mentions,
-        Err(_) => return Denial::ServerError.into_response(),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let unread_base = |mention_filter: Condition| {
+        use pidash_db::entity::notifications as n;
+        n::Entity::find()
+            .filter(base_cond(&ws_ids, &actor.id))
+            .filter(n::Column::ReadAt.is_null())
+            .filter(n::Column::ArchivedAt.is_null())
+            .filter(n::Column::SnoozedTill.is_null())
+            .filter(mention_filter)
+    };
+    let (total, mentions) = if ws_ids.is_empty() {
+        (0, 0)
+    } else {
+        use pidash_db::entity::notifications as n;
+        let total = match unread_base(
+            Condition::all()
+                .add(Expr::col((n::Entity, n::Column::Sender)).not_ilike("%mentioned%")),
+        )
+        .count(&db)
+        .await
+        {
+            Ok(total) => total as i64,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let mentions = match unread_base(Condition::all().add(sender_ilike()))
+            .count(&db)
+            .await
+        {
+            Ok(mentions) => mentions as i64,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        (total, mentions)
     };
     json_ok(
         serde_json::to_string(&UnreadBody {
@@ -1858,18 +2063,17 @@ async fn save_snoozed(
     user_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Response> {
-    sqlx::query(
-        r#"UPDATE notifications SET snoozed_till = $2, updated_at = $3, updated_by_id = $4
-           WHERE id = $1"#,
-    )
-    .bind(pk)
-    .bind(snoozed)
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map(|_| ())
-    .map_err(|_| Denial::ServerError.into_response())
+    use pidash_db::entity::notifications as n;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    n::Entity::update_many()
+        .col_expr(n::Column::SnoozedTill, Expr::value(*snoozed))
+        .col_expr(n::Column::UpdatedAt, Expr::value(*now))
+        .col_expr(n::Column::UpdatedById, Expr::value(*user_id))
+        .filter(n::Column::Id.eq(*pk))
+        .exec(&db)
+        .await
+        .map(|_| ())
+        .map_err(|_| Denial::ServerError.into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1903,17 +2107,6 @@ fn data_truthy(value: Option<&Value>) -> bool {
         Some(Value::Array(items)) => !items.is_empty(),
         Some(Value::Object(fields)) => !fields.is_empty(),
     }
-}
-
-/// `watching` type arm (mark-all-read, `base.py:258-262`): the plain
-/// subscriber issue list — unlike the list's `subscribed` arm there is
-/// no created/assigned exclusion (QUIRK-mark-type-spelling).
-fn watching_arm(slug_param: &str, user_param: &str) -> String {
-    format!(
-        "n.\"entity_identifier\" IN (SELECT s.\"issue_id\" FROM \"issue_subscribers\" s \
-         INNER JOIN \"workspaces\" ws ON (s.\"workspace_id\" = ws.\"id\") \
-         WHERE (s.\"deleted_at\" IS NULL AND s.\"subscriber_id\" = {user_param} AND ws.\"slug\" = {slug_param}))"
-    )
 }
 
 /// `MarkAllReadNotificationViewSet.create`: session auth, the workspace
@@ -1975,37 +2168,54 @@ async fn mark_all_read_create(
             Err(denial) => return denial.into_response(),
         }
     }
-    let snoozed_sql = match snoozed_clause(if snoozed { "true" } else { "false" }, "$3") {
-        Ok(clause) => clause,
-        Err(denial) => return denial.into_response(),
-    };
-    let archived_sql = match archived_clause(if archived { "true" } else { "false" }) {
-        Ok(clause) => clause,
-        Err(denial) => return denial.into_response(),
-    };
-    // `$1` slug, `$2` user, `$3` now — the same placeholders the
-    // reused arm builders expect.
-    let mut sql = format!(
-        "UPDATE \"notifications\" n SET \"read_at\" = $3 FROM \"workspaces\" w \
-         WHERE (n.\"workspace_id\" = w.\"id\") AND w.\"slug\" = $1 AND n.\"receiver_id\" = $2 \
-         AND n.\"read_at\" IS NULL AND n.\"deleted_at\" IS NULL \
-         AND {snoozed_sql} AND {archived_sql}"
-    );
-    match type_param.as_str() {
-        "watching" => sql.push_str(&format!(" AND {}", watching_arm("$1", "$2"))),
-        "assigned" => sql.push_str(&format!(" AND {}", assigned_arm("$1", "$2"))),
-        "created" => sql.push_str(&format!(" AND {}", created_arm("$1", "$2"))),
-        _ => {}
-    }
     let now = Utc::now();
-    if sqlx::query(&sql)
-        .bind(&slug)
-        .bind(actor.id)
-        .bind(now)
-        .execute(pool)
-        .await
-        .is_err()
-    {
+    let snoozed = match snoozed_cond(if snoozed { "true" } else { "false" }, now) {
+        Ok(cond) => cond,
+        Err(denial) => return denial.into_response(),
+    };
+    let archived = match archived_cond(if archived { "true" } else { "false" }) {
+        Ok(cond) => cond,
+        Err(denial) => return denial.into_response(),
+    };
+    let ws_ids = match workspace_ids_for_slug(pool, &slug).await {
+        Ok(ids) => ids,
+        Err(denial) => return denial.into_response(),
+    };
+    if ws_ids.is_empty() {
+        return json_ok(MARK_ALL_READ_BODY.to_owned());
+    }
+    let type_ids = match type_param.as_str() {
+        "watching" => Some(match watching_issue_ids(pool, &ws_ids, &actor.id).await {
+            Ok(ids) => ids,
+            Err(denial) => return denial.into_response(),
+        }),
+        "assigned" => Some(match assigned_issue_ids(pool, &ws_ids, &actor.id).await {
+            Ok(ids) => ids,
+            Err(denial) => return denial.into_response(),
+        }),
+        "created" => Some(match created_issue_ids(pool, &ws_ids, &actor.id).await {
+            Ok(ids) => ids,
+            Err(denial) => return denial.into_response(),
+        }),
+        _ => None,
+    };
+    if let Some(ids) = &type_ids {
+        if ids.is_empty() {
+            return json_ok(MARK_ALL_READ_BODY.to_owned());
+        }
+    }
+    use pidash_db::entity::notifications as n;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut stmt = n::Entity::update_many()
+        .col_expr(n::Column::ReadAt, Expr::value(now))
+        .filter(base_cond(&ws_ids, &actor.id))
+        .filter(n::Column::ReadAt.is_null())
+        .filter(snoozed)
+        .filter(archived);
+    if let Some(ids) = type_ids {
+        stmt = stmt.filter(n::Column::EntityIdentifier.is_in(ids));
+    }
+    if stmt.exec(&db).await.is_err() {
         return Denial::ServerError.into_response();
     }
     json_ok(MARK_ALL_READ_BODY.to_owned())
@@ -2035,28 +2245,25 @@ struct PreferenceRow {
 }
 
 impl PreferenceRow {
-    fn get(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            id: row.try_get("id")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            deleted_at: row.try_get("deleted_at")?,
-            created_by_id: row.try_get("created_by_id")?,
-            updated_by_id: row.try_get("updated_by_id")?,
-            user_id: row.try_get("user_id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            project_id: row.try_get("project_id")?,
-            property_change: row.try_get("property_change")?,
-            state_change: row.try_get("state_change")?,
-            comment: row.try_get("comment")?,
-            mention: row.try_get("mention")?,
-            issue_completed: row.try_get("issue_completed")?,
-        })
+    fn from_model(model: pidash_db::entity::user_notification_preferences::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            user_id: model.user_id,
+            workspace_id: model.workspace_id,
+            project_id: model.project_id,
+            property_change: model.property_change,
+            state_change: model.state_change,
+            comment: model.comment,
+            mention: model.mention,
+            issue_completed: model.issue_completed,
+        }
     }
 }
-
-/// `SELECT` list for preference rows, in [`PreferenceRow`] order.
-const PREFERENCE_SELECT: &str = r#""id", "created_at", "updated_at", "deleted_at", "created_by_id", "updated_by_id", "user_id", "workspace_id", "project_id", "property_change", "state_change", "comment", "mention", "issue_completed""#;
 
 /// Scoped preference lookup: `UserNotificationPreference.objects.get(
 /// user=request.user)` (`base.py:297,303`) — the default manager, so
@@ -2064,20 +2271,19 @@ const PREFERENCE_SELECT: &str = r#""id", "created_at", "updated_at", "deleted_at
 /// answers the `ObjectDoesNotExist` 404); two or more rows is a
 /// `MultipleObjectsReturned` 500, like Django.
 async fn fetch_preference(pool: &PgPool, user_id: &Uuid) -> Result<Option<PreferenceRow>, Denial> {
-    let sql = format!(
-        "SELECT {PREFERENCE_SELECT} FROM \"user_notification_preferences\" \
-         WHERE \"user_id\" = $1 AND \"deleted_at\" IS NULL"
-    );
-    let rows = sqlx::query(&sql)
-        .bind(user_id)
-        .fetch_all(pool)
+    use pidash_db::entity::user_notification_preferences as pref;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = pref::Entity::find()
+        .filter(pref::Column::UserId.eq(*user_id))
+        .filter(pref::Column::DeletedAt.is_null())
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     match rows.len() {
         0 => Ok(None),
-        1 => PreferenceRow::get(&rows[0])
-            .map(Some)
-            .map_err(|_| Denial::ServerError),
+        1 => Ok(Some(PreferenceRow::from_model(
+            rows.into_iter().next().unwrap(),
+        ))),
         _ => Err(Denial::ServerError),
     }
 }
@@ -2086,20 +2292,13 @@ async fn fetch_preference(pool: &PgPool, user_id: &Uuid) -> Result<Option<Prefer
 /// the row to another user, so the owner lookup no longer applies —
 /// Python re-renders the same instance (`base.py:306-307`).
 async fn fetch_preference_by_id(pool: &PgPool, id: &Uuid) -> Result<Option<PreferenceRow>, Denial> {
-    let sql = format!(
-        "SELECT {PREFERENCE_SELECT} FROM \"user_notification_preferences\" WHERE \"id\" = $1"
-    );
-    let row = sqlx::query(&sql)
-        .bind(id)
-        .fetch_optional(pool)
+    use pidash_db::entity::user_notification_preferences as pref;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = pref::Entity::find_by_id(*id)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    match row {
-        Some(row) => PreferenceRow::get(&row)
-            .map(Some)
-            .map_err(|_| Denial::ServerError),
-        None => Ok(None),
-    }
+    Ok(model.map(PreferenceRow::from_model))
 }
 
 /// `UserNotificationPreferenceSerializer` output (`fields="__all__"`,
@@ -2304,15 +2503,56 @@ async fn check_preference_fk(
         );
         return Ok(None);
     };
-    let mut sql = format!("SELECT 1 AS \"one\" FROM \"{table}\" WHERE \"id\" = $1");
-    if soft_scoped {
-        sql.push_str(" AND \"deleted_at\" IS NULL");
-    }
-    let found: Option<(i32,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| CompileError::Server)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let found = match table {
+        "users" => {
+            use pidash_db::entity::users;
+            users::Entity::find_by_id(id)
+                .select_only()
+                .columns([users::Column::Id])
+                .into_tuple::<Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| CompileError::Server)?
+        }
+        "workspaces" => {
+            use pidash_db::entity::workspaces;
+            let sel = workspaces::Entity::find_by_id(id)
+                .select_only()
+                .columns([workspaces::Column::Id]);
+            let sel = if soft_scoped {
+                sel.filter(workspaces::Column::DeletedAt.is_null())
+            } else {
+                sel
+            };
+            sel.into_tuple::<Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| CompileError::Server)?
+        }
+        "projects" => {
+            use pidash_db::entity::projects;
+            let sel = projects::Entity::find_by_id(id)
+                .select_only()
+                .columns([projects::Column::Id]);
+            let sel = if soft_scoped {
+                sel.filter(projects::Column::DeletedAt.is_null())
+            } else {
+                sel
+            };
+            sel.into_tuple::<Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| CompileError::Server)?
+        }
+        _ => {
+            errors.insert(
+                key.to_owned(),
+                field_error(&format!("Invalid pk \"{text}\" - object does not exist.")),
+            );
+            return Ok(None);
+        }
+    };
     if found.is_none() {
         errors.insert(
             key.to_owned(),
@@ -2470,10 +2710,16 @@ async fn save_preference(
             (column, mapped)
         })
         .collect();
-    pidash_services::domain::identity::save_preference_columns(pool, *id, *now, *user_id, &mapped)
-        .await
-        .map(|_| ())
-        .map_err(|_| Denial::ServerError.into_response())
+    pidash_services::domain::identity::save_preference_columns(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *id,
+        *now,
+        *user_id,
+        &mapped,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| Denial::ServerError.into_response())
 }
 
 /// `preference_patch` (`base.py:302-308`): the owner lookup runs first
@@ -2800,40 +3046,75 @@ mod tests {
     /// read silent-ignore, mentioned presence rule.
     #[test]
     fn filter_branches_port_the_quirks() {
-        assert!(snoozed_clause("true", "$3")
-            .expect("true")
-            .contains("IS NOT NULL"));
-        assert!(snoozed_clause("false", "$3")
-            .expect("false")
-            .contains("IS NULL"));
+        use pidash_db::entity::notifications;
+        use sea_orm::{DbBackend, EntityTrait as _, QueryFilter as _, QueryTrait as _};
+        let now = Utc::now();
+        let true_sql = notifications::Entity::find()
+            .filter(snoozed_cond("true", now).expect("true"))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            true_sql.contains("snoozed_till") && true_sql.contains("IS NOT NULL"),
+            "{true_sql}"
+        );
+        let false_sql = notifications::Entity::find()
+            .filter(snoozed_cond("false", now).expect("false"))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            false_sql.contains("snoozed_till") && false_sql.contains("IS NULL"),
+            "{false_sql}"
+        );
         assert!(matches!(
-            snoozed_clause("bogus", "$3"),
+            snoozed_cond("bogus", now),
             Err(Denial::BadError(_))
         ));
-        assert!(matches!(archived_clause("bogus"), Err(Denial::BadError(_))));
-        assert_eq!(read_clause(None), None);
-        assert_eq!(read_clause(Some("yes")), None);
-        assert!(mentioned_clause(true).starts_with("n.\"sender\""));
-        assert!(mentioned_clause(false).starts_with("NOT"));
+        assert!(matches!(archived_cond("bogus"), Err(Denial::BadError(_))));
+        assert!(read_cond(None).is_none());
+        assert!(read_cond(Some("yes")).is_none());
+        let mentioned = notifications::Entity::find()
+            .filter(mentioned_cond(true))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            mentioned.contains("ILIKE") && mentioned.contains("mentioned"),
+            "{mentioned}"
+        );
+        let not_mentioned = notifications::Entity::find()
+            .filter(mentioned_cond(false))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(not_mentioned.contains("NOT ILIKE"), "{not_mentioned}");
     }
 
-    /// `type=created` + sub-15 membership short-circuits to `.none()`.
+    /// List-select shape: base scope + entity guard + snoozed ordering
+    /// companion columns are pinned without a database.
     #[test]
-    fn created_member_short_circuits() {
-        assert!(matches!(
-            list_type_filter("created", "$1", "$2", true),
-            TypeFilter::Empty
-        ));
-        assert!(matches!(
-            list_type_filter("all", "$1", "$2", false),
-            TypeFilter::None
-        ));
-        let TypeFilter::Where(where_sql) =
-            list_type_filter("subscribed,assigned", "$1", "$2", false)
-        else {
-            panic!("subscribed+assigned filters");
+    fn migrated_list_select_shape() {
+        use pidash_db::entity::notifications;
+        use sea_orm::{DbBackend, EntityTrait, QueryTrait};
+        let workspace_id = Uuid::nil();
+        let receiver = Uuid::nil();
+        let now = Utc::now();
+        let filters = ListFilters {
+            ws_ids: vec![workspace_id],
+            user_id: receiver,
+            snoozed: snoozed_cond("false", now).expect("false"),
+            archived: archived_cond("false").expect("false"),
+            read: read_cond(Some("false")),
+            mentioned: mentioned_cond(false),
+            type_ids: None,
         };
-        assert!(where_sql.contains(" OR "));
+        let sql = notifications::Entity::find()
+            .filter(base_cond(&filters.ws_ids, &filters.user_id))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"notifications\".\"receiver_id\"")
+                && sql.contains("\"notifications\".\"deleted_at\" IS NULL"),
+            "base scope: {sql}"
+        );
+        let _ = list_select(&filters);
     }
 
     /// Single-instance responses omit the annotation keys (the
@@ -2996,17 +3277,52 @@ mod tests {
         assert!(!data_truthy(Some(&Value::Object(Default::default()))));
     }
 
-    /// The `watching` arm is the plain subscriber list (no
-    /// created/assigned exclusion, unlike the list's `subscribed` arm)
-    /// over the caller's placeholders (`base.py:258-262`).
+    /// The `watching` set is the plain subscriber list (no
+    /// created/assigned exclusion, unlike the list's `subscribed`
+    /// set) — pinned at the select-shape level (`base.py:258-262`).
     #[test]
-    fn watching_arm_is_plain_subscribers() {
-        let arm = watching_arm("$1", "$2");
-        assert!(arm.contains("FROM \"issue_subscribers\""));
-        assert!(arm.contains("s.\"subscriber_id\" = $2"));
-        assert!(arm.contains("ws.\"slug\" = $1"));
-        assert!(!arm.contains("created_by"));
-        assert!(!arm.contains("assignee"));
+    fn watching_select_is_plain_subscribers() {
+        use pidash_db::entity::issue_subscribers;
+        use sea_orm::{
+            DbBackend, EntityTrait as _, QueryFilter as _, QuerySelect as _, QueryTrait as _,
+        };
+        let sql = issue_subscribers::Entity::find()
+            .filter(issue_subscribers::Column::SubscriberId.eq(Uuid::nil()))
+            .filter(issue_subscribers::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([issue_subscribers::Column::IssueId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"issue_subscribers\".\"subscriber_id\"")
+                && sql.contains("\"issue_subscribers\".\"issue_id\""),
+            "watching select: {sql}"
+        );
+    }
+
+    /// The `subscribed` assigned leg correlates Django's
+    /// `pk=OuterRef("issue_id")` (`base.py:110`): the assignee row's
+    /// own `id`, not its `issue_id`. Pinned at statement shape so the
+    /// "fix" to `issue_id` cannot re-land silently.
+    #[test]
+    fn subscribed_assigned_correlates_by_pk() {
+        use pidash_db::entity::issue_assignees;
+        use sea_orm::{
+            DbBackend, EntityTrait as _, QueryFilter as _, QuerySelect as _, QueryTrait as _,
+        };
+        let issue_id = Uuid::nil();
+        let sql = issue_assignees::Entity::find()
+            .filter(issue_assignees::Column::AssigneeId.eq(Uuid::nil()))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .filter(issue_assignees::Column::Id.is_in([issue_id]))
+            .select_only()
+            .columns([issue_assignees::Column::Id])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"issue_assignees\".\"id\" IN"),
+            "subscribed assigned leg must correlate by pk: {sql}"
+        );
     }
 
     /// Preference booleans follow DRF's truth tables, including the

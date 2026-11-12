@@ -12,7 +12,8 @@ pub struct Model {
     pub last_seen_at: Option<DateTimeWithTimeZone>,
     pub revoked_at: Option<DateTimeWithTimeZone>,
     pub revoked_reason: String,
-    #[sea_orm(unique)]
+    // Not `unique`: the generator reads a partial unique index as a
+    // column constraint (see the module doc in `mod.rs`).
     pub runner_id: Uuid,
 }
 

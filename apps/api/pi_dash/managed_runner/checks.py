@@ -11,7 +11,7 @@ confusing ``RecipeNotFound`` the first time someone clicks Run).
 """
 
 from django.conf import settings
-from django.core.checks import Error, register
+from django.core.checks import Error, Warning, register
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 
@@ -20,20 +20,23 @@ from pi_dash.core.agent_execution import AgentExecutorKind
 def managed_runner_configuration_check(app_configs, **kwargs):
     errors = []
     default = settings.DEFAULT_AGENT_EXECUTOR
-    if default == AgentExecutorKind.MANAGED_RUNNER and not settings.MANAGED_RUNNER_ENABLED:
+    # Runner is the only executor for new projects (built_engine_as_runner
+    # §6). Another value is ignored rather than refused at boot, so an
+    # instance configured for the old choices keeps starting.
+    if default != AgentExecutorKind.LOCAL_RUNNER:
         errors.append(
-            Error(
-                "DEFAULT_AGENT_EXECUTOR=managed_runner requires MANAGED_RUNNER_ENABLED",
-                id="managed.E001",
+            Warning(
+                f"DEFAULT_AGENT_EXECUTOR={default!r} is ignored: new projects always use local_runner",
+                id="managed.W001",
             )
-        )
-    if settings.MANAGED_RUNNER_MAX_PER_USER_PROJECT < 1:
-        errors.append(
-            Error("MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1", id="managed.E003")
         )
     if settings.MANAGED_RUNNER_QUEUED_MAX_AGE_SECS <= 0:
         errors.append(
             Error("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive", id="managed.E004")
+        )
+    if settings.DEDICATED_RUN_QUEUED_MAX_AGE_SECS <= 0:
+        errors.append(
+            Error("DEDICATED_RUN_QUEUED_MAX_AGE_SECS must be positive", id="dedicated.E004")
         )
 
     from pi_dash.orchestration.agent_phases import PHASES
