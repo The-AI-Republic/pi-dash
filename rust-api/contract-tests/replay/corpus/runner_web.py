@@ -11,7 +11,8 @@ ticket mint), test_web_runners.py (patch/revoke/revive/delete +
 invites), test_web_runs.py (create/cancel/release-pin + re-tick),
 test_web_approvals.py (decide incl. the 500 bug), test_web_chat.py
 (session create/message/warm/cancel/close, chat approvals decide,
-all online + offline legs).
+all online + offline legs), test_web_runner_pause.py (pause/resume
+toggles + idempotency + 404s).
 
 Approvals are seeded black-box through the daemon endpoints inside
 the flow (as the suites do), so the session also covers the daemon
@@ -45,6 +46,9 @@ _NXUUID = "33333333-4444-5555-6666-777777777777"
 
 MT_RAW = "mt_rp823webofff0000000000000000000001"
 AIDW = "22222222-3333-4444-5555-666666666666"
+
+EC_RAW = "ec_rp823engine0000000000000000000001"
+MT_WEB_ENGINE = "mt_rp823wengine00000000000000000001"
 
 _STATIC = {
     "mt": MT_RAW,
@@ -185,6 +189,63 @@ def _setup(world, config) -> dict:
 _MT = {"Authorization": "Bearer {mt}", "X-Runner-Id": "{roff}"}
 
 
+def _seed_engine_sign_out(conn) -> None:
+    import uuid
+
+    from _harness.seed import Seeder, SeedTracker
+    from _harness.tokens import fingerprint as _fp
+    from _harness.tokens import hash_token as _hash
+
+    from .space import _ConnDb
+
+    adapter = _ConnDb(conn)
+    secret = os.environ["SECRET_KEY"]
+    seeder = Seeder(adapter, SeedTracker(adapter), tag="RP823", secret_key=secret)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM workspaces WHERE slug = 'replay-ws'")
+        ws_id = str(cur.fetchone()[0])
+        cur.execute("SELECT id FROM users WHERE email = 'replay-admin@example.com'")
+        admin_id = str(cur.fetchone()[0])
+    machine = seeder.create_dev_machine(admin_id, host_label="rp-wmeng")
+    # The token pulls the machine into workspace scope; the engine
+    # credential is the sign-out's revoke target (active, 14-day TTL).
+    seeder.create_machine_token(
+        admin_id, ws_id, MT_WEB_ENGINE, host_label="rp-wmeng",
+        dev_machine_id=machine["id"],
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO engine_credential
+               (id, user_id, dev_machine_id, token_hash, fingerprint,
+                created_at, expires_at, revoked_reason)
+               VALUES (%s,%s,%s,%s,%s, now(), now() + interval '14 days', '')""",
+            (
+                str(uuid.uuid4()),
+                admin_id,
+                machine["id"],
+                _hash(EC_RAW, secret),
+                _fp(EC_RAW),
+            ),
+        )
+        cur.execute(
+            "UPDATE dev_machine SET engine_sign_in_state = 'active',"
+            " engine_credential_expires_at = now() + interval '14 days'"
+            " WHERE id = %s",
+            (machine["id"],),
+        )
+
+
+def _setup_engine_sign_out(world, config) -> dict:
+    import psycopg
+
+    out = {}
+    with psycopg.connect(config.django_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM dev_machine WHERE host_label = 'rp-wmeng'")
+        out["meng"] = str(cur.fetchone()[0])
+    return out
+
+
+
 SESSIONS = (
     Session(
         name="runner_web_lifecycle",
@@ -192,7 +253,7 @@ SESSIONS = (
         source=(
             "runner/test_web_catalog.py (pods), test_web_machines.py, "
             "runner/test_web_runners.py, test_web_runs.py, "
-            "test_web_approvals.py, test_web_chat.py"
+            "test_web_approvals.py, test_web_chat.py, test_web_runner_pause.py"
         ),
         auth_users=("admin", "member", "api_key"),
         static_context=dict(_STATIC),
@@ -207,7 +268,7 @@ SESSIONS = (
             "machine_token": ["token_hash", "token_fingerprint"],
         },
         timestamp_columns={
-            "runner": ["enrolled_at", "revoked_at", "last_heartbeat_at"],
+            "runner": ["enrolled_at", "revoked_at", "last_heartbeat_at", "paused_at"],
             # Evidence: machine revoke stamps revoked_at with now()
             # per backend (request 53).
             "dev_machine": ["last_seen_at", "revoked_at"],
@@ -221,7 +282,10 @@ SESSIONS = (
             ],
             # Evidence: rotate revokes the machine's tokens with
             # now() per backend (request 52).
-            "machine_token": ["last_used_at", "revoked_at"],
+            # expires_at is minted as now+60d on both backends
+            # (runner/models.py save + Rust tokens mint, PIDESKAPP-122);
+            # the replay sees two instants ms apart (NEWPIDASH-58).
+            "machine_token": ["last_used_at", "revoked_at", "expires_at"],
             "agent_run_approval": ["requested_at"],
             # Evidence: chat-approval decide stamps decided_at with
             # now() per backend (the persisted half of the offline
@@ -651,6 +715,42 @@ SESSIONS = (
                 auth="admin", expect_status=404,
                 **_csrf("w0"),
             ),
+            # -- owner engine controls (#2903, NEWPIDASH-49): PATCH
+            # pod_dispatch + machine PATCH (the moff machine hosts roff,
+            # an own-agent runner; pause/team flips are no-op pins here).
+            # The runner PATCH below expects 404, not 400: rdel_id was
+            # deleted earlier in this session, and both backends look
+            # the runner up before validating pod_dispatch (Django
+            # runners.py patch, Rust manage.rs runner_patch), so both
+            # answer 404 {"error":"not found"} (NEWPIDASH-58 req56).
+            Request(
+                "PATCH", f"{WEB}/{{rdel_id}}/",
+                route=f"{WEB}/{{runner_id}}/",
+                json={"pod_dispatch": "sometimes"},
+                auth="admin", expect_status=404,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "bogus": 1},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "engine_paused_by_owner": "yes"},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "engine_team_runs": True},
+                auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
             Request(
                 "DELETE", f"{WEB}/dev-machines/{{mspare}}/",
                 route=f"{WEB}/dev-machines/{{machine_id}}/",
@@ -693,6 +793,99 @@ SESSIONS = (
                 auth="admin", expect_status=404,
                 **_csrf("w0"),
             ),
+            # -- operator pause / resume (NEWPIDASH-32; ron is online
+            # with no runs, so in_flight_runs is [] and the pause
+            # release + resume drain are no-ops) --
+            Request(
+                "POST", f"{WEB}/{{ron}}/pause/",
+                route=f"{WEB}/{{runner_id}}/pause/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{ron}}/pause/",
+                route=f"{WEB}/{{runner_id}}/pause/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{ron}}/resume/",
+                route=f"{WEB}/{{runner_id}}/resume/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{ron}}/resume/",
+                route=f"{WEB}/{{runner_id}}/resume/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{missing}}/pause/",
+                route=f"{WEB}/{{runner_id}}/pause/",
+                json={}, auth="admin", expect_status=404,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{missing}}/resume/",
+                route=f"{WEB}/{{runner_id}}/resume/",
+                json={}, auth="admin", expect_status=404,
+                **_csrf("w0"),
+            ),
+        ),
+    ),
+    Session(
+        name="runner_web_engine_sign_out",
+        domain="runner_web",
+        source=(
+            "runner/test_engine_credential.py (web engine-sign-out) + "
+            "Django's test_engine_identity.py::test_web_sign_out_the_engine"
+        ),
+        auth_users=("admin",),
+        static_context={"ec": EC_RAW},
+        seed=_seed_engine_sign_out,
+        setup=_setup_engine_sign_out,
+        setup_keys=("meng",),
+        timestamp_columns={
+            # Evidence: the sign-out stamps the credential's
+            # revoked_at with now() per backend; the machine's
+            # engine_state_reported_at stays NULL on both sides.
+            "engine_credential": ["revoked_at"],
+        },
+        db_cell_refs=[
+            ("engine_credential", "dev_machine_id", "dev_machine", ""),
+        ],
+        requests=(
+            _prime("eng"),
+            # The workspace-scoped sign-out revokes the credential
+            # with reason signed_out (state signed_out) and answers
+            # the workspace machine serialization.
+            Request(
+                "POST", f"{WEB}/dev-machines/{{meng}}/engine-sign-out/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/engine-sign-out/",
+                json={"workspace": "{ws_id}"},
+                auth="admin", expect_status=200,
+                **_csrf("eng"),
+            ),
+            # Idempotent: a second sign-out is still 200 (the
+            # credential is already revoked).
+            Request(
+                "POST", f"{WEB}/dev-machines/{{meng}}/engine-sign-out/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/engine-sign-out/",
+                json={"workspace": "{ws_id}"},
+                auth="admin", expect_status=200,
+                **_csrf("eng"),
+            ),
+            # A workspace the machine is not attached to does not
+            # see it (404, nothing revoked).
+            Request(
+                "POST", f"{WEB}/dev-machines/{{meng}}/engine-sign-out/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/engine-sign-out/",
+                json={"workspace": "{other_ws_id}"},
+                auth="admin", expect_status=404,
+                **_csrf("eng"),
+            ),
         ),
     ),
 )
+

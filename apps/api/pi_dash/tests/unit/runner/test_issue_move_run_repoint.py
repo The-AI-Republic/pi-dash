@@ -161,9 +161,7 @@ def test_move_replaces_queued_run_with_fresh_target_run(db, create_user, workspa
         },
     )
 
-    with patch(
-        "pi_dash.orchestration.signals.handle_issue_state_transition"
-    ) as transition:
+    with patch("pi_dash.orchestration.signals.handle_issue_state_transition") as transition:
         _move(
             workspace,
             source_project,
@@ -343,10 +341,16 @@ def test_move_leaves_terminal_run_in_place(db, create_user, workspace, source_pr
     run.refresh_from_db()
     assert run.pod_id == source_pod.id
     assert AgentRun.objects.filter(work_item=issue).count() == 1
-    assert _pinned_runner_for(
-        run,
-        Pod.default_for_project(target_project),
-    ) is None
+    assert (
+        _pinned_runner_for(
+            run,
+            Pod.default_for_project(target_project),
+            creator=create_user,
+            trigger=run.trigger,
+            issue=issue,
+        )
+        is None
+    )
 
 
 @pytest.mark.unit
@@ -362,9 +366,7 @@ def test_move_without_active_run_does_not_require_target_pod(
     target_pod.save(update_fields=["deleted_at"])
     issue = _make_issue(source_project, create_user)
 
-    with patch(
-        "pi_dash.orchestration.signals.handle_issue_state_transition"
-    ) as transition:
+    with patch("pi_dash.orchestration.signals.handle_issue_state_transition") as transition:
         moved = _move(
             workspace,
             source_project,

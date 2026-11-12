@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DAEMON_STOP_GRACE_SECONDS, platform } from "./tauri.js";
+import { platform } from "./tauri.js";
 
 type InvokeFn = (command: string, args?: unknown) => Promise<unknown>;
 
@@ -32,92 +32,75 @@ describe("desktop agent runtime", () => {
     vi.restoreAllMocks();
   });
 
-  it("reports available only when both bundled pieces exist", async () => {
-    const invoke = vi.fn(async () => ({ runner_present: true, engine_present: true, host_label: "h" }));
+  it("discovers the daemon for the app's account", async () => {
+    const found = { kind: "no_daemon", cli: { installed: false, path: null, version: null, updatable: false } };
+    const invoke = vi.fn(async () => found);
     installBridge(invoke);
-    await expect(platform.agentRuntime?.isAvailable()).resolves.toBe(true);
-    expect(invoke).toHaveBeenCalledWith("managed_doctor", undefined);
-  });
-
-  it("reports unavailable when a piece is missing", async () => {
-    installBridge(vi.fn(async () => ({ runner_present: true, engine_present: false, host_label: "h" })));
-    await expect(platform.agentRuntime?.isAvailable()).resolves.toBe(false);
-  });
-
-  it("reports unavailable when the self-check fails", async () => {
-    installBridge(
-      vi.fn(async () => {
-        throw new Error("nope");
-      })
-    );
-    await expect(platform.agentRuntime?.isAvailable()).resolves.toBe(false);
-  });
-
-  it("maps the host self-check with safe defaults", async () => {
-    const invoke = vi.fn(async () => ({}));
-    installBridge(invoke);
-    await expect(platform.agentRuntime?.checkHost()).resolves.toEqual({
-      runnerPresent: false,
-      enginePresent: false,
-      hostLabel: "",
+    await expect(
+      platform.agentRuntime?.discover({ userId: "u1", email: "a@b.test", cloudUrl: "https://cloud.test" })
+    ).resolves.toEqual(found);
+    await platform.agentRuntime?.discover({ userId: "u1", cloudUrl: "https://cloud.test" });
+    expect(invoke).toHaveBeenCalledWith("daemon_discover", {
+      appIdentity: { userId: "u1", email: "a@b.test", cloudUrl: "https://cloud.test" },
     });
-    expect(invoke).toHaveBeenCalledWith("managed_doctor", undefined);
+    expect(invoke).toHaveBeenCalledWith("daemon_discover", {
+      appIdentity: { userId: "u1", cloudUrl: "https://cloud.test" },
+    });
   });
 
-  it("writes the engine config and model token", async () => {
-    const invoke = vi.fn(async () => undefined);
+  it("lists the daemon's runners, reading none as empty", async () => {
+    const runner = {
+      name: "engine-ws-p",
+      runner_id: "r1",
+      workspace_slug: "ws",
+      project_slug: "P",
+      working_dir: "/t",
+      agent: "engine",
+    };
+    const invoke = vi.fn(async () => [runner]);
     installBridge(invoke);
-    const profile = { available: true, base_url: "https://models.test", model: "m", reason_code: "" };
-    await platform.agentRuntime?.writeEngineConfig({ account: "u1", profile });
-    await platform.agentRuntime?.writeModelToken("tok");
-    expect(invoke).toHaveBeenCalledWith("managed_write_engine_config", { account: "u1", profile });
-    expect(invoke).toHaveBeenCalledWith("managed_write_model_token", { token: "tok" });
+    await expect(platform.agentRuntime?.localRunners()).resolves.toEqual([runner]);
+    expect(invoke).toHaveBeenCalledWith("daemon_runners", undefined);
+    installBridge(vi.fn(async () => null));
+    await expect(platform.agentRuntime?.localRunners()).resolves.toEqual([]);
   });
 
-  it("bootstraps the machine and enrolls the project", async () => {
-    const invoke = vi.fn(async () => undefined);
-    installBridge(invoke);
-    await platform.agentRuntime?.bootstrapMachine({
-      cloudUrl: "https://cloud.test",
-      workspace: "ws",
-      machineToken: "mt",
-      devMachineId: "dm",
-    });
-    await platform.agentRuntime?.enrollProject({ account: "u1", workspace: "ws", project: "P", hostLabel: "h" });
-    expect(invoke).toHaveBeenCalledWith("managed_bootstrap", {
-      cloudUrl: "https://cloud.test",
-      workspace: "ws",
-      machineToken: "mt",
-      devMachineId: "dm",
-    });
-    expect(invoke).toHaveBeenCalledWith("managed_enroll", {
-      account: "u1",
+  it("adds an engine runner, sending no working folder when none is named", async () => {
+    const invoke = vi.fn(async () => ({
+      runner: "r",
+      runner_id: "id",
       workspace: "ws",
       project: "P",
-      hostLabel: "h",
+      working_dir: "/t",
+    }));
+    installBridge(invoke);
+    await platform.agentRuntime?.addEngineRunner({ workspace: "ws", project: "P" });
+    await platform.agentRuntime?.addEngineRunner({ workspace: "ws", project: "P", workingDir: "/w" });
+    expect(invoke).toHaveBeenCalledWith("daemon_engine_runner_add", {
+      workspace: "ws",
+      project: "P",
+      workingDir: null,
+    });
+    expect(invoke).toHaveBeenCalledWith("daemon_engine_runner_add", {
+      workspace: "ws",
+      project: "P",
+      workingDir: "/w",
     });
   });
 
-  it("starts the daemon and stops it with the default grace", async () => {
+  it("runs the set-up, engine sign-in and credential reload commands", async () => {
     const invoke = vi.fn(async () => undefined);
     installBridge(invoke);
-    await platform.agentRuntime?.startDaemon({ account: "u1", workspace: "ws" });
-    await platform.agentRuntime?.stopDaemon();
-    await platform.agentRuntime?.stopDaemon(1);
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "u1", workspace: "ws" });
-    expect(invoke).toHaveBeenCalledWith("managed_stop_daemon", { graceSeconds: DAEMON_STOP_GRACE_SECONDS });
-    expect(invoke).toHaveBeenCalledWith("managed_stop_daemon", { graceSeconds: 1 });
-    expect(DAEMON_STOP_GRACE_SECONDS).toBe(5);
-  });
-
-  it("signs out natively with and without history deletion", async () => {
-    const invoke = vi.fn(async () => undefined);
-    installBridge(invoke);
-    await platform.agentRuntime?.signOutNative();
-    await platform.agentRuntime?.signOutNative({ deleteChatHistoryAccount: "u1" });
-    await platform.agentRuntime?.signOutNative({ deleteChatHistoryAccount: undefined });
-    expect(invoke).toHaveBeenCalledWith("managed_sign_out", undefined);
-    expect(invoke).toHaveBeenCalledWith("managed_sign_out", { clearChatHistory: { account: "u1" } });
+    await platform.agentRuntime?.installService();
+    await platform.agentRuntime?.ensureEngine();
+    await platform.agentRuntime?.engineLogin("dev-code");
+    await platform.agentRuntime?.reloadCredentials();
+    expect(invoke.mock.calls).toEqual([
+      ["daemon_install_service", undefined],
+      ["daemon_ensure_engine", undefined],
+      ["pidash_cli_engine_login", { deviceCode: "dev-code" }],
+      ["daemon_credentials_reload", undefined],
+    ]);
   });
 
   it("stashes and loads approval modes", async () => {
@@ -136,12 +119,45 @@ describe("desktop agent runtime", () => {
     await expect(platform.agentRuntime?.loadApprovalModes("u1")).resolves.toEqual({});
   });
 
+  it("runs the migration and notices commands", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "legacy_scan") return [];
+      if (
+        command === "desktop_notices_load" ||
+        command === "desktop_notices_record" ||
+        command === "desktop_notices_dismiss"
+      )
+        return { notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] };
+      return undefined;
+    });
+    installBridge(invoke);
+    await expect(platform.agentRuntime?.scanLegacyTrees()).resolves.toEqual([]);
+    await platform.agentRuntime?.finishLegacyTree({ dir: "/d", account: "u1", daemonAccount: "u1" });
+    await platform.agentRuntime?.restoreLegacyFolder({ runner: "r", workingDir: "/w" });
+    await platform.agentRuntime?.loadNotices("u1");
+    await platform.agentRuntime?.recordNotices("u1", { legacy_folders: [], pod_member_projects: [] });
+    await platform.agentRuntime?.dismissNotices("u1", ["folder:/t"]);
+    await platform.agentRuntime?.signOutComputer();
+    expect(invoke).toHaveBeenCalledWith("legacy_scan", undefined);
+    expect(invoke).toHaveBeenCalledWith("legacy_finish", { dir: "/d", account: "u1", daemonAccount: "u1" });
+    expect(invoke).toHaveBeenCalledWith("legacy_restore_folder", { runner: "r", workingDir: "/w" });
+    expect(invoke).toHaveBeenCalledWith("desktop_notices_load", { account: "u1" });
+    expect(invoke).toHaveBeenCalledWith("desktop_notices_record", {
+      account: "u1",
+      notices: { legacy_folders: [], pod_member_projects: [] },
+    });
+    expect(invoke).toHaveBeenCalledWith("desktop_notices_dismiss", { account: "u1", keys: ["folder:/t"] });
+    expect(invoke).toHaveBeenCalledWith("pidash_cli_logout", { engine: false });
+  });
+
   it("rejects runtime calls without the bridge", async () => {
-    await expect(platform.agentRuntime?.checkHost()).rejects.toThrow("managed_doctor needs the native bridge");
-    await expect(platform.agentRuntime?.writeModelToken("t")).rejects.toThrow(
-      "managed_write_model_token needs the native bridge"
+    await expect(platform.agentRuntime?.discover({ userId: "u1", cloudUrl: "https://c.test" })).rejects.toThrow(
+      "daemon_discover needs the native bridge"
     );
-    await expect(platform.agentRuntime?.isAvailable()).resolves.toBe(false);
+    await expect(platform.agentRuntime?.engineLogin("d")).rejects.toThrow(
+      "pidash_cli_engine_login needs the native bridge"
+    );
+    await expect(platform.agentRuntime?.signOutComputer()).rejects.toThrow("pidash_cli_logout needs the native bridge");
   });
 });
 

@@ -102,11 +102,11 @@ EXPECTED_LEAVES = [
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0168_ticker_stop_signal_disarm_reason"),
+    ("db", "0174_legacy_creation_defaults"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+    ("runner", "0039_issue_assigned_runner"),
     ("sessions", "0001_initial"),
 ]
 REPO_LEAVES = [leaf for leaf in EXPECTED_LEAVES if leaf[0] in {"assistant", "db", "license", "prompting", "runner"}]
@@ -686,9 +686,12 @@ def test_migrations_leaf_crosscheck_from_repo_files():
                 if isinstance(dep, ast.Tuple) and len(dep.elts) == 2:
                     dep_app = ast.literal_eval(dep.elts[0])
                     dep_name = ast.literal_eval(dep.elts[1])
-                    if dep_app == app or (migrations_root / "pi_dash" / dep_app).is_dir():
-                        # An edge inside first-party apps (or to one):
-                        # the dependency gains a dependent.
+                    if dep_app == app:
+                        # Django leaf rule: only same-app children count
+                        # (MigrationGraph.leaf_nodes: no *same-app*
+                        # dependents). A cross-app edge (db 0174 ->
+                        # runner 0039) does not make runner 0039 a
+                        # non-leaf, so only same-app edges are recorded.
                         dependents.add((dep_app, dep_name))
                 # `swappable_dependency(...)` calls are edges *to* auth —
                 # they never make a first-party node a non-leaf.

@@ -13,18 +13,22 @@
 //! (`hard_delete.first_statements` / `all_statements`,
 //! `soft_delete_walk.*`) and `columns.json` (column lists).
 //!
-//! Query-building uses `sea-query` with every literal inlined, executed
-//! through `sqlx::query(&sql)`. Inlining is safe here: table and column
-//! names come from internal constants or the live catalog (both quoted by
-//! the builder), primary keys are typed (`RowPk`: parsed `Uuid` or
-//! catalog-decoded `i64`) before use, and the cutoff is formatted by
-//! `chrono`. No caller input reaches SQL raw.
+//! Query-building uses `sea-query`, executed through SeaORM
+//! `ConnectionTrait` over `sea_orm_connection(&pool)` (or `TxConn` inside
+//! sqlx transactions). Values bind typed — never interpolated — so Sqlx
+//! argument parity holds by construction. Table and column names come
+//! from internal constants or the live catalog (both quoted as the
+//! builder's `Alias`es), and the cutoff is parsed back into a typed bound
+//! before use. No caller input reaches the builder raw.
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use sea_query::{Alias, Expr, Order, PostgresQueryBuilder, Query, SimpleExpr};
-use sqlx::{PgPool, Row};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult};
+use sea_query::{Alias, Expr, Func, Keyword, Order, Query, SimpleExpr};
+use sqlx::PgPool;
+
+use crate::orm_tx::{into_sqlx, TxConn};
 
 /// `deleted_at` marker column, as on every `SoftDeleteModel`.
 pub const DELETED_AT: &str = "deleted_at";
@@ -395,29 +399,28 @@ pub fn cutoff_for(days: i64, now: DateTime<Utc>) -> String {
 /// `DELETE FROM "<table>" WHERE "<table>"."deleted_at" < '<cutoff>'`
 /// (`model.all_objects.filter(deleted_at__lt=cutoff).delete()`:
 /// `all_objects` is unscoped, so no `deleted_at IS NULL` guard).
-pub fn hard_delete_before_sql(table: &str, cutoff: &str) -> String {
-    Query::delete()
-        .from_table(Alias::new(table.to_owned()))
-        .and_where(
-            Expr::col((
-                Alias::new(table.to_owned()),
-                Alias::new(DELETED_AT.to_owned()),
-            ))
-            .lt(cutoff),
-        )
-        .to_string(PostgresQueryBuilder)
+pub fn hard_delete_before_stmt(table: &str, cutoff: DateTime<Utc>) -> sea_query::DeleteStatement {
+    let mut stmt = Query::delete();
+    stmt.from_table(Alias::new(table.to_owned())).and_where(
+        Expr::col((
+            Alias::new(table.to_owned()),
+            Alias::new(DELETED_AT.to_owned()),
+        ))
+        .lt(cutoff),
+    );
+    stmt
 }
 
 /// Full-save stamp: `UPDATE "<table>" SET deleted_at + updated_at WHERE pk`
 /// (instance `save()`: `deleted_at = now()` plus the `auto_now`
 /// `updated_at` bump; `updated_at` only when the table has it).
-pub fn soft_stamp_sql(
+pub fn soft_stamp_stmt(
     table: &str,
     pk_col: &str,
     pk: &RowPk,
-    now: &str,
+    now: DateTime<Utc>,
     has_updated_at: bool,
-) -> String {
+) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(table.to_owned()));
     if has_updated_at {
@@ -429,7 +432,7 @@ pub fn soft_stamp_sql(
         stmt.value(Alias::new(DELETED_AT.to_owned()), now);
     }
     stmt.and_where(Expr::col(Alias::new(pk_col.to_owned())).eq(pk.as_query_value()));
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// `save(update_fields=[fk])` on a reverse one-to-one:
@@ -438,19 +441,22 @@ pub fn soft_stamp_sql(
 /// (which fires `auto_now`) runs only for those fields — so unlike the
 /// full `save()` behind [`soft_stamp_sql`], a partial save never bumps
 /// `updated_at` (`deletion_task.py:56-57`).
-pub fn null_fk_one_to_one_sql(
+pub fn null_fk_one_to_one_stmt(
     child_table: &str,
     child_pk_col: &str,
     child_pk: &RowPk,
     fk_col: &str,
     _now: &str,
     _has_updated_at: bool,
-) -> String {
+) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()));
-    stmt.value(Alias::new(fk_col.to_owned()), None::<&str>);
+    stmt.value(
+        Alias::new(fk_col.to_owned()),
+        SimpleExpr::Keyword(Keyword::Null),
+    );
     stmt.and_where(Expr::col(Alias::new(child_pk_col.to_owned())).eq(child_pk.as_query_value()));
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// `related_queryset.update(fk=None)`: `UPDATE child SET fk = NULL WHERE
@@ -472,15 +478,18 @@ pub fn null_fk_one_to_one_sql(
 /// (`db/models/state.py:79-83`): `.exclude(group=TRIAGE)`. `group` is NOT
 /// NULL with no `null=True`, so a plain `<> 'triage'` is exact — there are
 /// no NULL rows to preserve.
-pub fn null_fk_bulk_sql(
+pub fn null_fk_bulk_stmt(
     child_table: &str,
     fk_col: &str,
     parent_pk: &RowPk,
     scope_live: bool,
-) -> String {
+) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()))
-        .value(Alias::new(fk_col.to_owned()), None::<&str>)
+        .value(
+            Alias::new(fk_col.to_owned()),
+            SimpleExpr::Keyword(Keyword::Null),
+        )
         .and_where(Expr::col(Alias::new(fk_col.to_owned())).eq(parent_pk.as_query_value()));
     if scope_live {
         stmt.and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
@@ -558,7 +567,7 @@ pub fn null_fk_bulk_sql(
     if child_table == "states" {
         stmt.and_where(states_scope_predicate(child_table));
     }
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// `StateManager.get_queryset()` as one predicate
@@ -607,34 +616,86 @@ impl SchemaInfo {
 
 /// Load [`SchemaInfo`] from the Postgres catalog (two round trips).
 pub async fn load_schema_info(pool: &PgPool) -> Result<SchemaInfo, sqlx::Error> {
-    let columns = sqlx::query(
-        "SELECT t.table_name, c.column_name \
-         FROM information_schema.tables t \
-         JOIN information_schema.columns c \
-           ON c.table_name = t.table_name AND c.table_schema = t.table_schema \
-         WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'",
-    )
-    .fetch_all(pool)
-    .await?;
+    let conn = crate::pool::sea_orm_connection(pool);
+    // Catalog reads use sea-query statements with explicit schema-qualified
+    // aliases (information_schema has no SeaORM entity).
+    let mut columns_stmt = Query::select();
+    columns_stmt
+        .expr_as(
+            Expr::col((Alias::new("t"), Alias::new("table_name"))),
+            Alias::new("table_name".to_owned()),
+        )
+        .expr_as(
+            Expr::col((Alias::new("c"), Alias::new("column_name"))),
+            Alias::new("column_name".to_owned()),
+        )
+        .from_as(
+            (Alias::new("information_schema"), Alias::new("tables")),
+            Alias::new("t"),
+        )
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            (Alias::new("information_schema"), Alias::new("columns")),
+            Alias::new("c"),
+            Expr::col((Alias::new("c"), Alias::new("table_name")))
+                .equals((Alias::new("t"), Alias::new("table_name")))
+                .and(
+                    Expr::col((Alias::new("c"), Alias::new("table_schema")))
+                        .equals((Alias::new("t"), Alias::new("table_schema"))),
+                ),
+        )
+        .and_where(Expr::col((Alias::new("t"), Alias::new("table_schema"))).eq("public"))
+        .and_where(Expr::col((Alias::new("t"), Alias::new("table_type"))).eq("BASE TABLE"));
+    let columns = conn
+        .query_all(DbBackend::Postgres.build(&columns_stmt))
+        .await
+        .map_err(into_sqlx)?;
     let mut info = SchemaInfo::default();
     for row in columns {
-        let table: String = row.try_get("table_name")?;
-        let column: String = row.try_get("column_name")?;
+        let table: String = row.try_get_by("table_name").map_err(into_sqlx)?;
+        let column: String = row.try_get_by("column_name").map_err(into_sqlx)?;
         info.columns.entry(table).or_default().insert(column);
     }
-    let pks = sqlx::query(
-        "SELECT kcu.table_name, kcu.column_name \
-         FROM information_schema.table_constraints tc \
-         JOIN information_schema.key_column_usage kcu \
-           ON kcu.constraint_name = tc.constraint_name \
-          AND kcu.constraint_schema = tc.constraint_schema \
-         WHERE tc.constraint_schema = 'public' AND tc.constraint_type = 'PRIMARY KEY'",
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut pks_stmt = Query::select();
+    pks_stmt
+        .expr_as(
+            Expr::col((Alias::new("kcu"), Alias::new("table_name"))),
+            Alias::new("table_name".to_owned()),
+        )
+        .expr_as(
+            Expr::col((Alias::new("kcu"), Alias::new("column_name"))),
+            Alias::new("column_name".to_owned()),
+        )
+        .from_as(
+            (
+                Alias::new("information_schema"),
+                Alias::new("table_constraints"),
+            ),
+            Alias::new("tc"),
+        )
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            (
+                Alias::new("information_schema"),
+                Alias::new("key_column_usage"),
+            ),
+            Alias::new("kcu"),
+            Expr::col((Alias::new("kcu"), Alias::new("constraint_name")))
+                .equals((Alias::new("tc"), Alias::new("constraint_name")))
+                .and(
+                    Expr::col((Alias::new("kcu"), Alias::new("constraint_schema")))
+                        .equals((Alias::new("tc"), Alias::new("constraint_schema"))),
+                ),
+        )
+        .and_where(Expr::col((Alias::new("tc"), Alias::new("constraint_schema"))).eq("public"))
+        .and_where(Expr::col((Alias::new("tc"), Alias::new("constraint_type"))).eq("PRIMARY KEY"));
+    let pks = conn
+        .query_all(DbBackend::Postgres.build(&pks_stmt))
+        .await
+        .map_err(into_sqlx)?;
     for row in pks {
-        let table: String = row.try_get("table_name")?;
-        let column: String = row.try_get("column_name")?;
+        let table: String = row.try_get_by("table_name").map_err(into_sqlx)?;
+        let column: String = row.try_get_by("column_name").map_err(into_sqlx)?;
         info.pk_column.entry(table).or_insert(column);
     }
     Ok(info)
@@ -893,59 +954,189 @@ pub async fn reverse_relations(
     pool: &PgPool,
     parent_table: &str,
 ) -> Result<Vec<ReverseRelation>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT kcu.table_name AS child_table, kcu.column_name AS fk_column, \
-                rc.delete_rule AS delete_rule, \
-                EXISTS ( \
-                  SELECT 1 \
-                  FROM information_schema.table_constraints tc2 \
-                  JOIN information_schema.key_column_usage kcu2 \
-                    ON kcu2.constraint_name = tc2.constraint_name \
-                   AND kcu2.constraint_schema = tc2.constraint_schema \
-                   AND kcu2.table_name = kcu.table_name \
-                   AND kcu2.column_name = kcu.column_name \
-                  WHERE tc2.constraint_schema = 'public' \
-                    AND tc2.table_name = kcu.table_name \
-                    AND tc2.constraint_type IN ('UNIQUE', 'PRIMARY KEY') \
-                    AND (SELECT count(*) \
-                         FROM information_schema.key_column_usage kcu3 \
-                         WHERE kcu3.constraint_name = tc2.constraint_name \
-                           AND kcu3.constraint_schema = tc2.constraint_schema) = 1 \
-                ) AS is_unique, \
-                (SELECT kcu4.column_name \
-                 FROM information_schema.table_constraints tc4 \
-                 JOIN information_schema.key_column_usage kcu4 \
-                   ON kcu4.constraint_name = tc4.constraint_name \
-                  AND kcu4.constraint_schema = tc4.constraint_schema \
-                 WHERE tc4.constraint_schema = 'public' \
-                   AND tc4.table_name = kcu.table_name \
-                   AND tc4.constraint_type = 'PRIMARY KEY' \
-                 LIMIT 1) AS child_pk \
-         FROM information_schema.referential_constraints rc \
-         JOIN information_schema.key_column_usage kcu \
-           ON kcu.constraint_name = rc.constraint_name \
-          AND kcu.constraint_schema = rc.constraint_schema \
-         JOIN information_schema.constraint_column_usage ccu \
-           ON ccu.constraint_name = rc.unique_constraint_name \
-          AND ccu.constraint_schema = rc.unique_constraint_schema \
-         WHERE rc.constraint_schema = 'public' \
-           AND ccu.table_schema = 'public' \
-           AND ccu.table_name = $1 \
-         ORDER BY kcu.table_name, kcu.column_name",
+    let mut unique_inner = Query::select();
+    unique_inner
+        .expr(Expr::val(1))
+        .from_as(
+            (
+                Alias::new("information_schema"),
+                Alias::new("table_constraints"),
+            ),
+            Alias::new("tc2"),
+        )
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            (
+                Alias::new("information_schema"),
+                Alias::new("key_column_usage"),
+            ),
+            Alias::new("kcu2"),
+            Expr::col((Alias::new("kcu2"), Alias::new("constraint_name")))
+                .equals((Alias::new("tc2"), Alias::new("constraint_name")))
+                .and(
+                    Expr::col((Alias::new("kcu2"), Alias::new("constraint_schema")))
+                        .equals((Alias::new("tc2"), Alias::new("constraint_schema"))),
+                )
+                .and(
+                    Expr::col((Alias::new("kcu2"), Alias::new("table_name")))
+                        .equals((Alias::new("kcu"), Alias::new("table_name"))),
+                )
+                .and(
+                    Expr::col((Alias::new("kcu2"), Alias::new("column_name")))
+                        .equals((Alias::new("kcu"), Alias::new("column_name"))),
+                ),
+        )
+        .and_where(Expr::col((Alias::new("tc2"), Alias::new("constraint_schema"))).eq("public"))
+        .and_where(
+            Expr::col((Alias::new("tc2"), Alias::new("table_name")))
+                .equals((Alias::new("kcu"), Alias::new("table_name"))),
+        )
+        .and_where(
+            Expr::col((Alias::new("tc2"), Alias::new("constraint_type")))
+                .is_in(["UNIQUE", "PRIMARY KEY"]),
+        );
+    // (SELECT count(*) FROM kcu3 WHERE kcu3.constraint_name = tc2.constraint_name
+    //   AND kcu3.constraint_schema = tc2.constraint_schema) = 1
+    let mut single_col = Query::select();
+    single_col
+        .expr_as(
+            Func::count::<SimpleExpr>(Expr::col(Alias::new("column_name")).into()),
+            "count",
+        )
+        .from_as(
+            (
+                Alias::new("information_schema"),
+                Alias::new("key_column_usage"),
+            ),
+            Alias::new("kcu3"),
+        )
+        .and_where(
+            Expr::col((Alias::new("kcu3"), Alias::new("constraint_name")))
+                .equals((Alias::new("tc2"), Alias::new("constraint_name"))),
+        )
+        .and_where(
+            Expr::col((Alias::new("kcu3"), Alias::new("constraint_schema")))
+                .equals((Alias::new("tc2"), Alias::new("constraint_schema"))),
+        );
+    unique_inner.and_where(
+        SimpleExpr::SubQuery(None, Box::new(single_col.into_sub_query_statement()))
+            .binary(sea_query::BinOper::Equal, SimpleExpr::Value(1.into())),
+    );
+    let mut pk_inner = Query::select();
+    pk_inner
+        .expr(Expr::col((Alias::new("kcu4"), Alias::new("column_name"))))
+        .from_as(
+            (
+                Alias::new("information_schema"),
+                Alias::new("table_constraints"),
+            ),
+            Alias::new("tc4"),
+        )
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            (
+                Alias::new("information_schema"),
+                Alias::new("key_column_usage"),
+            ),
+            Alias::new("kcu4"),
+            Expr::col((Alias::new("kcu4"), Alias::new("constraint_name")))
+                .equals((Alias::new("tc4"), Alias::new("constraint_name")))
+                .and(
+                    Expr::col((Alias::new("kcu4"), Alias::new("constraint_schema")))
+                        .equals((Alias::new("tc4"), Alias::new("constraint_schema"))),
+                ),
+        )
+        .and_where(Expr::col((Alias::new("tc4"), Alias::new("constraint_schema"))).eq("public"))
+        .and_where(
+            Expr::col((Alias::new("tc4"), Alias::new("table_name")))
+                .equals((Alias::new("kcu"), Alias::new("table_name"))),
+        )
+        .and_where(Expr::col((Alias::new("tc4"), Alias::new("constraint_type"))).eq("PRIMARY KEY"))
+        .limit(1);
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col((Alias::new("kcu"), Alias::new("table_name"))),
+        Alias::new("child_table".to_owned()),
     )
-    .bind(parent_table)
-    .fetch_all(pool)
-    .await?;
+    .expr_as(
+        Expr::col((Alias::new("kcu"), Alias::new("column_name"))),
+        Alias::new("fk_column".to_owned()),
+    )
+    .expr_as(
+        Expr::col((Alias::new("rc"), Alias::new("delete_rule"))),
+        Alias::new("delete_rule".to_owned()),
+    )
+    .expr_as(
+        Expr::exists(unique_inner),
+        Alias::new("is_unique".to_owned()),
+    )
+    .expr_as(
+        SimpleExpr::SubQuery(None, Box::new(pk_inner.into_sub_query_statement())),
+        Alias::new("child_pk".to_owned()),
+    )
+    .from_as(
+        (
+            Alias::new("information_schema"),
+            Alias::new("referential_constraints"),
+        ),
+        Alias::new("rc"),
+    )
+    .join_as(
+        sea_query::JoinType::InnerJoin,
+        (
+            Alias::new("information_schema"),
+            Alias::new("key_column_usage"),
+        ),
+        Alias::new("kcu"),
+        Expr::col((Alias::new("kcu"), Alias::new("constraint_name")))
+            .equals((Alias::new("rc"), Alias::new("constraint_name")))
+            .and(
+                Expr::col((Alias::new("kcu"), Alias::new("constraint_schema")))
+                    .equals((Alias::new("rc"), Alias::new("constraint_schema"))),
+            ),
+    )
+    .join_as(
+        sea_query::JoinType::InnerJoin,
+        (
+            Alias::new("information_schema"),
+            Alias::new("constraint_column_usage"),
+        ),
+        Alias::new("ccu"),
+        Expr::col((Alias::new("ccu"), Alias::new("constraint_name")))
+            .equals((Alias::new("rc"), Alias::new("unique_constraint_name")))
+            .and(
+                Expr::col((Alias::new("ccu"), Alias::new("constraint_schema")))
+                    .equals((Alias::new("rc"), Alias::new("unique_constraint_schema"))),
+            ),
+    )
+    .and_where(Expr::col((Alias::new("rc"), Alias::new("constraint_schema"))).eq("public"))
+    .and_where(Expr::col((Alias::new("ccu"), Alias::new("table_schema"))).eq("public"))
+    .and_where(Expr::col((Alias::new("ccu"), Alias::new("table_name"))).eq(parent_table))
+    .order_by(
+        (Alias::new("kcu"), Alias::new("table_name")),
+        sea_query::Order::Asc,
+    )
+    .order_by(
+        (Alias::new("kcu"), Alias::new("column_name")),
+        sea_query::Order::Asc,
+    );
+    // Replace the order aliases with column tuples for catalog scoping.
+    let conn = crate::pool::sea_orm_connection(pool);
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     let mut relations = Vec::with_capacity(rows.len());
     for row in rows {
         relations.push(ReverseRelation {
-            child_table: row.try_get("child_table")?,
-            fk_column: row.try_get("fk_column")?,
+            child_table: row.try_get_by("child_table").map_err(into_sqlx)?,
+            fk_column: row.try_get_by("fk_column").map_err(into_sqlx)?,
             child_pk: row
-                .try_get::<Option<String>, _>("child_pk")?
+                .try_get_by::<Option<String>, _>("child_pk")
+                .map_err(into_sqlx)?
                 .unwrap_or_else(|| PK_COLUMN.to_owned()),
-            delete_rule: row.try_get("delete_rule")?,
-            one_to_one: row.try_get("is_unique")?,
+            delete_rule: row.try_get_by("delete_rule").map_err(into_sqlx)?,
+            one_to_one: row.try_get_by("is_unique").map_err(into_sqlx)?,
         });
     }
     Ok(relations)
@@ -1008,15 +1199,16 @@ impl RowPk {
 /// 32-bit ints (only `project_identifiers` is non-UUID today; the `i32`
 /// arm keeps a future `AutoField` child working). A pk of any other type
 /// surfaces as the decode error — an honest failure, never a skip.
-fn decode_child_pk(row: &sqlx::postgres::PgRow) -> Result<RowPk, sqlx::Error> {
-    if let Ok(pk) = row.try_get::<uuid::Uuid, _>("pk") {
+fn decode_child_pk(row: &QueryResult) -> Result<RowPk, sqlx::Error> {
+    if let Ok(pk) = row.try_get_by::<uuid::Uuid, _>("pk") {
         return Ok(RowPk::Uuid(pk));
     }
-    if let Ok(pk) = row.try_get::<i64, _>("pk") {
+    if let Ok(pk) = row.try_get_by::<i64, _>("pk") {
         return Ok(RowPk::Int(pk));
     }
-    row.try_get::<i32, _>("pk")
+    row.try_get_by::<i32, _>("pk")
         .map(|pk| RowPk::Int(i64::from(pk)))
+        .map_err(into_sqlx)
 }
 
 /// The `model_class.all_objects.get(pk)` snapshot: unscoped (sees already
@@ -1036,18 +1228,27 @@ pub async fn fetch_row(
     pk: &uuid::Uuid,
 ) -> Result<Option<RowState>, sqlx::Error> {
     let pk_col = schema.pk_column(table);
-    let select = if schema.has_deleted_at(table) {
-        format!("SELECT \"{pk_col}\" AS pk, \"deleted_at\" FROM \"{table}\" WHERE \"{pk_col}\" = '{pk}'")
-    } else {
-        format!("SELECT \"{pk_col}\" AS pk FROM \"{table}\" WHERE \"{pk_col}\" = '{pk}'")
-    };
-    let row = sqlx::query(&select).fetch_optional(pool).await?;
+    let conn = crate::pool::sea_orm_connection(pool);
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col(Alias::new(pk_col.to_owned())),
+        Alias::new("pk".to_owned()),
+    );
+    if schema.has_deleted_at(table) {
+        stmt.expr(Expr::col(Alias::new(DELETED_AT.to_owned())));
+    }
+    stmt.from(Alias::new(table.to_owned()))
+        .and_where(Expr::col(Alias::new(pk_col.to_owned())).eq(*pk));
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     match row {
         None => Ok(None),
         Some(row) => Ok(Some(RowState {
             pk: RowPk::Uuid(*pk),
             deleted_at: if schema.has_deleted_at(table) {
-                row.try_get("deleted_at")?
+                row.try_get_by("deleted_at").map_err(into_sqlx)?
             } else {
                 None
             },
@@ -1068,11 +1269,11 @@ pub async fn fetch_row(
 /// services CASCADE branch needs it for the `if not deleted_at` skip
 /// (`:70-71`), while the SET_NULL branch nulls whatever is found
 /// (`:54-57`, no `deleted_at` check).
-fn one_to_one_select(
+fn one_to_one_stmt(
     relation: &ReverseRelation,
     parent_pk: &RowPk,
     select_deleted_at: bool,
-) -> String {
+) -> sea_query::SelectStatement {
     let mut stmt = Query::select();
     stmt.expr_as(
         Expr::col(Alias::new(relation.child_pk.clone())),
@@ -1084,7 +1285,7 @@ fn one_to_one_select(
         stmt.expr(Expr::col(Alias::new(DELETED_AT.to_owned())));
     }
     stmt.limit(1);
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// Fetch the related row behind a reverse one-to-one: the catalog form
@@ -1099,21 +1300,22 @@ pub async fn fetch_one_to_one(
     relation: &ReverseRelation,
     parent_pk: &RowPk,
 ) -> Result<Option<RowState>, sqlx::Error> {
-    // The builder lives and drops inside the pure call above (no
-    // await inside), so no non-`Send` `SeaRc` handle is alive at the
-    // `.await` below and the walk future stays `Send`.
-    let select = one_to_one_select(
+    let stmt = one_to_one_stmt(
         relation,
         parent_pk,
         schema.has_deleted_at(&relation.child_table),
     );
-    let row = sqlx::query(&select).fetch_optional(pool).await?;
+    let conn = crate::pool::sea_orm_connection(pool);
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     match row {
         None => Ok(None),
         Some(row) => Ok(Some(RowState {
             pk: decode_child_pk(&row)?,
             deleted_at: if schema.has_deleted_at(&relation.child_table) {
-                row.try_get("deleted_at")?
+                row.try_get_by("deleted_at").map_err(into_sqlx)?
             } else {
                 None
             },
@@ -1129,12 +1331,12 @@ pub async fn fetch_one_to_one(
 /// `SoftDeletionManager`, so `issues` deliberately carry no
 /// `IssueManager` guard here — unlike the SET_NULL path, which inherits
 /// the child *default* manager).
-fn live_to_many_select(
+fn live_to_many_stmt(
     child_table: &str,
     child_pk: &str,
     fk_col: &str,
     parent_pk: &RowPk,
-) -> String {
+) -> sea_query::SelectStatement {
     let mut stmt = Query::select();
     stmt.expr_as(
         Expr::col(Alias::new(child_pk.to_owned())),
@@ -1147,8 +1349,8 @@ fn live_to_many_select(
     if child_table == "states" {
         stmt.and_where(states_scope_predicate(child_table));
     }
-    stmt.order_by(Alias::new(child_pk.to_owned()), Order::Asc)
-        .to_string(PostgresQueryBuilder)
+    stmt.order_by(Alias::new(child_pk.to_owned()), Order::Asc);
+    stmt
 }
 
 /// Fetch every LIVE row behind a to-many CASCADE: the catalog form of the
@@ -1175,25 +1377,34 @@ pub async fn fetch_live_to_many(
     if !schema.has_deleted_at(&relation.child_table) {
         return Ok(Vec::new());
     }
-    let select = live_to_many_select(
+    let stmt = live_to_many_stmt(
         &relation.child_table,
         &relation.child_pk,
         &relation.fk_column,
         parent_pk,
     );
+    let conn = crate::pool::sea_orm_connection(pool);
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     let mut out = Vec::new();
-    for row in sqlx::query(&select).fetch_all(pool).await? {
+    for row in rows {
         out.push(RowState {
             pk: decode_child_pk(&row)?,
-            deleted_at: row.try_get("deleted_at")?,
+            deleted_at: row.try_get_by("deleted_at").map_err(into_sqlx)?,
         });
     }
     Ok(out)
 }
 
-/// Execute a rendered statement; returns affected rows.
-async fn execute(pool: &PgPool, sql: &str) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query(sql).execute(pool).await?.rows_affected())
+/// Execute a statement; returns affected rows.
+async fn execute(pool: &PgPool, stmt: &sea_orm::Statement) -> Result<u64, sqlx::Error> {
+    let result = crate::pool::sea_orm_connection(pool)
+        .execute(stmt.clone())
+        .await
+        .map_err(into_sqlx)?;
+    Ok(result.rows_affected())
 }
 
 /// Stamp one row (full-save shape): returns affected rows.
@@ -1204,14 +1415,19 @@ pub async fn stamp_row(
     pk: &RowPk,
     now: &str,
 ) -> Result<u64, sqlx::Error> {
-    let sql = soft_stamp_sql(
+    // `now` is the Django-literal `now_stamp()` render; parse it back so
+    // the bound binds typed, never as interpolated text.
+    let parsed = DateTime::parse_from_str(now, "%Y-%m-%d %H:%M:%S%:z")
+        .map_err(|_| sqlx::Error::Protocol(format!("unparsable soft-delete stamp: {now}")))?
+        .with_timezone(&Utc);
+    let stmt = soft_stamp_stmt(
         table,
         schema.pk_column(table),
         pk,
-        now,
+        parsed,
         schema.has_column(table, UPDATED_AT),
     );
-    execute(pool, &sql).await
+    execute(pool, &DbBackend::Postgres.build(&stmt)).await
 }
 
 /// Null one reverse one-to-one (`save(update_fields=[fk])` shape).
@@ -1222,7 +1438,7 @@ pub async fn null_one_to_one(
     child_pk: &RowPk,
     now: &str,
 ) -> Result<u64, sqlx::Error> {
-    let sql = null_fk_one_to_one_sql(
+    let stmt = null_fk_one_to_one_stmt(
         &relation.child_table,
         &relation.child_pk,
         child_pk,
@@ -1230,7 +1446,7 @@ pub async fn null_one_to_one(
         now,
         schema.has_column(&relation.child_table, UPDATED_AT),
     );
-    execute(pool, &sql).await
+    execute(pool, &DbBackend::Postgres.build(&stmt)).await
 }
 
 /// Null every live row behind a to-many `SET_NULL` (queryset-update shape).
@@ -1240,13 +1456,13 @@ pub async fn null_bulk(
     relation: &ReverseRelation,
     parent_pk: &RowPk,
 ) -> Result<u64, sqlx::Error> {
-    let sql = null_fk_bulk_sql(
+    let stmt = null_fk_bulk_stmt(
         &relation.child_table,
         &relation.fk_column,
         parent_pk,
         schema.has_deleted_at(&relation.child_table),
     );
-    execute(pool, &sql).await
+    execute(pool, &DbBackend::Postgres.build(&stmt)).await
 }
 
 /// One catalog foreign key: the Collector emulation's graph edge.
@@ -1284,29 +1500,81 @@ impl FkEdge {
 /// Every FK edge in `public`, deduplicated, ordered by
 /// `(child_table, fk_column)` for determinism.
 pub async fn load_fk_details(pool: &PgPool) -> Result<Vec<FkEdge>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT DISTINCT kcu.table_name AS child_table, kcu.column_name AS fk_column, \
-                ccu.table_name AS parent_table, rc.delete_rule AS delete_rule \
-         FROM information_schema.referential_constraints rc \
-         JOIN information_schema.key_column_usage kcu \
-           ON kcu.constraint_name = rc.constraint_name \
-          AND kcu.constraint_schema = rc.constraint_schema \
-         JOIN information_schema.constraint_column_usage ccu \
-           ON ccu.constraint_name = rc.unique_constraint_name \
-          AND ccu.constraint_schema = rc.unique_constraint_schema \
-         WHERE rc.constraint_schema = 'public' \
-           AND ccu.table_schema = 'public' \
-         ORDER BY 1, 2",
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col((Alias::new("kcu"), Alias::new("table_name"))),
+        Alias::new("child_table".to_owned()),
     )
-    .fetch_all(pool)
-    .await?;
+    .expr_as(
+        Expr::col((Alias::new("kcu"), Alias::new("column_name"))),
+        Alias::new("fk_column".to_owned()),
+    )
+    .expr_as(
+        Expr::col((Alias::new("ccu"), Alias::new("table_name"))),
+        Alias::new("parent_table".to_owned()),
+    )
+    .expr_as(
+        Expr::col((Alias::new("rc"), Alias::new("delete_rule"))),
+        Alias::new("delete_rule".to_owned()),
+    )
+    .distinct()
+    .from_as(
+        (
+            Alias::new("information_schema"),
+            Alias::new("referential_constraints"),
+        ),
+        Alias::new("rc"),
+    )
+    .join_as(
+        sea_query::JoinType::InnerJoin,
+        (
+            Alias::new("information_schema"),
+            Alias::new("key_column_usage"),
+        ),
+        Alias::new("kcu"),
+        Expr::col((Alias::new("kcu"), Alias::new("constraint_name")))
+            .equals((Alias::new("rc"), Alias::new("constraint_name")))
+            .and(
+                Expr::col((Alias::new("kcu"), Alias::new("constraint_schema")))
+                    .equals((Alias::new("rc"), Alias::new("constraint_schema"))),
+            ),
+    )
+    .join_as(
+        sea_query::JoinType::InnerJoin,
+        (
+            Alias::new("information_schema"),
+            Alias::new("constraint_column_usage"),
+        ),
+        Alias::new("ccu"),
+        Expr::col((Alias::new("ccu"), Alias::new("constraint_name")))
+            .equals((Alias::new("rc"), Alias::new("unique_constraint_name")))
+            .and(
+                Expr::col((Alias::new("ccu"), Alias::new("constraint_schema")))
+                    .equals((Alias::new("rc"), Alias::new("unique_constraint_schema"))),
+            ),
+    )
+    .and_where(Expr::col((Alias::new("rc"), Alias::new("constraint_schema"))).eq("public"))
+    .and_where(Expr::col((Alias::new("ccu"), Alias::new("table_schema"))).eq("public"))
+    .order_by(
+        (Alias::new("kcu"), Alias::new("table_name")),
+        sea_query::Order::Asc,
+    )
+    .order_by(
+        (Alias::new("kcu"), Alias::new("column_name")),
+        sea_query::Order::Asc,
+    );
+    let conn = crate::pool::sea_orm_connection(pool);
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     let mut edges = Vec::with_capacity(rows.len());
     for row in rows {
         edges.push(FkEdge {
-            child_table: row.try_get("child_table")?,
-            fk_column: row.try_get("fk_column")?,
-            parent_table: row.try_get("parent_table")?,
-            delete_rule: row.try_get("delete_rule")?,
+            child_table: row.try_get_by("child_table").map_err(into_sqlx)?,
+            fk_column: row.try_get_by("fk_column").map_err(into_sqlx)?,
+            parent_table: row.try_get_by("parent_table").map_err(into_sqlx)?,
+            delete_rule: row.try_get_by("delete_rule").map_err(into_sqlx)?,
         });
     }
     Ok(edges)
@@ -1343,10 +1611,24 @@ pub fn classify_delete_edges(
 /// '<cutoff>')`: the empty-seed short-circuit. A Collector run over an
 /// empty queryset visits no relations and commits nothing, so a model
 /// with no due tombstones is a no-op without further queries.
-pub fn hard_delete_seed_exists_sql(table: &str, cutoff: &str) -> String {
-    format!(
-        "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE \"{table}\".\"deleted_at\" < '{cutoff}')"
-    )
+pub fn hard_delete_seed_exists_stmt(
+    table: &str,
+    cutoff: DateTime<Utc>,
+) -> sea_query::SelectStatement {
+    let mut inner = Query::select();
+    inner
+        .expr(Expr::val(1))
+        .from(Alias::new(table.to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new(table.to_owned()),
+                Alias::new(DELETED_AT.to_owned()),
+            ))
+            .lt(cutoff),
+        );
+    let mut stmt = Query::select();
+    stmt.expr(Expr::exists(inner));
+    stmt
 }
 
 /// L1 CASCADE collection: `SELECT "<child_pk>" AS pk FROM "<child>"
@@ -1360,32 +1642,45 @@ pub fn hard_delete_seed_exists_sql(table: &str, cutoff: &str) -> String {
 /// while the collected fringe (rows outside the tombstone set) stays
 /// small. Child tables without `deleted_at` (M2M through tables) collect
 /// identically — there is no child-side predicate at all.
-pub fn cascade_seed_children_sql(
+pub fn cascade_seed_children_stmt(
     child_table: &str,
     child_pk: &str,
     fk_col: &str,
     parent_table: &str,
     parent_pk: &str,
-    cutoff: &str,
-) -> String {
-    format!(
-        "SELECT \"{child_pk}\" AS pk FROM \"{child_table}\" \
-         WHERE \"{fk_col}\" IN \
-         (SELECT \"{parent_pk}\" FROM \"{parent_table}\" \
-         WHERE \"{parent_table}\".\"deleted_at\" < '{cutoff}')"
+    cutoff: DateTime<Utc>,
+) -> sea_query::SelectStatement {
+    let mut inner = Query::select();
+    inner
+        .expr(Expr::col(Alias::new(parent_pk.to_owned())))
+        .from(Alias::new(parent_table.to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new(parent_table.to_owned()),
+                Alias::new(DELETED_AT.to_owned()),
+            ))
+            .lt(cutoff),
+        );
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Expr::col(Alias::new(child_pk.to_owned())),
+        Alias::new("pk".to_owned()),
     )
+    .from(Alias::new(child_table.to_owned()))
+    .and_where(Expr::col(Alias::new(fk_col.to_owned())).in_subquery(inner));
+    stmt
 }
 
 /// Transitive CASCADE collection: `SELECT "<child_pk>" AS pk FROM
 /// "<child>" WHERE "<fk>" IN (<id literals>)`. `ids` is one chunk of an
 /// already-collected parent id set; callers never pass an empty slice
 /// (`IN ()` is invalid SQL).
-pub fn cascade_collected_children_sql(
+pub fn cascade_collected_children_stmt(
     child_table: &str,
     child_pk: &str,
     fk_col: &str,
     ids: &[RowPk],
-) -> String {
+) -> sea_query::SelectStatement {
     let mut stmt = Query::select();
     stmt.expr_as(
         Expr::col(Alias::new(child_pk.to_owned())),
@@ -1395,32 +1690,50 @@ pub fn cascade_collected_children_sql(
     .and_where(
         Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
     );
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// `PROTECT` pre-check over the due seeds: `SELECT EXISTS(SELECT 1 FROM
 /// "<child>" WHERE "<fk>" IN (SELECT ... due seeds ...))`. Any hit aborts
 /// the model pass before its transaction opens, like the Collector
 /// raising during collection.
-pub fn protect_seed_check_sql(
+pub fn protect_seed_check_stmt(
     child_table: &str,
     fk_col: &str,
     parent_table: &str,
     parent_pk: &str,
-    cutoff: &str,
-) -> String {
-    format!(
-        "SELECT EXISTS(SELECT 1 FROM \"{child_table}\" WHERE \"{fk_col}\" IN \
-         (SELECT \"{parent_pk}\" FROM \"{parent_table}\" \
-         WHERE \"{parent_table}\".\"deleted_at\" < '{cutoff}'))"
-    )
+    cutoff: DateTime<Utc>,
+) -> sea_query::SelectStatement {
+    let mut inner = Query::select();
+    inner
+        .expr(Expr::col(Alias::new(parent_pk.to_owned())))
+        .from(Alias::new(parent_table.to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new(parent_table.to_owned()),
+                Alias::new(DELETED_AT.to_owned()),
+            ))
+            .lt(cutoff),
+        );
+    let mut check = Query::select();
+    check
+        .expr(Expr::val(1))
+        .from(Alias::new(child_table.to_owned()))
+        .and_where(Expr::col(Alias::new(fk_col.to_owned())).in_subquery(inner));
+    let mut stmt = Query::select();
+    stmt.expr(Expr::exists(check));
+    stmt
 }
 
 /// `PROTECT` pre-check over collected ids: `SELECT EXISTS(SELECT 1 FROM
 /// "<child>" WHERE "<fk>" IN (<id literals>))`. No exclusion of rows
 /// collected for deletion: `PROTECT` fires on those too (the Collector
 /// checks the unscoped related set, not the delete set).
-pub fn protect_collected_check_sql(child_table: &str, fk_col: &str, ids: &[RowPk]) -> String {
+pub fn protect_collected_check_stmt(
+    child_table: &str,
+    fk_col: &str,
+    ids: &[RowPk],
+) -> sea_query::SelectStatement {
     let mut stmt = Query::select();
     let mut inner = Query::select();
     inner
@@ -1430,7 +1743,7 @@ pub fn protect_collected_check_sql(child_table: &str, fk_col: &str, ids: &[RowPk
             Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
         );
     stmt.expr(Expr::exists(inner));
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// Collector `SET_NULL` over the due seeds: `UPDATE "<child>" SET
@@ -1442,41 +1755,62 @@ pub fn protect_collected_check_sql(child_table: &str, fk_col: &str, ids: &[RowPk
 /// `_base_manager` — tombstoned, triage, archived, and draft rows are
 /// nulled exactly like live ones, and `updated_at` is untouched (a bulk
 /// `QuerySet.update`, never a save).
-pub fn null_fk_emulation_seed_sql(
+pub fn null_fk_emulation_seed_stmt(
     child_table: &str,
     fk_col: &str,
     parent_table: &str,
     parent_pk: &str,
-    cutoff: &str,
-) -> String {
-    format!(
-        "UPDATE \"{child_table}\" SET \"{fk_col}\" = NULL WHERE \"{fk_col}\" IN \
-         (SELECT \"{parent_pk}\" FROM \"{parent_table}\" \
-         WHERE \"{parent_table}\".\"deleted_at\" < '{cutoff}')"
-    )
+    cutoff: DateTime<Utc>,
+) -> sea_query::UpdateStatement {
+    let mut inner = Query::select();
+    inner
+        .expr(Expr::col(Alias::new(parent_pk.to_owned())))
+        .from(Alias::new(parent_table.to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new(parent_table.to_owned()),
+                Alias::new(DELETED_AT.to_owned()),
+            ))
+            .lt(cutoff),
+        );
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(child_table.to_owned()))
+        .value(
+            Alias::new(fk_col.to_owned()),
+            SimpleExpr::Keyword(Keyword::Null),
+        )
+        .and_where(Expr::col(Alias::new(fk_col.to_owned())).in_subquery(inner));
+    stmt
 }
 
 /// Collector `SET_NULL` over collected ids: `UPDATE "<child>" SET
 /// "<fk>" = NULL WHERE "<fk>" IN (<id literals>)`, unscoped as above.
-pub fn null_fk_emulation_ids_sql(child_table: &str, fk_col: &str, ids: &[RowPk]) -> String {
+pub fn null_fk_emulation_ids_stmt(
+    child_table: &str,
+    fk_col: &str,
+    ids: &[RowPk],
+) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()))
-        .value(Alias::new(fk_col.to_owned()), None::<&str>)
+        .value(
+            Alias::new(fk_col.to_owned()),
+            SimpleExpr::Keyword(Keyword::Null),
+        )
         .and_where(
             Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
         );
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// `DELETE FROM "<table>" WHERE "<pk>" IN (<id literals>)`: removes one
 /// chunk of CASCADE-collected rows (which may be live, so the
 /// `deleted_at` predicate cannot select them).
-pub fn delete_ids_sql(table: &str, pk_col: &str, ids: &[RowPk]) -> String {
+pub fn delete_ids_stmt(table: &str, pk_col: &str, ids: &[RowPk]) -> sea_query::DeleteStatement {
     let mut stmt = Query::delete();
     stmt.from_table(Alias::new(table.to_owned())).and_where(
         Expr::col(Alias::new(pk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
     );
-    stmt.to_string(PostgresQueryBuilder)
+    stmt
 }
 
 /// Id-list chunk size for collected-id statements: 1000 UUIDs render
@@ -1545,9 +1879,20 @@ pub async fn run_model_hard_delete(
     table: &str,
     cutoff: &str,
 ) -> Result<ModelDeleteOutcome, ModelDeleteError> {
-    let seed_exists: bool = sqlx::query_scalar(&hard_delete_seed_exists_sql(table, cutoff))
-        .fetch_one(pool)
-        .await?;
+    // `cutoff` is the Django-literal `cutoff_for` render; parse it back so
+    // the due-seed bound binds typed, never as interpolated text.
+    let cutoff: DateTime<Utc> = DateTime::parse_from_str(cutoff, "%Y-%m-%d %H:%M:%S%:z")
+        .map_err(|_| sqlx::Error::Protocol(format!("unparsable hard-delete cutoff: {cutoff}")))?
+        .with_timezone(&Utc);
+    let conn = crate::pool::sea_orm_connection(pool);
+    let seed_row = conn
+        .query_one(DbBackend::Postgres.build(&hard_delete_seed_exists_stmt(table, cutoff)))
+        .await
+        .map_err(into_sqlx)?;
+    let seed_exists: bool = seed_row
+        .ok_or_else(|| sqlx::Error::Protocol("hard delete seed check returned no row".to_owned()))?
+        .try_get_by("exists")
+        .map_err(into_sqlx)?;
     if !seed_exists {
         return Ok(ModelDeleteOutcome::default());
     }
@@ -1556,15 +1901,18 @@ pub async fn run_model_hard_delete(
     // L1: direct CASCADE children of the due seeds (subquery-seeded).
     let mut collected: HashMap<String, HashSet<RowPk>> = HashMap::new();
     for edge in cascade.iter().filter(|e| e.parent_table == table) {
-        let sql = cascade_seed_children_sql(
-            &edge.child_table,
-            schema.pk_column(&edge.child_table),
-            &edge.fk_column,
-            table,
-            parent_pk,
-            cutoff,
-        );
-        for row in sqlx::query(&sql).fetch_all(pool).await? {
+        for row in conn
+            .query_all(DbBackend::Postgres.build(&cascade_seed_children_stmt(
+                &edge.child_table,
+                schema.pk_column(&edge.child_table),
+                &edge.fk_column,
+                table,
+                parent_pk,
+                cutoff,
+            )))
+            .await
+            .map_err(into_sqlx)?
+        {
             collected
                 .entry(edge.child_table.clone())
                 .or_default()
@@ -1593,13 +1941,17 @@ pub async fn run_model_hard_delete(
             }
             let child_pk_col = schema.pk_column(&edge.child_table);
             for chunk in parent_ids.chunks(ID_CHUNK) {
-                let sql = cascade_collected_children_sql(
+                let stmt = cascade_collected_children_stmt(
                     &edge.child_table,
                     child_pk_col,
                     &edge.fk_column,
                     chunk,
                 );
-                for row in sqlx::query(&sql).fetch_all(pool).await? {
+                for row in conn
+                    .query_all(DbBackend::Postgres.build(&stmt))
+                    .await
+                    .map_err(into_sqlx)?
+                {
                     if collected
                         .entry(edge.child_table.clone())
                         .or_default()
@@ -1619,15 +1971,20 @@ pub async fn run_model_hard_delete(
     // for this model's own seeds, id-list form for collected parents.
     for edge in protect.iter() {
         if edge.parent_table == table {
-            let hit: bool = sqlx::query_scalar(&protect_seed_check_sql(
-                &edge.child_table,
-                &edge.fk_column,
-                table,
-                parent_pk,
-                cutoff,
-            ))
-            .fetch_one(pool)
-            .await?;
+            let hit_row = conn
+                .query_one(DbBackend::Postgres.build(&protect_seed_check_stmt(
+                    &edge.child_table,
+                    &edge.fk_column,
+                    table,
+                    parent_pk,
+                    cutoff,
+                )))
+                .await
+                .map_err(into_sqlx)?;
+            let hit: bool = hit_row
+                .ok_or_else(|| sqlx::Error::Protocol("protect check returned no row".to_owned()))?
+                .try_get_by("exists")
+                .map_err(into_sqlx)?;
             if hit {
                 return Err(ModelDeleteError::Protected {
                     parent_table: table.to_owned(),
@@ -1642,13 +1999,20 @@ pub async fn run_model_hard_delete(
                 if chunk.is_empty() {
                     continue;
                 }
-                let hit: bool = sqlx::query_scalar(&protect_collected_check_sql(
-                    &edge.child_table,
-                    &edge.fk_column,
-                    chunk,
-                ))
-                .fetch_one(pool)
-                .await?;
+                let hit_row = conn
+                    .query_one(DbBackend::Postgres.build(&protect_collected_check_stmt(
+                        &edge.child_table,
+                        &edge.fk_column,
+                        chunk,
+                    )))
+                    .await
+                    .map_err(into_sqlx)?;
+                let hit: bool = hit_row
+                    .ok_or_else(|| {
+                        sqlx::Error::Protocol("protect check returned no row".to_owned())
+                    })?
+                    .try_get_by("exists")
+                    .map_err(into_sqlx)?;
                 if hit {
                     return Err(ModelDeleteError::Protected {
                         parent_table: edge.parent_table.clone(),
@@ -1669,14 +2033,19 @@ pub async fn run_model_hard_delete(
     let mut outcome = ModelDeleteOutcome::default();
     for edge in set_null.iter() {
         if edge.parent_table == table {
-            let sql = null_fk_emulation_seed_sql(
+            let stmt = null_fk_emulation_seed_stmt(
                 &edge.child_table,
                 &edge.fk_column,
                 table,
                 parent_pk,
                 cutoff,
             );
-            outcome.nulled += sqlx::query(&sql).execute(&mut *tx).await?.rows_affected();
+            let tx_conn = TxConn::new(&mut tx);
+            outcome.nulled += tx_conn
+                .execute(DbBackend::Postgres.build(&stmt))
+                .await
+                .map_err(into_sqlx)?
+                .rows_affected();
         }
         if let Some(ids) = collected.get(&edge.parent_table) {
             let ids: Vec<RowPk> = ids.iter().copied().collect();
@@ -1684,15 +2053,25 @@ pub async fn run_model_hard_delete(
                 if chunk.is_empty() {
                     continue;
                 }
-                let sql = null_fk_emulation_ids_sql(&edge.child_table, &edge.fk_column, chunk);
-                outcome.nulled += sqlx::query(&sql).execute(&mut *tx).await?.rows_affected();
+                let stmt = null_fk_emulation_ids_stmt(&edge.child_table, &edge.fk_column, chunk);
+                let tx_conn = TxConn::new(&mut tx);
+                outcome.nulled += tx_conn
+                    .execute(DbBackend::Postgres.build(&stmt))
+                    .await
+                    .map_err(into_sqlx)?
+                    .rows_affected();
             }
         }
     }
-    let seeds_removed = sqlx::query(&hard_delete_before_sql(table, cutoff))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let seeds_removed = {
+        let stmt = hard_delete_before_stmt(table, cutoff);
+        let tx_conn = TxConn::new(&mut tx);
+        tx_conn
+            .execute(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(into_sqlx)?
+            .rows_affected()
+    };
     if seeds_removed > 0 {
         outcome.deleted.push((table.to_owned(), seeds_removed));
     }
@@ -1704,9 +2083,12 @@ pub async fn run_model_hard_delete(
             if chunk.is_empty() {
                 continue;
             }
-            removed += sqlx::query(&delete_ids_sql(collected_table, pk_col, chunk))
-                .execute(&mut *tx)
-                .await?
+            let stmt = delete_ids_stmt(collected_table, pk_col, chunk);
+            let tx_conn = TxConn::new(&mut tx);
+            removed += tx_conn
+                .execute(DbBackend::Postgres.build(&stmt))
+                .await
+                .map_err(into_sqlx)?
                 .rows_affected();
         }
         if removed > 0 {
@@ -1720,8 +2102,14 @@ pub async fn run_model_hard_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_query::PostgresQueryBuilder;
 
     const CUTOFF: &str = "2026-08-29 06:00:00+00:00";
+    fn cutoff() -> DateTime<Utc> {
+        DateTime::parse_from_str(CUTOFF, "%Y-%m-%d %H:%M:%S%:z")
+            .expect("valid test cutoff")
+            .with_timezone(&Utc)
+    }
 
     fn uuid(s: &str) -> uuid::Uuid {
         uuid::Uuid::parse_str(s).expect("valid test uuid")
@@ -1730,28 +2118,31 @@ mod tests {
     #[test]
     fn hard_delete_sql_matches_fixture_first_statements() {
         let expected = [
-            "DELETE FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"projects\" WHERE \"projects\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"cycles\" WHERE \"cycles\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"modules\" WHERE \"modules\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"issues\" WHERE \"issues\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"pages\" WHERE \"pages\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"issue_views\" WHERE \"issue_views\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"labels\" WHERE \"labels\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"states\" WHERE \"states\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"issue_activities\" WHERE \"issue_activities\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"issue_comments\" WHERE \"issue_comments\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"issue_links\" WHERE \"issue_links\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"issue_reactions\" WHERE \"issue_reactions\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"user_favorites\" WHERE \"user_favorites\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"module_issues\" WHERE \"module_issues\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"cycle_issues\" WHERE \"cycle_issues\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"estimates\" WHERE \"estimates\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
-            "DELETE FROM \"estimate_points\" WHERE \"estimate_points\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
+            "DELETE FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"projects\" WHERE \"projects\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"cycles\" WHERE \"cycles\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"modules\" WHERE \"modules\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"issues\" WHERE \"issues\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"pages\" WHERE \"pages\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"issue_views\" WHERE \"issue_views\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"labels\" WHERE \"labels\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"states\" WHERE \"states\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"issue_activities\" WHERE \"issue_activities\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"issue_comments\" WHERE \"issue_comments\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"issue_links\" WHERE \"issue_links\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"issue_reactions\" WHERE \"issue_reactions\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"user_favorites\" WHERE \"user_favorites\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"module_issues\" WHERE \"module_issues\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"cycle_issues\" WHERE \"cycle_issues\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"estimates\" WHERE \"estimates\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
+            "DELETE FROM \"estimate_points\" WHERE \"estimate_points\".\"deleted_at\" < '2026-08-29 06:00:00.000000 +00:00'",
         ];
         assert_eq!(HARD_DELETE_NAMED_TABLES.len(), expected.len());
         for (table, sql) in HARD_DELETE_NAMED_TABLES.iter().zip(expected.iter()) {
-            assert_eq!(&hard_delete_before_sql(table, CUTOFF), sql);
+            assert_eq!(
+                hard_delete_before_stmt(table, cutoff()).to_string(PostgresQueryBuilder),
+                *sql
+            );
         }
     }
 
@@ -1819,12 +2210,12 @@ mod tests {
     fn soft_stamp_sets_both_markers() {
         let pk = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
-            soft_stamp_sql("issues", "id", &RowPk::Uuid(pk), "2026-09-28 06:00:00+00:00", true),
-            "UPDATE \"issues\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00', \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = '12345678-1234-1234-1234-1234567890ab'"
+            soft_stamp_stmt("issues", "id", &RowPk::Uuid(pk), DateTime::parse_from_str("2026-09-28 06:00:00+00:00", "%Y-%m-%d %H:%M:%S%:z").unwrap().with_timezone(&Utc), true).to_string(PostgresQueryBuilder),
+            "UPDATE \"issues\" SET \"deleted_at\" = '2026-09-28 06:00:00.000000 +00:00', \"updated_at\" = '2026-09-28 06:00:00.000000 +00:00' WHERE \"id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
         assert_eq!(
-            soft_stamp_sql("issues", "id", &RowPk::Uuid(pk), "2026-09-28 06:00:00+00:00", false),
-            "UPDATE \"issues\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = '12345678-1234-1234-1234-1234567890ab'"
+            soft_stamp_stmt("issues", "id", &RowPk::Uuid(pk), DateTime::parse_from_str("2026-09-28 06:00:00+00:00", "%Y-%m-%d %H:%M:%S%:z").unwrap().with_timezone(&Utc), false).to_string(PostgresQueryBuilder),
+            "UPDATE \"issues\" SET \"deleted_at\" = '2026-09-28 06:00:00.000000 +00:00' WHERE \"id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
     }
 
@@ -1833,21 +2224,21 @@ mod tests {
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         let child = uuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(
-            null_fk_one_to_one_sql("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", true),
+            null_fk_one_to_one_stmt("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", true).to_string(PostgresQueryBuilder),
             "UPDATE \"pages\" SET \"workspace_id\" = NULL WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
         );
         // `save(update_fields=[fk])` writes only the FK column: no
         // `updated_at` bump whether or not the table has the column.
         assert_eq!(
-            null_fk_one_to_one_sql("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", false),
+            null_fk_one_to_one_stmt("pages", "id", &RowPk::Uuid(child), "workspace_id", "2026-09-28 06:00:00+00:00", false).to_string(PostgresQueryBuilder),
             "UPDATE \"pages\" SET \"workspace_id\" = NULL WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
         );
         assert_eq!(
-            null_fk_bulk_sql("issue_comments", "issue_id", &RowPk::Uuid(parent), true),
+            null_fk_bulk_stmt("issue_comments", "issue_id", &RowPk::Uuid(parent), true).to_string(PostgresQueryBuilder),
             "UPDATE \"issue_comments\" SET \"issue_id\" = NULL WHERE \"issue_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL"
         );
         assert_eq!(
-            null_fk_bulk_sql("issue_comments", "issue_id", &RowPk::Uuid(parent), false),
+            null_fk_bulk_stmt("issue_comments", "issue_id", &RowPk::Uuid(parent), false).to_string(PostgresQueryBuilder),
             "UPDATE \"issue_comments\" SET \"issue_id\" = NULL WHERE \"issue_id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
     }
@@ -1860,17 +2251,18 @@ mod tests {
         // `EstimatePoint` or `IssueType` must leave those rows' FKs alone.
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
-            null_fk_bulk_sql("issues", "estimate_point_id", &RowPk::Uuid(parent), true),
+            null_fk_bulk_stmt("issues", "estimate_point_id", &RowPk::Uuid(parent), true).to_string(PostgresQueryBuilder),
             "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = FALSE AND (NOT EXISTS(SELECT 1 FROM \"states\" WHERE \"states\".\"id\" = \"issues\".\"state_id\" AND \"states\".\"group\" = 'triage')) AND (NOT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = \"issues\".\"project_id\" AND \"projects\".\"archived_at\" IS NOT NULL))"
         );
         assert_eq!(
-            null_fk_bulk_sql("issues", "type_id", &RowPk::Uuid(parent), true),
+            null_fk_bulk_stmt("issues", "type_id", &RowPk::Uuid(parent), true).to_string(PostgresQueryBuilder),
             "UPDATE \"issues\" SET \"type_id\" = NULL WHERE \"type_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = FALSE AND (NOT EXISTS(SELECT 1 FROM \"states\" WHERE \"states\".\"id\" = \"issues\".\"state_id\" AND \"states\".\"group\" = 'triage')) AND (NOT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = \"issues\".\"project_id\" AND \"projects\".\"archived_at\" IS NOT NULL))"
         );
         // The triage / project guards retain NULL-FK rows (Django
         // `exclude()` left-join semantics): no bare `NOT (group = ...)`
         // that three-valued logic would turn against NULLs.
-        let sql = null_fk_bulk_sql("issues", "estimate_point_id", &RowPk::Uuid(parent), true);
+        let sql = null_fk_bulk_stmt("issues", "estimate_point_id", &RowPk::Uuid(parent), true)
+            .to_string(PostgresQueryBuilder);
         assert!(sql.contains("NOT EXISTS"), "{sql}");
         assert!(!sql.contains("NOT (\"states\""), "{sql}");
     }
@@ -1883,7 +2275,7 @@ mod tests {
         // user must leave triage states' audit FKs alone.
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
-            null_fk_bulk_sql("states", "created_by_id", &RowPk::Uuid(parent), true),
+            null_fk_bulk_stmt("states", "created_by_id", &RowPk::Uuid(parent), true).to_string(PostgresQueryBuilder),
             "UPDATE \"states\" SET \"created_by_id\" = NULL WHERE \"created_by_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage'"
         );
     }
@@ -1901,15 +2293,15 @@ mod tests {
         // issues through `issues.project_id` CASCADE.
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
-            live_to_many_select("states", "id", "project_id", &RowPk::Uuid(parent)),
+            live_to_many_stmt("states", "id", "project_id", &RowPk::Uuid(parent)).to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"states\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage' ORDER BY \"id\" ASC"
         );
         assert_eq!(
-            live_to_many_select("issues", "id", "project_id", &RowPk::Uuid(parent)),
+            live_to_many_stmt("issues", "id", "project_id", &RowPk::Uuid(parent)).to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"issues\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
         );
         assert_eq!(
-            live_to_many_select("loop_targets", "id", "job_id", &RowPk::Uuid(parent)),
+            live_to_many_stmt("loop_targets", "id", "job_id", &RowPk::Uuid(parent)).to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"loop_targets\" WHERE \"job_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
         );
     }
@@ -2023,32 +2415,36 @@ mod tests {
             "12345678-1234-1234-1234-1234567890ab"
         );
         assert_eq!(
-            soft_stamp_sql(
+            soft_stamp_stmt(
                 "project_identifiers",
                 "id",
                 &pk,
-                "2026-09-28 06:00:00+00:00",
+                DateTime::parse_from_str("2026-09-28 06:00:00+00:00", "%Y-%m-%d %H:%M:%S%:z")
+                    .unwrap()
+                    .with_timezone(&Utc),
                 true
-            ),
-            "UPDATE \"project_identifiers\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00', \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 7"
+            )
+            .to_string(PostgresQueryBuilder),
+            "UPDATE \"project_identifiers\" SET \"deleted_at\" = '2026-09-28 06:00:00.000000 +00:00', \"updated_at\" = '2026-09-28 06:00:00.000000 +00:00' WHERE \"id\" = 7"
         );
         assert_eq!(
-            null_fk_one_to_one_sql(
+            null_fk_one_to_one_stmt(
                 "project_identifiers",
                 "id",
                 &pk,
                 "project_id",
                 "2026-09-28 06:00:00+00:00",
                 true
-            ),
+            )
+            .to_string(PostgresQueryBuilder),
             "UPDATE \"project_identifiers\" SET \"project_id\" = NULL WHERE \"id\" = 7"
         );
         assert_eq!(
-            null_fk_bulk_sql("project_identifiers", "workspace_id", &pk, true),
+            null_fk_bulk_stmt("project_identifiers", "workspace_id", &pk, true).to_string(PostgresQueryBuilder),
             "UPDATE \"project_identifiers\" SET \"workspace_id\" = NULL WHERE \"workspace_id\" = 7 AND \"deleted_at\" IS NULL"
         );
         assert_eq!(
-            live_to_many_select("project_identifiers", "id", "workspace_id", &pk),
+            live_to_many_stmt("project_identifiers", "id", "workspace_id", &pk).to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"workspace_id\" = 7 AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC"
         );
     }
@@ -2091,7 +2487,8 @@ mod tests {
             delete_rule: "NO ACTION".to_owned(),
             one_to_one: true,
         };
-        let unscoped_shape = one_to_one_select(&relation, &RowPk::Uuid(parent), true);
+        let unscoped_shape =
+            one_to_one_stmt(&relation, &RowPk::Uuid(parent), true).to_string(PostgresQueryBuilder);
         assert_eq!(
             unscoped_shape,
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' LIMIT 1"
@@ -2101,12 +2498,12 @@ mod tests {
             "O2O read must be unscoped: {unscoped_shape}"
         );
         assert_eq!(
-            one_to_one_select(&relation, &RowPk::Uuid(parent), false),
+            one_to_one_stmt(&relation, &RowPk::Uuid(parent), false).to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\" FROM \"project_identifiers\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' LIMIT 1"
         );
         // Int parents render bare (O2O children decode either way).
         assert_eq!(
-            one_to_one_select(&relation, &RowPk::Int(7), true),
+            one_to_one_stmt(&relation, &RowPk::Int(7), true).to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"project_identifiers\" WHERE \"project_id\" = 7 LIMIT 1"
         );
     }
@@ -2193,33 +2590,37 @@ mod tests {
         // L1 collection: subquery-seeded, no child-side scope — not even
         // `deleted_at IS NULL`.
         assert_eq!(
-            cascade_seed_children_sql("loop_targets", "id", "job_id", "loop_jobs", "id", CUTOFF),
-            "SELECT \"id\" AS pk FROM \"loop_targets\" WHERE \"job_id\" IN \
+            cascade_seed_children_stmt("loop_targets", "id", "job_id", "loop_jobs", "id", cutoff())
+                .to_string(PostgresQueryBuilder),
+            "SELECT \"id\" AS \"pk\" FROM \"loop_targets\" WHERE \"job_id\" IN \
              (SELECT \"id\" FROM \"loop_jobs\" WHERE \"loop_jobs\".\"deleted_at\" < \
-             '2026-08-29 06:00:00+00:00')"
+             '2026-08-29 06:00:00.000000 +00:00')"
         );
         // Transitive collection over one chunk of parent ids.
         let one = RowPk::Uuid(uuid("12345678-1234-1234-1234-1234567890ab"));
         let two = RowPk::Int(7);
         assert_eq!(
-            cascade_collected_children_sql("loop_targets", "id", "job_id", &[one, two]),
+            cascade_collected_children_stmt("loop_targets", "id", "job_id", &[one, two])
+                .to_string(PostgresQueryBuilder),
             "SELECT \"id\" AS \"pk\" FROM \"loop_targets\" WHERE \"job_id\" IN \
              ('12345678-1234-1234-1234-1234567890ab', 7)"
         );
         // Empty-seed short-circuit.
         assert_eq!(
-            hard_delete_seed_exists_sql("issues", CUTOFF),
+            hard_delete_seed_exists_stmt("issues", cutoff()).to_string(PostgresQueryBuilder),
             "SELECT EXISTS(SELECT 1 FROM \"issues\" WHERE \"issues\".\"deleted_at\" < \
-             '2026-08-29 06:00:00+00:00')"
+             '2026-08-29 06:00:00.000000 +00:00')"
         );
         // PROTECT pre-checks: seed-subquery + id-list forms.
         assert_eq!(
-            protect_seed_check_sql("issues", "assigned_pod_id", "pod", "id", CUTOFF),
+            protect_seed_check_stmt("issues", "assigned_pod_id", "pod", "id", cutoff())
+                .to_string(PostgresQueryBuilder),
             "SELECT EXISTS(SELECT 1 FROM \"issues\" WHERE \"assigned_pod_id\" IN \
              (SELECT \"id\" FROM \"pod\" WHERE \"pod\".\"deleted_at\" < \
-             '2026-08-29 06:00:00+00:00'))"
+             '2026-08-29 06:00:00.000000 +00:00'))"
         );
-        let probe = protect_collected_check_sql("issues", "assigned_pod_id", &[one]);
+        let probe = protect_collected_check_stmt("issues", "assigned_pod_id", &[one])
+            .to_string(PostgresQueryBuilder);
         assert!(probe.starts_with("SELECT EXISTS("), "{probe}");
         assert!(
             probe.contains("\"assigned_pod_id\" IN ('12345678-1234-1234-1234-1234567890ab')"),
@@ -2228,25 +2629,27 @@ mod tests {
         // Collector SET_NULL: unscoped (no deleted_at / manager guards)
         // and no updated_at touch — unlike null_fk_bulk_sql.
         assert_eq!(
-            null_fk_emulation_seed_sql(
+            null_fk_emulation_seed_stmt(
                 "issues",
                 "estimate_point_id",
                 "estimate_points",
                 "id",
-                CUTOFF
-            ),
+                cutoff()
+            )
+            .to_string(PostgresQueryBuilder),
             "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" IN \
              (SELECT \"id\" FROM \"estimate_points\" WHERE \"estimate_points\".\"deleted_at\" < \
-             '2026-08-29 06:00:00+00:00')"
+             '2026-08-29 06:00:00.000000 +00:00')"
         );
         assert_eq!(
-            null_fk_emulation_ids_sql("issues", "estimate_point_id", &[one]),
+            null_fk_emulation_ids_stmt("issues", "estimate_point_id", &[one])
+                .to_string(PostgresQueryBuilder),
             "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" IN \
              ('12345678-1234-1234-1234-1234567890ab')"
         );
         // Id-list delete (live collected rows need no deleted_at predicate).
         assert_eq!(
-            delete_ids_sql("states", "id", &[one, two]),
+            delete_ids_stmt("states", "id", &[one, two]).to_string(PostgresQueryBuilder),
             "DELETE FROM \"states\" WHERE \"id\" IN \
              ('12345678-1234-1234-1234-1234567890ab', 7)"
         );

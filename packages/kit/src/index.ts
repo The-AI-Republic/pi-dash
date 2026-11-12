@@ -30,7 +30,7 @@ export { IconButton } from "./components/IconButton";
 export type { IconButtonProps } from "./components/IconButton";
 export { Input } from "./components/Input";
 export type { InputProps } from "./components/Input";
-export { Kbd } from "./components/Kbd";
+export { Kbd, formatKbdKey, isMacPlatform, kbdKeyLabel } from "./components/Kbd";
 export type { KbdProps } from "./components/Kbd";
 export { Markdown, MarkdownSpans } from "./components/Markdown";
 export type { MarkdownProps } from "./components/Markdown";

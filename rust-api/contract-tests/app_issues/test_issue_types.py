@@ -96,7 +96,7 @@ def ttypes(db_conn, seed):
                          ids["project"], ids["ws"], "{}", "{}", 0.0, "{}",
                          True))
         cur.execute("INSERT INTO projects (%s) VALUES (%s)" % (
-            PROJECT_COLUMNS, ",".join(["%s"] * 30)),
+            PROJECT_COLUMNS, ",".join(["%s"] * 31)),
             _project_row(ids["del_project"], "Deleted Types Proj", "ISTD",
                          ids["ws"], True))
         cur.execute("UPDATE projects SET deleted_at = %s WHERE id = %s",

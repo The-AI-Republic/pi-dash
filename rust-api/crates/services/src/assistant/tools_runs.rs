@@ -92,9 +92,42 @@ pub fn is_ticking_state(group: Option<&str>, name: Option<&str>) -> bool {
 }
 
 /// Run-status row (`runs.py:27-33`); `created_at` passes `None` through
-/// instead of calling `isoformat` on it.
-pub fn run_row(id: &str, status: &str, created_at_iso: Option<&str>) -> Value {
-    json!({ "id": id, "status": status, "created_at": created_at_iso })
+/// instead of calling `isoformat` on it. The dedicated-runner columns
+/// (PDASHOSS01-350, design §14.6): the pin and the waiting state.
+pub fn run_row(
+    id: &str,
+    status: &str,
+    created_at_iso: Option<&str>,
+    pinned_runner_id: Option<&str>,
+    pinned_runner_name: Option<&str>,
+    pin_kind: &str,
+    dispatch_wait: &Value,
+) -> Value {
+    json!({
+        "id": id,
+        "status": status,
+        "created_at": created_at_iso,
+        "pinned_runner": pinned_runner_id,
+        "pinned_runner_name": pinned_runner_name,
+        "pin_kind": pin_kind,
+        "dispatch_wait": dispatch_wait,
+    })
+}
+
+/// The `pin` values `dispatch_coding_run` accepts (design §23.3):
+/// `None` (the dedicated pin governs) or `"pod_once"`. Anything else
+/// retries, byte-exact with Django.
+pub const PIN_POD_ONCE: &str = "pod_once";
+/// Retry message for an unknown `pin` value.
+pub const INVALID_PIN_MESSAGE: &str = "pin must be \"pod_once\" when given";
+
+/// Whether `pin` is acceptable (`runs.py` after PDASHOSS01-350).
+pub fn validate_pin(pin: Option<&str>) -> Result<Option<String>, ToolScopeError> {
+    match pin {
+        None => Ok(None),
+        Some(PIN_POD_ONCE) => Ok(Some(PIN_POD_ONCE.to_owned())),
+        Some(_) => Err(ToolScopeError::Permission(INVALID_PIN_MESSAGE.to_string())),
+    }
 }
 
 /// `get_run_status` result (`runs.py:34`).
@@ -159,13 +192,15 @@ pub fn get_run_status_schema() -> Value {
 }
 
 /// Input schema for `dispatch_coding_run` (parameters `issue_id`,
-/// optional `target_state_id`).
+/// optional `target_state_id`, optional `pin` — `"pod_once"` runs on any
+/// runner in the pod for this run only, design §23.3).
 pub fn dispatch_coding_run_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "issue_id": { "type": "string" },
             "target_state_id": { "type": ["string", "null"] },
+            "pin": { "type": ["string", "null"] },
         },
         "required": ["issue_id"],
         "additionalProperties": false,
@@ -215,15 +250,30 @@ mod tests {
     fn run_row_and_status_shapes_match_python() {
         assert_eq!(RUN_HISTORY_LIMIT, 5);
         assert_eq!(
-            run_row("r1", "running", Some("2026-01-01T00:00:00+00:00")),
+            run_row(
+                "r1",
+                "running",
+                Some("2026-01-01T00:00:00+00:00"),
+                Some("runner-1"),
+                Some("gpu-box"),
+                "dedicated",
+                &json!({"reason": "runner_offline"}),
+            ),
             json!({
                 "id": "r1",
                 "status": "running",
                 "created_at": "2026-01-01T00:00:00+00:00",
+                "pinned_runner": "runner-1",
+                "pinned_runner_name": "gpu-box",
+                "pin_kind": "dedicated",
+                "dispatch_wait": {"reason": "runner_offline"},
             })
         );
         // Missing timestamp passes None through.
-        assert_eq!(run_row("r1", "queued", None)["created_at"], Value::Null);
+        assert_eq!(
+            run_row("r1", "queued", None, None, None, "locality", &Value::Null)["created_at"],
+            Value::Null
+        );
         assert_eq!(
             run_status_result("i1", vec![]),
             json!({ "issue_id": "i1", "runs": [] })
@@ -284,5 +334,23 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("null")));
+        assert!(schema["properties"]["pin"]["type"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("null")));
+    }
+
+    #[test]
+    fn pin_validation_matches_python() {
+        assert_eq!(validate_pin(None), Ok(None));
+        assert_eq!(
+            validate_pin(Some("pod_once")),
+            Ok(Some("pod_once".to_owned()))
+        );
+        assert_eq!(
+            validate_pin(Some("bogus")).unwrap_err().to_string(),
+            "pin must be \"pod_once\" when given"
+        );
+        assert_eq!(PIN_POD_ONCE, "pod_once");
     }
 }

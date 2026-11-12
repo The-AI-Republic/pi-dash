@@ -4,7 +4,7 @@
 // Runs presentation helpers (NEWFRONT-545). Page parsing, executor labels,
 // diagnostics fallbacks, transcript narration, result summary and time
 // formatting each keep one tested definition.
-import type { AgentRun, RunErrorDiagnostic, RunEvent } from "@pidash/api-client";
+import type { AgentRun, RunErrorDiagnostic, RunEvent, Runner } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -19,6 +19,7 @@ import {
   parseRunsPage,
   resultJson,
   resultSummary,
+  runExecutorLabel,
   runsHref,
   runsPageSearch,
   startedLabel,
@@ -76,7 +77,7 @@ describe("executor presentation", () => {
   it("separates the cloud agent from every local executor", () => {
     expect(executorLabel("cloud_agent")).toBe("Cloud executor");
     expect(executorLabel("local_runner")).toBe("Local runner");
-    expect(executorLabel("managed_runner")).toBe("Local runner");
+    expect(executorLabel("managed_runner")).toBe("Built-in engine");
     expect(executorTone("cloud_agent")).toBe("accent");
     expect(executorTone("managed_runner")).toBe("neutral");
   });
@@ -138,5 +139,28 @@ describe("time helpers", () => {
 
   it("formats event clock times", () => {
     expect(eventTime("2024-01-01T00:00:00Z")).toBe(new Date("2024-01-01T00:00:00Z").toLocaleTimeString());
+  });
+});
+
+describe("run executor label from the runner", () => {
+  const machine = { id: "m-1", label: "Work laptop", host_label: "rich-mbp" };
+  const engine = { id: "r-engine", name: "builtin-x", provisioning: "desktop_bundled", dev_machine_detail: machine };
+  const own = { id: "r-own", name: "codex-1", provisioning: "manual", dev_machine_detail: machine };
+  const runners = [engine, own] as unknown as Runner[];
+
+  it("names a run on an engine by its machine", () => {
+    expect(runExecutorLabel({ executor_kind: "local_runner", runner: "r-engine" }, runners)).toBe(
+      "Built-in engine · Work laptop"
+    );
+    expect(runExecutorLabel({ executor_kind: "managed_runner", runner: "r-engine" }, runners)).toBe(
+      "Built-in engine · Work laptop"
+    );
+  });
+
+  it("falls back to the kind label for own-agent, unknown or unassigned runners", () => {
+    expect(runExecutorLabel({ executor_kind: "local_runner", runner: "r-own" }, runners)).toBe("Local runner");
+    expect(runExecutorLabel({ executor_kind: "local_runner", runner: "gone" }, runners)).toBe("Local runner");
+    expect(runExecutorLabel({ executor_kind: "managed_runner", runner: null }, undefined)).toBe("Built-in engine");
+    expect(runExecutorLabel({ executor_kind: "cloud_agent", runner: null }, runners)).toBe("Cloud executor");
   });
 });

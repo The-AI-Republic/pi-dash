@@ -5,10 +5,14 @@
 //! PIDASHCONV-1649): `GithubPullRequestLinkSerializer`
 //! (`github_pr.py:53-95`).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use sea_orm::{EntityTrait, FromQueryResult, QuerySelect};
 use serde_json::{Map, Value};
 use uuid::Uuid;
+
+use pidash_db::entity::github_pull_request_links;
+use pidash_db::pool::sea_orm_connection;
 
 use crate::app_issues::pr_links::{attach_pull_request, AttachError, StoreError};
 use crate::domain::WriteCtx;
@@ -53,69 +57,49 @@ pub fn extract_raw_url(body: &Map<String, Value>) -> Result<String, Error> {
     }
 }
 
-/// Render one PR-link row through `GithubPullRequestLinkSerializer`
-/// (S3 [`render_pr_link`](crate::v1_work_items::shape_links::render_pr_link)):
-/// full field set, no `fields=`/`expand=` (the view passes neither).
-pub fn render_pr_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Error> {
+/// Decoded PR-link fields, column-by-name (`orm-migration.md` §3.2):
+/// the create-response re-read below maps the entity row into this
+/// view; [`render_pr_row`] does the same from a legacy `PgRow` for
+/// the callers that still hold one.
+#[derive(Debug, Clone, PartialEq)]
+struct PrLinkView {
+    id: Uuid,
+    issue_id: Uuid,
+    repo_owner: String,
+    repo_name: String,
+    pr_number: i32,
+    url: String,
+    title: String,
+    state: String,
+    merged: bool,
+    draft: bool,
+    pr_updated_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    created_by: Option<Uuid>,
+}
+
+fn render_pr_link_view(view: &PrLinkView, tz: &Tz) -> Result<Value, Error> {
     use crate::v1_work_items::shape_links as shape;
-    use sqlx::Row as _;
-    let dt = |key: &str| -> Result<String, Error> {
-        row.try_get::<chrono::DateTime<chrono::Utc>, _>(key)
-            .map(|stamp| pidash_compat::datetime::render_datetime_in(&stamp, tz))
-            .map_err(|error| db_error(error, "pr row datetime"))
-    };
-    let dt_opt = |key: &str| -> Result<Option<String>, Error> {
-        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(key)
-            .map(|stamp| stamp.map(|stamp| pidash_compat::datetime::render_datetime_in(&stamp, tz)))
-            .map_err(|error| db_error(error, "pr row datetime"))
-    };
-    let id: Uuid = row
-        .try_get("id")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let issue_id: Uuid = row
-        .try_get("issue_id")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let created_by: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let id = id.to_string();
-    let issue = issue_id.to_string();
-    let created_by = created_by.map(|id| id.to_string());
-    let pr_updated_at = dt_opt("pr_updated_at")?;
-    let created_at = dt("created_at")?;
-    let updated_at = dt("updated_at")?;
-    let repo_owner: String = row
-        .try_get("repo_owner")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let repo_name: String = row
-        .try_get("repo_name")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let url: String = row
-        .try_get("url")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let title: String = row
-        .try_get("title")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let state: String = row
-        .try_get("state")
-        .map_err(|error| db_error(error, "pr row map"))?;
+    let id = view.id.to_string();
+    let issue = view.issue_id.to_string();
+    let created_by = view.created_by.map(|id| id.to_string());
+    let pr_updated_at = view
+        .pr_updated_at
+        .map(|stamp| pidash_compat::datetime::render_datetime_in(&stamp, tz));
+    let created_at = pidash_compat::datetime::render_datetime_in(&view.created_at, tz);
+    let updated_at = pidash_compat::datetime::render_datetime_in(&view.updated_at, tz);
     let shape_row = shape::PrLinkRow {
         id: &id,
         issue: &issue,
-        repo_owner: &repo_owner,
-        repo_name: &repo_name,
-        pr_number: row
-            .try_get("pr_number")
-            .map_err(|error| db_error(error, "pr row map"))?,
-        url: &url,
-        title: &title,
-        state: &state,
-        merged: row
-            .try_get("merged")
-            .map_err(|error| db_error(error, "pr row map"))?,
-        draft: row
-            .try_get("draft")
-            .map_err(|error| db_error(error, "pr row map"))?,
+        repo_owner: &view.repo_owner,
+        repo_name: &view.repo_name,
+        pr_number: view.pr_number,
+        url: &view.url,
+        title: &view.title,
+        state: &view.state,
+        merged: view.merged,
+        draft: view.draft,
         pr_updated_at: pr_updated_at.as_deref(),
         created_at: &created_at,
         updated_at: &updated_at,
@@ -129,6 +113,60 @@ pub fn render_pr_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Erro
     })
     .map_err(|error| db_error(error, "pr row render"))?;
     Ok(Value::Object(map))
+}
+
+/// Render one PR-link row through `GithubPullRequestLinkSerializer`
+/// (S3 [`render_pr_link`](crate::v1_work_items::shape_links::render_pr_link)):
+/// full field set, no `fields=`/`expand=` (the view passes neither).
+pub fn render_pr_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Error> {
+    use sqlx::Row as _;
+    let dt = |key: &str| -> Result<DateTime<Utc>, Error> {
+        row.try_get::<DateTime<Utc>, _>(key)
+            .map_err(|error| db_error(error, "pr row datetime"))
+    };
+    let dt_opt = |key: &str| -> Result<Option<DateTime<Utc>>, Error> {
+        row.try_get::<Option<DateTime<Utc>>, _>(key)
+            .map_err(|error| db_error(error, "pr row datetime"))
+    };
+    let view = PrLinkView {
+        id: row
+            .try_get("id")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        issue_id: row
+            .try_get("issue_id")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        repo_owner: row
+            .try_get("repo_owner")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        repo_name: row
+            .try_get("repo_name")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        pr_number: row
+            .try_get("pr_number")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        url: row
+            .try_get("url")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        title: row
+            .try_get("title")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        state: row
+            .try_get("state")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        merged: row
+            .try_get("merged")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        draft: row
+            .try_get("draft")
+            .map_err(|error| db_error(error, "pr row map"))?,
+        pr_updated_at: dt_opt("pr_updated_at")?,
+        created_at: dt("created_at")?,
+        updated_at: dt("updated_at")?,
+        created_by: row
+            .try_get("created_by_id")
+            .map_err(|error| db_error(error, "pr row map"))?,
+    };
+    render_pr_link_view(&view, tz)
 }
 
 /// Sentinel for the deleted-project lookup miss inside PR attach: the
@@ -145,11 +183,46 @@ const PR_RACE_MISS: &str = "pr link lost the create race";
 /// 400, so the handler maps these to 400, not 500.
 const PR_PAYLOAD_INVALID: &str = "pr-links: payload not valid";
 
-/// Re-read one PR link by id for the create response (the serializer
-/// reads the saved instance, whose audit columns the store stamped).
-const PR_OWNED_SQL: &str = r#"SELECT id, issue_id, repo_owner, repo_name, pr_number, url, title, state,
-              merged, draft, pr_updated_at, created_at, updated_at, created_by_id
-       FROM github_pull_request_links WHERE id = $1 LIMIT 1"#;
+/// Narrow row of [`github_pull_request_links`] keeping exactly the
+/// `PR_OWNED_SQL` projection (see the create-response comment).
+#[derive(Debug, Clone, FromQueryResult)]
+struct PrLinkStoredRow {
+    id: Uuid,
+    issue_id: Uuid,
+    repo_owner: String,
+    repo_name: String,
+    pr_number: i32,
+    url: String,
+    title: String,
+    state: String,
+    merged: bool,
+    draft: bool,
+    pr_updated_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    created_by_id: Option<Uuid>,
+}
+
+fn pr_link_reread_query(id: Uuid) -> sea_orm::Select<github_pull_request_links::Entity> {
+    github_pull_request_links::Entity::find_by_id(id)
+        .select_only()
+        .columns([
+            github_pull_request_links::Column::Id,
+            github_pull_request_links::Column::IssueId,
+            github_pull_request_links::Column::RepoOwner,
+            github_pull_request_links::Column::RepoName,
+            github_pull_request_links::Column::PrNumber,
+            github_pull_request_links::Column::Url,
+            github_pull_request_links::Column::Title,
+            github_pull_request_links::Column::State,
+            github_pull_request_links::Column::Merged,
+            github_pull_request_links::Column::Draft,
+            github_pull_request_links::Column::PrUpdatedAt,
+            github_pull_request_links::Column::CreatedAt,
+            github_pull_request_links::Column::UpdatedAt,
+            github_pull_request_links::Column::CreatedById,
+        ])
+}
 
 /// `POST .../github/pull-requests/` (`GithubPullRequestLinkSerializer`,
 /// `github_pr.py:53-95`): validate the URL, attach through the store,
@@ -227,15 +300,33 @@ pub async fn attach(
             return Err(Error::ServerError);
         }
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(PR_OWNED_SQL)
-        .bind(link.id)
-        .fetch_optional(pool)
+    // Re-read one PR link by id for the create response (the serializer
+    // reads the saved instance, whose audit columns the store stamped).
+    let stored = pr_link_reread_query(link.id)
+        .into_model::<PrLinkStoredRow>()
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "pr create reread"))?;
-    let Some(row) = row else {
+    let Some(stored) = stored else {
         return Err(Error::ServerError);
     };
-    let shape = render_pr_row(&row, &tz)?;
+    let view = PrLinkView {
+        id: stored.id,
+        issue_id: stored.issue_id,
+        repo_owner: stored.repo_owner,
+        repo_name: stored.repo_name,
+        pr_number: stored.pr_number,
+        url: stored.url,
+        title: stored.title,
+        state: stored.state,
+        merged: stored.merged,
+        draft: stored.draft,
+        pr_updated_at: stored.pr_updated_at.map(|stamp| stamp.with_timezone(&Utc)),
+        created_at: stored.created_at.with_timezone(&Utc),
+        updated_at: stored.updated_at.with_timezone(&Utc),
+        created_by: stored.created_by_id,
+    };
+    let shape = render_pr_link_view(&view, &tz)?;
     let text = serde_json::to_string(&shape).map_err(|_| Error::ServerError)?;
     if created {
         Ok(Outcome::created(text))
@@ -265,9 +356,21 @@ pub struct PullRequestWrite<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
 
     fn is_server_error(error: Error) -> bool {
         error.status_and_body().0 == 500
+    }
+
+    #[test]
+    fn reread_selects_the_saved_row_by_id() {
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = pr_link_reread_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"FROM "github_pull_request_links""#), "{sql}");
+        assert!(sql.contains(&format!(r#""id" = '{id}'"#)), "{sql}");
+        assert!(sql.contains(r#""created_by_id""#), "{sql}");
     }
 
     #[test]

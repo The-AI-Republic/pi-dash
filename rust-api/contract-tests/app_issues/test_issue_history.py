@@ -29,7 +29,7 @@ PROJECT_COLUMNS = (
     " repo_url, base_branch, agent_default_interval_seconds,"
     " agent_default_max_ticks, agent_ticking_enabled, is_default,"
     " agent_review_default_interval_seconds, default_agent_executor,"
-    " agent_test_default_interval_seconds"
+    " dedicated_runner_lost_action, agent_test_default_interval_seconds"
 )
 
 
@@ -60,11 +60,11 @@ def history_world(db_conn, seed):
     with db_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO projects (%s) VALUES (%s)" % (
-                PROJECT_COLUMNS, ",".join(["%s"] * 30)),
+                PROJECT_COLUMNS, ",".join(["%s"] * 31)),
             (now, now, ids["project"], "History Test Project", "", 0,
              "HIST", ws_id, True, True, True, True, True, 0, 0, "{}", True,
              True, True, "UTC", True, "", "", 3600, 100, True, False,
-             10800, "muse", 10800),
+             10800, "muse", "fail_to_backlog", 10800),
         )
         cur.execute(
             "INSERT INTO project_members (created_at, updated_at, id, role,"

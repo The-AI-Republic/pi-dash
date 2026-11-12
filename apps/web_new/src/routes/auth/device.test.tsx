@@ -104,6 +104,22 @@ describe("device guard", () => {
     await expect(load(client, apiClient)).resolves.toEqual({ ok: {} });
   });
 
+  it("renders when every onboarding flag is set without the marker", async () => {
+    const client = queryClient();
+    const apiClient = throwingClient();
+    client.setQueryData(meQueryOptions(apiClient).queryKey, { id: "u1" } as never);
+    client.setQueryData(profileQueryOptions(apiClient).queryKey, {
+      is_onboarded: false,
+      onboarding_step: {
+        profile_complete: true,
+        workspace_create: true,
+        workspace_invite: true,
+        workspace_join: true,
+      },
+    } as never);
+    await expect(load(client, apiClient)).resolves.toEqual({ ok: {} });
+  });
+
   it("funnels unfinished users to onboarding", async () => {
     const client = queryClient();
     const apiClient = throwingClient();

@@ -311,7 +311,8 @@ export function useFinishOnboarding() {
  */
 export function useApproveDeviceCode() {
   return useMutation({
-    mutationFn: (userCode: string) => approveDeviceCode(freshClient(), userCode),
+    // The person typed the code on this page: an interactive approval.
+    mutationFn: (userCode: string) => approveDeviceCode(freshClient(), userCode, { interactive: true }),
   });
 }
 

@@ -12,7 +12,7 @@ import type { SchedulerBinding } from "@pidash/api-client";
 import { Button, Dialog } from "@pidash/kit";
 import * as React from "react";
 
-import { DEFAULT_TZID, isoToLocalStart, type ScheduleValue } from "./schedule.js";
+import { DEFAULT_TZID, isoToLocalStart, localStartToIso, type ScheduleValue } from "./schedule.js";
 import { ScheduleFields, useScheduleDraft } from "./ScheduleFields.js";
 import { OutcomeModeField } from "./OutcomeModeField.js";
 import { PodField } from "./PodField.js";
@@ -50,9 +50,14 @@ export function installDraftFromBinding(binding: SchedulerBinding): InstallDraft
  * The PATCH payload for a draft; an empty pod means the project default,
  * and a blank zone means the default zone. The rule travels exactly as
  * it sits in the draft: a stored rule the person never edited is saved
- * byte for byte, and a typed one is saved as typed.
+ * byte for byte, and a typed one is saved as typed. The stored start
+ * travels as `originalDtstart` so an untouched Starts at input saves the
+ * stored instant back, even inside a DST repeated hour.
  */
-export function installUpdatePayload(draft: InstallDraft): {
+export function installUpdatePayload(
+  draft: InstallDraft,
+  originalDtstart?: string
+): {
   dtstart: string;
   tzid: string;
   rrule: string;
@@ -62,7 +67,7 @@ export function installUpdatePayload(draft: InstallDraft): {
   pod: string | null;
 } {
   return {
-    dtstart: new Date(draft.schedule.startsAt).toISOString(),
+    dtstart: localStartToIso(draft.schedule.startsAt, originalDtstart),
     tzid: draft.schedule.timeZone.trim() || DEFAULT_TZID,
     rrule: draft.schedule.rrule,
     extra_context: draft.schedule.projectContext.trim(),
@@ -102,7 +107,7 @@ function EditForm({ workspaceSlug, projectId, binding, onClose, onSaved }: EditF
   async function submit(): Promise<void> {
     if (pending) return;
     if (!schedule.validate()) return;
-    const next = installUpdatePayload({ schedule: schedule.value, outcomeMode, pod });
+    const next = installUpdatePayload({ schedule: schedule.value, outcomeMode, pod }, binding.dtstart);
     try {
       await update.mutateAsync({ projectId, bindingId: binding.id, input: next });
       onSaved?.();

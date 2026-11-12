@@ -8,6 +8,7 @@
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
+import { PropertyChip } from "./PropertyChip.js";
 import {
   PRIORITY_ICONS,
   PRIORITY_TONES,
@@ -24,6 +25,10 @@ export interface PriorityPickerProps {
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the label. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "Priority: High" when set. */
+  label?: string | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Explicit keyboard position inside a dialog's tab order. */
@@ -55,6 +60,8 @@ export function PriorityPicker({
   disabled = false,
   variant = "secondary",
   iconOnly = false,
+  chip = false,
+  label = "Priority",
   trigger,
   tabIndex,
   open: controlledOpen,
@@ -73,6 +80,18 @@ export function PriorityPicker({
   const current = options.find((option) => option.level === value)!;
 
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
+    // None is a real value, so the chip is always filled.
+    if (chip) {
+      return (
+        <PropertyChip
+          label={`${label}: ${current.label}`}
+          icon={<PriorityGlyph option={current} />}
+          text={current.label}
+          title={current.label}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        />
+      );
+    }
     if (iconOnly) {
       return (
         <IconButton label={current.label} variant={variant}>

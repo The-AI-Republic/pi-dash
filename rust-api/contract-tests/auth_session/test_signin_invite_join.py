@@ -322,6 +322,12 @@ def test_project_invites_join_both_workspaces_and_projects(
                 (email,),
             )
             invites_live = cur.fetchone()[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM project_member_invites"
+                " WHERE email = %s AND accepted AND deleted_at IS NOT NULL",
+                (email,),
+            )
+            invites_soft_deleted = cur.fetchone()[0]
     assert sorted((w, r) for w, r in members) == sorted(
         [(old_ws["id"], 15), (new_ws["id"], 5)]
     ), members
@@ -330,10 +336,12 @@ def test_project_invites_join_both_workspaces_and_projects(
     ), project_rows
     assert last_login is not None
     assert last_active is not None
-    # No live accepted invite remains on either backend. (Django
-    # soft-deletes the rows while Rust hard-deletes them -- a hardness
-    # divergence outside this issue's write-sequence scope.)
+    # No live accepted invite remains on either backend.
     assert invites_live == 0
+    # NEWPIDASH-11: both consumed rows still exist, soft-deleted (the
+    # queryset `.delete()` stamps `deleted_at`). FAILS on pre-fix Rust,
+    # which hard-deletes them.
+    assert invites_soft_deleted == 2, invites_soft_deleted
 
 
 def test_workspace_invites_publish_track_event_newest_first(browser, db, user, invite_world):
@@ -372,16 +380,90 @@ def test_workspace_invites_publish_track_event_newest_first(browser, db, user, i
                 (email,),
             )
             invites_live = cur.fetchone()[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM workspace_member_invites"
+                " WHERE email = %s AND accepted AND deleted_at IS NOT NULL",
+                (email,),
+            )
+            invites_soft_deleted = cur.fetchone()[0]
             cur.execute("SELECT last_login FROM users WHERE id = %s", (user["id"],))
             last_login = cur.fetchone()[0]
     assert sorted((w, r) for w, r in members) == sorted(
         [(old_ws["id"], 15), (new_ws["id"], 20)]
     ), members
-    # No live accepted invite remains on either backend. (Django
-    # soft-deletes the rows while Rust hard-deletes them -- a hardness
-    # divergence outside this issue's write-sequence scope.)
+    # No live accepted invite remains on either backend.
     assert invites_live == 0
+    # NEWPIDASH-11: both consumed rows still exist, soft-deleted. FAILS
+    # on pre-fix Rust, which hard-deletes them.
+    assert invites_soft_deleted == 2, invites_soft_deleted
     assert last_login is not None
+
+
+def test_revoked_accepted_invites_are_ignored(browser, db, user, invite_world):
+    """Soft-deleted accepted invites: 302, rows untouched, no membership.
+
+    NEWPIDASH-11: the join reads through the soft-delete manager, so a
+    revoked invite (accepted then stamped ``deleted_at``) is invisible to
+    the sign-in: the rows stay present with ``deleted_at`` unchanged and
+    no ``workspace_members``/``project_members`` row is written. FAILS on
+    pre-fix Rust (the member row lands and the revoked row is
+    hard-deleted).
+    """
+    email = user["email"]
+    old_ws, new_ws = invite_world["workspaces"]
+    _old_proj, new_proj = invite_world["projects"]
+    ws_iid = _seed_workspace_invite(db, old_ws["id"], email, role=15, created_days_ago=2)
+    pm_iid = _seed_project_invite(
+        db, new_ws["id"], new_proj["id"], email, role=5, created_days_ago=1
+    )
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE workspace_member_invites SET deleted_at = now() - make_interval(days => 1)"
+                " WHERE id = %s",
+                (ws_iid,),
+            )
+            cur.execute(
+                "UPDATE project_member_invites SET deleted_at = now() - make_interval(days => 1)"
+                " WHERE id = %s",
+                (pm_iid,),
+            )
+            cur.execute(
+                "SELECT deleted_at FROM workspace_member_invites WHERE id = %s", (ws_iid,)
+            )
+            ws_stamped = cur.fetchone()[0]
+            cur.execute(
+                "SELECT deleted_at FROM project_member_invites WHERE id = %s", (pm_iid,)
+            )
+            pm_stamped = cur.fetchone()[0]
+        conn.commit()
+    assert ws_stamped is not None and pm_stamped is not None
+
+    res = browser().post("/auth/sign-in/", data={"email": email, "password": user["password"]})
+    assert res.status_code == 302, res.text[:300]
+
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM workspace_members WHERE member_id = %s", (user["id"],)
+            )
+            members = cur.fetchone()[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM project_members WHERE member_id = %s", (user["id"],)
+            )
+            project_members = cur.fetchone()[0]
+            cur.execute(
+                "SELECT deleted_at FROM workspace_member_invites WHERE id = %s", (ws_iid,)
+            )
+            ws_row = cur.fetchone()
+            cur.execute(
+                "SELECT deleted_at FROM project_member_invites WHERE id = %s", (pm_iid,)
+            )
+            pm_row = cur.fetchone()
+    assert members == 0, "revoked invite must not grant membership"
+    assert project_members == 0, "revoked project invite must not grant membership"
+    assert ws_row is not None and ws_row[0] == ws_stamped, "revoked row stays, stamp unchanged"
+    assert pm_row is not None and pm_row[0] == pm_stamped, "revoked row stays, stamp unchanged"
 
 
 def test_inactive_user_signin_publishes_activation_and_succeeds(browser, db, user):

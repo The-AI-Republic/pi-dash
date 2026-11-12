@@ -474,19 +474,17 @@ async function desk013Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     });
   }
 
-  await test.step("the fallback action opens the hosted app through the native opener", async () => {
+  await test.step("the fallback action opens the hosted app through the native browser command", async () => {
     // The gate serves the desktop dev bundle with PIDASH_WEB_BASE_URL set
     // to the stack's oracle origin, so the card resolves there.
     const hosted = parityOracleUrl(process.env);
     await driver.visit("/");
     await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_UNAVAILABLE_ACTION);
     await driver.page.getByRole("button", { name: NEW_UNAVAILABLE_ACTION, exact: true }).click();
-    await expect
-      .poll(async () => (await desktopInvocations(driver.page, "plugin:opener|open_url")).length, POLL_60)
-      .toBe(1);
-    const opened = await desktopInvocations(driver.page, "plugin:opener|open_url");
+    await expect.poll(async () => (await desktopInvocations(driver.page, "open_in_browser")).length, POLL_60).toBe(1);
+    const opened = await desktopInvocations(driver.page, "open_in_browser");
     expect((opened[0]?.args as { url?: unknown } | undefined)?.url).toBe(hosted);
-    // No in-page popup: the opener owns the navigation.
+    // No in-page popup: the shell owns the navigation.
     expect(await driver.currentPath()).toBe("/");
   });
 
@@ -555,19 +553,17 @@ async function desk015Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     }
   });
 
-  await test.step("a web address opens through the native opener with no popup", async () => {
+  await test.step("a web address opens through the native browser command with no popup", async () => {
     expect(await driver.deskSigninOpenUpdateDialogLink("Docs")).toBeNull();
-    await expect
-      .poll(async () => (await desktopInvocations(driver.page, "plugin:opener|open_url")).length, POLL_60)
-      .toBe(1);
-    const opened = await desktopInvocations(driver.page, "plugin:opener|open_url");
+    await expect.poll(async () => (await desktopInvocations(driver.page, "open_in_browser")).length, POLL_60).toBe(1);
+    const opened = await desktopInvocations(driver.page, "open_in_browser");
     const url = String((opened[0]?.args as { url?: unknown } | undefined)?.url ?? "");
     expect(url).toMatch(/^https:/);
   });
 
-  await test.step("a non-web address is refused with no opener call", async () => {
+  await test.step("a non-web address is refused with no browser open call", async () => {
     expect(await driver.deskSigninOpenUpdateDialogLink("Support")).toBeNull();
-    const opened = await desktopInvocations(driver.page, "plugin:opener|open_url");
+    const opened = await desktopInvocations(driver.page, "open_in_browser");
     expect(opened).toHaveLength(1);
     expect(JSON.stringify(opened)).not.toContain("mailto:");
   });

@@ -240,6 +240,20 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(within(listbox).getByText("No projects match your search.")).toBeInTheDocument();
   });
 
+  it("hands the open-time focus to the schedule's start field", async () => {
+    // The kit's deferred pass would otherwise pick the header's Close
+    // button and could land after the reader clicked a control, stealing
+    // their input on a busy host (NEWFRONT-1055, 1058).
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    renderDialog();
+    const field = screen.getByLabelText("Starts at");
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+    // Past the kit's deferred pass, the field still holds the caret.
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
+    expect(field).toHaveFocus();
+  });
+
   it("selects every unlocked target, then clears them", async () => {
     contracts.listProjectDetails.mockResolvedValue([
       project({ id: ALPHA, name: "Alpha" }),

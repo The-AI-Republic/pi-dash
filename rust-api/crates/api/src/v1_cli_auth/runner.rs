@@ -59,16 +59,27 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
+use pidash_db::entity::{
+    agent_run, api_tokens, dev_machine, issue_assignees, issues, machine_token, workspace_members,
+    workspaces,
+};
 use pidash_db::redis::client_from_settings;
 use pidash_db::v1_cli_auth::queries::runner_lookup;
 use pidash_jobs::runner_enroll::{fire_revoke_bundle, revoke, RevokeCtx, RevokeScope};
+use pidash_services::domain::engine_credential;
 use pidash_services::runner_enroll::purge;
+use pidash_services::runner_enroll::queries::manage_reads;
+use pidash_services::runner_enroll::serializers::shapes;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_types::{UserId, WorkspaceId};
 
@@ -84,6 +95,8 @@ const NOT_FOUND_BODY: &str = r#"{"error":"not found"}"#;
 /// `{"error": "forbidden"}` — 403 (viewable but not manageable;
 /// unreachable with today's single PRIVATE visibility, ported anyway).
 const FORBIDDEN_BODY: &str = r#"{"error":"forbidden"}"#;
+/// `{"error":"workspace not found"}` — 404 unknown workspace slug (list).
+const WORKSPACE_NOT_FOUND_BODY: &str = r#"{"error":"workspace not found"}"#;
 /// DRF renders `AuthenticationFailed("Given API token is not valid")` as
 /// 403 here (no `authenticate_header` on the class, so the 401 coerces;
 /// probed live — the `device_session.rs` precedent).
@@ -95,6 +108,10 @@ fn not_found() -> Response {
 
 fn forbidden() -> Response {
     json_response(StatusCode::FORBIDDEN, FORBIDDEN_BODY.to_owned())
+}
+
+fn workspace_not_found() -> Response {
+    json_response(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND_BODY.to_owned())
 }
 
 fn unauthorized() -> Response {
@@ -170,9 +187,38 @@ async fn authenticate(
     }
 }
 
-/// One `api_tokens` row for the lookup: `(id, user_id, is_active,
-/// expired_at)`.
-type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    id: Uuid,
+    user_id: Uuid,
+    is_active: bool,
+    expired_at: Option<DateTime<Utc>>,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope): a soft-deleted token is a miss.
+async fn live_api_token(
+    pool: &PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Id,
+            api_tokens::Column::UserId,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())
+}
 
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token
 /// match, `is_active`, unexpired (`expired_at__gt=now` or null) — then
@@ -180,14 +226,14 @@ type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
 /// `SoftDeleteModel` manager Python filters through.
 async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Response> {
     let now = Utc::now();
-    let row: Option<ApiTokenLookupRow> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((id, user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        id,
+        user_id,
+        is_active,
+        expired_at,
+    }) = row
+    else {
         return Err(invalid_token());
     };
     if !is_active {
@@ -199,9 +245,13 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -209,17 +259,59 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
 }
 
 /// One `machine_token` row for the lookup, with the linked dev-machine
-/// revocation flag: `(id, user_id, workspace_id, revoked_at,
-/// dev_machine_id, dev_machine_revoked, dev_machine_found)`.
-type MachineTokenLookupRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-);
+/// revocation state (all three come from the `LEFT JOIN`: a token with
+/// no device reads `None` for each).
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookup {
+    id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    revoked_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+    dev_machine_id: Option<Uuid>,
+    dm_revoked: Option<DateTime<Utc>>,
+    dm_found: Option<Uuid>,
+}
+
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its id and
+/// revocation (`api_authentication.py:47-70`). No liveness scope: the
+/// tables have no soft delete.
+async fn machine_token_with_device(
+    pool: &PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
+            "dm_revoked",
+        )
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::Id)),
+            "dm_found",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())
+}
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
 /// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
@@ -233,24 +325,29 @@ async fn authenticate_machine(
 ) -> Result<Caller, Response> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookupRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at, dm.id
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
+    let row = machine_token_with_device(pool, &token_hash).await?;
+    let Some(MachineTokenLookup {
+        id,
+        user_id,
+        workspace_id,
+        revoked_at,
+        expires_at,
+        dev_machine_id,
+        dm_revoked,
+        dm_found,
+    }) = row
     else {
         return Err(invalid_token());
     };
     if revoked_at.is_some() {
         return Err(invalid_token());
     }
+    if expires_at.is_some_and(|expires| expires <= now) {
+        return Err(invalid_token());
+    }
+    // 60-day idle expiry (NEWPIDASH-50): `MachineToken.is_expired` is
+    // the generic refusal on this opaque `X-Api-Key` surface, checked
+    // after revoked and before dev-machine revocation.
     // `machine_token.dev_machine_id is not None and
     // machine_token.dev_machine.revoked_at is not None`. A set id with no
     // row is the `select_related` 500 (unreachable without FK surgery).
@@ -265,15 +362,23 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
-            .await
-            .map_err(|_| server_error())?;
+        pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            id,
+            now,
+        )
+        .await
+        .map_err(|_| server_error())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -285,16 +390,480 @@ async fn authenticate_machine(
 /// for `(workspace, member)` (the manager's `deleted_at IS NULL`
 /// included, like the `v1_projects` copy).
 async fn is_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> Result<bool, Response> {
-    let exists: Option<bool> = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(exists.unwrap_or(false))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(hit.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// Handler: GET /api/v1/workspaces/<slug>/runners/ (NEWPIDASH-146, f92fe3c0)
+// ---------------------------------------------------------------------------
+
+/// Busy statuses (`matcher.py: BUSY_STATUSES`): statuses that occupy the runner.
+const BUSY_STATUSES: &[&str] = &[
+    "assigned",
+    "waiting_for_worktree",
+    "running",
+    "cancel_requested",
+    "awaiting_approval",
+    "awaiting_reauth",
+];
+/// Blocking statuses for E8 (`NON_TERMINAL minus QUEUED/PAUSED_AWAITING_INPUT`).
+const E8_BLOCKING_STATUSES: &[&str] = &[
+    "assigned",
+    "waiting_for_worktree",
+    "running",
+    "cancel_requested",
+    "awaiting_approval",
+    "awaiting_reauth",
+];
+
+/// `Workspace.objects.filter(slug=slug).first()` with the manager's
+/// `deleted_at IS NULL` scope.
+async fn workspace_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row)
+}
+
+/// `is_busy` (`issue_assignment.py:65-70`): any run the runner is serving
+/// in BUSY_STATUSES.
+async fn runner_is_busy(pool: &PgPool, runner_id: Uuid) -> Result<bool, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<Uuid> = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::RunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.is_in(BUSY_STATUSES.to_vec()))
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(hit.is_some())
+}
+
+/// `queue_depth` (`issue_assignment.py:58-63`): QUEUED runs pinned to the runner.
+async fn runner_queue_depth(pool: &PgPool, runner_id: Uuid) -> Result<i64, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count = agent_run::Entity::find()
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .count(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(count as i64)
+}
+
+/// Evaluate E1-E8 (sans E6) for one runner against the list context.
+/// Mirrors `_check_assignment_code` in `issue_assignment.py`.
+#[allow(clippy::too_many_arguments)]
+async fn assignable_code(
+    pool: &PgPool,
+    caller_user_id: Uuid,
+    _runner_id: Uuid,
+    runner_owner_id: Uuid,
+    runner_status: &str,
+    runner_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    runner_pod_project_id: Uuid,
+    issue: Option<&issues::Model>,
+) -> Result<&'static str, Response> {
+    // E1: can_use_runner — today owns the runner.
+    if runner_owner_id != caller_user_id {
+        return Ok("runner_not_found");
+    }
+    // E2: pod.project matches issue.project (issue=None skips the check).
+    if let Some(issue) = issue {
+        if runner_pod_project_id != issue.project_id {
+            return Ok("runner_wrong_project");
+        }
+    }
+    // E4: revoked.
+    if runner_status == "revoked" || runner_revoked_at.is_some() {
+        return Ok("runner_revoked");
+    }
+    // E7: owner is creator or current assignee of the issue.
+    if let Some(issue) = issue {
+        let mut people: Vec<Uuid> = Vec::new();
+        if let Some(creator) = issue.created_by_id {
+            people.push(creator);
+        }
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let assignees: Vec<issue_assignees::Model> = issue_assignees::Entity::find()
+            .filter(issue_assignees::Column::IssueId.eq(issue.id))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?;
+        for row in assignees {
+            if !people.contains(&row.assignee_id) {
+                people.push(row.assignee_id);
+            }
+        }
+        if !people.contains(&runner_owner_id) {
+            return Ok("runner_owner_not_on_issue");
+        }
+    }
+    // E8: no blocking run on the issue.
+    if let Some(issue) = issue {
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let hit: Option<Uuid> = agent_run::Entity::find()
+            .select_only()
+            .column(agent_run::Column::Id)
+            .filter(agent_run::Column::WorkItemId.eq(issue.id))
+            .filter(agent_run::Column::Status.is_in(E8_BLOCKING_STATUSES.to_vec()))
+            .limit(1)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| server_error())?;
+        if hit.is_some() {
+            return Ok("active_run_in_progress");
+        }
+    }
+    Ok("")
+}
+
+/// `GET /api/v1/workspaces/<slug>/runners/` (`api/views/runner.py:68-116`).
+/// CLI-friendly token list: workspace 404, membership 403, visible runners
+/// in `-updated_at` order, optional `?project=` narrowing and
+/// `?assignable_for=` eligibility fields. Handler order mirrors Django:
+/// auth (401/403) → workspace lookup (404) → membership (403) → list.
+pub async fn list_runners(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<QueryMap>,
+    headers: HeaderMap,
+) -> Response {
+    if !headers
+        .get(token_kernel::API_KEY_HEADER)
+        .is_some_and(|value| !value.as_bytes().is_empty())
+    {
+        return unauthorized();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(resp) => return resp,
+    };
+    let caller = match authenticate(&pool, state.settings().secret_key.as_bytes(), &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let workspace_id = match workspace_by_slug(&pool, &slug).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return workspace_not_found(),
+        Err(resp) => return resp,
+    };
+    let member = match is_member(&pool, workspace_id, caller.user_id).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if !member {
+        return forbidden();
+    }
+    // ?project= narrows to the project's pods. Empty/missing means no
+    // filter; a non-UUID value returns [] (Django 500s on the
+    // ValidationError — tier 3: no client sends a non-UUID project).
+    let project_filter: Option<Uuid> = match query_last(&query, "project") {
+        Some(raw) if !raw.is_empty() => match raw.parse::<Uuid>() {
+            Ok(id) => Some(id),
+            _ => {
+                // Bogus project: return empty list (no client sends it —
+                // tier 3; Django 500s on the ValidationError).
+                return json_response(StatusCode::OK, "[]".to_owned());
+            }
+        },
+        _ => None,
+    };
+
+    // Query runner rows: same visibility as Django's
+    // `runner_visible_to_user_q` (owner_id + PRIVATE) and `-updated_at` order.
+    // Reuse the manage_reads R1 query (workspace, owner, visibility, project).
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let rows: Vec<pidash_services::runner_enroll::queries::manage_reads::RunnerJoinRow> =
+        match pidash_services::runner_enroll::queries::manage_reads::runner_list(
+            &db,
+            workspace_id,
+            caller.user_id,
+            runner_perm::VISIBILITY_PRIVATE as i16,
+            None,
+            None,
+            project_filter,
+        )
+        .await
+        .map_err(|_| server_error())
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+    // ?assignable_for= presence gates the four extra fields (Django:
+    // `if assignable_for is not None`).
+    let assignable_for_present = query.contains_key("assignable_for");
+    let issue_opt: Option<Option<issues::Model>> = if assignable_for_present {
+        let raw = query_last(&query, "assignable_for").unwrap_or_default();
+        if raw == "new" {
+            Some(None)
+        } else {
+            match raw.parse::<Uuid>() {
+                Ok(uuid) => {
+                    let found: Option<issues::Model> = match issues::Entity::find()
+                        .filter(issues::Column::Id.eq(uuid))
+                        .filter(issues::Column::DeletedAt.is_null())
+                        .one(&db)
+                        .await
+                        .map_err(|_| server_error())
+                    {
+                        Ok(v) => v,
+                        Err(resp) => return resp,
+                    };
+                    Some(found)
+                }
+                Err(_) => Some(None),
+            }
+        }
+    } else {
+        None
+    };
+    let assignable_issue: Option<&issues::Model> = match &issue_opt {
+        Some(Some(m)) => Some(m),
+        Some(None) => None,
+        None => None,
+    };
+
+    // Render each runner (full 31-field wire shape). Live state is
+    // fetched per row like the web list (`fetch_live_state` in
+    // `runner_enroll::manage`); null when the row is missing.
+    let mut bodies: Vec<String> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        // Pre-render datetime strings for the shapes layer (already ISO-8601).
+        let last_heartbeat_str = row
+            .last_heartbeat_at
+            .as_ref()
+            .map(crate::serializer::render_datetime);
+        let enrolled_str = row
+            .enrolled_at
+            .as_ref()
+            .map(crate::serializer::render_datetime);
+        let revoked_str = row
+            .revoked_at
+            .as_ref()
+            .map(crate::serializer::render_datetime);
+        let paused_str = row
+            .paused_at
+            .as_ref()
+            .map(crate::serializer::render_datetime);
+        let created_str = crate::serializer::render_datetime(&row.created_at);
+        let updated_str = crate::serializer::render_datetime(&row.updated_at);
+
+        let id_str = row.id.to_string();
+        let owner_str = row.owner_id.to_string();
+        let pod_str = row.pod_id.to_string();
+        let pod_project_str = row.pod_project_id.to_string();
+        let pod_project_id = row.pod_project_id;
+        let dev_machine_str = row.dev_machine_id.map(|id| id.to_string());
+
+        // Derived flags mirroring `RunnerSerializer` / `runner_render`.
+        let is_engine = row.provisioning == "desktop_bundled";
+        let engine_paused = if is_engine {
+            let by_owner = row.dm_engine_paused_by_owner.unwrap_or(false);
+            let reason = row.dm_engine_auto_pause_reason.as_deref().unwrap_or("");
+            by_owner || !reason.is_empty()
+        } else {
+            false
+        };
+        let dispatch_paused = row.paused_at.is_some();
+        // `Runner.machine_display_name` (`models.py:740-755` plus the
+        // dev-machine `display_name`): when a dev machine is bound, its
+        // label or host_label, falling back to "This computer" — even when
+        // both labels are blank (`blank=True, default=""`). Only rows with
+        // no bound machine fall back to the runner's own labels (mirroring
+        // `runner_render` in `runner_enroll::manage`).
+        let machine_display_name: String = if row.dm_id.is_some() {
+            let label = row.dm_label.as_deref().unwrap_or("");
+            let host = row.dm_host_label.as_deref().unwrap_or("");
+            if !label.is_empty() {
+                label.to_owned()
+            } else if !host.is_empty() {
+                host.to_owned()
+            } else {
+                "This computer".to_owned()
+            }
+        } else if !row.host_label.is_empty() {
+            row.host_label.clone()
+        } else {
+            row.name.clone()
+        };
+
+        // Build the base JSON object directly (31 fields, wire order) so
+        // optional assignable fields can be injected without lifetime gymnastics.
+        let pod_detail = serde_json::json!({
+            "id": pod_str,
+            "name": row.pod_name,
+            "is_default": row.pod_is_default,
+            "project": pod_project_str,
+            "project_identifier": row.project_identifier,
+        });
+        let dev_machine_detail = match row.dm_id {
+            Some(dm_id) => {
+                let dm_expires = row
+                    .dm_engine_credential_expires_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime);
+                // `DevMachineMiniSerializer.to_representation`
+                // (`serializers.py:186-189`): the stored state is derived
+                // through `current_engine_sign_in_state`, never emitted raw
+                // (the `runner_enroll::manage` precedent).
+                let engine_sign_in_state = engine_credential::current_engine_sign_in_state(
+                    row.dm_engine_sign_in_state.as_deref().unwrap_or(""),
+                    row.dm_engine_credential_expires_at,
+                    Utc::now(),
+                );
+                serde_json::json!({
+                    "id": dm_id.to_string(),
+                    "host_label": row.dm_host_label.clone().unwrap_or_default(),
+                    "label": row.dm_label.clone().unwrap_or_default(),
+                    "engine_paused_by_owner": row.dm_engine_paused_by_owner.unwrap_or(false),
+                    "engine_auto_pause_reason": row.dm_engine_auto_pause_reason.clone().unwrap_or_default(),
+                    "engine_team_runs": row.dm_engine_team_runs.unwrap_or(false),
+                    "engine_sign_in_state": engine_sign_in_state,
+                    "engine_credential_expires_at": dm_expires,
+                })
+            }
+            None => serde_json::Value::Null,
+        };
+
+        // The `RunnerLiveState` snapshot (`serializers.py:199` via
+        // `RunnerSerializer.live_state`): the row when present, null when
+        // missing. Fetched per row like the web list; rendered through the
+        // shapes kernel so the sub-shape matches byte for byte.
+        let live_row = match manage_reads::runner_live_state(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            row.id,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => return server_error(),
+        };
+        let live_state_value = match live_row {
+            Some(live) => {
+                let render_at = |at: &sea_orm::prelude::DateTimeWithTimeZone| {
+                    crate::serializer::render_datetime(&at.with_timezone(&Utc))
+                };
+                let observed_run_id = live.observed_run_id.map(|id| id.to_string());
+                let last_event_at = live.last_event_at.as_ref().map(render_at);
+                let agent_last_activity_at = live.agent_last_activity_at.as_ref().map(render_at);
+                let live_updated_at = render_at(&live.updated_at);
+                serde_json::to_value(shapes::live_state_to_representation(
+                    &shapes::LiveStateRow {
+                        observed_run_id: observed_run_id.as_deref(),
+                        last_event_at: last_event_at.as_deref(),
+                        last_event_kind: live.last_event_kind.as_deref(),
+                        last_event_summary: live.last_event_summary.as_deref(),
+                        agent_pid: live.agent_pid.map(i64::from),
+                        agent_subprocess_alive: live.agent_subprocess_alive,
+                        approvals_pending: live.approvals_pending.map(i64::from),
+                        usage: &live.usage,
+                        llm_model: live.llm_model.as_deref(),
+                        turn_count: live.turn_count.map(i64::from),
+                        agent_health: live.agent_health.as_deref(),
+                        agent_last_activity_at: agent_last_activity_at.as_deref(),
+                        updated_at: &live_updated_at,
+                    },
+                ))
+                .expect("live-state shape serializes")
+            }
+            None => serde_json::Value::Null,
+        };
+
+        let mut obj = serde_json::json!({
+            "id": id_str,
+            "name": row.name,
+            "status": row.status,
+            "host_label": row.host_label,
+            "is_engine": is_engine,
+            "engine_paused": engine_paused,
+            "dispatch_paused": dispatch_paused,
+            "machine_display_name": machine_display_name,
+            "provisioning": row.provisioning,
+            "pod_dispatch": row.pod_dispatch,
+            "os": row.os,
+            "arch": row.arch,
+            "runner_version": row.runner_version,
+            "dev_metadata": row.dev_metadata,
+            "protocol_version": i64::from(row.protocol_version),
+            "capabilities": row.capabilities,
+            "last_heartbeat_at": last_heartbeat_str,
+            "owner": owner_str,
+            "dev_machine": dev_machine_str,
+            "dev_machine_detail": dev_machine_detail,
+            "visibility": i64::from(row.visibility),
+            "pod": pod_str,
+            "pod_detail": pod_detail,
+            "live_state": live_state_value,
+            "enrolled_at": enrolled_str,
+            "revoked_at": revoked_str,
+            "revoked_reason": row.revoked_reason,
+            "paused_at": paused_str,
+            "paused_by": row.paused_by_id.map(|id| id.to_string()),
+            "created_at": created_str,
+            "updated_at": updated_str,
+        });
+
+        if assignable_for_present {
+            let code = match assignable_code(
+                &pool,
+                caller.user_id,
+                row.id,
+                row.owner_id,
+                &row.status,
+                row.revoked_at,
+                pod_project_id,
+                assignable_issue,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let busy = match runner_is_busy(&pool, row.id).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let depth = match runner_queue_depth(&pool, row.id).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            if let serde_json::Value::Object(ref mut map) = obj {
+                map.insert("assignable".to_owned(), serde_json::json!(code.is_empty()));
+                map.insert("not_assignable_code".to_owned(), serde_json::json!(code));
+                map.insert("is_busy".to_owned(), serde_json::json!(busy));
+                map.insert("queue_depth".to_owned(), serde_json::json!(depth));
+            }
+        }
+        bodies.push(serde_json::to_string(&obj).expect("runner JSON serializes"));
+    }
+    json_response(StatusCode::OK, format!("[{}]", bodies.join(",")))
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +1018,7 @@ pub async fn delete_runner(
     let ports = LivePorts::new(pool.clone(), &state);
     let pool_ref = &pool;
     let ports_ref = &ports;
+    let state_ref = &state;
     // Each lifecycle arm below never fails (it logs internally and
     // answers `Ok`), so the results discard, as the merged drain did;
     // only drains and cleanup propagate, as the server error.
@@ -482,6 +1052,67 @@ pub async fn delete_runner(
             )
             .await;
         },
+        // §13.1: the ticking-issue bounce for a lost runner.
+        |issue_id, runner_name, reason, triggered_by| async move {
+            let name = runner_name.unwrap_or_else(|| "the dedicated runner".to_owned());
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state_ref,
+                pool_ref,
+                Uuid::nil(),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, _)) => {
+                    if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                        pool_ref,
+                        deps,
+                        now,
+                        0.0,
+                        issue_id,
+                        &triggered_by,
+                        &reason,
+                        &name,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner bounce failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner bounce: dispatch deps failed");
+                }
+            }
+        },
+        // §13.1 `fall_back` step 2: recreate in the default pod.
+        |issue_id, _pod_id, trigger, creator| async move {
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state_ref,
+                pool_ref,
+                creator.unwrap_or(Uuid::nil()),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, matcher)) => {
+                    if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                        pool_ref, deps, &matcher, now, 0.0, issue_id, &trigger, creator, false,
+                        false,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner recreate failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner recreate: dispatch deps failed");
+                }
+            }
+        },
     )
     .await
     .is_err()
@@ -489,4 +1120,23 @@ pub async fn delete_runner(
         return server_error();
     }
     no_content()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 60-day idle expiry (`NEWPIDASH-50`): `MachineToken.is_expired`
+    /// is the generic refusal on `X-Api-Key` `mt_` paths, checked
+    /// after revoked and before dev-machine revocation.
+    #[test]
+    fn machine_token_expiry_is_checked() {
+        let now = Utc::now();
+        let past = now - chrono::Duration::seconds(1);
+        let future = now + chrono::Duration::days(1);
+        assert!(Some(past).is_some_and(|expires| expires <= now));
+        assert!(!Some(future).is_some_and(|expires| expires <= now));
+        assert!(!None.is_some_and(|expires: DateTime<Utc>| expires <= now));
+        assert!(Some(now).is_some_and(|expires| expires <= now));
+    }
 }

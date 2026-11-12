@@ -42,6 +42,12 @@ vi.mock("../api/runs.js", async (importOriginal) => {
   return { ...original, ...queryMocks };
 });
 
+const runnerMocks = vi.hoisted(() => ({ useRunners: vi.fn() }));
+vi.mock("../api/queries.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../api/queries.js")>();
+  return { ...original, ...runnerMocks };
+});
+
 const { schedulerBindingHref, RunsScreen } = await import("./RunsScreen.js");
 
 function stubQueries(
@@ -71,6 +77,7 @@ function renderScreen(page = 2, selectedRunId: string | null = null) {
 beforeEach(() => {
   navigate.mockClear();
   notifyError.mockClear();
+  runnerMocks.useRunners.mockReturnValue({ data: undefined });
   stubQueries();
 });
 
@@ -194,6 +201,40 @@ describe("detail states", () => {
     renderScreen(1, "11111111-2222-3333-4444-555555555555");
     expect(screen.getByTestId("run-detail")).toBeInTheDocument();
     expect(screen.getByTestId("run-scheduler-link")).toHaveAttribute("href", "/acme/projects/p-1/schedulers/b-1");
+  });
+
+  it("labels a run on a built-in engine by its machine", () => {
+    runnerMocks.useRunners.mockReturnValue({
+      data: [
+        {
+          id: "r-engine",
+          name: "builtin-x",
+          provisioning: "desktop_bundled",
+          dev_machine_detail: { id: "m-1", label: "Work laptop", host_label: "rich-mbp" },
+        },
+      ],
+    });
+    stubQueries({
+      detail: {
+        data: {
+          id: "11111111-2222-3333-4444-555555555555",
+          status: "running",
+          executor_kind: "local_runner",
+          runner: "r-engine",
+          prompt: "p",
+          error: "",
+          error_diagnostic: null,
+          done_payload: null,
+          tool_plan: {},
+          tool_calls: [],
+          events: [],
+          scheduler_binding: null,
+          scheduler_binding_detail: null,
+        },
+      },
+    });
+    renderScreen(1, "11111111-2222-3333-4444-555555555555");
+    expect(screen.getByTestId("run-executor")).toHaveTextContent("Built-in engine · Work laptop");
   });
 });
 
