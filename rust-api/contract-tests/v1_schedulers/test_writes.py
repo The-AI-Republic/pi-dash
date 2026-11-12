@@ -552,17 +552,17 @@ def test_run_now_conflicts(world, conn):
             "run_config": {},
             "required_capabilities": {},
             "thread_id": "seed-thread",
-            "error": "",
+            # PDASHOSS01-187 folded error/error_code into error_details;
+            # refusal_category is a generated column (no write).
+            "error_details": {},
             "workspace_id": world["ws"]["id"],
             "pod_id": world["pod"]["id"],
             "created_by_id": world["users"]["owner"]["id"],
             "llm_model": "seed-model",
-            "refusal_category": "",
             "trigger": "scheduler",
             "executor_kind": "local_runner",
             "dispatch_attempts": 0,
             "cancel_reason": "",
-            "error_code": "",
             "tool_plan": {},
             "phase_kind": "",
             "agent_metadata": {},
@@ -807,7 +807,6 @@ def project_list_url(w, project=None):
 def new_scheduler(w, **extra):
     return {
         "name": "Nightly Bug Scan",
-        "slug": f"nightly-{w['tag']}",
         "description": "Looks for regressions.",
         "prompt": NEW_PROMPT,
         **extra,
@@ -820,8 +819,10 @@ def test_workspace_admin_creates_definition(world, conn):
     assert r.status_code == 201, r.text
     body = r.json()
     assert list(body.keys()) == SCHEDULER_KEYS
-    for key in ("name", "slug", "description", "prompt"):
+    for key in ("name", "description", "prompt"):
         assert body[key] == body_in[key]
+    # The slug is derived from the name (PDASHOSS01-319).
+    assert body["slug"] == "nightly-bug-scan"
     assert body["workspace"] == str(world["ws"]["id"])
     assert body["color"] == "#3b82f6"
     assert body["is_enabled"] is True
@@ -831,7 +832,7 @@ def test_workspace_admin_creates_definition(world, conn):
     assert str(row["created_by_id"]) == str(world["users"]["owner"]["id"])
     assert row["deleted_at"] is None
     listed = http.get(world["keys"]["owner"], ws_list_url(world)).json()
-    assert body_in["slug"] in [s["slug"] for s in listed["results"]]
+    assert "nightly-bug-scan" in [s["slug"] for s in listed["results"]]
 
 
 def test_create_disabled_with_color(world):
@@ -844,20 +845,35 @@ def test_create_disabled_with_color(world):
     assert r.json()["color"] == "#aabbcc"
 
 
-def test_create_slug_errors(world):
+def test_create_name_errors(world):
     key = world["keys"]["owner"]
+    # A body `slug` is ignored: the server derives it from the name.
+    ignored = send(
+        "POST", key, ws_list_url(world),
+        json=new_scheduler(world, slug="evil"),
+    )
+    assert ignored.status_code == 201, ignored.text
+    assert ignored.json()["slug"] == "nightly-bug-scan"
+    # A second create with a name whose derived slug collides is a name
+    # field error (PDASHOSS01-319).
     taken = send(
         "POST", key, ws_list_url(world),
-        json=new_scheduler(world, slug=world["manifest"]["slug"]),
+        json=new_scheduler(world, name="nightly bug-scan!"),
     )
     assert (taken.status_code, taken.json()) == (
-        400, {"slug": ["This slug is already in use in this workspace."]}
+        400,
+        {"name": ["A scheduler with the same name already exists in this workspace."]},
     )
-    for slug in ("security-audit", "fable-security-audit", " fable-security-audit "):
-        reserved = send("POST", key, ws_list_url(world), json=new_scheduler(world, slug=slug))
-        assert (reserved.status_code, reserved.json()) == (
-            400, {"slug": ["This slug is reserved for a built-in scheduler."]}
-        ), slug
+    # The built-in row (slug "security-audit") still exists, so a user-
+    # created scheduler named "Security Audit" collides the same way.
+    builtin = send(
+        "POST", key, ws_list_url(world),
+        json=new_scheduler(world, name="Security Audit"),
+    )
+    assert (builtin.status_code, builtin.json()) == (
+        400,
+        {"name": ["A scheduler with the same name already exists in this workspace."]},
+    )
 
 
 def test_create_validation(world, conn):
@@ -865,7 +881,6 @@ def test_create_validation(world, conn):
     empty = send("POST", key, ws_list_url(world), json={})
     assert empty.status_code == 400
     assert list(empty.json().items()) == [
-        ("slug", ["This field is required."]),
         ("name", ["This field is required."]),
         ("prompt", ["This field is required."]),
     ]
@@ -885,8 +900,9 @@ def test_create_validation(world, conn):
     listed = send("POST", key, ws_list_url(world), json=[new_scheduler(world)])
     assert (listed.status_code, listed.json()) == (400, NOT_AN_OBJECT)
     assert db.fetch_one(
-        conn, "SELECT count(*) AS n FROM schedulers WHERE slug = %s",
-        (f"nightly-{world['tag']}",),
+        conn,
+        "SELECT count(*) AS n FROM schedulers WHERE slug = %s AND workspace_id = %s",
+        ("nightly-bug-scan", world["ws"]["id"]),
     )["n"] == 0
 
 
@@ -904,8 +920,9 @@ def test_create_denials(world, conn, role, body):
     r = send("POST", world["keys"][role], ws_list_url(world), json=new_scheduler(world))
     assert (r.status_code, r.json()) == (403, body)
     assert db.fetch_one(
-        conn, "SELECT count(*) AS n FROM schedulers WHERE slug = %s",
-        (f"nightly-{world['tag']}",),
+        conn,
+        "SELECT count(*) AS n FROM schedulers WHERE slug = %s AND workspace_id = %s",
+        ("nightly-bug-scan", world["ws"]["id"]),
     )["n"] == 0
 
 
