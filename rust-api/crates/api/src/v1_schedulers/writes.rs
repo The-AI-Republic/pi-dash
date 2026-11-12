@@ -13,7 +13,9 @@
 //!   (`WorkspaceSchedulerDetailAPIEndpoint`): edit a definition's `prompt`,
 //!   `name`, `description`, `color`, `is_enabled`; never a built-in one.
 //! * `POST workspaces/<slug>/schedulers/` (`WorkspaceSchedulerListAPIEndpoint`,
-//!   -318): create a definition; a built-in slug is refused.
+//!   -318): create a definition; the slug is derived from the name
+//!   (PDASHOSS01-319), a body `slug` is ignored, and a name whose derived
+//!   slug collides is a `{"name": [...]}` field error.
 //! * `DELETE workspaces/<slug>/schedulers/<uuid>/` (-318): soft-delete a
 //!   definition and every install of it; never a built-in one.
 //! * `POST workspaces/<slug>/projects/<project_id>/schedulers/`
@@ -134,7 +136,9 @@ pub const BINDING_WRITABLE_FIELDS: &[&str] = &[
 pub const DEFINITION_WRITABLE_FIELDS: &[&str] =
     &["prompt", "name", "description", "color", "is_enabled"];
 
-/// `DEFINITION_CREATE_FIELDS`: the slug plus the editable fields.
+/// `DEFINITION_CREATE_FIELDS`: the editable fields plus `slug` as an
+/// ignored key (old CLI callers still send it; the server derives the slug
+/// from the name, PDASHOSS01-319).
 pub const DEFINITION_CREATE_FIELDS: &[&str] = &[
     "slug",
     "prompt",
@@ -171,9 +175,6 @@ pub const NOT_AN_OBJECT_MESSAGE: &str = "The request body must be a JSON object"
 
 /// `BUILTIN_CONFLICT` message (`code: builtin_scheduler`).
 pub const BUILTIN_MESSAGE: &str = "Built-in schedulers cannot be edited or deleted; put per-project instructions in the binding's extra_context instead.";
-
-/// The create 400 for a built-in slug.
-pub const RESERVED_SLUG_MESSAGE: &str = "This slug is reserved for a built-in scheduler.";
 
 /// The install 400 for a missing, blank or non-string `scheduler`.
 pub const SCHEDULER_REQUIRED_MESSAGE: &str = "The scheduler's id or slug is required.";
@@ -1218,8 +1219,20 @@ pub(crate) async fn definition_patch_inner(
         };
         previous.insert(key.clone(), value);
     }
-    let write = app_sched::validate_patch_body(&Value::Object(fields), &record)
-        .map_err(|errors| Denial::Body(StatusCode::BAD_REQUEST, errors))?;
+    // `validate_name` (PDASHOSS01-319): a `name` whose derived slug another
+    // live scheduler in the workspace uses is the app's `{"name": [...]}`
+    // 400, merged ahead of the other field errors.
+    let fields = Value::Object(fields);
+    let validated = app_sched::validate_patch_body(&fields, &record);
+    let write = app_sched::enforce_name_unique(
+        &context.pool,
+        &record.workspace_id,
+        &fields,
+        Some(scheduler_id),
+        validated,
+    )
+    .await
+    .map_err(from_sched)?;
     // `serializer.save()`: every writable column with the merged values,
     // plus `updated_at` / `updated_by_id` (the app's R4 statement).
     let now = Utc::now();
@@ -1396,18 +1409,16 @@ pub(crate) async fn definition_create_inner(
         return Err(Denial::BadError(NOT_AN_OBJECT_MESSAGE.to_owned()));
     };
     // Unknown keys only: an empty body goes on to the serializer's
-    // required-field errors.
+    // required-field errors. A body `slug` is an allowed, ignored key:
+    // the shared create path derives the slug from the name
+    // (PDASHOSS01-319), so a duplicate comes back as a `{"name": [...]}`
+    // field error from `create_scheduler`.
     if body
         .keys()
         .any(|key| !DEFINITION_CREATE_FIELDS.contains(&key.as_str()))
     {
         if let Some(denial) = unwritable_denial(body, DEFINITION_CREATE_FIELDS, "a new scheduler") {
             return Err(denial);
-        }
-    }
-    if let Some(Value::String(slug)) = body.get("slug") {
-        if is_builtin_slug(slug.trim_matches(app_bind::is_python_space)) {
-            return Err(field_error("slug", RESERVED_SLUG_MESSAGE));
         }
     }
     let workspace_id = context.workspace_id.ok_or(Denial::ServerError)?;

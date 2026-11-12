@@ -29,6 +29,8 @@
 --   .exists() over filter(workspace, slug); manager NULL-guard only
 --   (tombstoned slugs reusable); slug sorts before workspace_id (Q
 --   alphabetical kwargs). PATCH appends AND NOT (id = :scheduler_id).
+--   PDASHOSS01-319: validate_name runs the same query with :slug derived
+--   from the name (pi_dash/scheduler/slug.py).
 
 -- R1 scheduler list (:59-68)
 SELECT "schedulers"."created_at", "schedulers"."updated_at", "schedulers"."created_by_id", "schedulers"."updated_by_id", "schedulers"."deleted_at", "schedulers"."id", "schedulers"."workspace_id", "schedulers"."slug", "schedulers"."name", "schedulers"."description", "schedulers"."prompt", "schedulers"."source", "schedulers"."is_enabled", "schedulers"."color", COUNT("scheduler_bindings"."id") FILTER (WHERE "scheduler_bindings"."deleted_at" IS NULL) AS "_active_binding_count" FROM "schedulers" LEFT OUTER JOIN "scheduler_bindings" ON ("schedulers"."id" = "scheduler_bindings"."scheduler_id") WHERE ("schedulers"."deleted_at" IS NULL AND "schedulers"."workspace_id" = :workspace_id) GROUP BY "schedulers"."id" ORDER BY "schedulers"."name" ASC;

@@ -65,7 +65,7 @@ def test_scheduler_get_noncanonical_404s(org, spelling):
 
 @pytest.mark.parametrize("spelling", SPELLINGS)
 def test_scheduler_patch_noncanonical_404s_and_writes_nothing(org, spelling):
-    created = _create(org, slug="keep", name="Keep")
+    created = _create(org, name="Keep")
     seg = _spellings(created["id"])[spelling]
     r = org.request(
         "PATCH", sched_detail(org, seg), "admin", json={"name": "Mutated"}
