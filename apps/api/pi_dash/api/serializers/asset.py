@@ -36,7 +36,6 @@ class UserAssetUploadSerializer(serializers.Serializer):
     entity_type = serializers.ChoiceField(
         choices=[
             (FileAsset.EntityTypeContext.USER_AVATAR, "User Avatar"),
-            (FileAsset.EntityTypeContext.USER_COVER, "User Cover"),
         ],
         help_text="Type of user asset",
     )

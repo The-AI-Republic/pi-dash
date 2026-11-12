@@ -8,16 +8,12 @@ import { useState } from "react";
 import { Controller, useFormContext } from "react-hook-form";
 // pi dash imports
 import { ETabIndices } from "@pi-dash/constants";
-import { useTranslation } from "@pi-dash/i18n";
 import { EmojiPicker, EmojiIconPickerTypes, Logo } from "@pi-dash/propel/emoji-icon-picker";
 import { CloseIcon } from "@pi-dash/propel/icons";
 // pi dash types
 import type { IProject } from "@pi-dash/types";
 // pi dash ui
 import { getTabIndex } from "@pi-dash/utils";
-// components
-import { CoverImage } from "@/components/common/cover-image";
-import { ImagePickerPopover } from "@/components/core/image-picker-popover";
 // pi dash web imports
 import { ProjectTemplateSelect } from "@/pi-dash-web/components/projects/create/template-select";
 
@@ -39,52 +35,14 @@ function ProjectCreateHeader(props: Props) {
     handleTemplateSelect,
     showActionButtons = true,
   } = props;
-  const { watch, control, setValue } = useFormContext<IProject>();
-  const { t } = useTranslation();
-  // derived values
-  const coverImage = watch("cover_image_url");
+  const { control, setValue } = useFormContext<IProject>();
 
   const [isOpen, setIsOpen] = useState(false);
   const { getIndex } = getTabIndex(ETabIndices.PROJECT_CREATE, isMobile);
 
   return (
-    <div className="group relative h-44 w-full rounded-lg">
-      <CoverImage
-        src={coverImage}
-        alt={t("Project cover image")}
-        className="absolute top-0 left-0 h-full w-full rounded-lg"
-      />
-      {showActionButtons && (
-        <div className="absolute top-2.5 left-2.5">
-          <ProjectTemplateSelect onClick={handleTemplateSelect} />
-        </div>
-      )}
-      {isClosable && (
-        <div className="absolute top-2 right-2 p-2">
-          <button type="button" onClick={handleClose} tabIndex={getIndex("close")}>
-            <CloseIcon className="h-5 w-5 text-on-color" />
-          </button>
-        </div>
-      )}
-      <div className="absolute right-2 bottom-2">
-        <Controller
-          name="cover_image_url"
-          control={control}
-          render={({ field: { value, onChange } }) => (
-            <ImagePickerPopover
-              label={t("Change cover")}
-              onChange={(data) => {
-                onChange(data);
-                handleFormOnChange?.();
-              }}
-              control={control}
-              value={value ?? null}
-              tabIndex={getIndex("cover_image")}
-            />
-          )}
-        />
-      </div>
-      <div className="absolute -bottom-[22px] left-3">
+    <div className="flex w-full items-center justify-between gap-3 px-3 pt-3">
+      <div className="flex items-center gap-3">
         <Controller
           name="logo_props"
           control={control}
@@ -127,7 +85,18 @@ function ProjectCreateHeader(props: Props) {
             />
           )}
         />
+        {showActionButtons && <ProjectTemplateSelect onClick={handleTemplateSelect} />}
       </div>
+      {isClosable && (
+        <button
+          type="button"
+          onClick={handleClose}
+          tabIndex={getIndex("close")}
+          className="rounded-sm p-2 text-secondary hover:bg-layer-transparent-hover hover:text-primary"
+        >
+          <CloseIcon className="h-5 w-5" />
+        </button>
+      )}
     </div>
   );
 }

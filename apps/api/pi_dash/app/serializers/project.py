@@ -160,8 +160,6 @@ class ProjectLiteSerializer(BaseSerializer):
             "id",
             "identifier",
             "name",
-            "cover_image",
-            "cover_image_url",
             "logo_props",
             "description",
             "is_default",
@@ -175,7 +173,6 @@ class ProjectListSerializer(DynamicBaseSerializer):
     member_role = serializers.IntegerField(read_only=True)
     anchor = serializers.CharField(read_only=True)
     members = serializers.SerializerMethodField()
-    cover_image_url = serializers.CharField(read_only=True)
     inbox_view = serializers.BooleanField(read_only=True, source="intake_view")
     next_work_item_sequence = serializers.SerializerMethodField()
     agent_executor_options = serializers.SerializerMethodField()

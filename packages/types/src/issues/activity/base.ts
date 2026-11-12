@@ -21,7 +21,6 @@ export type TIssueActivityProjectDetail = {
   id: string;
   identifier: string;
   name: string;
-  cover_image: string;
   description: string | null;
   emoji: string | null;
   icon_prop: {

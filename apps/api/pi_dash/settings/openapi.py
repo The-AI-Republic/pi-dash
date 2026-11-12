@@ -59,11 +59,11 @@ SPECTACULAR_SETTINGS = {
             "name": "Assets",
             "description": (
                 "**File Upload & Presigned URLs**\n\n"
-                "Generate presigned URLs for direct file uploads to cloud storage. Handle user avatars, "
-                "cover images, and generic project assets with secure upload workflows.\n\n"
+                "Generate presigned URLs for direct file uploads to cloud storage. Handle user avatars "
+                "and generic project assets with secure upload workflows.\n\n"
                 "*Key Features:*\n"
                 "- Generate presigned URLs for S3 uploads\n"
-                "- Support for user avatars and cover images\n"
+                "- Support for user avatars\n"
                 "- Generic asset upload for projects\n"
                 "- File validation and size limits\n\n"
                 "*Use Cases:* User profile images, project file uploads, secure direct-to-cloud uploads."

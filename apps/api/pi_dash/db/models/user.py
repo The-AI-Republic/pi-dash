@@ -73,15 +73,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name="user_avatar",
     )
-    # cover image
-    cover_image = models.URLField(blank=True, null=True, max_length=800)
-    cover_image_asset = models.ForeignKey(
-        FileAsset,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="user_cover_image",
-    )
 
     # tracking metrics
     date_joined = models.DateTimeField(auto_now_add=True, verbose_name="Created At")
@@ -148,17 +139,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         # Return the logo url if it exists
         if self.avatar:
             return self.avatar
-        return None
-
-    @property
-    def cover_image_url(self):
-        # Return the logo asset url if it exists
-        if self.cover_image_asset:
-            return self.cover_image_asset.asset_url
-
-        # Return the logo url if it exists
-        if self.cover_image:
-            return self.cover_image
         return None
 
     @property

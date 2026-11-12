@@ -25,7 +25,6 @@ const DEFAULT_DESCRIPTION = "Made with Pi Dash, an AI-powered work management pl
 interface IssueMetadata {
   name?: string;
   description?: string;
-  cover_image?: string;
 }
 
 // Loader function runs on the server and fetches metadata
@@ -59,9 +58,8 @@ export function meta({ loaderData }: Route.MetaArgs) {
 
   const title = metadata?.name || DEFAULT_TITLE;
   const description = metadata?.description || DEFAULT_DESCRIPTION;
-  const coverImage = metadata?.cover_image;
 
-  const metaTags = [
+  return [
     { title },
     { name: "description", content: description },
     // OpenGraph metadata
@@ -73,19 +71,6 @@ export function meta({ loaderData }: Route.MetaArgs) {
     { name: "twitter:title", content: title },
     { name: "twitter:description", content: description },
   ];
-
-  // Add images if cover image exists
-  if (coverImage) {
-    metaTags.push(
-      { property: "og:image", content: coverImage },
-      { property: "og:image:width", content: "800" },
-      { property: "og:image:height", content: "600" },
-      { property: "og:image:alt", content: title },
-      { name: "twitter:image", content: coverImage }
-    );
-  }
-
-  return metaTags;
 }
 
 // Prevent loader from re-running on anchor param changes

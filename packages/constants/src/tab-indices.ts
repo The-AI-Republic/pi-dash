@@ -57,7 +57,6 @@ export const PROJECT_CREATE_TAB_INDICES = [
   "cancel",
   "submit",
   "close",
-  "cover_image",
   "logo_props",
 ];
 

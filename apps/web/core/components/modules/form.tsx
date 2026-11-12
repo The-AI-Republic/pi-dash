@@ -101,7 +101,6 @@ export function ModuleForm(props: Props) {
                     multiple={false}
                     buttonVariant="border-with-text"
                     renderCondition={(projectId) => !!projectsWithCreatePermissions?.[projectId]}
-                    tabIndex={getIndex("cover_image")}
                   />
                 </div>
               )}

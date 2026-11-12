@@ -66,9 +66,7 @@ class UserMeSerializer(BaseSerializer):
         fields = [
             "id",
             "avatar",
-            "cover_image",
             "avatar_url",
-            "cover_image_url",
             "date_joined",
             "display_name",
             "email",

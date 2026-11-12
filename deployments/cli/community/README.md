@@ -441,7 +441,6 @@ api-1  | EMAIL_USE_TLS loaded with value from environment variable.
 api-1  | EMAIL_USE_SSL loaded with value from environment variable.
 api-1  | OPENAI_API_KEY loaded with value from environment variable.
 api-1  | GPT_ENGINE loaded with value from environment variable.
-api-1  | UNSPLASH_ACCESS_KEY loaded with value from environment variable.
 api-1  | Checking bucket...
 api-1  | Bucket 'uploads' does not exist. Creating bucket...
 api-1  | Bucket 'uploads' created successfully.

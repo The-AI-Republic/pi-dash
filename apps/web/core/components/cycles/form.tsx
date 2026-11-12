@@ -90,15 +90,13 @@ export function CycleForm(props: Props) {
                     multiple={false}
                     buttonVariant="border-with-text"
                     renderCondition={(projectId) => !!projectsWithCreatePermissions?.[projectId]}
-                    tabIndex={getIndex("cover_image")}
+                    tabIndex={getIndex("project_id")}
                   />
                 </div>
               )}
             />
           )}
-          <h3 className="text-18 font-medium text-secondary">
-            {status ? t("Update cycle") : t("Create cycle")}
-          </h3>
+          <h3 className="text-18 font-medium text-secondary">{status ? t("Update cycle") : t("Create cycle")}</h3>
         </div>
         <div className="space-y-3">
           <div className="space-y-1">
@@ -188,13 +186,7 @@ export function CycleForm(props: Props) {
           {t("Cancel")}
         </Button>
         <Button variant="primary" size="lg" type="submit" loading={isSubmitting} tabIndex={getIndex("submit")}>
-          {data
-            ? isSubmitting
-              ? t("Updating")
-              : t("Update cycle")
-            : isSubmitting
-              ? t("Creating")
-              : t("Create cycle")}
+          {data ? (isSubmitting ? t("Updating") : t("Update cycle")) : isSubmitting ? t("Creating") : t("Create cycle")}
         </Button>
       </div>
     </form>

@@ -6,7 +6,6 @@
 
 import { RANDOM_EMOJI_CODES } from "@pi-dash/constants";
 import type { IProject } from "@pi-dash/types";
-import { getRandomCoverImage } from "@/helpers/cover-image.helper";
 
 // Detect the user's local IANA timezone from the browser so new projects
 // default to it instead of always defaulting to UTC. Modern browsers
@@ -23,7 +22,6 @@ const getBrowserTimezone = (): string => {
 };
 
 export const getProjectFormValues = (): Partial<IProject> => ({
-  cover_image_url: getRandomCoverImage(),
   timezone: getBrowserTimezone(),
   description: "",
   logo_props: {

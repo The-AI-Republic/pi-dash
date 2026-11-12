@@ -93,7 +93,6 @@ class ProjectCreateSerializer(BaseSerializer):
             "identifier",
             "icon_prop",
             "emoji",
-            "cover_image",
             "module_view",
             "cycle_view",
             "issue_views_view",
@@ -252,7 +251,6 @@ class ProjectSerializer(BaseSerializer):
     sort_order = serializers.FloatField(read_only=True)
     member_role = serializers.IntegerField(read_only=True)
     is_deployed = serializers.BooleanField(read_only=True)
-    cover_image_url = serializers.CharField(read_only=True)
 
     class Meta:
         model = Project
@@ -266,7 +264,6 @@ class ProjectSerializer(BaseSerializer):
             "created_by",
             "updated_by",
             "deleted_at",
-            "cover_image_url",
         ]
 
     def validate(self, data):
@@ -348,19 +345,15 @@ class ProjectLiteSerializer(BaseSerializer):
     and basic metadata optimized for list views and references.
     """
 
-    cover_image_url = serializers.CharField(read_only=True)
-
     class Meta:
         model = Project
         fields = [
             "id",
             "identifier",
             "name",
-            "cover_image",
             "icon_prop",
             "emoji",
             "description",
             "is_default",
-            "cover_image_url",
         ]
         read_only_fields = fields
