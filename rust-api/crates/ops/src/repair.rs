@@ -157,9 +157,13 @@ pub async fn run_fix(args: FixArgs) {
         .unwrap_or_else(|message| fail(message));
     let map = db::build_sequence_map(tx.sequences());
     let sequence_updates = db::plan_sequence_updates(&map, &issue_updates);
-    domain_issues::apply_fix_plan(tx.executor(), &issue_updates, &sequence_updates)
-        .await
-        .unwrap_or_else(|e| fail(e));
+    domain_issues::apply_fix_plan(
+        &pidash_db::orm_tx::TxConn::new(tx.executor()),
+        &issue_updates,
+        &sequence_updates,
+    )
+    .await
+    .unwrap_or_else(|e| fail(e));
     tx.commit().await.unwrap_or_else(|e| fail(e));
     println!("{}", decisions::FIX_DONE_LINE);
 }
@@ -213,7 +217,12 @@ pub async fn run_slug(args: SlugArgs) {
             name,
             new_slug,
             success_line,
-        } => match pidash_services::domain::workspaces::rename(pool, workspace_id, &new_slug).await
+        } => match pidash_services::domain::workspaces::rename(
+            &pidash_db::pool::sea_orm_connection(pool),
+            workspace_id,
+            &new_slug,
+        )
+        .await
         {
             Ok(()) => println!("{success_line}"),
             Err(error) => println!("{}", decisions::slug_save_error_line(&name, &error)),

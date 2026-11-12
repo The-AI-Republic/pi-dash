@@ -10,8 +10,9 @@
 //!   and the bulk `PageLabel` write (`batch_size=10`).
 //! - `PageSerializer.update` (`:108-126`): label wipe + bulk recreate,
 //!   everything else via `super().update`.
-//! - `PageDetailSerializer` (`:129-133`): base fields plus a bare
-//!   `description_html` `CharField`.
+//! - `PageDetailSerializer` (`:129-133`, plus NEWFRONT-932 on main):
+//!   base fields plus a bare `description_html` `CharField` plus the
+//!   read-only `description_json` snapshot (main `:138,141`).
 //! - `PageVersionSerializer` (`:136-150`) and
 //!   `PageVersionDetailSerializer` (`:153-170`): field lists with
 //!   `read_only_fields = ["workspace", "page"]`.
@@ -96,10 +97,12 @@ pub const LABEL_IDS_FIELD: &str = "label_ids";
 pub const PROJECT_IDS_FIELD: &str = "project_ids";
 
 /// `PageDetailSerializer.Meta.fields`: base fields plus `description_html`
-/// (`page.py:129-133`).
+/// plus the read-only `description_json` snapshot (NEWFRONT-932, main
+/// `page.py:138,141`).
 pub fn page_detail_fields() -> Vec<&'static str> {
     let mut fields = PAGE_SERIALIZER_FIELDS.to_vec();
     fields.push("description_html");
+    fields.push("description_json");
     fields
 }
 
@@ -455,8 +458,9 @@ mod tests {
         assert_eq!(PAGE_READ_ONLY_FIELDS, guards.as_slice());
         let mut expected = str_list(&parsed["field_list"]);
         expected.push("description_html");
+        expected.push("description_json");
         assert_eq!(page_detail_fields(), expected);
-        assert_eq!(page_detail_fields().len(), 22);
+        assert_eq!(page_detail_fields().len(), 23);
     }
 
     #[test]

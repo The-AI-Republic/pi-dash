@@ -2,13 +2,17 @@
 //!
 //! Ports `apps/api/pi_dash/app/views/cycle/issue.py`:
 //!
-//! - `CycleIssueViewSet.list` (`:108-221`): the issue-list pipeline scoped to
-//!   one cycle — legacy `issue_filters(params, 'GET')` (`:111`),
+//! - `CycleIssueViewSet.list` (`:131-240`): the issue-list pipeline scoped to
+//!   one cycle (`cycle_issue_queryset`, `:108-129`, including the guest
+//!   `created_by` scoping) — legacy `issue_filters(params, 'GET')`,
 //!   `ComplexFilterBackend` + `IssueFilterSet` (`:43-44, :119`), the
 //!   `apply_annotations` columns (`:77-106`), `order_issue_queryset`
 //!   (`:130-134`), the grouped / sub-grouped / plain paginators
 //!   (`:136-221`) with `issue_on_results` shaping.
-//! - `CycleIssueViewSet.create` (`:223-297`): `issues` required (`:227-228`),
+//! - `CycleIssueViewSet.retrieve` (`:242-254`): one flat list row for a
+//!   work item in the cycle (same scope, no filters), else the 404
+//!   `ObjectDoesNotExist` body.
+//! - `CycleIssueViewSet.create` (`:264-338`): `issues` required,
 //!   completed-cycle refusal (`:232-236`), move-vs-`bulk_create`
 //!   (`:239-279`, batches 10 / 100), `issue_activity` publish (`:281-295`),
 //!   201 `{"message": "success"}` (`:297`).
@@ -33,10 +37,10 @@
 //!
 //! * `destroy` on a missing bridge still answers 204: `filter().delete()`
 //!   on an empty set with no existence check (`:301-320`).
-//! * `retrieve` / `update` / `partial_update` on the detail path fall
-//!   through to the `ModelViewSet` defaults, which die with a 500 for
-//!   every caller (contract `test_cycle_issue_detail_broken_upstream`).
-//!   Those methods proxy to Django, which reproduces the 500 itself.
+//! * `update` / `partial_update` on the detail path pass the MEMBER gate
+//!   and then run the `ModelViewSet` defaults, which die with a 500
+//!   (contract `test_cycle_issue_detail_writes_broken_upstream`). Those
+//!   methods proxy to Django, which reproduces the gate and the 500.
 //! * Non-UUID path segments: Django's `<uuid:>` converter rejects them at
 //!   URL resolve (HTML 404, unreachable through the JSON edge); here they
 //!   answer the `ValidationError` 400, the same body the kernels render
@@ -48,6 +52,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Router;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QuerySelect, QueryTrait,
+    RelationTrait,
+};
 use serde_json::{Map, Value};
 use sqlx::{Postgres, Row};
 
@@ -63,11 +72,39 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
+use pidash_db::entity::{
+    cycle_issues, cycles, project_members, projects, workspace_members, workspaces,
+};
+use sea_orm::FromQueryResult;
 
-/// `GET` + `POST` on the collection path; `DELETE` on the detail path.
-/// Every other method falls through to Django: the detail
-/// retrieve/update/partial_update are undecorated `ModelViewSet` defaults
-/// (500 upstream, gate `Authenticated`), which the proxy reproduces.
+#[derive(Debug, FromQueryResult)]
+struct ProjectIdRow {
+    id: uuid::Uuid,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct RoleRow {
+    role: i16,
+}
+
+#[derive(Debug, FromQueryResult)]
+#[allow(dead_code)]
+struct CycleRow {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    end_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct BridgeRow {
+    issue_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+}
+
+/// `GET` + `POST` on the collection path; `GET` + `DELETE` on the detail
+/// path. Every other method falls through to Django: the detail
+/// update/partial_update are MEMBER-gated `ModelViewSet` defaults (500
+/// upstream), which the proxy reproduces.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -83,10 +120,11 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/",
             axum::routing::delete(cycle_issue_destroy)
-                .get(crate::edge::proxy)
+                .get(cycle_issue_retrieve)
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .post(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
 }
@@ -221,16 +259,19 @@ pub(crate) async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Identifier.eq(&upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .columns([projects::Column::Id])
+        .into_model::<ProjectIdRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|r| r.id).ok_or(Denial::ProjectNotFound)
 }
 
 /// Badly-formed UUIDs in filters/paths render the `ValidationError` branch
@@ -246,51 +287,76 @@ pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
 /// Membership facts for one `(user, slug, project)` over the same rows the
 /// decorator reads (`app/permissions/base.py:19-86`): active project and
 /// workspace memberships scoped by slug/project, soft-deleted rows excluded.
+/// The role facts are computed against `[ADMIN, MEMBER]`; gates with
+/// another role list use [`fetch_allow_facts_for`].
 pub(crate) async fn fetch_allow_facts(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<AllowFacts, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
     use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
-    let allowed = [ROLE_ADMIN, ROLE_MEMBER];
+    fetch_allow_facts_for(pool, slug, project_id, user_id, &[ROLE_ADMIN, ROLE_MEMBER]).await
+}
+
+/// [`fetch_allow_facts`] with the role facts computed against `allowed`
+/// (the gate's own role list).
+pub(crate) async fn fetch_allow_facts_for(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    allowed: &[i32],
+) -> Result<AllowFacts, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project_role_row = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([project_members::Column::Role])
+        .into_model::<RoleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let workspace_role_row = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([workspace_members::Column::Role])
+        .into_model::<RoleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_role = project_role_row.map(|r| r.role);
+    let workspace_role = workspace_role_row.map(|r| r.role);
+    use pidash_auth::permissions::ROLE_ADMIN;
     Ok(AllowFacts {
         workspace: pidash_types::WorkspaceId::from(slug),
         authenticated: true,
         is_workspace_member: workspace_role.is_some(),
         has_allowed_workspace_role: workspace_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
+            .map(|role| allowed.contains(&i32::from(role)))
             .unwrap_or(false),
         is_creator: false,
         has_allowed_project_role: project_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
+            .map(|role| allowed.contains(&i32::from(role)))
             .unwrap_or(false),
         is_project_member: project_role.is_some(),
         is_workspace_admin: workspace_role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
+            .map(|role| i32::from(role) == ROLE_ADMIN)
             .unwrap_or(false),
     })
 }
@@ -326,8 +392,8 @@ pub(crate) async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: serde_json::Ma
     }
 }
 
-/// Common preamble for the three cycle-issue actions: session auth, project
-/// rewrite, the route's MEMBER gate. Returns `(pool, user_id, project_id)`.
+/// Common preamble for the cycle-issue actions: session auth, project
+/// rewrite, the route's role gate. Returns `(pool, user_id, project_id)`.
 async fn cycle_issue_context(
     state: &AppState,
     slug: &str,
@@ -338,9 +404,61 @@ async fn cycle_issue_context(
     let pool = pool_of(state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
-    let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id).await?;
+    let roles = match gate {
+        gates::Gate::Project { roles } | gates::Gate::ProjectCreator { roles } => *roles,
+        gates::Gate::Authenticated => &[],
+    };
+    let facts = fetch_allow_facts_for(&pool, slug, &project_id, &user_id, roles).await?;
     check_gate(gate, slug, &facts)?;
     Ok((pool, user_id, project_id))
+}
+
+/// The guest half of `cycle_issue_queryset` (`issue.py:116-127`): an active
+/// GUEST project membership on a project without `guest_view_all_features`
+/// sees only the work items it created. Returns the creator to scope to.
+async fn guest_creator_scope(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let is_guest = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::Role.eq(5))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if is_guest == 0 {
+        return Ok(None);
+    }
+    let has_view_all = projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::GuestViewAllFeatures.eq(true))
+        .filter(projects::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let scoped = has_view_all == 0;
+    Ok(scoped.then_some(*user_id))
+}
+
+/// Row scope on top of the cycle bridge: the guest creator restriction
+/// and, for retrieve, the one work item asked for.
+#[derive(Default)]
+struct RowScope {
+    created_by: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
 }
 
 fn gate_for_list() -> &'static gates::Gate {
@@ -349,6 +467,15 @@ fn gate_for_list() -> &'static gates::Gate {
         "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
     )
     .expect("cycle-issues list gate")
+    .gate
+}
+
+fn gate_for_retrieve() -> &'static gates::Gate {
+    &gates::gate_for(
+        "GET",
+        "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+    )
+    .expect("cycle-issues retrieve gate")
     .gate
 }
 
@@ -650,13 +777,15 @@ fn bind_values<'a>(
 /// (`issue_cycle__cycle_id`, bridge live) + tenant (workspace slug,
 /// project, active membership — the `get_queryset` `:61-68` filters, kept
 /// although the gate already enforces them) + the `ComplexFilterBackend`
-/// tree + the legacy `issue_filters(params, 'GET')` predicates.
+/// tree + the legacy `issue_filters(params, 'GET')` predicates, narrowed
+/// by `scope` (guest creator, retrieve's work item).
 #[allow(clippy::too_many_arguments)]
 fn cycle_filtered_set(
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
+    scope: &RowScope,
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
@@ -678,6 +807,14 @@ fn cycle_filtered_set(
                      WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
                        AND pm.is_active AND pm.deleted_at IS NULL)"#
     )];
+    if let Some(creator) = scope.created_by {
+        let holder = binder.bind_uuid(creator);
+        fragments.push(format!("issue.created_by_id = {holder}"));
+    }
+    if let Some(issue_id) = scope.issue_id {
+        let holder = binder.bind_uuid(issue_id);
+        fragments.push(format!("issue.id = {holder}"));
+    }
     if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
@@ -769,7 +906,7 @@ fn cycle_filtered_set(
     })
 }
 
-/// `CycleIssueViewSet.list` (`issue.py:108-221`).
+/// `CycleIssueViewSet.list` (`issue.py:131-240`).
 async fn cycle_issue_list(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
@@ -814,12 +951,17 @@ async fn cycle_issue_list(
     }
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
+    let scope = RowScope {
+        created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
+        issue_id: None,
+    };
     let timezone = filters_timezone(&pool, &user_id, &query).await?;
     let filtered = cycle_filtered_set(
         &slug,
         &project_id,
         &user_id,
         &cycle_id,
+        &scope,
         &query,
         group_by,
         sub_group_by,
@@ -888,7 +1030,56 @@ async fn cycle_issue_list(
     .await
 }
 
-/// Plain `paginate` branch (`issue.py:213-221`): distinct rows, the
+/// `CycleIssueViewSet.retrieve` (`issue.py:242-254`): the list's flat row
+/// (`issue_on_results`, ungrouped) for one work item in the cycle — the
+/// same bridge, manager, tenant and guest scope as the list, no filters —
+/// or the 404 `{"error": "The required object does not exist."}`.
+async fn cycle_issue_retrieve(
+    State(state): State<AppState>,
+    Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) || super::is_noncanonical_uuid(&issue_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
+    let (pool, user_id, project_id) =
+        cycle_issue_context(&state, &slug, &project_raw, gate_for_retrieve(), extension).await?;
+    let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
+    let issue_id = parse_uuid_or_invalid(&issue_raw)?;
+    let scope = RowScope {
+        created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
+        issue_id: Some(issue_id),
+    };
+    let filtered = cycle_filtered_set(
+        &slug,
+        &project_id,
+        &user_id,
+        &cycle_id,
+        &scope,
+        &empty_query_map(),
+        None,
+        None,
+        &chrono_tz::UTC,
+    )?;
+    let sql = format!(
+        "SELECT DISTINCT {} {} LIMIT 1",
+        cycle_row_selects(None),
+        filtered.from_where
+    );
+    let rows = fetch_json_rows(&pool, &sql, filtered.values).await?;
+    let row = rows.first().ok_or(Denial::NotFound)?;
+    Ok(json_response(
+        StatusCode::OK,
+        shape_row(row, &flat_row_fields(None, None), &chrono_tz::UTC, false),
+    ))
+}
+
+fn empty_query_map() -> QueryMap {
+    QueryMap::new()
+}
+
+/// Plain `paginate` branch (`issue.py:232-240`): distinct rows, the
 /// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
 async fn cycle_flat_response(
     pool: &sqlx::PgPool,
@@ -1097,6 +1288,7 @@ async fn cycle_grouped_response(
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
         process_sub_grouped_results, sub_field_dict, sub_total_dicts, total_dict,
+        unquote_sort_order,
     };
     use pidash_services::app_issues::shape::envelope;
     let limit = per_page.min(1000);
@@ -1200,6 +1392,7 @@ async fn cycle_grouped_response(
             .map_err(group_denial)?,
     };
     let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
+    let results_json = unquote_sort_order(&results_json);
     let top_group = group_totals
         .iter()
         .map(|(_, count)| *count)
@@ -1378,23 +1571,26 @@ async fn cycle_issue_create(
     };
     let issue_inputs = extract_issue_inputs(&issues_value)?;
     // `Cycle.objects.get(workspace__slug, project_id, pk)` (`:230`).
-    let cycle: Option<(
-        uuid::Uuid,
-        uuid::Uuid,
-        Option<chrono::DateTime<chrono::Utc>>,
-    )> = sqlx::query_as(
-        r#"SELECT c.id, c.workspace_id, c.end_date FROM cycles c
-               JOIN workspaces w ON w.id = c.workspace_id
-               WHERE c.id = $1 AND c.project_id = $2 AND w.slug = $3
-               AND c.deleted_at IS NULL"#,
-    )
-    .bind(cycle_id)
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (_, workspace_id, end_date) = cycle.ok_or(Denial::NotFound)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let cycle_row = cycles::Entity::find()
+        .join(JoinType::InnerJoin, cycles::Relation::Workspaces.def())
+        .filter(cycles::Column::Id.eq(cycle_id))
+        .filter(cycles::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .filter(cycles::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            cycles::Column::Id,
+            cycles::Column::WorkspaceId,
+            cycles::Column::EndDate,
+        ])
+        .into_model::<CycleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let cycle_row = cycle_row.ok_or(Denial::NotFound)?;
+    let workspace_id = cycle_row.workspace_id;
+    let end_date = cycle_row.end_date;
     // Completed-cycle refusal (`:232-236`).
     if cycle_is_completed(end_date, chrono::Utc::now()) {
         return Ok(json_response(
@@ -1411,15 +1607,24 @@ async fn cycle_issue_create(
         issue_ids.push(coerced_input(input)?);
     }
     // Bridges already created for these issues in *other* cycles (`:239`).
-    let existing: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-        r#"SELECT issue_id, cycle_id FROM cycle_issues
-           WHERE cycle_id != $1 AND issue_id = ANY($2) AND deleted_at IS NULL"#,
-    )
-    .bind(cycle_id)
-    .bind(&issue_ids)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let existing_rows = if issue_ids.is_empty() {
+        Vec::new()
+    } else {
+        cycle_issues::Entity::find()
+            .filter(cycle_issues::Column::CycleId.ne(cycle_id))
+            .filter(cycle_issues::Column::IssueId.is_in(issue_ids.clone()))
+            .filter(cycle_issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([cycle_issues::Column::IssueId, cycle_issues::Column::CycleId])
+            .into_model::<BridgeRow>()
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+    };
+    let existing: Vec<(uuid::Uuid, uuid::Uuid)> = existing_rows
+        .iter()
+        .map(|r| (r.issue_id, r.cycle_id))
+        .collect();
     // `existing_issues = [str(...) for ...]` + `set(issues) -
     // set(existing_issues)` (`:241-242`): the comparison is on the RAW
     // input strings, so a non-canonical UUID spelling of an already
@@ -1438,7 +1643,9 @@ async fn cycle_issue_create(
     }
     // `bulk_create(..., batch_size=10)` (`:244-257`); batching is
     // unobservable, one multi-row INSERT with RETURNING for the activity
-    // payload below.
+    // payload below. SeaORM insert_many replaces the PostgreSQL
+    // `gen_random_uuid()` + `unnest(uuid[])` RETURNING form: ids are
+    // generated in Rust and the payload rows are synthesised from `now`.
     let mut created: Vec<(
         uuid::Uuid,
         uuid::Uuid,
@@ -1447,38 +1654,51 @@ async fn cycle_issue_create(
     )> = Vec::new();
     if !new_ids.is_empty() {
         let now = chrono::Utc::now();
-        let rows: Vec<(
-            uuid::Uuid,
-            uuid::Uuid,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-        )> = sqlx::query_as(
-            r#"INSERT INTO cycle_issues
-                   (id, project_id, workspace_id, created_by_id, updated_by_id, cycle_id, issue_id, created_at, updated_at)
-                   SELECT gen_random_uuid(), $1, $2, $3, $3, $4, unnest($5::uuid[]), $6, $6
-                   RETURNING id, issue_id, created_at, updated_at"#,
-        )
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(user_id)
-            .bind(cycle_id)
-            .bind(&new_ids)
-            .bind(now)
-            .fetch_all(&pool)
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        let ids: Vec<uuid::Uuid> = new_ids.iter().map(|_| uuid::Uuid::new_v4()).collect();
+        let models: Vec<cycle_issues::ActiveModel> = new_ids
+            .iter()
+            .zip(ids.iter())
+            .map(|(issue_id, id)| cycle_issues::ActiveModel {
+                id: sea_orm::ActiveValue::Set(*id),
+                project_id: sea_orm::ActiveValue::Set(project_id),
+                workspace_id: sea_orm::ActiveValue::Set(workspace_id),
+                created_by_id: sea_orm::ActiveValue::Set(Some(user_id)),
+                updated_by_id: sea_orm::ActiveValue::Set(Some(user_id)),
+                cycle_id: sea_orm::ActiveValue::Set(cycle_id),
+                issue_id: sea_orm::ActiveValue::Set(*issue_id),
+                created_at: sea_orm::ActiveValue::Set(now_tz),
+                updated_at: sea_orm::ActiveValue::Set(now_tz),
+                deleted_at: sea_orm::ActiveValue::NotSet,
+            })
+            .collect();
+        cycle_issues::Entity::insert_many(models)
+            .exec(&db)
             .await
-            .map_err(|error| match error {
+            .map_err(|error| {
                 // `bulk_create` on a foreign key (`issue_id`) that no
                 // `issues` row owns raises `IntegrityError` → 400 payload
                 // not valid (`:244-257` through `handle_exception`); the
                 // partial-unique bridge constraint maps the same way.
-                sqlx::Error::Database(db)
-                    if matches!(db.code().as_deref(), Some("23505" | "23503")) =>
-                {
-                    Denial::BadError("The payload is not valid".to_owned())
+                match error {
+                    sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+                    | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner)) => {
+                        if let sqlx::Error::Database(db_err) = inner {
+                            if matches!(db_err.code().as_deref(), Some("23505" | "23503")) {
+                                return Denial::BadError("The payload is not valid".to_owned());
+                            }
+                        }
+                        Denial::ServerError
+                    }
+                    sea_orm::DbErr::RecordNotInserted | sea_orm::DbErr::RecordNotUpdated => {
+                        Denial::BadError("The payload is not valid".to_owned())
+                    }
+                    _ => Denial::ServerError,
                 }
-                _ => Denial::ServerError,
             })?;
-        created = rows;
+        for (idx, issue_id) in new_ids.iter().enumerate() {
+            created.push((ids[idx], *issue_id, now, now));
+        }
     }
     // Moved bridges: `bulk_update(["cycle_id"], batch_size=100)` (`:279`).
     // `bulk_update(["cycle_id"])` builds its UPDATE from the listed fields
@@ -1487,15 +1707,14 @@ async fn cycle_issue_create(
     let mut moved: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
     if !existing.is_empty() {
         let moved_ids: Vec<uuid::Uuid> = existing.iter().map(|(issue_id, _)| *issue_id).collect();
-        sqlx::query(
-            r#"UPDATE cycle_issues SET cycle_id = $1
-               WHERE issue_id = ANY($2) AND cycle_id != $1 AND deleted_at IS NULL"#,
-        )
-        .bind(cycle_id)
-        .bind(&moved_ids)
-        .execute(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        cycle_issues::Entity::update_many()
+            .col_expr(cycle_issues::Column::CycleId, Expr::value(cycle_id))
+            .filter(cycle_issues::Column::IssueId.is_in(moved_ids))
+            .filter(cycle_issues::Column::CycleId.ne(cycle_id))
+            .filter(cycle_issues::Column::DeletedAt.is_null())
+            .exec(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         for (issue_id, old_cycle_id) in &existing {
             moved.push((*old_cycle_id, *issue_id));
         }
@@ -1631,19 +1850,27 @@ async fn cycle_issue_destroy(
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin));
     enqueue_activity(&pool, kwargs).await;
-    sqlx::query(
-        r#"UPDATE cycle_issues SET deleted_at = now()
-           WHERE issue_id = $1 AND project_id = $2 AND cycle_id = $3
-             AND workspace_id IN (SELECT id FROM workspaces WHERE slug = $4)
-             AND deleted_at IS NULL"#,
-    )
-    .bind(issue_id)
-    .bind(project_id)
-    .bind(cycle_id)
-    .bind(&slug)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let workspace_id_subquery = workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .select_only()
+        .column(workspaces::Column::Id)
+        .into_query();
+    cycle_issues::Entity::update_many()
+        .col_expr(
+            cycle_issues::Column::DeletedAt,
+            Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(
+                chrono::Utc::now(),
+            )),
+        )
+        .filter(cycle_issues::Column::IssueId.eq(issue_id))
+        .filter(cycle_issues::Column::ProjectId.eq(project_id))
+        .filter(cycle_issues::Column::CycleId.eq(cycle_id))
+        .filter(cycle_issues::Column::WorkspaceId.in_subquery(workspace_id_subquery))
+        .filter(cycle_issues::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -1658,25 +1885,37 @@ mod tests {
     }
 
     #[test]
-    fn gates_cover_the_three_owned_actions() {
+    fn gates_cover_the_owned_actions() {
         let list = gates::gate_for(
             "GET",
             "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
         )
         .expect("list gate");
-        assert_eq!(list.source, "issue.py:109 (CycleIssueViewSet.list)");
+        assert_eq!(list.source, "issue.py:132 (CycleIssueViewSet.list)");
         let create = gates::gate_for(
             "POST",
             "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
         )
         .expect("create gate");
-        assert_eq!(create.source, "issue.py:223 (CycleIssueViewSet.create)");
+        assert_eq!(create.source, "issue.py:264 (CycleIssueViewSet.create)");
         let destroy = gates::gate_for(
             "DELETE",
             "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
         )
         .expect("destroy gate");
-        assert_eq!(destroy.source, "issue.py:299 (CycleIssueViewSet.destroy)");
+        assert_eq!(destroy.source, "issue.py:340 (CycleIssueViewSet.destroy)");
+        let retrieve = gates::gate_for(
+            "GET",
+            "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+        )
+        .expect("retrieve gate");
+        assert_eq!(retrieve.source, "issue.py:242 (CycleIssueViewSet.retrieve)");
+        for row in [list, retrieve] {
+            assert!(matches!(
+                row.gate,
+                gates::Gate::Project { roles } if roles.contains(&pidash_auth::permissions::ROLE_GUEST)
+            ));
+        }
         for row in [list, create, destroy] {
             assert!(matches!(row.gate, gates::Gate::Project { .. }));
         }
@@ -1942,6 +2181,7 @@ mod tests {
             &project,
             &user,
             &cycle,
+            &RowScope::default(),
             &empty_query(),
             None,
             None,
@@ -1965,6 +2205,32 @@ mod tests {
         }
         assert_eq!(filtered.values.len(), 4);
         assert!(filtered.referenced.contains(&"bridge"));
+    }
+
+    #[test]
+    fn filtered_set_applies_the_row_scope() {
+        let project = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let cycle = uuid::Uuid::new_v4();
+        let scope = RowScope {
+            created_by: Some(user),
+            issue_id: Some(uuid::Uuid::new_v4()),
+        };
+        let filtered = cycle_filtered_set(
+            "acme",
+            &project,
+            &user,
+            &cycle,
+            &scope,
+            &empty_query(),
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(filtered.from_where.contains("issue.created_by_id = "));
+        assert!(filtered.from_where.contains("issue.id = "));
+        assert_eq!(filtered.values.len(), 6);
     }
 
     #[test]
@@ -2026,6 +2292,7 @@ mod tests {
             &uuid::Uuid::nil(),
             &uuid::Uuid::nil(),
             &uuid::Uuid::nil(),
+            &RowScope::default(),
             &empty_query(),
             Some("labels__id"),
             None,
@@ -2051,6 +2318,7 @@ mod tests {
             &uuid::Uuid::nil(),
             &uuid::Uuid::nil(),
             &uuid::Uuid::nil(),
+            &RowScope::default(),
             &empty_query(),
             Some("labels"),
             None,
@@ -2077,6 +2345,7 @@ mod tests {
             &uuid::Uuid::nil(),
             &uuid::Uuid::nil(),
             &uuid::Uuid::nil(),
+            &RowScope::default(),
             &empty_query(),
             Some("priority"),
             None,
@@ -2113,6 +2382,130 @@ mod tests {
         assert!(parse_uuid_or_invalid("123e4567-e89b-12d3-a456-426614174000").is_ok());
         // `OneOrMany` import stays the query-map contract witness.
         let _ = OneOrMany::One("x".to_owned());
+    }
+
+    #[test]
+    fn statement_shape_resolve_project_joins_workspace_and_filters() {
+        use sea_orm::{DbBackend, QuerySelect};
+        let slug = "acme";
+        let upper = "ENG".to_owned();
+        let stmt = projects::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                projects::Relation::Workspaces.def(),
+            )
+            .filter(projects::Column::Identifier.eq(&upper))
+            .filter(projects::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Slug.eq(slug))
+            .select_only()
+            .column(projects::Column::Id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("\"projects\""));
+        assert!(stmt.contains("\"workspaces\""));
+        assert!(stmt.contains("\"identifier\""));
+        assert!(stmt.contains("\"deleted_at\" IS NULL"));
+        assert!(stmt.contains("\"slug\""));
+        assert!(
+            stmt.contains("JOIN \"workspaces\"") || stmt.contains("INNER JOIN"),
+            "join missing: {stmt}"
+        );
+    }
+
+    #[test]
+    fn statement_shape_allow_facts_join_and_filters() {
+        use sea_orm::{DbBackend, QuerySelect};
+        let uid = uuid::Uuid::nil();
+        let pid = uuid::Uuid::nil();
+        let stmt = project_members::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(project_members::Column::MemberId.eq(uid))
+            .filter(project_members::Column::ProjectId.eq(pid))
+            .filter(workspaces::Column::Slug.eq("ws"))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .select_only()
+            .column(project_members::Column::Role)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("\"project_members\""));
+        assert!(stmt.contains("\"workspaces\""));
+        assert!(stmt.contains("\"is_active\""));
+        assert!(stmt.contains("\"deleted_at\" IS NULL"));
+        assert!(stmt.contains("\"member_id\""));
+        assert!(stmt.contains("\"project_id\""));
+    }
+
+    #[test]
+    fn statement_shape_cycle_lookup_joins_workspace() {
+        use sea_orm::{DbBackend, QuerySelect};
+        let stmt = cycles::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                cycles::Relation::Workspaces.def(),
+            )
+            .filter(cycles::Column::Id.eq(uuid::Uuid::nil()))
+            .filter(cycles::Column::ProjectId.eq(uuid::Uuid::nil()))
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([
+                cycles::Column::Id,
+                cycles::Column::WorkspaceId,
+                cycles::Column::EndDate,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("\"cycles\""));
+        assert!(stmt.contains("\"workspace_id\""));
+        assert!(stmt.contains("\"end_date\""));
+        assert!(stmt.contains("JOIN"));
+    }
+
+    #[test]
+    fn statement_shape_existing_bridges_filters() {
+        use sea_orm::{DbBackend, QuerySelect};
+        let stmt = cycle_issues::Entity::find()
+            .filter(cycle_issues::Column::CycleId.ne(uuid::Uuid::nil()))
+            .filter(cycle_issues::Column::IssueId.is_in(vec![uuid::Uuid::nil()]))
+            .filter(cycle_issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([cycle_issues::Column::IssueId, cycle_issues::Column::CycleId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("\"cycle_issues\""));
+        assert!(stmt.contains("\"cycle_id\" <>"));
+        assert!(stmt.contains("IN"));
+        assert!(stmt.contains("\"deleted_at\" IS NULL"));
+    }
+
+    #[test]
+    fn statement_shape_destroy_subquery() {
+        use sea_orm::{DbBackend, QuerySelect, QueryTrait};
+        let sub = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .select_only()
+            .column(workspaces::Column::Id)
+            .into_query();
+        let stmt = cycle_issues::Entity::update_many()
+            .col_expr(
+                cycle_issues::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(
+                    chrono::Utc::now(),
+                )),
+            )
+            .filter(cycle_issues::Column::IssueId.eq(uuid::Uuid::nil()))
+            .filter(cycle_issues::Column::WorkspaceId.in_subquery(sub))
+            .filter(cycle_issues::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("UPDATE \"cycle_issues\""));
+        assert!(stmt.contains("\"deleted_at\""));
+        assert!(stmt.contains("IN ("));
+        assert!(stmt.contains("SELECT"));
     }
 }
 

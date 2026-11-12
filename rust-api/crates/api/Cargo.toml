@@ -64,7 +64,9 @@ sea-query = { version = "0.32", default-features = false, features = ["backend-p
 # ORM-03/B (PIDASHCONV-1521): the v1 patch driver re-reads the full issue
 # row through the `issues` entity (the render decode is lossy). Identical
 # spec to pidash-db/pidash-services, so the lockfile gains no new downloads.
-sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
+# `postgres-array` decodes the `ARRAY_AGG` id-list annotations by name
+# (sea-query already builds with it; no lockfile change).
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json", "postgres-array"] }
 thiserror = "2"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 uuid = { version = "1", features = ["v4"] }

@@ -19,7 +19,7 @@
 //! (the `Agent()` default, `runtime/agent.py:26-34`), `retries=2`,
 //! `end_strategy='early'`, no output *toolset*, no deferred / native /
 //! server tools, no model settings, tools cherry-picked per run
-//! (the 17 local tools registered on the shared agent, plus the
+//! (the 18 local tools registered on the shared agent, plus the
 //! per-run MCP toolsets).
 //!
 //! Rules ported here, each with its graph line, in the order one turn
@@ -67,7 +67,7 @@
 //! classification) and the implementor owns "validate then execute one
 //! call", which is exactly the settled PIDASHCONV-1113
 //! `tools_local::ToolFailure` shape. Phase 7 (the live seam) binds the
-//! 17 local executors and the PIDASHCONV-1112 MCP sessions to it; the
+//! 18 local executors and the PIDASHCONV-1112 MCP sessions to it; the
 //! tests below drive the loop with scripted toolsets over the
 //! `fixtures/assistant/turn-runtime/` captures replayed through a stub
 //! provider.
@@ -948,8 +948,10 @@ fn content_filter_message(state: &RunState) -> String {
 /// content-filter body. Reimplemented here because the D-11 copy is
 /// `pub(crate)` in `pidash_jobs` (foundation crates are read-only):
 /// non-ASCII becomes `\uXXXX` (surrogate pairs above the BMP), and the
-/// control characters use CPython's short escapes.
-fn ensure_ascii(text: &str) -> String {
+/// control characters use CPython's short escapes. Shared with the MCP
+/// result wrapper ([`super::live`] frames dict results through it), so
+/// there is one escaper for the turn path.
+pub(crate) fn ensure_ascii(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {

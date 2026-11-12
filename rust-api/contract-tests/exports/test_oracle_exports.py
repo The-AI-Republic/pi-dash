@@ -267,6 +267,25 @@ def test_oracle_analytic_export_segmented_capture(export_worker, seed, db_conn, 
     _maybe_capture("analytic_segmented.csv.golden", content)
 
 
+def test_oracle_analytic_export_longline_quoted_printable(
+    export_worker, seed, db_conn, smtp_sink
+):
+    """Wide segmented CSV goes quoted-printable on the wire (PIDASHCONV-1691)."""
+    world = cases.seed_export_world(seed, cases.unique_tag("qp"))
+    cases.seed_label_fanout(seed, world)
+    email = f"qp-{world['slug']}@example.com"
+    smtp_sink.clear()
+    _publish_analytic(
+        email=email,
+        data={"x_axis": "priority", "y_axis": "issue_count", "segment": "labels__id"},
+        slug=world["slug"],
+    )
+    (delivered,) = smtp_sink.wait_for_count(1, what="long-line analytic mail")
+    assert delivered["subject"] == "Your Export is ready"
+    assert delivered["rcpt_tos"] == [email]
+    cases.assert_quoted_printable_csv_mail(delivered["raw"], world["slug"])
+
+
 def test_oracle_analytic_export_estimate(export_worker, seed, db_conn, smtp_sink):
     """Estimate plots mail the summed points (NULL estimates stay empty)."""
     world = cases.seed_export_world(seed, cases.unique_tag("est"))

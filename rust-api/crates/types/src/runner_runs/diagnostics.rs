@@ -400,7 +400,10 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
             action: "Choose a model the agent account can access, then retry the run.".to_string(),
         });
     }
-    if lowered.contains("runner_not_found") || lowered.contains("run_not_owned_by_runner") {
+    if lowered.contains("runner_not_found")
+        || lowered.contains("runner_gone")
+        || lowered.contains("run_not_owned_by_runner")
+    {
         return Some(RunErrorDiagnostic {
             source: RunErrorSource::PidashCloud,
             source_label: "Pi Dash cloud".to_string(),
@@ -699,6 +702,16 @@ mod tests {
         assert_eq!(detail.kind, RunErrorKind::AgentAuthentication);
         assert!(error_diagnostic(None, false).is_none());
         assert!(error_diagnostic(err, true).is_none());
+    }
+
+    #[test]
+    fn runner_gone_classifies_as_runner_registration() {
+        // PDASHOSS01-306: the daemon surfaces `runner_gone` the same way as
+        // `runner_not_found` (`diagnostics.py:212`).
+        let detail = classify_run_error(Some("bootstrap failed: runner_gone")).expect("classifies");
+        assert_eq!(detail.source, RunErrorSource::PidashCloud);
+        assert_eq!(detail.kind, RunErrorKind::RunnerRegistration);
+        assert_eq!(detail.summary, "bootstrap failed: runner_gone");
     }
 
     #[test]

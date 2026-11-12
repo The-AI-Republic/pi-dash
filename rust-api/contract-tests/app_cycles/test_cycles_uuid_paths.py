@@ -61,6 +61,18 @@ def _detail_routes(urls, uuid_str, issue_id):
         ("cycle_issues_list", "GET", urls["cycle_issues"](uuid_str), False),
         ("cycle_issues_create", "POST", urls["cycle_issues"](uuid_str), False),
         (
+            "cycle_issue_detail_get",
+            "GET",
+            urls["cycle_issue_detail"](uuid_str, issue_id),
+            False,
+        ),
+        (
+            "cycle_issue_detail_get_issue_seg",
+            "GET",
+            urls["cycle_issue_detail"](issue_id, uuid_str),
+            False,
+        ),
+        (
             "cycle_issue_detail_delete",
             "DELETE",
             urls["cycle_issue_detail"](uuid_str, issue_id),

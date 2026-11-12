@@ -12,7 +12,7 @@ name: rust-api-contract-tests-integrations-rust
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-integrations-rust.yml"
@@ -24,7 +24,7 @@ concurrency:
 jobs:
   integrations-rust-replay:
     name: integrations oracle vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:
@@ -99,7 +99,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt

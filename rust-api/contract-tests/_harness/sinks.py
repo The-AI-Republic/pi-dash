@@ -211,6 +211,82 @@ class WildcardHttpProbe:
         self._server.server_close()
 
 
+class SlowDripSink:
+    """A page dripped across two timed gaps (PIDASHCONV-1669).
+
+    Every GET waits ``first_gap`` seconds, sends the headers plus the
+    first half of ``body``, waits ``second_gap`` seconds, then sends the
+    rest. A client with a per-read timeout larger than either gap reads
+    the whole page whatever the total; a client with a total deadline
+    shorter than the sum fails. HEAD serves the same headers without a
+    body (favicon-probe shape); ``/favicon.ico`` answers immediately.
+    """
+
+    BODY = (
+        b"<html><head><title>Slow drip oracle</title>"
+        b'<link rel="icon" href="/favicon.ico"></head>'
+        b"<body>hello</body></html>"
+    )
+    FAVICON = b"slow-drip-sink-favicon"
+
+    def __init__(
+        self,
+        first_gap: float = 0.6,
+        second_gap: float = 0.6,
+        body: bytes | None = None,
+    ) -> None:
+        outer = self
+        self.first_gap = first_gap
+        self.second_gap = second_gap
+        self.body = self.BODY if body is None else body
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self, payload: bytes, content_type: str, gaps: bool) -> None:
+                if gaps:
+                    time.sleep(outer.first_gap)
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                half = len(payload) // 2
+                self.wfile.write(payload[:half])
+                self.wfile.flush()
+                if gaps:
+                    time.sleep(outer.second_gap)
+                self.wfile.write(payload[half:])
+                self.wfile.flush()
+
+            def do_GET(self) -> None:
+                if urlsplit(self.path).path == "/favicon.ico":
+                    self._answer(outer.FAVICON, "image/x-icon", gaps=False)
+                    return
+                self._answer(outer.body, "text/html", gaps=True)
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "SlowDripSink":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
+
+
 class RoutingStub:
     """HTTP stub dispatching fixed responses by (method, path).
 
@@ -614,6 +690,104 @@ class ChunkedKeepAliveSink:
             return list(self.deliveries)
 
     def wait_for_count(self, n: int, what: str = "chunked webhook deliveries") -> list:
+        return wait_for_condition(
+            lambda: self.snapshot() if len(self.snapshot()) >= n else None,
+            what=what,
+        )
+
+
+class ChunkedStreamSink:
+    """Webhook sink streaming a large chunked body in paced chunks.
+
+    Answers every POST with ``Transfer-Encoding: chunked`` and writes
+    ``chunk_count`` chunks of ``chunk_size`` bytes, pausing
+    ``pace_seconds`` between chunks so socket reads stay small, then
+    the terminal chunk and close. A client that re-decodes the whole
+    buffered body after every read (PIDASHCONV-1673) spends quadratic
+    time here; an incremental decoder finishes near the pacing floor.
+    """
+
+    def __init__(
+        self,
+        chunk_count: int = 8192,
+        chunk_size: int = 8192,
+        pace_seconds: float = 0.0002,
+        fill: bytes = b"x",
+    ) -> None:
+        self.chunk_count = chunk_count
+        self.chunk_size = chunk_size
+        self.pace_seconds = pace_seconds
+        self.fill = fill
+        self.deliveries: list = []
+        self._lock = threading.Lock()
+        self._server = None
+        self._thread = None
+
+    @property
+    def total_bytes(self) -> int:
+        return self.chunk_count * self.chunk_size
+
+    def start(self) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                with outer._lock:
+                    outer.deliveries.append(
+                        {
+                            "path": self.path,
+                            "headers": dict(self.headers),
+                            "body": raw.decode("utf-8", "replace"),
+                        }
+                    )
+                payload = outer.fill * outer.chunk_size
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                size_line = format(outer.chunk_size, "x").encode() + b"\r\n"
+                for _ in range(outer.chunk_count):
+                    self.wfile.write(size_line)
+                    self.wfile.write(payload)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+                    time.sleep(outer.pace_seconds)
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._thread.join(timeout=30)
+            self._server.server_close()
+            self._server = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.deliveries = []
+
+    def snapshot(self) -> list:
+        with self._lock:
+            return list(self.deliveries)
+
+    def wait_for_count(self, n: int, what: str = "streamed webhook deliveries") -> list:
         return wait_for_condition(
             lambda: self.snapshot() if len(self.snapshot()) >= n else None,
             what=what,

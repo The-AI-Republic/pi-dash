@@ -17,9 +17,10 @@
 //!   the rest `""`); any failure is 400
 //!   `{"error": "Failed to disable email configuration"}`.
 //! - `POST /api/instances/email-credentials-check/` —
-//!   `EmailCredentialCheckEndpoint.post` (`configuration.py:90-172`):
+//!   `EmailCredentialCheckEndpoint.post` (`configuration.py:102-224`):
 //!   `receiver_email`-required 400; `get_email_configuration`;
-//!   `int(EMAIL_PORT)`; send through `settings.EMAIL_BACKEND` — SMTP is
+//!   candidate-or-stored grading with a generic-400 bad port; send
+//!   through `settings.EMAIL_BACKEND` — SMTP is
 //!   the live conversation with the 9-branch error matrix where a
 //!   non-empty array/object receiver is the generic 400 Django's SMTP
 //!   `sanitize_address` raises for (nothing sent); console/locmem validate
@@ -57,10 +58,11 @@
 //!
 //! Ported bugs and deliberate warts (also listed in the PR):
 //!
-//! - BUG-2 (`configuration.py:111`): `int(EMAIL_PORT)` runs outside the
-//!   `try`, so garbage raises `ValueError` into the base 500, not the
-//!   fallthrough 400. `None` (a `NULL` row with no env fallback) raises
-//!   `TypeError` the same way.
+//! - BUG-2 (fixed upstream by NEWFRONT-524): `int(EMAIL_PORT)` used to
+//!   run outside the `try` (rust-dev `configuration.py:111`), so garbage
+//!   raised `ValueError` into the base 500. Django main wraps
+//!   `int(str(...).strip())` in its own `try` (`configuration.py:152-158`)
+//!   and answers the fallthrough 400 instead; the port below follows main.
 //! - BUG-3 (`workspace.py:105-110`): an `IntegrityError` whose string
 //!   lacks `"already exists"` (any non-unique violation: every 23505
 //!   carries a `Key (...) already exists.` DETAIL line through the
@@ -111,6 +113,9 @@ use super::{
 use crate::state::AppState;
 use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_compat::db::is_unique_violation;
+use pidash_db::entity::{file_assets, instance_configurations, users, workspaces};
+use sea_orm::sea_query::ExprTrait;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -170,24 +175,34 @@ async fn get_configurations(
         Err(denial) => return denial.into_response(),
     };
     // `InstanceConfiguration.objects.all()` (`Meta.ordering -created_at`).
-    let sql = format!(
-        "SELECT {} FROM \"instance_configurations\" \
-         WHERE \"instance_configurations\".\"deleted_at\" IS NULL \
-         ORDER BY \"instance_configurations\".\"created_at\" DESC",
-        pidash_db::license::queries::CONFIG_COLUMNS.join(", ")
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = match sqlx::query(&sql).fetch_all(&pool).await {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let configs = match instance_configurations::Entity::find()
+        .filter(instance_configurations::Column::DeletedAt.is_null())
+        .order_by_desc(instance_configurations::Column::CreatedAt)
+        .all(&db)
+        .await
+    {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let keyring =
         pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
     let registry = pidash_db::config::registry::global();
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mapped = match pidash_db::license::queries::map_config_row(row) {
-            Ok(mapped) => mapped,
-            Err(_) => return Denial::ServerError.into_response(),
+    let mut out = Vec::with_capacity(configs.len());
+    for cfg in &configs {
+        // `map_config_row` decodes from PgRow; the SeaORM row already
+        // carries the same fields, so construct the map result directly.
+        let mapped = pidash_db::license::models::instance_configuration::InstanceConfiguration {
+            id: cfg.id,
+            created_at: cfg.created_at.with_timezone(&chrono::Utc),
+            updated_at: cfg.updated_at.with_timezone(&chrono::Utc),
+            deleted_at: cfg.deleted_at.map(|d| d.with_timezone(&chrono::Utc)),
+            key: cfg.key.clone(),
+            value: cfg.value.clone(),
+            category: cfg.category.clone(),
+            is_encrypted: cfg.is_encrypted,
+            created_by_id: cfg.created_by_id,
+            updated_by_id: cfg.updated_by_id,
         };
         out.push(rendered_config_value(&mapped, &keyring, registry, &actor));
     }
@@ -537,7 +552,7 @@ async fn disable_email_feature(
 // EmailCredentialCheckEndpoint
 // ---------------------------------------------------------------------------
 
-/// `POST email-credentials-check/` (`configuration.py:89-172`).
+/// `POST email-credentials-check/` (`configuration.py:102-224`).
 async fn email_credential_check(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
@@ -563,14 +578,14 @@ async fn email_credential_check(
         return Denial::ServerError.into_response();
     }
     // `receiver_email = request.data.get("receiver_email", False)`:
-    // anything falsy answers 400 (`configuration.py:91-96`).
+    // anything falsy answers 400 (`configuration.py:116-121`).
     let receiver = data.field("receiver_email");
     if !json_truthy(receiver) {
         return Denial::BadError("Receiver email is required".to_owned()).into_response();
     }
     let recipient = json_recipient(receiver);
     // `get_email_configuration()` runs outside the `try`
-    // (`configuration.py:98-106`): a store failure escapes to the base
+    // (`configuration.py:124-131`): a store failure escapes to the base
     // 500, exactly like a DB error in Python.
     let keyring =
         pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
@@ -584,34 +599,56 @@ async fn email_credential_check(
             Err(_) => return Denial::ServerError.into_response(),
         };
     let mut values = values.into_iter();
-    let host = values.next().and_then(config_string);
-    let username = values.next().and_then(config_string);
-    let password = values.next().and_then(config_string);
-    let port_raw = values.next();
-    let use_tls = values
-        .next()
-        .is_some_and(|v| v == pidash_db::config::ConfigValue::Str("1".to_owned()));
-    let use_ssl = values
-        .next()
-        .is_some_and(|v| v == pidash_db::config::ConfigValue::Str("1".to_owned()));
-    let from_email = values.next().and_then(config_string);
-    // `port=int(EMAIL_PORT)` (`configuration.py:111`, BUG-2): outside the
-    // `try`, so `ValueError`/`TypeError` answer the base 500.
-    let port = match port_raw {
-        Some(value) => match parse_email_port(&value) {
+    let stored_host = values.next().and_then(config_string);
+    let stored_username = values.next().and_then(config_string);
+    let stored_password = values.next().and_then(config_string);
+    let stored_port = values.next();
+    let stored_use_tls = values.next();
+    let stored_use_ssl = values.next();
+    let stored_from = values.next().and_then(config_string);
+    // `candidate(...)` (`configuration.py:133-143`): a present body
+    // field grades as given (strings stripped); a missing or null
+    // field falls back to the stored configuration. Only the
+    // password treats a blank string as stored: stored secrets read
+    // back blank, so blank means "unchanged".
+    let host = candidate_string(&data, "EMAIL_HOST", stored_host, false);
+    let username = candidate_string(&data, "EMAIL_HOST_USER", stored_username, false);
+    let password = candidate_string(&data, "EMAIL_HOST_PASSWORD", stored_password, true);
+    let from_email = candidate_string(&data, "EMAIL_FROM", stored_from, false);
+    let use_tls = candidate_flag(&data, "EMAIL_USE_TLS", stored_use_tls.as_ref());
+    let use_ssl = candidate_flag(&data, "EMAIL_USE_SSL", stored_use_ssl.as_ref());
+    // `port = int(str(candidate("EMAIL_PORT", ...)).strip())`
+    // (`configuration.py:152-158`): unparseable is the generic 400,
+    // for candidate and stored values alike. A missing stored value
+    // answers the base 500, like the tuple unpack it mirrors
+    // (`configuration.py:124-131`, outside the `try`).
+    let port = match candidate_present(data.field("EMAIL_PORT")) {
+        Some(present) => match parse_py_int(&py_str_value(present)) {
             Some(port) => port,
+            None => {
+                return Denial::BadError(smtp::MailError::Failed.message().to_owned())
+                    .into_response()
+            }
+        },
+        None => match stored_port.as_ref() {
+            Some(value) => match parse_email_port(value) {
+                Some(port) => port,
+                None => {
+                    return Denial::BadError(smtp::MailError::Failed.message().to_owned())
+                        .into_response()
+                }
+            },
             None => return Denial::ServerError.into_response(),
         },
-        None => return Denial::ServerError.into_response(),
     };
-    // `to=[receiver_email]` (`configuration.py:120-127`): Django joins the
+    // `to=[receiver_email]` (`configuration.py:174-181`): Django joins the
     // single value with `str()` into the `To` header. Only the SMTP backend
     // additionally parses it with `sanitize_address` (`smtp.py:_send`); the
     // non-dialing backends never parse it, so a container repr is just a
     // header string there.
     let header = [json_recipient_header(receiver)];
     // `get_connection()` resolves the send through `settings.EMAIL_BACKEND`
-    // (`configuration.py:109`): only the SMTP backend dials out.
+    // (`configuration.py:161`): only the SMTP backend dials out.
     // Console/locmem validate headers and succeed without touching the
     // network; dummy succeeds without even validating; an unknown dotted
     // path fails `import_string` outside the view's `try` and answers the
@@ -635,7 +672,7 @@ async fn email_credential_check(
     // SMTP `_send` parses the recipient with `sanitize_address`: an
     // array/object repr (`"['a@x.test', 'b@x.test']"`) never parses as a
     // mailbox, so `send()` raises inside the view's `try` and the generic
-    // 400 is answered with nothing delivered (`configuration.py:168-172`).
+    // 400 is answered with nothing delivered (`configuration.py:220-224`).
     let Some(recipient) = recipient else {
         return Denial::BadError(smtp::MailError::Failed.message().to_owned()).into_response();
     };
@@ -684,7 +721,7 @@ fn json_truthy(found: BodyField<'_>) -> bool {
     }
 }
 
-/// `msg = ...; to=[receiver_email]` (`configuration.py:120-127`): Django
+/// `msg = ...; to=[receiver_email]` (`configuration.py:174-181`): Django
 /// `force_str`s the single value and parses it as one mailbox
 /// (`sanitize_address`), so a string or scalar is one recipient and an
 /// uploaded file is its name (`str(file)`, probed). `None` is the shape
@@ -701,7 +738,7 @@ fn json_recipient(found: BodyField<'_>) -> Option<String> {
 }
 
 /// The `To` header value Django builds for `to=[receiver_email]`
-/// (`configuration.py:120-127`): `str()` of the single value, so a string
+/// (`configuration.py:174-181`): `str()` of the single value, so a string
 /// is itself, an array/object its `repr()`, an uploaded file its name. The
 /// non-dialing backends only validate this for newlines, never parse it as
 /// a mailbox, so a container repr is a plain header string there.
@@ -738,27 +775,100 @@ fn config_string(value: pidash_db::config::ConfigValue) -> Option<String> {
     }
 }
 
-/// `int(EMAIL_PORT)` (`configuration.py:111`): Python `int()` over the
-/// resolved value. Strings strip surrounding whitespace, take an optional
-/// sign, allow `_` separators, and must otherwise be ASCII digits;
-/// floats truncate toward zero; `True`/`False` are 1/0; anything else
-/// (`None`, garbage strings) raises into the base 500 (BUG-2).
+/// Django `candidate()` presence (`configuration.py:133-143`): a
+/// missing or null field falls back to stored (`None`); anything
+/// else present — a string, a scalar, a container, an uploaded
+/// file — grades as given.
+fn candidate_present(field: BodyField<'_>) -> Option<BodyField<'_>> {
+    match field {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        present => Some(present),
+    }
+}
+
+/// Django `candidate()` for a string-graded field
+/// (`configuration.py:133-143`): missing/null fall back to stored;
+/// a present string grades stripped (and, for the password only, a
+/// blank grades as stored); any other present value grades as
+/// given. Non-string values are `str()`-coerced (tier 3: Django
+/// hands the object itself to the connection/message constructors,
+/// which no admin-form client sends; both land in a 400 branch).
+fn candidate_string(
+    data: &ParsedBody,
+    key: &str,
+    stored: Option<String>,
+    blank_means_stored: bool,
+) -> Option<String> {
+    match data.field(key) {
+        BodyField::Missing | BodyField::Json(Value::Null) => stored,
+        BodyField::Json(Value::String(s)) => {
+            let trimmed = s.trim();
+            if blank_means_stored && trimmed.is_empty() {
+                stored
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        BodyField::Json(value) => Some(json_scalar_string(value)),
+        BodyField::File(file) => Some(file.filename.clone()),
+    }
+}
+
+/// Django `_flag_is_enabled(candidate(...))`
+/// (`configuration.py:89-99,166-167`): a present JSON boolean
+/// passes through; any other present value compares
+/// `str(value).strip() == "1"`; missing/null fall back to the
+/// stored value under the same rule.
+fn candidate_flag(
+    data: &ParsedBody,
+    key: &str,
+    stored: Option<&pidash_db::config::ConfigValue>,
+) -> bool {
+    match candidate_present(data.field(key)) {
+        Some(BodyField::Json(Value::Bool(enabled))) => *enabled,
+        Some(present) => py_str_value(present) == "1",
+        None => stored.is_some_and(flag_is_enabled_stored),
+    }
+}
+
+/// `_flag_is_enabled` over a stored value
+/// (`configuration.py:89-99`): booleans pass through, anything
+/// else compares `str(value).strip() == "1"`.
+fn flag_is_enabled_stored(value: &pidash_db::config::ConfigValue) -> bool {
+    use pidash_db::config::ConfigValue;
+    match value {
+        ConfigValue::Bool(enabled) => *enabled,
+        _ => config_py_str(value).trim() == "1",
+    }
+}
+
+/// `int(str(value).strip())` over a stored port
+/// (`configuration.py:153`): the stored side of the
+/// candidate-or-stored port. `str()` renders ints plainly, floats
+/// as `repr` (never int-parseable), `True`/`False` capitalized
+/// (never parseable) and `None` as `"None"` (likewise), so only
+/// strings and ints can resolve; anything else is `None` and the
+/// caller answers the generic 400.
 /// Returns the raw integer; range is checked by the SMTP layer, where an
 /// out-of-range port raises `OverflowError` into the generic fallthrough.
 pub fn parse_email_port(value: &pidash_db::config::ConfigValue) -> Option<i64> {
+    parse_py_int(&config_py_str(value))
+}
+
+/// Python `str()` over a stored email value for the port/flag
+/// coercions (`configuration.py:89-99,153`): DB/env rows are
+/// strings; the port default can be the int 587; a missing host
+/// default is `None`. `str()` renders ints plainly, floats as
+/// `repr`, `True`/`False` capitalized, `None` as `"None"`.
+fn config_py_str(value: &pidash_db::config::ConfigValue) -> String {
     use pidash_db::config::ConfigValue;
     match value {
-        ConfigValue::Int(i) => Some(*i),
-        ConfigValue::Bool(b) => Some(i64::from(*b)),
-        ConfigValue::Float(f) => {
-            if f.is_finite() {
-                Some(*f as i64)
-            } else {
-                None
-            }
-        }
-        ConfigValue::Str(s) => parse_py_int(s),
-        ConfigValue::Null => None,
+        ConfigValue::Str(s) => s.clone(),
+        ConfigValue::Int(i) => i.to_string(),
+        ConfigValue::Float(f) => crate::paginator::py_float_str(*f),
+        ConfigValue::Bool(true) => "True".to_owned(),
+        ConfigValue::Bool(false) => "False".to_owned(),
+        ConfigValue::Null => "None".to_owned(),
     }
 }
 
@@ -808,7 +918,7 @@ pub fn parse_py_int(text: &str) -> Option<i64> {
 // ---------------------------------------------------------------------------
 
 /// The send behind `email-credentials-check`, through `settings.EMAIL_BACKEND`
-/// the way `get_connection()` resolves it (`configuration.py:108-172`).
+/// the way `get_connection()` resolves it (`configuration.py:161-224`).
 /// The SMTP backend is the genuine conversation, speaking SMTP the way
 /// `smtplib` + Django's `EmailBackend` do: connect (+implicit TLS),
 /// greeting, EHLO/HELO, STARTTLS, AUTH, `MAIL`, `RCPT`, `DATA`, `QUIT`.
@@ -829,7 +939,7 @@ mod smtp {
     pub const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
     pub const DUMMY_BACKEND: &str = "django.core.mail.backends.dummy.EmailBackend";
 
-    /// Fixed probe content (`configuration.py:118-119`).
+    /// Fixed probe content (`configuration.py:170-171`).
     const SUBJECT: &str = "Email Notification from Pi Dash";
     const BODY: &str = "This is a sample email notification sent from Pi Dash application.";
     /// Django's global default (`DEFAULT_FROM_EMAIL`): the project does not
@@ -889,7 +999,7 @@ mod smtp {
         pub recipients: &'a [String],
     }
 
-    /// One Python exception branch of `configuration.py:131-172`.
+    /// One Python exception branch of `configuration.py:183-224`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum MailError {
         BadHeader,
@@ -2184,15 +2294,22 @@ async fn slug_exists(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
     if slug.contains('\0') {
         return Ok(false);
     }
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM "workspaces"
-           WHERE "workspaces"."deleted_at" IS NULL
-             AND UPPER("workspaces"."slug"::text) = UPPER($1)"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use sea_orm::sea_query::{Alias, Expr, Func};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find()
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(
+            Func::upper(Expr::col((
+                Alias::new("workspaces"),
+                workspaces::Column::Slug,
+            )))
+            .cast_as(Alias::new("text"))
+            .eq(Func::upper(Expr::val(slug))),
+        )
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -2292,25 +2409,31 @@ async fn list_workspaces(
 }
 
 async fn workspace_total_count(pool: &sqlx::PgPool, search: Option<&str>) -> Result<i64, Denial> {
-    let (sql, param): (String, Option<String>) = match search {
-        Some(term) => (
-            "SELECT COUNT(*) FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND UPPER(\"workspaces\".\"name\"::text) LIKE UPPER($1))".to_owned(),
-            Some(pidash_db::license::queries::icontains_param(term)),
-        ),
-        None => (
-            "SELECT COUNT(*) FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" IS NULL".to_owned(),
-            None,
-        ),
-    };
-    let mut query = sqlx::query_as::<_, (i64,)>(&sql);
-    if let Some(param) = param {
-        query = query.bind(param);
+    use sea_orm::sea_query::{Alias, Expr, Func};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut sel = workspaces::Entity::find().filter(workspaces::Column::DeletedAt.is_null());
+    if let Some(term) = search {
+        let param = pidash_db::license::queries::icontains_param(term);
+        // `UPPER(name::text) LIKE UPPER(param)` — use the builder func
+        // rather than stitching SQL text via binary Like.
+        sel = sel.filter(
+            Func::upper(Expr::col((
+                Alias::new("workspaces"),
+                workspaces::Column::Name,
+            )))
+            .cast_as(Alias::new("text"))
+            .binary(
+                sea_orm::sea_query::BinOper::Like,
+                Func::upper(Expr::val(param)),
+            ),
+        );
     }
-    query
-        .fetch_one(pool)
+    let count = sel
+        .count(&db)
         .await
-        .map(|row| row.0)
-        .map_err(|_| Denial::ServerError)
+        .map(|c| c as i64)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(count)
 }
 
 /// One annotated list row through `WorkspaceSerializer` (read path):
@@ -2321,16 +2444,19 @@ async fn render_workspace_row(
     row: &pidash_db::license::queries::WorkspaceListRow,
     actor: &Actor,
 ) -> Result<Value, Denial> {
-    let owner: Option<(uuid::Uuid, Option<String>, String, String)> =
-        sqlx::query_as(r#"SELECT id, email, first_name, last_name FROM users WHERE id = $1"#)
-            .bind(row.owner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((owner_id, owner_email, first_name, last_name)) = owner else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let owner = users::Entity::find_by_id(row.owner_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(owner) = owner else {
         // The FK is non-nullable; a missing owner row cannot render.
         return Err(Denial::ServerError);
     };
+    let owner_id = owner.id;
+    let owner_email = owner.email;
+    let first_name = owner.first_name;
+    let last_name = owner.last_name;
     let resolved_logo_url =
         workspace_logo_url(pool, row.logo_asset_id, row.logo.as_deref()).await?;
     let skip_logo_url = matches!(resolved_logo_url, AssetUrl::Skip);
@@ -2392,22 +2518,19 @@ async fn workspace_logo_url(
         return Ok(fallback());
     };
     // `(id, entity_type, workspace_id, project_id, issue_id)`, unscoped.
-    type AssetRow = (
-        uuid::Uuid,
-        Option<String>,
-        Option<uuid::Uuid>,
-        Option<uuid::Uuid>,
-        Option<uuid::Uuid>,
-    );
-    let asset: Option<AssetRow> =
-        sqlx::query_as(r#"SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1"#)
-            .bind(asset_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((id, entity_type, workspace_id, project_id, issue_id)) = asset else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let asset = file_assets::Entity::find_by_id(asset_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(asset) = asset else {
         return Ok(AssetUrl::Present(None));
     };
+    let id = asset.id;
+    let entity_type = asset.entity_type;
+    let workspace_id = asset.workspace_id;
+    let project_id = asset.project_id;
+    let issue_id = asset.issue_id;
     let slug = match workspace_id {
         None => None,
         Some(workspace_id) => asset_workspace_slug(pool, workspace_id).await?,
@@ -2428,12 +2551,12 @@ async fn asset_workspace_slug(
 ) -> Result<Option<String>, Denial> {
     // Unscoped, like the forward-FK descriptor; a missing row is the
     // `RelatedObjectDoesNotExist` path (null at the caller).
-    let row: Option<(String,)> = sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-        .bind(workspace_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find_by_id(workspace_id)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    Ok(row.map(|r| r.slug))
 }
 
 // ---------------------------------------------------------------------------
@@ -2588,7 +2711,7 @@ async fn create_workspace(
     let member_view_props = default_view_props();
     let member_issue_props = default_issue_props();
     let member_result = pidash_services::domain::workspaces::members::add(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::workspaces::members::NewMember {
             workspace_id,
             user_id: Some(actor.id),
@@ -2895,6 +3018,7 @@ pub const WORKSPACE_TIMEZONES: &[&str] = &[
     "America/Chihuahua",
     "America/Ciudad_Juarez",
     "America/Costa_Rica",
+    "America/Coyhaique",
     "America/Creston",
     "America/Cuiaba",
     "America/Curacao",
@@ -3028,7 +3152,6 @@ pub const WORKSPACE_TIMEZONES: &[&str] = &[
     "Asia/Bishkek",
     "Asia/Brunei",
     "Asia/Chita",
-    "Asia/Choibalsan",
     "Asia/Colombo",
     "Asia/Damascus",
     "Asia/Dhaka",
@@ -3583,14 +3706,14 @@ async fn unique_slug_taken(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Deni
     if slug.contains('\0') {
         return Ok(false);
     }
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM "workspaces"
-           WHERE "workspaces"."deleted_at" IS NULL AND "workspaces"."slug" = $1"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find()
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -3655,12 +3778,14 @@ async fn asset_by_id(
     raw: &str,
     errors: &mut FieldErrors,
 ) -> Result<Option<uuid::Uuid>, Denial> {
-    let exists: Option<(i32,)> =
-        sqlx::query_as(r#"SELECT 1 FROM file_assets WHERE id = $1 AND deleted_at IS NULL"#)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let exists = file_assets::Entity::find()
+        .filter(file_assets::Column::Id.eq(id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if exists.is_none() {
         field_error(
             errors,
@@ -3688,7 +3813,7 @@ mod handler_tests {
     use super::*;
     use serde_json::json;
 
-    /// `to=[receiver_email]` (`configuration.py:120-127`): a string or
+    /// `to=[receiver_email]` (`configuration.py:174-181`): a string or
     /// scalar is one recipient, an array or object repr is not a mailbox
     /// and the handler answers Django's generic 400 without a send.
     #[test]
@@ -3773,19 +3898,161 @@ mod handler_tests {
 
     #[test]
     fn port_resolution_matches_python() {
+        // `int(str(value).strip())` (`configuration.py:153`): only
+        // strings and ints resolve. `str(True)` is `"True"`,
+        // `str(587.9)` is `"587.9"`, `str(None)` is `"None"` — none
+        // int-parseable, so all three are the generic 400 now (the old
+        // direct-`int()` answers died with BUG-2).
         use pidash_db::config::ConfigValue;
         assert_eq!(parse_email_port(&ConfigValue::Int(587)), Some(587));
         assert_eq!(
             parse_email_port(&ConfigValue::Str("587".to_owned())),
             Some(587)
         );
-        assert_eq!(parse_email_port(&ConfigValue::Bool(true)), Some(1));
-        assert_eq!(parse_email_port(&ConfigValue::Float(587.9)), Some(587));
+        assert_eq!(
+            parse_email_port(&ConfigValue::Str("  2525  ".to_owned())),
+            Some(2525)
+        );
+        assert_eq!(parse_email_port(&ConfigValue::Bool(true)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Bool(false)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Float(587.9)), None);
         assert_eq!(parse_email_port(&ConfigValue::Null), None);
         assert_eq!(
             parse_email_port(&ConfigValue::Str("garbage".to_owned())),
             None
         );
+    }
+
+    #[test]
+    fn candidate_strings_fall_back_per_field() {
+        // `candidate()` (`configuration.py:133-143`): missing/null fall
+        // back per field; present strings grade stripped; only the
+        // password treats blank as stored.
+        use serde_json::json;
+        let stored = || Some("stored".to_owned());
+        let body = ParsedBody::json(json!({"EMAIL_HOST": "  candidate  ", "EMAIL_PORT": null}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST", stored(), false),
+            Some("candidate".to_owned())
+        );
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST_USER", stored(), false),
+            stored()
+        );
+        assert_eq!(
+            candidate_string(&body, "EMAIL_PORT", stored(), false),
+            stored()
+        );
+        // An empty non-password grades as given, not stored.
+        let body = ParsedBody::json(json!({"EMAIL_HOST": ""}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST", stored(), false),
+            Some(String::new())
+        );
+        // A blank password (even whitespace) means stored.
+        for blank in ["", "   "] {
+            let body = ParsedBody::json(json!({"EMAIL_HOST_PASSWORD": blank}));
+            assert_eq!(
+                candidate_string(&body, "EMAIL_HOST_PASSWORD", stored(), true),
+                stored(),
+                "blank password {blank:?}"
+            );
+        }
+        let body = ParsedBody::json(json!({"EMAIL_HOST_PASSWORD": "candidate-secret"}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST_PASSWORD", stored(), true),
+            Some("candidate-secret".to_owned())
+        );
+    }
+
+    #[test]
+    fn candidate_flags_match_python() {
+        // `_flag_is_enabled` (`configuration.py:89-99`): booleans pass
+        // through, anything else compares `str(value).strip() == "1"`.
+        // Cases mirror the Django coercion table in
+        // `test_email_credentials_check.py::test_flag_and_port_coercions`.
+        use pidash_db::config::ConfigValue;
+        use serde_json::json;
+        let stored_on = ConfigValue::Str("1".to_owned());
+        let stored_off = ConfigValue::Str("0".to_owned());
+        let flag = |body: &ParsedBody, stored: Option<&ConfigValue>| {
+            candidate_flag(body, "EMAIL_USE_TLS", stored)
+        };
+        // JSON booleans pass through, ignoring stored.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": true})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": false})),
+            Some(&stored_on)
+        ));
+        // Ints compare as `str()`.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": 1})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": 0})),
+            Some(&stored_on)
+        ));
+        // Strings strip, then compare; non-canonical spellings are off.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "1"})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "0"})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "true"})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "True"})),
+            Some(&stored_on)
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": " 1 "})),
+            Some(&stored_off)
+        ));
+        // Missing/null fall back to stored under the same rule.
+        assert!(flag(&ParsedBody::json(json!({})), Some(&stored_on)));
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": null})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(&ParsedBody::json(json!({})), Some(&stored_off)));
+        assert!(!flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Str("true".to_owned()))
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Int(1))
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Bool(true))
+        ));
+        assert!(!flag(&ParsedBody::json(json!({})), None));
+    }
+
+    #[test]
+    fn candidate_port_coercions_match_python() {
+        // `int(str(candidate).strip())` (`configuration.py:153`): ints
+        // and int-strings (padded included) resolve; bools, floats and
+        // containers render unparseable and answer the generic 400.
+        use serde_json::json;
+        let port = |value: serde_json::Value| parse_py_int(&py_str_value(BodyField::Json(&value)));
+        assert_eq!(port(json!(1025)), Some(1025));
+        assert_eq!(port(json!("1026")), Some(1026));
+        assert_eq!(port(json!(" 1027 ")), Some(1027));
+        assert_eq!(port(json!(true)), None);
+        assert_eq!(port(json!(587.9)), None);
+        assert_eq!(port(json!(["587"])), None);
+        assert_eq!(port(json!("not-a-port")), None);
     }
 
     #[test]

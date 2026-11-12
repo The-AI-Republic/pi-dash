@@ -44,7 +44,9 @@ pub enum Relation {
     MachineToken,
     #[sea_orm(has_many = "super::project_members::Entity")]
     ProjectMembers,
-    #[sea_orm(has_one = "super::projects::Entity")]
+    // `has_many`: a workspace has many projects (`projects.workspace_id` is
+    // unique only under a partial index).
+    #[sea_orm(has_many = "super::projects::Entity")]
     Projects,
     #[sea_orm(has_many = "super::states::Entity")]
     States,

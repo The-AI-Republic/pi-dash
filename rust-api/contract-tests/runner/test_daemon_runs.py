@@ -161,12 +161,16 @@ def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "failed"
     )
+    # The failure lands in the ``error_details`` bag (PDASHOSS01-187).
+    assert seeder.db.fetchval(
+        "SELECT error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == {"message": "boom"}
 
 
 def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
     response = machine_client.post(
         f"{DAEMON}/runs/{daemon_run['id']}/fail/",
-        json={"reason": "refusal", "category": "cyber", "detail": "declined"},
+        json={"reason": "refusal", "category": " CYBER ", "detail": "declined"},
         headers=_idem(),
     )
     assert response.json() == {"ok": True, "refused": True}
@@ -175,6 +179,14 @@ def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "refused"
     )
+    # The normalized category lands in the bag and the generated column
+    # derives from it (PDASHOSS01-187).
+    assert seeder.db.fetchval(
+        "SELECT error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == {"message": "declined", "refusal_category": "cyber"}
+    assert seeder.db.fetchval(
+        "SELECT refusal_category FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == "cyber"
 
 
 def test_daemon_run_cancelled_shape(machine_client, daemon_run, seeder):
