@@ -107,3 +107,24 @@ class TestMagicSignUp:
         probe = client.get("/api/users/me/")
         assert probe.status_code == 200, probe.text
         assert probe.json()["email"] == email
+
+    def test_success_stores_django_iteration_password_hash(self, db, seed, rdb):
+        # PIDASHCONV-1355: the autoset password is `set_password(uuid4().hex)`
+        # (adapter/base.py:310), so the stored hash must use the pinned
+        # Django 4.2.30 PBKDF2 iteration count (600000), not the 1500000
+        # recorded from a Django 5.2 fixture.
+        email = fresh_email()
+        client = csrf_client()
+        token = _seed_token(client, rdb, email)
+
+        resp = post_form(client, SIGN_UP, {"email": email, "code": token})
+
+        assert resp.status_code == 302, resp.text
+        assert "error_code" not in location_query(resp)
+
+        with db.cursor() as cur:
+            cur.execute("SELECT id, password FROM users WHERE email = %s", (email,))
+            row = cur.fetchone()
+        assert row is not None
+        seed.track("users", "id", str(row[0]))
+        assert row[1].startswith("pbkdf2_sha256$600000$"), row[1]

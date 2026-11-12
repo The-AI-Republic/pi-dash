@@ -1,0 +1,343 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// One public issue in either surface (SPC-027-029, 031, 032). The list row
+// keeps the key outside its title-only link; the board card makes the body
+// one link and puts engagement controls beside it. Both are read-only: no
+// drag handle, editable field or structural affordance exists here. The
+// open action is a callback when the owner supplies one, with the address
+// as the link's ordinary fallback.
+
+import type { SpaceBoardIssue, SpaceBoardLabel, SpaceBoardState } from "@pidash/api-client";
+import { Tooltip } from "@pidash/kit";
+import { AlertCircle, Ban, SignalHigh, SignalLow, SignalMedium } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import * as React from "react";
+
+import { issueKey } from "../components/BoardShell.js";
+import { groupSpaceReactions, spaceReactionEmoji, tallySpaceVotes } from "../engagement/model.js";
+import { SpaceReactionBar } from "../engagement/SpaceReactionBar.js";
+import { SpaceVoteControls } from "../engagement/SpaceVoteControls.js";
+import { useSpaceEmbedded } from "../lib/spaceEmbed.js";
+import { spaceMessage } from "../lib/spaceMessages.js";
+import { StateMarker } from "./StateMarker.js";
+
+type PriorityLevel = NonNullable<SpaceBoardIssue["priority"]>;
+
+const PRIORITY_GLYPHS: Record<PriorityLevel, LucideIcon> = {
+  urgent: AlertCircle,
+  high: SignalHigh,
+  medium: SignalMedium,
+  low: SignalLow,
+  none: Ban,
+};
+
+const PRIORITY_LABELS: Record<PriorityLevel, string> = {
+  urgent: "Urgent",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  none: "None",
+};
+
+const PRIORITY_TONES: Record<PriorityLevel, string> = {
+  urgent: "text-(--danger)",
+  high: "text-(--warning)",
+  medium: "text-(--accent)",
+  low: "text-(--text-muted)",
+  none: "text-(--text-muted)",
+};
+
+const CARD_DATE_FORMAT = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+/** The short due-date marker the public cards use; null when unset. */
+export function formatSpaceCardDate(isoDate: string | null): string | null {
+  if (isoDate === null) return null;
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return CARD_DATE_FORMAT.format(parsed);
+}
+
+/** The priority level a card renders; an unset priority is the `none` level. */
+export function spaceCardPriority(priority: SpaceBoardIssue["priority"]): PriorityLevel {
+  return priority ?? "none";
+}
+
+/** Labels present on the issue, in the issue's own id order. */
+export function spaceCardLabels(labelIds: readonly string[], labels: readonly SpaceBoardLabel[]): SpaceBoardLabel[] {
+  const byId = new Map(labels.map((label) => [label.id, label]));
+  const selected: SpaceBoardLabel[] = [];
+  for (const id of labelIds) {
+    const label = byId.get(id);
+    if (label !== undefined) selected.push(label);
+  }
+  return selected;
+}
+
+/** Votes split into the up/down counts the card shows. */
+export function spaceCardVoteCounts(issue: Pick<SpaceBoardIssue, "vote_items">): { up: number; down: number } {
+  let up = 0;
+  let down = 0;
+  for (const item of issue.vote_items) {
+    if (item.vote === 1) up += 1;
+    else if (item.vote === -1) down += 1;
+  }
+  return { up, down };
+}
+
+/** The character for one API reaction key; an unknown key shows the key itself. */
+export function spaceCardReactionEmoji(code: string): string {
+  return spaceReactionEmoji(code);
+}
+
+/** Emoji reactions grouped by their API code, preserving first-seen order. */
+export function spaceCardReactionCounts(
+  reactionItems: SpaceBoardIssue["reaction_items"]
+): Array<{ reaction: string; emoji: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const item of reactionItems) counts.set(item.reaction, (counts.get(item.reaction) ?? 0) + 1);
+  return [...counts].map(([reaction, count]) => ({ reaction, emoji: spaceCardReactionEmoji(reaction), count }));
+}
+
+export interface SpaceIssueRowProps {
+  issue: SpaceBoardIssue;
+  state: SpaceBoardState;
+  labels: readonly SpaceBoardLabel[];
+  projectIdentifier: string;
+  /** Canonical address for this issue's open link. */
+  issueHref: string;
+  /** The address's open-issue key; only an exact id match highlights. */
+  selected?: boolean;
+  /** Rendered as a board card instead of a list row. */
+  card?: boolean;
+  votesEnabled?: boolean;
+  reactionsEnabled?: boolean;
+  /** Slice H owns the overlay; when supplied it replaces the link's default navigation. */
+  onOpenIssue?: ((issue: SpaceBoardIssue) => void) | undefined;
+  onVote?: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
+  onReact?: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
+  /** The signed-in visitor's id; without one the footer shows no own mark. */
+  viewerId?: string | null | undefined;
+}
+
+interface MarkerStripProps {
+  issue: SpaceBoardIssue;
+  state: SpaceBoardState;
+  labels: readonly SpaceBoardLabel[];
+}
+
+function MarkerStrip({ issue, state, labels }: MarkerStripProps): React.ReactElement {
+  const priority = spaceCardPriority(issue.priority);
+  const PriorityGlyph = PRIORITY_GLYPHS[priority];
+  const selectedLabels = spaceCardLabels(issue.label_ids, labels);
+  const dueDate = formatSpaceCardDate(issue.target_date);
+  return (
+    <div data-testid="space-card-markers" className="flex min-w-0 flex-wrap items-center gap-(--space-2)">
+      <div
+        data-testid="space-card-state"
+        className="text-meta inline-flex h-5 min-w-0 items-center gap-(--space-1) text-(--text-muted)"
+      >
+        <StateMarker state={state} />
+        <span className="truncate">{state.name}</span>
+      </div>
+      <div
+        data-testid="space-card-priority"
+        data-priority={priority}
+        title={PRIORITY_LABELS[priority]}
+        className={`inline-flex h-5 items-center ${PRIORITY_TONES[priority]}`}
+      >
+        <PriorityGlyph size={13} strokeWidth={1.75} aria-label={`Priority: ${PRIORITY_LABELS[priority]}`} />
+      </div>
+      {selectedLabels.length === 0 ? null : (
+        <div data-testid="space-card-labels" className="flex min-w-0 flex-wrap items-center gap-(--space-1)">
+          {selectedLabels.map((label) => (
+            <div
+              key={label.id}
+              data-testid="space-card-label"
+              className="text-meta inline-flex h-5 max-w-40 items-center gap-(--space-1) rounded-(--radius-full) bg-(--subtle) px-(--space-2) text-(--text)"
+            >
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full"
+                style={{ backgroundColor: label.color }}
+              />
+              <span className="truncate">{label.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {dueDate === null ? null : (
+        <div data-testid="space-card-date" className="text-meta inline-flex h-5 items-center text-(--text-muted)">
+          {dueDate}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface CardFooterProps {
+  issue: SpaceBoardIssue;
+  votesEnabled: boolean;
+  reactionsEnabled: boolean;
+  embedded: boolean;
+  /** The signed-in visitor's id; without one no own mark shows. */
+  viewerId?: string | null | undefined;
+  onVote?: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
+  onReact?: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
+}
+
+function CardFooter({
+  issue,
+  votesEnabled,
+  reactionsEnabled,
+  embedded,
+  viewerId,
+  onVote,
+  onReact,
+}: CardFooterProps): React.ReactElement | null {
+  if (!votesEnabled && !reactionsEnabled) return null;
+  return (
+    <div
+      data-testid="space-board-card-footer"
+      className="flex items-center gap-(--space-2) border-t border-(--border) px-(--space-2) py-(--space-1)"
+    >
+      {votesEnabled ? (
+        <SpaceVoteControls
+          issueName={issue.name}
+          tally={tallySpaceVotes(issue.vote_items, viewerId)}
+          embedded={embedded}
+          onVote={(side) => onVote?.(issue, side)}
+          testId="space-card-votes"
+          upTestId="space-card-vote-up"
+          downTestId="space-card-vote-down"
+        />
+      ) : null}
+      {reactionsEnabled ? (
+        <SpaceReactionBar
+          issueName={issue.name}
+          groups={groupSpaceReactions(issue.reaction_items, viewerId)}
+          embedded={embedded}
+          onToggle={(code) => onReact?.(issue, code)}
+          onPick={(code) => onReact?.(issue, code)}
+          addLabel={`Add a reaction to ${issue.name}`}
+          panelLabel={spaceMessage("engagement.chooseReaction")}
+          testId="space-card-reactions"
+          pillTestId="space-card-reaction"
+          addTestId="space-card-reaction-add"
+        />
+      ) : null}
+    </div>
+  );
+}
+
+export function SpaceIssueRow({
+  issue,
+  state,
+  labels,
+  projectIdentifier,
+  issueHref,
+  selected = false,
+  card = false,
+  votesEnabled = false,
+  reactionsEnabled = false,
+  onOpenIssue,
+  onVote,
+  onReact,
+  viewerId,
+}: SpaceIssueRowProps): React.ReactElement {
+  const embedded = useSpaceEmbedded();
+  const [titleTooltipOpen, setTitleTooltipOpen] = React.useState(false);
+  const key = issueKey(projectIdentifier, issue);
+  const emphasis = selected ? "border-(--accent) ring-1 ring-(--accent)" : "border-(--border)";
+  const showTitle = (): void => setTitleTooltipOpen(true);
+  const hideTitle = (): void => setTitleTooltipOpen(false);
+  const open = (event: React.MouseEvent<HTMLAnchorElement>): void => {
+    if (onOpenIssue === undefined) return;
+    event.preventDefault();
+    onOpenIssue(issue);
+  };
+  // A focused link already activates on Enter; Space is the other key people
+  // press on a focused control, so honour it too and stop the page scroll.
+  const openFromKeyboard = (event: React.KeyboardEvent<HTMLAnchorElement>): void => {
+    if (event.key !== " ") return;
+    if (onOpenIssue === undefined) return;
+    event.preventDefault();
+    onOpenIssue(issue);
+  };
+  if (card) {
+    return (
+      <div
+        data-testid="space-board-card"
+        data-issue-id={issue.id}
+        data-state-id={state.id}
+        data-selected={selected ? "true" : undefined}
+        className={`group/kanban-block flex flex-col rounded-(--radius-control) border bg-(--bg) ${emphasis}`}
+      >
+        <Tooltip content={issue.name} open={titleTooltipOpen} onOpenChange={setTitleTooltipOpen}>
+          <a
+            id={`issue-${issue.id}`}
+            href={issueHref}
+            title={issue.name}
+            aria-current={selected ? "true" : undefined}
+            onClick={open}
+            onKeyDown={openFromKeyboard}
+            onFocus={showTitle}
+            onBlur={hideTitle}
+            className="flex cursor-pointer flex-col gap-(--space-1) px-(--space-3) py-(--space-2) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+          >
+            <div className="text-meta text-(--text-muted)">{key}</div>
+            <div title={issue.name} className="text-body truncate text-(--text)">
+              {issue.name}
+            </div>
+            <MarkerStrip issue={issue} state={state} labels={labels} />
+          </a>
+        </Tooltip>
+        <CardFooter
+          issue={issue}
+          votesEnabled={votesEnabled}
+          reactionsEnabled={reactionsEnabled}
+          embedded={embedded}
+          viewerId={viewerId}
+          onVote={onVote}
+          onReact={onReact}
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      data-testid="space-board-issue"
+      data-issue-id={issue.id}
+      data-state-id={state.id}
+      data-selected={selected ? "true" : undefined}
+      className={`group/list-block flex flex-col gap-(--space-1) rounded-(--radius-control) border bg-(--bg) px-(--space-3) py-(--space-2) ${emphasis}`}
+    >
+      <div className="flex min-w-0 items-center gap-(--space-2)">
+        <div data-testid="space-issue-key" className="text-meta shrink-0 text-(--text-muted)">
+          {key}
+        </div>
+        <Tooltip content={issue.name} open={titleTooltipOpen} onOpenChange={setTitleTooltipOpen}>
+          <a
+            id={`issue-${issue.id}`}
+            href={issueHref}
+            title={issue.name}
+            aria-current={selected ? "true" : undefined}
+            onClick={open}
+            onKeyDown={openFromKeyboard}
+            onFocus={showTitle}
+            onBlur={hideTitle}
+            className="text-body min-w-0 cursor-pointer truncate rounded-(--radius-control) text-(--text) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+          >
+            {issue.name}
+          </a>
+        </Tooltip>
+      </div>
+      <MarkerStrip issue={issue} state={state} labels={labels} />
+    </div>
+  );
+}

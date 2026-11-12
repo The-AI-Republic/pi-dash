@@ -130,6 +130,31 @@ def test_duplicate_ignores_entity_identifier(org):
     assert seed_a.fetch(org.conn, str(new_id))["workspace_id"] is None
 
 
+def test_duplicate_empty_entity_id_stores_null(org):
+    # NEWPIDASH-171: "" entity_id stores NULL via the same
+    # ForeignKey.get_db_prep_save rule (POST duplicate reads "entity_id",
+    # not "entity_identifier"). Rust once answered 400 for "".
+    asset_id = mint_uploaded(org, name="empty.png")
+    before = {
+        row[0]
+        for row in org.conn.execute("SELECT id FROM file_assets").fetchall()
+    }
+    r = org.request(
+        "POST", dup_path(org, asset_id), "admin",
+        json={"entity_type": "WORKSPACE_LOGO", "entity_id": ""},
+    )
+    assert r.status_code != 400, r.text
+    assert r.status_code in (200, 500), r.text[:300]
+    after = {
+        row[0]
+        for row in org.conn.execute("SELECT id FROM file_assets").fetchall()
+    }
+    new_ids = after - before
+    assert len(new_ids) == 1, f"duplicate with '' must create a row: {r.text[:300]}"
+    new_id = next(iter(new_ids))
+    assert seed_a.fetch(org.conn, str(new_id))["workspace_id"] is None
+
+
 def test_duplicate_throttle(org):
     # AssetRateThrottle allows 5/minute per asset_id; the 6th request trips
     # it. A not-yet-uploaded source answers 404 (fast, no storage touch), so

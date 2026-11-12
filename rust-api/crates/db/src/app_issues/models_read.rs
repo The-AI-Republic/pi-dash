@@ -696,7 +696,6 @@ pub mod foreign {
         "status",
         "runner_id",
         "executor_kind",
-        "queue_position",
         "created_at",
         "assigned_at",
         "started_at",
@@ -792,6 +791,8 @@ pub mod foreign {
         "usage",
         "llm_model",
         "turn_count",
+        "agent_health",
+        "agent_last_activity_at",
         "updated_at",
     ];
 
@@ -1279,7 +1280,7 @@ mod tests {
             owned(foreign::AGENT_RUN_COLUMNS_READ),
             foreign_columns_read(&v, "agent_run")
         );
-        assert_eq!(foreign::AGENT_RUN_COLUMNS_READ.len(), 19);
+        assert_eq!(foreign::AGENT_RUN_COLUMNS_READ.len(), 18);
         let agent_run_table: &str = foreign::AGENT_RUN_TABLE;
         assert_eq!(agent_run_table, "agent_run");
         let merged_table: &str = agent_run::TABLE;
@@ -1344,7 +1345,7 @@ mod tests {
             .map(|c| c.split(" (").next().unwrap().to_string())
             .collect();
         assert_eq!(owned(foreign::RUNNER_LIVE_STATE_COLUMNS_READ), live_read);
-        assert_eq!(foreign::RUNNER_LIVE_STATE_COLUMNS_READ.len(), 12);
+        assert_eq!(foreign::RUNNER_LIVE_STATE_COLUMNS_READ.len(), 14);
         let live_raw = foreign_columns_read(&v, "runner_live_state");
         assert!(live_raw[0].contains("(PK, OneToOne)"));
         assert!(live_raw[8].contains("PROPERTIES"));

@@ -9,6 +9,7 @@ pub mod config_cmd;
 pub mod connect;
 pub mod context;
 pub mod doctor;
+pub mod engine_cmd;
 mod install;
 pub mod issue;
 pub mod managed;
@@ -17,6 +18,7 @@ pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
 mod project;
+mod reconnect;
 mod remove;
 pub mod resolve;
 mod restart;
@@ -26,8 +28,8 @@ pub mod run_cmd;
 // (`add`, `remove`) directly without going through clap.
 pub mod runner;
 pub mod runner_ops;
-mod start;
 mod scheduler;
+mod start;
 mod state;
 mod status;
 mod stop;
@@ -107,6 +109,10 @@ pub enum Command {
     /// Restart the installed service.
     Restart(restart::Args),
 
+    /// Retry the cloud connection now instead of waiting out the backoff
+    /// (all runners, or just `<runner>`).
+    Reconnect(reconnect::Args),
+
     /// Print service + daemon status.
     Status(status::Args),
 
@@ -120,6 +126,11 @@ pub enum Command {
     /// The running daemon keeps its loaded copy; pass `--restart` to
     /// also restart so the new code takes effect immediately.
     Update(update::Args),
+
+    /// The built-in agent engine shipped with this release (`engine install`
+    /// / `path` / `status` / `pause` / `resume`). Installed next to pidash,
+    /// never on PATH.
+    Engine(engine_cmd::EngineArgs),
 
     /// Deregister with the cloud and delete local credentials.
     Remove(remove::Args),
@@ -144,8 +155,10 @@ pub enum Command {
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
-    /// Read project schedulers (read-only): `scheduler list` /
-    /// `scheduler get <id>` / `scheduler runs <id>`.
+    /// Project schedulers: `scheduler list` / `scheduler get <id>` /
+    /// `scheduler runs <id>`; for project admins `scheduler install` /
+    /// `update` / `run-now` / `uninstall`; for workspace admins
+    /// `scheduler create` / `edit` / `delete`.
     Scheduler(scheduler::SchedulerArgs),
 
     /// Read or overwrite the coding agent's per-issue workpad.
@@ -169,6 +182,11 @@ pub enum Command {
     /// configure a runner with `pidash runner add` instead.
     #[command(name = "__managed", hide = true)]
     Managed(managed::ManagedArgs),
+
+    /// Internal: verbs the built-in engine runs (its model-token auth
+    /// helper). Not a user-facing verb.
+    #[command(name = "__engine", hide = true)]
+    EngineHelper(engine_cmd::EngineHelperArgs),
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -193,10 +211,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Start(args) => start::run(args, &paths).await,
         Command::Stop(args) => stop::run(args, &paths).await,
         Command::Restart(args) => restart::run(args, &paths).await,
+        Command::Reconnect(args) => reconnect::run(args, &paths).await,
         Command::Status(args) => status::run(args, &paths).await,
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
         Command::Update(args) => update::run(args, &paths).await,
+        Command::Engine(args) => engine_cmd::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
@@ -210,6 +230,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
         Command::Managed(args) => managed::run(args, &paths).await,
+        Command::EngineHelper(args) => engine_cmd::run_helper(args, &paths).await,
     }
 }
 
@@ -225,7 +246,9 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
+                force: false,
                 device_code_stdin: false,
+                engine: false,
             }),
         };
         return auth::run(args, paths).await;

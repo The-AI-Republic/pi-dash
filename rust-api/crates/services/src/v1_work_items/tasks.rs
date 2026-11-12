@@ -103,22 +103,14 @@
 
 use serde_json::{Map, Value};
 
-/// Celery wire name for `issue_activity` (bare `@shared_task`,
-/// `bgtasks/issue_activities_task.py:1503-1516`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
-/// Celery wire name for `model_activity` (bare `@shared_task`,
-/// `bgtasks/webhook_task.py:463-464`).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-exports of the canonical [`crate::domain::activity`] task names.
+pub use crate::domain::activity::{ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 /// Celery wire name for `crawl_work_item_link_title` (bare `@shared_task`,
 /// `bgtasks/work_item_link_task.py:262-263`).
 pub const CRAWL_LINK_TITLE_TASK: &str =
     "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title";
-/// Celery wire name for `page_transaction` (bare `@shared_task`,
-/// `bgtasks/page_transaction_task.py:84-85`).
-pub const PAGE_TRANSACTION_TASK: &str = "pi_dash.bgtasks.page_transaction_task.page_transaction";
-/// Celery wire name for `track_page_version` (bare `@shared_task`,
-/// `bgtasks/page_version_task.py:21-22`).
-pub const TRACK_PAGE_VERSION_TASK: &str = "pi_dash.bgtasks.page_version_task.track_page_version";
+/// Re-exports of the canonical [`crate::domain::activity`] version-task names.
+pub use crate::domain::activity::{PAGE_TRANSACTION_TASK, TRACK_PAGE_VERSION_TASK};
 /// Celery wire name for `get_asset_object_metadata` (bare `@shared_task`,
 /// `bgtasks/storage_metadata_task.py:14-15`).
 pub const GET_ASSET_OBJECT_METADATA_TASK: &str =
@@ -336,7 +328,7 @@ pub fn issue_model_activity_kwargs(
         current_instance,
         actor_id,
         slug,
-        origin,
+        Some(origin),
     )
 }
 
@@ -359,7 +351,7 @@ pub fn comment_model_activity_kwargs(
         current_instance,
         actor_id,
         slug,
-        origin,
+        Some(origin),
     )
 }
 

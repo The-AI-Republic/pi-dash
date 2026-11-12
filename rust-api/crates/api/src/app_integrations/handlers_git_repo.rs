@@ -92,10 +92,11 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::SecondsFormat;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::app_integrations::queries_git::{self, BoundRepository, ProjectBinding};
 use pidash_db::integrations::git_models::git_provider_account;
 use pidash_db::integrations::git_models::git_repository_binding;
@@ -150,8 +151,6 @@ fn owned_bind() -> axum::routing::MethodRouter<AppState> {
 /// (`views/base.py:189-194`).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
-/// `handle_exception`'s generic 500 branch (`views/base.py:147-149`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF's default `Http404` body (missing workspace/project row in the
 /// bind body).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
@@ -243,14 +242,6 @@ fn parse_error_response(err: &serde_json::Error) -> Response {
     json_response(StatusCode::BAD_REQUEST, body)
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("git repo json response")
-}
-
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, RepoDenial> {
     state
         .pools()
@@ -299,16 +290,11 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    row.map(|row| row.0).ok_or(RepoDenial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = crate::app_issues::access::project_id_by_identifier(&db, slug, &upper)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
+    row.ok_or(RepoDenial::ProjectNotFound)
 }
 
 /// `@allow_permission` at the default `"PROJECT"` level: an active project
@@ -324,47 +310,20 @@ async fn allow_project(
     user_id: &uuid::Uuid,
     roles: &[i16],
 ) -> Result<(), RepoDenial> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    if let Some((role,)) = role {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
+    if let Some(role) = role {
         if roles.contains(&role) {
             return Ok(());
         }
     }
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    let admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    if member.is_some() && admin.is_some() {
+    // The member half is the same row the role read just looked for.
+    let admin = crate::app_issues::access::is_workspace_admin(&db, slug, *user_id)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
+    if role.is_some() && admin {
         Ok(())
     } else {
         Err(RepoDenial::Forbidden)
@@ -449,11 +408,14 @@ fn repository_json(repo: &BoundRepository) -> serde_json::Map<String, serde_json
 
 /// Render an aware datetime the way `Model.__getattribute__` +
 /// DRF renders `last_synced_at.isoformat()` / `verified_at.isoformat()`:
-/// the stored instant with its offset, microseconds only when nonzero.
+/// the stored instant with its offset, exactly six fraction digits
+/// when microseconds are nonzero, none when zero (chrono `AutoSi`
+/// trims trailing zeros, so this shares
+/// [`crate::assistant::common::py_iso`], PIDASHCONV-1464).
 /// (`serialize_binding` deliberately bypasses `TimezoneMixin`: no zone
 /// shift happens on this path.)
 fn isoformat(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    crate::assistant::common::py_iso(dt)
 }
 
 /// `serialize_binding` (`services.py:280-294`), key order as declared.
@@ -515,6 +477,7 @@ fn binding_json(binding: &ProjectBinding) -> serde_json::Map<String, serde_json:
 /// The candidate read stays in `created_at` order (`services.py:169-175`)
 /// so multi-account probing order matches; the timestamp itself never
 /// decides (`_account_preference` ranks on the first tuple half only).
+#[derive(sea_orm::FromQueryResult)]
 struct ResolvableAccount {
     id: uuid::Uuid,
     auth_type: String,
@@ -527,68 +490,68 @@ struct ResolvableAccount {
 /// branch (`select_provider_account`, `services.py:118-130`): the id must
 /// sit inside the CONNECTED/DEGRADED queryset for this host.
 async fn fetch_resolution_account(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: uuid::Uuid,
     provider: &str,
     host_url: &str,
     account_id: uuid::Uuid,
-) -> Result<Option<ResolvableAccount>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT a.id, a.auth_type, a.capabilities, a.host_url, a.credential_config
-           FROM git_provider_accounts a
-           WHERE a.deleted_at IS NULL AND a.workspace_id = $1 AND a.provider = $2
-             AND a.host_url = $3 AND a.status = ANY($4) AND a.id = $5
-           LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(provider)
-    .bind(host_url)
-    .bind(vec![
-        git_provider_account::STATUS_CONNECTED,
-        git_provider_account::STATUS_DEGRADED,
-    ])
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| map_resolvable_account(&row)).transpose()
+) -> Result<Option<ResolvableAccount>, sea_orm::DbErr> {
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    git_provider_accounts::Entity::find()
+        .select_only()
+        .columns([
+            git_provider_accounts::Column::Id,
+            git_provider_accounts::Column::AuthType,
+            git_provider_accounts::Column::Capabilities,
+            git_provider_accounts::Column::HostUrl,
+            git_provider_accounts::Column::CredentialConfig,
+        ])
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq(provider))
+        .filter(git_provider_accounts::Column::HostUrl.eq(host_url))
+        .filter(git_provider_accounts::Column::Status.is_in([
+            git_provider_account::STATUS_CONNECTED,
+            git_provider_account::STATUS_DEGRADED,
+        ]))
+        .filter(git_provider_accounts::Column::Id.eq(account_id))
+        .into_model::<ResolvableAccount>()
+        .one(db)
+        .await
 }
 
 /// Candidate accounts for the inferred branch (`services.py:169-175`,
 /// `created_at` order): the branching itself is handler logic.
 async fn fetch_resolution_candidates(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: uuid::Uuid,
     provider: &str,
     host_url: &str,
-) -> Result<Vec<ResolvableAccount>, sqlx::Error> {
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT a.id, a.auth_type, a.capabilities, a.host_url, a.credential_config
-           FROM git_provider_accounts a
-           WHERE a.deleted_at IS NULL AND a.workspace_id = $1 AND a.provider = $2
-             AND a.host_url = $3 AND a.status = ANY($4)
-           ORDER BY a.created_at ASC"#,
-    )
-    .bind(workspace_id)
-    .bind(provider)
-    .bind(host_url)
-    .bind(vec![
-        git_provider_account::STATUS_CONNECTED,
-        git_provider_account::STATUS_DEGRADED,
-    ])
-    .fetch_all(pool)
-    .await?;
-    rows.iter().map(map_resolvable_account).collect()
-}
-
-fn map_resolvable_account(row: &sqlx::postgres::PgRow) -> Result<ResolvableAccount, sqlx::Error> {
-    use sqlx::Row;
-    Ok(ResolvableAccount {
-        id: row.try_get("id")?,
-        auth_type: row.try_get("auth_type")?,
-        capabilities: row.try_get("capabilities")?,
-        host_url: row.try_get("host_url")?,
-        credential_config: row.try_get("credential_config")?,
-    })
+) -> Result<Vec<ResolvableAccount>, sea_orm::DbErr> {
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    git_provider_accounts::Entity::find()
+        .select_only()
+        .columns([
+            git_provider_accounts::Column::Id,
+            git_provider_accounts::Column::AuthType,
+            git_provider_accounts::Column::Capabilities,
+            git_provider_accounts::Column::HostUrl,
+            git_provider_accounts::Column::CredentialConfig,
+        ])
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq(provider))
+        .filter(git_provider_accounts::Column::HostUrl.eq(host_url))
+        .filter(git_provider_accounts::Column::Status.is_in([
+            git_provider_account::STATUS_CONNECTED,
+            git_provider_account::STATUS_DEGRADED,
+        ]))
+        .order_by_asc(git_provider_accounts::Column::CreatedAt)
+        .into_model::<ResolvableAccount>()
+        .all(db)
+        .await
 }
 
 /// `AuthType` values (`db/models/integration/git.py:18-24`).
@@ -645,7 +608,13 @@ async fn get_repository(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let binding = match queries_git::fetch_binding_for_project(&pool, project_id, &slug).await {
+    let binding = match queries_git::fetch_binding_for_project(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        project_id,
+        &slug,
+    )
+    .await
+    {
         Ok(binding) => binding,
         Err(_) => return RepoDenial::ServerError.into_response(),
     };
@@ -691,7 +660,13 @@ async fn patch_repository(
                 .into_response()
         }
     };
-    let binding = match queries_git::fetch_binding_for_project(&pool, project_id, &slug).await {
+    let binding = match queries_git::fetch_binding_for_project(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        project_id,
+        &slug,
+    )
+    .await
+    {
         Ok(binding) => binding,
         Err(_) => return RepoDenial::ServerError.into_response(),
     };
@@ -705,7 +680,13 @@ async fn patch_repository(
     if let Err(denial) = set_binding_sync_enabled(&pool, &slug, &binding, enabled).await {
         return denial.into_response();
     }
-    let refreshed = match queries_git::fetch_binding_for_project(&pool, project_id, &slug).await {
+    let refreshed = match queries_git::fetch_binding_for_project(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        project_id,
+        &slug,
+    )
+    .await
+    {
         Ok(refreshed) => refreshed,
         Err(_) => return RepoDenial::ServerError.into_response(),
     };
@@ -727,29 +708,43 @@ async fn set_binding_sync_enabled(
     binding: &ProjectBinding,
     enabled: bool,
 ) -> Result<(), RepoDenial> {
-    sqlx::query(
-        r#"UPDATE git_repository_bindings
-           SET is_sync_enabled = $1, updated_at = now()
-           WHERE id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(enabled)
-    .bind(binding.binding.id)
-    .execute(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    if binding.repository.provider == "github" {
-        sqlx::query(
-            r#"UPDATE github_repository_syncs s SET is_sync_enabled = $1
-               FROM workspaces w
-               WHERE s.workspace_id = w.id AND s.project_id = $2 AND w.slug = $3
-                 AND s.deleted_at IS NULL"#,
+    use pidash_db::entity::{git_repository_bindings, github_repository_syncs};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    git_repository_bindings::Entity::update_many()
+        .col_expr(
+            git_repository_bindings::Column::IsSyncEnabled,
+            sea_orm::sea_query::Expr::value(enabled),
         )
-        .bind(enabled)
-        .bind(binding.binding.project_id)
-        .bind(slug)
-        .execute(pool)
+        .col_expr(
+            git_repository_bindings::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(bumped),
+        )
+        .filter(git_repository_bindings::Column::Id.eq(binding.binding.id))
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .exec(&db)
         .await
         .map_err(|_| RepoDenial::ServerError)?;
+    if binding.repository.provider == "github" {
+        // `UPDATE ... FROM workspaces w`: scope the sync rows to the
+        // slug's workspace in two steps (resolve the id, then update).
+        let workspace_id = pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+        if let Some(workspace_id) = workspace_id {
+            github_repository_syncs::Entity::update_many()
+                .col_expr(
+                    github_repository_syncs::Column::IsSyncEnabled,
+                    sea_orm::sea_query::Expr::value(enabled),
+                )
+                .filter(github_repository_syncs::Column::ProjectId.eq(binding.binding.project_id))
+                .filter(github_repository_syncs::Column::WorkspaceId.eq(workspace_id))
+                .filter(github_repository_syncs::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await
+                .map_err(|_| RepoDenial::ServerError)?;
+        }
     }
     Ok(())
 }
@@ -776,35 +771,148 @@ async fn delete_repository(
     json_response(StatusCode::OK, UNBOUND_BODY.to_owned())
 }
 
+/// What Django's ORM Collector deletes when a `GitRepositoryBinding` is
+/// hard-deleted (`delete(soft=False)`): the `GitIssueSync` rows pointing at
+/// it (`git.py:153`, `on_delete=CASCADE`) and their `GitCommentSync` rows
+/// (`:191`). The Collector follows FKs via `_base_manager`, so soft-deleted
+/// children go too — hence no `deleted_at` filter here. The FKs are plain
+/// `DEFERRABLE INITIALLY DEFERRED` constraints with no `ON DELETE CASCADE`,
+/// so callers run this before the parent DELETE, in the same transaction.
+/// Shared with the `github_proj` rebind path, which hard-deletes bindings
+/// from `_upsert_git_binding_for_github_sync` (`github.py:404-406`).
+pub(crate) async fn delete_git_binding_children(
+    db: &impl sea_orm::ConnectionTrait,
+    binding_ids: &[uuid::Uuid],
+) -> Result<(), sea_orm::DbErr> {
+    use pidash_db::entity::{git_comment_syncs, git_issue_syncs};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    if binding_ids.is_empty() {
+        return Ok(());
+    }
+    let sync_ids: Vec<uuid::Uuid> = git_issue_syncs::Entity::find()
+        .select_only()
+        .column(git_issue_syncs::Column::Id)
+        .filter(git_issue_syncs::Column::BindingId.is_in(binding_ids.iter().copied()))
+        .into_tuple()
+        .all(db)
+        .await?;
+    if !sync_ids.is_empty() {
+        git_comment_syncs::Entity::delete_many()
+            .filter(git_comment_syncs::Column::IssueSyncId.is_in(sync_ids.iter().copied()))
+            .exec(db)
+            .await?;
+    }
+    git_issue_syncs::Entity::delete_many()
+        .filter(git_issue_syncs::Column::BindingId.is_in(binding_ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// The `GithubRepositorySync` half of the Collector cascade
+/// (`github.py:81` → `:107`): `GithubCommentSync` rows first, then
+/// `GithubIssueSync` rows, with no `deleted_at` filter (see
+/// [`delete_git_binding_children`]). Shared with the `github_proj` bind
+/// rebind (`github.py:1026-1032`).
+pub(crate) async fn delete_github_sync_children(
+    db: &impl sea_orm::ConnectionTrait,
+    sync_ids: &[uuid::Uuid],
+) -> Result<(), sea_orm::DbErr> {
+    use pidash_db::entity::{github_comment_syncs, github_issue_syncs};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    if sync_ids.is_empty() {
+        return Ok(());
+    }
+    let issue_ids: Vec<uuid::Uuid> = github_issue_syncs::Entity::find()
+        .select_only()
+        .column(github_issue_syncs::Column::Id)
+        .filter(github_issue_syncs::Column::RepositorySyncId.is_in(sync_ids.iter().copied()))
+        .into_tuple()
+        .all(db)
+        .await?;
+    if !issue_ids.is_empty() {
+        github_comment_syncs::Entity::delete_many()
+            .filter(github_comment_syncs::Column::IssueSyncId.is_in(issue_ids.iter().copied()))
+            .exec(db)
+            .await?;
+    }
+    github_issue_syncs::Entity::delete_many()
+        .filter(github_issue_syncs::Column::RepositorySyncId.is_in(sync_ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 /// `unbind_repository` (`services.py:374-378`): hard deletes scoped to the
-/// live rows of this workspace slug + project.
+/// live rows of this workspace slug + project, in one transaction. The
+/// parent filters stay live-only (the default manager); the child deletes
+/// take no `deleted_at` filter (the Collector's `_base_manager`).
 async fn unbind_repository(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<(), RepoDenial> {
-    sqlx::query(
-        r#"DELETE FROM git_repository_bindings b
-           USING workspaces w
-           WHERE b.workspace_id = w.id AND b.project_id = $1 AND w.slug = $2
-             AND b.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .execute(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    sqlx::query(
-        r#"DELETE FROM github_repository_syncs s
-           USING workspaces w
-           WHERE s.workspace_id = w.id AND s.project_id = $1 AND w.slug = $2
-             AND s.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .execute(pool)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
+    let mut tx = pool.begin().await.map_err(|_| RepoDenial::ServerError)?;
+    use pidash_db::entity::{git_repository_bindings, github_repository_syncs, workspaces};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let binding_ids: Vec<uuid::Uuid> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        git_repository_bindings::Entity::find()
+            .select_only()
+            .column(git_repository_bindings::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::Workspaces.def(),
+            )
+            .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?
+    };
+    let sync_ids: Vec<uuid::Uuid> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        delete_git_binding_children(&conn, &binding_ids)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+        // The parent delete re-scopes by project alone (a project sits in
+        // exactly one workspace, so the slug check is redundant here).
+        git_repository_bindings::Entity::delete_many()
+            .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+        github_repository_syncs::Entity::find()
+            .select_only()
+            .column(github_repository_syncs::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                github_repository_syncs::Relation::Workspaces.def(),
+            )
+            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(github_repository_syncs::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?
+    };
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        delete_github_sync_children(&conn, &sync_ids)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+        github_repository_syncs::Entity::delete_many()
+            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
+            .filter(github_repository_syncs::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+    }
+    tx.commit().await.map_err(|_| RepoDenial::ServerError)?;
     Ok(())
 }
 
@@ -984,6 +1092,21 @@ fn parse_gitlab_url(url: &str, allowed_hosts: &[String]) -> Option<ParsedReposit
     if !allowed_hosts.iter().any(|h| h == &host_url) {
         return None;
     }
+    // `urlparse(candidate).path` (`gitlab.py:236-242`): the `?query` and
+    // `#fragment` never reach the split. `/-/` inside them never splits
+    // (`?next=/-/x` keeps its repo). `?`, `#`, `;` are ASCII, so the byte
+    // slices below always land on char boundaries.
+    let path = path.find(['?', '#']).map_or(path, |idx| &path[..idx]);
+    // Last-segment `;params` are cut for http/https only: `ssh` is not in
+    // `urllib.parse.uses_params`, so Django keeps them in `.path` there.
+    let path = if scheme_lower == "ssh" {
+        path
+    } else {
+        let last_segment = path.rfind('/').map_or(0, |idx| idx + 1);
+        path[last_segment..]
+            .find(';')
+            .map_or(path, |idx| &path[..last_segment + idx])
+    };
     let path = match path.split_once("/-/") {
         Some((before, _)) => before,
         None => path,
@@ -1176,16 +1299,53 @@ fn quote_path_segment(value: &str) -> String {
     out
 }
 
+/// `PIDASH_GITHUB_API_BASE` override for the bind-path GitHub fetch
+/// (PIDASHCONV-1513): contract tests point a redirect stub here. `None`
+/// when unset or empty, which is the production state — Django has no
+/// equivalent knob (its contract leg reaches the stub through an HTTPS
+/// MITM proxy instead), so behavior with the variable unset is exactly
+/// `GithubClient(token=…)` against `https://api.github.com`. Twin of the
+/// jobs-crate override (PIDASHCONV-1472).
+fn github_api_base_override() -> Option<String> {
+    std::env::var("PIDASH_GITHUB_API_BASE")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Bind-path GitHub client: follows redirects like
+/// `GithubClient._request` (`requests.request` follows by default), so a
+/// renamed/transferred repo resolves through GitHub's 301
+/// (PIDASHCONV-1513). `limited(10)` per the PIDASHCONV-1472 precedent.
+fn github_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
+/// Bind-path GitLab client: never follows, mirroring `GitLabClient`
+/// (`allow_redirects=False`, `gitlab.py:104`); a 3xx surfaces so
+/// `fetch_gitlab_repository` fails closed.
+fn gitlab_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
 /// `GithubClient.get_repo` (`github_client.py:116-123`): one
 /// `GET /repos/{owner}/{repo}` with the client headers and the
-/// 401/403/404 mapping (`_request`, `:62-76`).
+/// 401/403/404 mapping (`_request`, `:62-76`). `api_base` is
+/// `https://api.github.com` in production, the redirect stub under test.
 async fn fetch_github_repository(
     http: &reqwest::Client,
+    api_base: &str,
     token: &str,
     namespace: &str,
     name: &str,
 ) -> Result<RemoteRepository, ProviderError> {
-    let url = format!("https://api.github.com/repos/{namespace}/{name}");
+    let url = format!("{api_base}/repos/{namespace}/{name}");
     let response = http
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -1442,7 +1602,9 @@ async fn fetch_remote_repository(
     match parsed.provider.as_str() {
         "github" => {
             let token = github_token(&credential, keyring)?;
-            fetch_github_repository(http, &token, &parsed.namespace, &parsed.name).await
+            let api_base =
+                github_api_base_override().unwrap_or_else(|| "https://api.github.com".to_owned());
+            fetch_github_repository(http, &api_base, &token, &parsed.namespace, &parsed.name).await
         }
         _ => {
             let host_url = credential
@@ -1555,28 +1717,28 @@ async fn post_bind(
     // `get_object_or_404(Workspace, slug=...)` then
     // `get_object_or_404(Project, pk=..., workspace=...)`: both are
     // `Http404` → the DRF detail body.
-    let workspace_row: Option<(uuid::Uuid,)> = match sqlx::query_as(
-        r#"SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(_) => return RepoDenial::ServerError.into_response(),
-    };
-    let workspace_id = match workspace_row {
-        Some((id,)) => id,
-        None => return RepoDenial::NotFoundDetail.into_response(),
-    };
-    let project_row: Option<(uuid::Uuid, String, String)> = match sqlx::query_as(
-        r#"SELECT p.id, p.repo_url, p.base_branch FROM projects p
-           WHERE p.id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(workspace_id)
-    .fetch_optional(&pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let workspace_id =
+        match pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, &slug).await {
+            Ok(Some(id)) => id,
+            Ok(None) => return RepoDenial::NotFoundDetail.into_response(),
+            Err(_) => return RepoDenial::ServerError.into_response(),
+        };
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let project_row: Option<(uuid::Uuid, String, String)> = match projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::RepoUrl,
+            projects::Column::BaseBranch,
+        ])
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return RepoDenial::ServerError.into_response(),
@@ -1588,11 +1750,15 @@ async fn post_bind(
     // Resolve the provider account (`resolve_provider_account_repository`,
     // `services.py:153-200`), then fetch the remote.
     let keyring = pidash_db::config::encryption::Keyring::from_secret(&state.settings().secret_key);
-    let http = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
+    // The provider fetch client is per provider (PIDASHCONV-1513): GitHub
+    // follows rename redirects like `GithubClient`, while GitLab never
+    // follows (`GitLabClient` `allow_redirects=False`). One shared
+    // `Policy::none()` client broke renamed-repo binds.
+    let http = match parsed.provider.as_str() {
+        "github" => github_client(),
+        _ => gitlab_client(),
+    };
+    let http = match http {
         Ok(http) => http,
         Err(_) => return RepoDenial::ServerError.into_response(),
     };
@@ -1654,8 +1820,9 @@ async fn resolve_account_remote(
     gitlab_hosts: &[String],
 ) -> Result<(ResolvableAccount, RemoteRepository), RepoDenial> {
     if let Some(account_id) = provider_account_id {
+        let db = pidash_db::pool::sea_orm_connection(pool);
         let account = fetch_resolution_account(
-            pool,
+            &db,
             *workspace_id,
             &parsed.provider,
             &parsed.host_url,
@@ -1677,8 +1844,9 @@ async fn resolve_account_remote(
             .map_err(ProviderError::denial)?;
         return Ok((account, remote));
     }
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let accounts =
-        fetch_resolution_candidates(pool, *workspace_id, &parsed.provider, &parsed.host_url)
+        fetch_resolution_candidates(&db, *workspace_id, &parsed.provider, &parsed.host_url)
             .await
             .map_err(|_| RepoDenial::ServerError)?;
     if accounts.is_empty() {
@@ -1764,153 +1932,236 @@ async fn bind_transaction(
     project_base_branch: &str,
 ) -> Result<ProjectBinding, RepoDenial> {
     let mut tx = pool.begin().await.map_err(|_| RepoDenial::ServerError)?;
-    let repository_id = upsert_repository(&mut tx, parsed, remote)
-        .await
-        .map_err(|_| RepoDenial::ServerError)?;
+    let repository_id = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        upsert_repository(&conn, parsed, remote, user_id)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?
+    };
     let clone_auth_mode = if remote.is_private {
         git_repository_binding::CLONE_AUTH_MODE_RUNNER_MANAGED
     } else {
         git_repository_binding::CLONE_AUTH_MODE_PUBLIC
     };
-    sqlx::query(
-        r#"DELETE FROM git_repository_bindings
-           WHERE project_id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    sqlx::query(
-        r#"DELETE FROM github_repository_syncs
-           WHERE project_id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    let binding_id = uuid::Uuid::new_v4();
-    let metadata = serde_json::json!({"raw_url": raw_url});
-    sqlx::query(
-        r#"INSERT INTO git_repository_bindings
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-              project_id, workspace_id, repository_id, provider_account_id, actor_id,
-              is_sync_enabled, clone_auth_mode, last_synced_at, last_sync_error, metadata)
-           VALUES ($1, now(), now(), $2, $2, NULL,
-                   $3, $4, $5, $6, $2,
-                   FALSE, $7, NULL, '', $8)"#,
-    )
-    .bind(binding_id)
-    .bind(user_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(repository_id)
-    .bind(account.id)
-    .bind(clone_auth_mode)
-    .bind(metadata)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| RepoDenial::ServerError)?;
-    let clone_url = canonical_clone_url(remote, &parsed.clone_url);
-    let mut updates: Vec<(&str, String)> = Vec::new();
-    if project_repo_url != clone_url {
-        updates.push(("repo_url", clone_url));
-    }
-    if !remote.default_branch.is_empty() && project_base_branch.is_empty() {
-        updates.push(("base_branch", remote.default_branch.clone()));
-    }
-    for (column, value) in updates {
-        let sql = format!("UPDATE projects SET {column} = $1 WHERE id = $2");
-        sqlx::query(&sql)
-            .bind(value)
-            .bind(project_id)
-            .execute(&mut *tx)
+    // Rebind (`services.py:324-328`): Collector-cascade the children of the
+    // live rows first — the FKs have no `ON DELETE CASCADE`, so the bare
+    // parent DELETEs below would 23503 at COMMIT once anything synced.
+    use pidash_db::entity::{git_repository_bindings, github_repository_syncs};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let rebind_binding_ids: Vec<uuid::Uuid> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        git_repository_bindings::Entity::find()
+            .select_only()
+            .column(git_repository_bindings::Column::Id)
+            .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?
+    };
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        delete_git_binding_children(&conn, &rebind_binding_ids)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+        git_repository_bindings::Entity::delete_many()
+            .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .exec(&conn)
             .await
             .map_err(|_| RepoDenial::ServerError)?;
     }
-    tx.commit().await.map_err(|_| RepoDenial::ServerError)?;
-    queries_git::fetch_binding_for_project(pool, *project_id, slug)
+    let rebind_sync_ids: Vec<uuid::Uuid> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        github_repository_syncs::Entity::find()
+            .select_only()
+            .column(github_repository_syncs::Column::Id)
+            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
+            .filter(github_repository_syncs::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?
+    };
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        delete_github_sync_children(&conn, &rebind_sync_ids)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+        github_repository_syncs::Entity::delete_many()
+            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
+            .filter(github_repository_syncs::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| RepoDenial::ServerError)?;
+    }
+    let binding_id = uuid::Uuid::new_v4();
+    let metadata = serde_json::json!({"raw_url": raw_url});
+    // `GitRepositoryBinding.objects.create(..., created_by_id=actor,
+    // updated_by_id=actor)` (`services.py:329-340`): `BaseModel.save`
+    // overrides the passed `updated_by_id` back to NULL on create
+    // (`db/models/base.py:36-39`).
+    {
+        use pidash_db::entity::git_repository_bindings;
+        use sea_orm::{ActiveModelTrait, Set};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+        git_repository_bindings::ActiveModel {
+            id: Set(binding_id),
+            created_at: Set(stamped),
+            updated_at: Set(stamped),
+            created_by_id: Set(Some(*user_id)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            project_id: Set(*project_id),
+            workspace_id: Set(*workspace_id),
+            repository_id: Set(repository_id),
+            provider_account_id: Set(account.id),
+            actor_id: Set(*user_id),
+            is_sync_enabled: Set(false),
+            clone_auth_mode: Set(clone_auth_mode.to_owned()),
+            last_synced_at: Set(None),
+            last_sync_error: Set(String::new()),
+            metadata: Set(metadata),
+        }
+        .insert(&conn)
         .await
-        .map_err(|_| RepoDenial::ServerError)?
-        .ok_or(RepoDenial::ServerError)
+        .map_err(|_| RepoDenial::ServerError)?;
+    }
+    let clone_url = canonical_clone_url(remote, &parsed.clone_url);
+    use pidash_services::domain::projects::ProjectTextField;
+    let mut updates: Vec<(ProjectTextField, String)> = Vec::new();
+    if project_repo_url != clone_url {
+        updates.push((ProjectTextField::RepoUrl, clone_url));
+    }
+    if !remote.default_branch.is_empty() && project_base_branch.is_empty() {
+        updates.push((ProjectTextField::BaseBranch, remote.default_branch.clone()));
+    }
+    for (field, value) in updates {
+        pidash_services::domain::projects::stamp_text_field(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            field,
+            &value,
+            *project_id,
+        )
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
+    }
+    tx.commit().await.map_err(|_| RepoDenial::ServerError)?;
+    queries_git::fetch_binding_for_project(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *project_id,
+        slug,
+    )
+    .await
+    .map_err(|_| RepoDenial::ServerError)?
+    .ok_or(RepoDenial::ServerError)
 }
 
 /// `upsert_repository` (`services.py:203-225`): the lookup is
 /// provider + host + (`external_id` when set, else `full_name`); the
 /// write covers every default column plus `updated_at`.
 async fn upsert_repository(
-    ex: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     parsed: &ParsedRepository,
     remote: &RemoteRepository,
-) -> Result<uuid::Uuid, sqlx::Error> {
+    actor_id: &uuid::Uuid,
+) -> Result<uuid::Uuid, sea_orm::DbErr> {
+    use pidash_db::entity::git_repositories;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
     let host_url = parsed.host_url.trim_end_matches('/');
-    let existing: Option<(uuid::Uuid,)> = if !remote.external_id.is_empty() {
-        sqlx::query_as(
-            r#"SELECT r.id FROM git_repositories r
-               WHERE r.provider = $1 AND r.host_url = $2 AND r.external_id = $3
-                 AND r.deleted_at IS NULL LIMIT 1"#,
-        )
-        .bind(&parsed.provider)
-        .bind(host_url)
-        .bind(&remote.external_id)
-        .fetch_optional(&mut *ex)
-        .await?
+    let lookup = git_repositories::Entity::find()
+        .select_only()
+        .column(git_repositories::Column::Id)
+        .filter(git_repositories::Column::Provider.eq(parsed.provider.clone()))
+        .filter(git_repositories::Column::HostUrl.eq(host_url))
+        .filter(git_repositories::Column::DeletedAt.is_null())
+        .limit(1);
+    let lookup = if !remote.external_id.is_empty() {
+        lookup.filter(git_repositories::Column::ExternalId.eq(remote.external_id.clone()))
     } else {
-        sqlx::query_as(
-            r#"SELECT r.id FROM git_repositories r
-               WHERE r.provider = $1 AND r.host_url = $2 AND r.full_name = $3
-                 AND r.deleted_at IS NULL LIMIT 1"#,
-        )
-        .bind(&parsed.provider)
-        .bind(host_url)
-        .bind(&remote.full_name)
-        .fetch_optional(&mut *ex)
-        .await?
+        lookup.filter(git_repositories::Column::FullName.eq(remote.full_name.clone()))
     };
-    if let Some((id,)) = existing {
-        sqlx::query(
-            r#"UPDATE git_repositories SET external_id = $1, namespace = $2, name = $3,
-                      full_name = $4, web_url = $5, clone_url_http = $6, clone_url_ssh = $7,
-                      default_branch = $8, is_private = $9, metadata = $10, updated_at = now()
-               WHERE id = $11"#,
-        )
-        .bind(&remote.external_id)
-        .bind(&remote.namespace)
-        .bind(&remote.name)
-        .bind(&remote.full_name)
-        .bind(&remote.web_url)
-        .bind(&remote.clone_url_http)
-        .bind(&remote.clone_url_ssh)
-        .bind(&remote.default_branch)
-        .bind(remote.is_private)
-        .bind(&remote.metadata)
-        .bind(id)
-        .execute(&mut *ex)
-        .await?;
+    let existing = lookup.into_tuple::<uuid::Uuid>().one(db).await?;
+    if let Some(id) = existing {
+        let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+        git_repositories::Entity::update_many()
+            .col_expr(
+                git_repositories::Column::ExternalId,
+                sea_orm::sea_query::Expr::value(remote.external_id.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::Namespace,
+                sea_orm::sea_query::Expr::value(remote.namespace.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::Name,
+                sea_orm::sea_query::Expr::value(remote.name.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::FullName,
+                sea_orm::sea_query::Expr::value(remote.full_name.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::WebUrl,
+                sea_orm::sea_query::Expr::value(remote.web_url.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::CloneUrlHttp,
+                sea_orm::sea_query::Expr::value(remote.clone_url_http.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::CloneUrlSsh,
+                sea_orm::sea_query::Expr::value(remote.clone_url_ssh.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::DefaultBranch,
+                sea_orm::sea_query::Expr::value(remote.default_branch.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::IsPrivate,
+                sea_orm::sea_query::Expr::value(remote.is_private),
+            )
+            .col_expr(
+                git_repositories::Column::Metadata,
+                sea_orm::sea_query::Expr::value(remote.metadata.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(bumped),
+            )
+            .filter(git_repositories::Column::Id.eq(id))
+            .exec(db)
+            .await?;
         return Ok(id);
     }
     let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO git_repositories
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-              provider, host_url, external_id, namespace, name, full_name, web_url,
-              clone_url_http, clone_url_ssh, default_branch, is_private, metadata)
-           VALUES ($1, now(), now(), NULL, NULL, NULL,
-                   $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
-    )
-    .bind(id)
-    .bind(&parsed.provider)
-    .bind(host_url)
-    .bind(&remote.external_id)
-    .bind(&remote.namespace)
-    .bind(&remote.name)
-    .bind(&remote.full_name)
-    .bind(&remote.web_url)
-    .bind(&remote.clone_url_http)
-    .bind(&remote.clone_url_ssh)
-    .bind(&remote.default_branch)
-    .bind(remote.is_private)
-    .bind(&remote.metadata)
-    .execute(&mut *ex)
+    // The `update_or_create` create branch stamps `created_by` with the
+    // request user and leaves `updated_by` NULL (`BaseModel.save`,
+    // `db/models/base.py:36-39`).
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    git_repositories::ActiveModel {
+        id: Set(id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(*actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        provider: Set(parsed.provider.clone()),
+        host_url: Set(host_url.to_owned()),
+        external_id: Set(remote.external_id.clone()),
+        namespace: Set(remote.namespace.clone()),
+        name: Set(remote.name.clone()),
+        full_name: Set(remote.full_name.clone()),
+        web_url: Set(remote.web_url.clone()),
+        clone_url_http: Set(remote.clone_url_http.clone()),
+        clone_url_ssh: Set(remote.clone_url_ssh.clone()),
+        default_branch: Set(remote.default_branch.clone()),
+        is_private: Set(remote.is_private),
+        metadata: Set(remote.metadata.clone()),
+    }
+    .insert(db)
     .await?;
     Ok(id)
 }
@@ -1922,6 +2173,25 @@ mod tests {
 
     fn gitlab_hosts() -> Vec<String> {
         gitlab_allowed_hosts(&[])
+    }
+
+    #[test]
+    fn isoformat_matches_python_isoformat() {
+        // Whole seconds render no fraction; trailing-zero micros keep
+        // six digits; nanosecond in-memory values truncate to
+        // microseconds (PIDASHCONV-1464).
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&whole), "2026-10-22T10:00:05+00:00");
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.12+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&trailing), "2026-10-22T10:00:05.120000+00:00");
+        let nanos = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.123456789+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&nanos), "2026-10-22T10:00:05.123456+00:00");
     }
 
     /// FX-GIT-02 `parse_repository_url` executed vectors
@@ -2008,6 +2278,66 @@ mod tests {
         let parsed =
             parse_repository_url("https://git.example.com/group/repo", &custom).expect("parses");
         assert_eq!(parsed.host_url, "https://git.example.com");
+    }
+
+    /// Browser-pasted URLs: `urlparse(candidate).path` drops the `?query`
+    /// and `#fragment` (`gitlab.py:236-245`), so they never reach the
+    /// namespace/name split (PIDASHCONV-1462).
+    #[test]
+    fn gitlab_url_query_fragment() {
+        let hosts = gitlab_hosts();
+        for url in [
+            "https://gitlab.com/g/r?x=1",
+            "https://gitlab.com/g/r#readme",
+            "https://gitlab.com/g/r?next=/-/tree/main",
+        ] {
+            let parsed =
+                parse_repository_url(url, &hosts).unwrap_or_else(|| panic!("parses: {url}"));
+            assert_eq!(parsed.provider, "gitlab", "{url}");
+            assert_eq!(
+                (parsed.namespace, parsed.name),
+                ("g".to_owned(), "r".to_owned()),
+                "{url}"
+            );
+        }
+        // A query/fragment `/` must not fabricate a namespace/name split:
+        // the path (`/onlygroup`) has no `/`, so the URL is unsupported.
+        assert_eq!(
+            parse_repository_url("https://gitlab.com/onlygroup?tab=/extra", &hosts),
+            None
+        );
+        assert_eq!(
+            parse_repository_url("https://gitlab.com/onlygroup#/extra", &hosts),
+            None
+        );
+        // `;params` of the last segment are cut like `urlparse().path`;
+        // a `;` earlier in the path survives (Django keeps it: the last
+        // segment `y` carries no params, then `/-/` splits first).
+        let parsed = parse_repository_url("https://gitlab.com/g/r;p=1", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r".to_owned())
+        );
+        let parsed = parse_repository_url("https://gitlab.com/g/r;x/-/y", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r;x".to_owned())
+        );
+        // `ssh` is not in `urllib.parse.uses_params`, so Django keeps the
+        // `;params` in `.path` for `ssh://` URLs — and so do we.
+        let parsed = parse_repository_url("ssh://gitlab.com/g/r;p=1", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r;p=1".to_owned())
+        );
+        // The SSH form never sees `urlparse` on either backend (Django's
+        // `_ssh_repo_re` path, `gitlab.py:218-234`), so a query there stays
+        // in the name on both — bug-compatible, deliberately unchanged.
+        let parsed = parse_repository_url("git@gitlab.com:g/r?x=1", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r?x=1".to_owned())
+        );
     }
 
     #[test]
@@ -2247,6 +2577,400 @@ mod tests {
         assert_eq!(account_rank(&account), 3);
         account.auth_type = "oauth".to_owned();
         assert_eq!(account_rank(&account), 4);
+    }
+
+    /// Live-kernel DB pool (PIDASHCONV-1083 convention): unset
+    /// DATABASE_URL (plain `cargo test`) skips these tests.
+    async fn kernel_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-kernel test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed an active user + workspace + project + PAT account (column
+    /// lists mirror `_harness.db.Database.make_user/make_workspace` and
+    /// `Seeder.create_git_provider_account`). Tag-derived names keep
+    /// reruns collision-free.
+    async fn seed_kernel_world(
+        pool: &sqlx::PgPool,
+        tag: &str,
+    ) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid, String) {
+        let user_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let account_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let slug = format!("k1465-{tag}");
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("k1465-{tag}"))
+        .bind(format!("k1465-{tag}@example.test"))
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                "owner_id", "timezone", "background_color")
+               VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+        )
+        .bind(now)
+        .bind(workspace_id)
+        .bind(format!("kernel ws {tag}"))
+        .bind(&slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network",
+                "identifier", "workspace_id", "cycle_view", "module_view",
+                "issue_views_view", "page_view", "intake_view", "archive_in",
+                "close_in", "logo_props", "is_time_tracking_enabled",
+                "is_issue_type_enabled", "guest_view_all_features", "timezone",
+                "members_can_edit_states", "repo_url", "base_branch",
+                "agent_default_interval_seconds", "agent_default_max_ticks",
+                "agent_ticking_enabled", "is_default",
+                "agent_review_default_interval_seconds",
+                "default_agent_executor",
+                "agent_test_default_interval_seconds")
+               VALUES ($1, $1, $2, $3, '', 0, $4, $5, true, true, true, true, true,
+                       365, 365, '{}', true, false, false, 'UTC', true, '', '',
+                       10800, 10, true, false, 10800, 'local_runner', 10800)"#,
+        )
+        .bind(now)
+        .bind(project_id)
+        .bind(format!("kernel proj {tag}"))
+        .bind(format!("K1465{}", &tag[..tag.len().min(6)]).to_uppercase())
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "git_provider_accounts" ("id", "provider", "host_url", "auth_type",
+                "external_account_id", "external_account_login", "display_name",
+                "capabilities", "credential_config", "status", "verified_at",
+                "last_check_error", "metadata", "workspace_id", "created_at", "updated_at")
+               VALUES ($1, 'github', 'https://github.com', 'pat', $2,
+                'kernel-octocat', 'kernel-octocat', '{}', '{}', 'connected', now(), '',
+                '{}', $3, now(), now())"#,
+        )
+        .bind(account_id)
+        .bind(format!("kernel:{tag}"))
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed account");
+        (user_id, workspace_id, project_id, account_id, slug)
+    }
+
+    async fn cleanup_kernel_world(
+        pool: &sqlx::PgPool,
+        user_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+    ) {
+        sqlx::query(r#"DELETE FROM "git_repository_bindings" WHERE "project_id" = $1"#)
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .expect("cleanup bindings");
+        sqlx::query(r#"DELETE FROM "git_provider_accounts" WHERE "workspace_id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup accounts");
+        sqlx::query(r#"DELETE FROM "git_repositories" WHERE "external_id" LIKE 'k1465-%'"#)
+            .execute(pool)
+            .await
+            .expect("cleanup repositories");
+        sqlx::query(r#"DELETE FROM "projects" WHERE "id" = $1"#)
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .expect("cleanup project");
+        sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("cleanup user");
+    }
+
+    /// PIDASHCONV-1465: `bind_transaction` must stamp `created_by` with
+    /// the request actor and leave `updated_by` NULL on create, exactly
+    /// like `BaseModel.save` (`db/models/base.py:36-39`) — including the
+    /// binding, where Django overrides the explicitly passed
+    /// `updated_by_id` back to NULL (`services.py:329-340`). The HTTP
+    /// bind path is sealed in tests (it GETs hardcoded
+    /// https://api.github.com URLs on both backends), so this drives the
+    /// transaction kernel directly with a fabricated remote — the
+    /// oauth_github kernel convention (PIDASHCONV-1083).
+    #[tokio::test]
+    async fn bind_transaction_stamps_audit_columns() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (user_id, workspace_id, project_id, account_id, slug) =
+            seed_kernel_world(&pool, &tag[..8]).await;
+        let external_id = format!("k1465-{tag}");
+        let full_name = format!("kernel-octo-{tag}/kernel-repo");
+        let parsed = ParsedRepository {
+            provider: "github".to_owned(),
+            host_url: "https://github.com".to_owned(),
+            namespace: format!("kernel-octo-{tag}"),
+            name: "kernel-repo".to_owned(),
+            full_name: full_name.clone(),
+            clone_url: format!("https://github.com/{full_name}"),
+        };
+        let remote = RemoteRepository {
+            external_id: external_id.clone(),
+            namespace: format!("kernel-octo-{tag}"),
+            name: "kernel-repo".to_owned(),
+            full_name: full_name.clone(),
+            web_url: format!("https://github.com/{full_name}"),
+            clone_url_http: format!("https://github.com/{full_name}.git"),
+            clone_url_ssh: format!("git@github.com:{full_name}.git"),
+            default_branch: "main".to_owned(),
+            is_private: false,
+            metadata: serde_json::json!({}),
+        };
+        let account = ResolvableAccount {
+            id: account_id,
+            auth_type: "pat".to_owned(),
+            capabilities: serde_json::json!({}),
+            host_url: "https://github.com".to_owned(),
+            credential_config: serde_json::json!({}),
+        };
+        match bind_transaction(
+            &pool,
+            &slug,
+            &workspace_id,
+            &project_id,
+            &user_id,
+            &parsed,
+            &account,
+            &remote,
+            &format!("https://github.com/{full_name}"),
+            "",
+            "",
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(denial) => {
+                let (status, body) = denial.status_and_body();
+                panic!("bind failed: {status} {body}");
+            }
+        }
+        let repo_stamps: (Option<uuid::Uuid>, Option<uuid::Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "git_repositories" WHERE "external_id" = $1"#,
+        )
+        .bind(&external_id)
+        .fetch_one(&pool)
+        .await
+        .expect("repository row");
+        assert_eq!(repo_stamps.0, Some(user_id), "repository created_by");
+        assert_eq!(repo_stamps.1, None, "repository updated_by");
+        let binding_stamps: (Option<uuid::Uuid>, Option<uuid::Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "git_repository_bindings" WHERE "project_id" = $1"#,
+        )
+        .bind(project_id)
+        .fetch_one(&pool)
+        .await
+        .expect("binding row");
+        assert_eq!(binding_stamps.0, Some(user_id), "binding created_by");
+        assert_eq!(binding_stamps.1, None, "binding updated_by");
+        cleanup_kernel_world(&pool, user_id, workspace_id, project_id).await;
+    }
+
+    /// The redirect stub's net: base URL, hit log, server thread.
+    type RedirectStubNet = (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        std::thread::JoinHandle<()>,
+    );
+
+    /// Minimal redirect stub for the bind-path client tests (PIDASHCONV-1472
+    /// shape): matches the request line by prefix, answers the mapped
+    /// status + optional same-host `Location` + body, and records
+    /// `(request_line, authorization)` per hit (bounded by `take` hits or
+    /// a deadline, so a broken client fails the assertions instead of
+    /// hanging the suite).
+    fn spawn_redirect_stub(
+        routes: Vec<(
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            &'static str,
+        )>,
+        take: usize,
+    ) -> RedirectStubNet {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let base = format!("http://127.0.0.1:{port}");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_server = seen.clone();
+        let base_server = base.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut handled = 0;
+            while handled < take && std::time::Instant::now() < deadline {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(err) => panic!("accepts: {err}"),
+                };
+                stream.set_nonblocking(false).expect("blocking");
+                let mut stream = stream;
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    if stream.read(&mut byte).expect("reads") == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let head_text = String::from_utf8_lossy(&head).into_owned();
+                // Header names arrive lowercase on the wire (hyper
+                // normalizes them), so match case-insensitively.
+                let auth = head_text
+                    .lines()
+                    .skip(1)
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.trim()
+                            .eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                seen_server
+                    .lock()
+                    .expect("locks")
+                    .push((head_text.lines().next().unwrap_or("").to_owned(), auth));
+                let (_, status, location, body) = routes
+                    .iter()
+                    .find(|(prefix, _, _, _)| head_text.starts_with(prefix))
+                    .map(|route| (route.0, route.1, route.2, route.3))
+                    .unwrap_or(("", "404 Not Found", None, "no route"));
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let Some(target) = location {
+                    response.push_str(&format!("Location: {base_server}{target}\r\n"));
+                }
+                response.push_str(&format!("\r\n{body}"));
+                stream.write_all(response.as_bytes()).expect("writes");
+                handled += 1;
+            }
+        });
+        (base, seen, server)
+    }
+
+    // Rename redirects follow `requests` (`github_client.py:62-73`, no
+    // `allow_redirects` override): the bind-path GitHub client resolves a
+    // renamed repo's 301 to the new location with `Authorization` kept,
+    // and the fetch returns the renamed metadata (PIDASHCONV-1513).
+    #[tokio::test]
+    async fn github_client_follows_rename_redirect() {
+        let payload = r#"{"id":987654321,"name":"bind-newrepo","full_name":"bind-newowner/bind-newrepo","owner":{"login":"bind-newowner"},"html_url":"https://github.com/bind-newowner/bind-newrepo","clone_url":"https://github.com/bind-newowner/bind-newrepo.git","ssh_url":"git@github.com:bind-newowner/bind-newrepo.git","default_branch":"main","private":false}"#;
+        let (base, seen, server) = spawn_redirect_stub(
+            vec![
+                (
+                    "GET /repos/bind-oldowner/bind-oldrepo",
+                    "301 Moved Permanently",
+                    Some("/repositories/987654321"),
+                    "",
+                ),
+                ("GET /repositories/987654321", "200 OK", None, payload),
+            ],
+            2,
+        );
+        let http = github_client().expect("builds");
+        let remote =
+            match fetch_github_repository(&http, &base, "t", "bind-oldowner", "bind-oldrepo").await
+            {
+                Ok(remote) => remote,
+                Err(_) => panic!("follows the 301"),
+            };
+        assert_eq!(remote.external_id, "987654321");
+        assert_eq!(remote.namespace, "bind-newowner");
+        assert_eq!(remote.name, "bind-newrepo");
+        assert_eq!(remote.full_name, "bind-newowner/bind-newrepo");
+        server.join().expect("server drains");
+        let hits = seen.lock().expect("locks");
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0]
+            .0
+            .starts_with("GET /repos/bind-oldowner/bind-oldrepo"));
+        assert!(hits[1].0.starts_with("GET /repositories/987654321"));
+        for (_, auth) in hits.iter() {
+            assert_eq!(auth, "Bearer t");
+        }
+    }
+
+    // `GitLabClient` never follows (`allow_redirects=False`,
+    // `gitlab.py:104`): the bind-path GitLab client surfaces the 301 so
+    // the fetch fails closed with the Django error (PIDASHCONV-1513).
+    #[tokio::test]
+    async fn gitlab_client_surfaces_redirect_fail_closed() {
+        let (base, seen, server) = spawn_redirect_stub(
+            vec![(
+                "GET /api/v4/projects/g%2Fp",
+                "301 Moved Permanently",
+                Some("/api/v4/projects/12345"),
+                "",
+            )],
+            1,
+        );
+        let http = gitlab_client().expect("builds");
+        let err = fetch_gitlab_repository(&http, "t", &base, "g/p")
+            .await
+            .expect_err("must not follow");
+        let message = match err {
+            ProviderError::Permission(message) => message,
+            ProviderError::Auth(_) => panic!("expected Permission, got Auth"),
+            ProviderError::NotFound(_) => panic!("expected Permission, got NotFound"),
+            ProviderError::Other(message) => panic!("expected Permission, got Other({message})"),
+        };
+        assert_eq!(message, "GitLab API redirects are not followed");
+        server.join().expect("server drains");
+        let hits = seen.lock().expect("locks");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.starts_with("GET /api/v4/projects/g%2Fp"));
     }
 }
 

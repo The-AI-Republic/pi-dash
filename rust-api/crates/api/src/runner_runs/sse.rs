@@ -20,20 +20,23 @@
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::Value;
 use uuid::Uuid;
 
+use pidash_db::entity::agent_chat_event;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::runner_runs::chat::{dumps_value, serialize_event_json, EventParts};
 use pidash_types::runner_runs::consts::event_channel;
 
 use super::chat::{can_read_session, fetch_session_with_runner};
 use super::run_endpoints::py_int;
-use super::{json_response, pool_of, py_truthy, server_error};
+use super::{is_uuid_path_segment, json_response, pool_of, py_truthy, server_error};
 use crate::assistant::common::py_iso;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -57,7 +60,30 @@ const HEARTBEAT_SECS: u64 = 15;
 const POLL_SECS: u64 = 1;
 
 /// Replay row: `id, message_id, seq, kind, payload::text, created_at`.
-type ReplayRow = (i64, Option<Uuid>, i32, String, String, DateTime<Utc>);
+type ReplayRow = (i64, Option<Uuid>, i32, String, Value, DateTime<Utc>);
+
+/// The replay rows (`chat.py:815-818`): the session's events with
+/// `seq > after`, ordered, uncapped.
+pub fn replay_select(
+    session_id: Uuid,
+    after: i64,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<ReplayRow>> {
+    use agent_chat_event::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::MessageId,
+            Column::Seq,
+            Column::Kind,
+            Column::Payload,
+            Column::CreatedAt,
+        ])
+        .filter(Column::SessionId.eq(session_id))
+        .filter(Column::Seq.gt(after))
+        .order_by_asc(Column::Seq)
+        .into_tuple::<ReplayRow>()
+}
 
 /// `after` cursor (`chat.py:800-804`): `GET.after or Last-Event-ID or
 /// "0"` — empty strings fall through to the next source — then
@@ -175,7 +201,14 @@ pub async fn chat_event_stream(
     Query(params): Query<crate::license::QueryMap>,
     headers: HeaderMap,
     extension: Option<Extension<SessionHandle>>,
+    req: Request,
 ) -> Response {
+    // Resolver first (Django 404s non-converter segments before auth):
+    // proxy the untouched request so Django's framework 404 answers
+    // byte for byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     // `_session_authenticates` (`chat.py:790-794`): session-only auth
     // (mirrored by `resolve_actor`), anonymous answers 403.
     let pool = match pool_of(&state) {
@@ -190,15 +223,9 @@ pub async fn chat_event_stream(
     let Some(actor) = actor else {
         return json_response(StatusCode::FORBIDDEN, SSE_AUTH_REQUIRED_BODY.to_owned());
     };
-    // Session fetch + `can_read_chat` (`chat.py:796-798`): missing,
-    // unreadable, and non-UUID ids all answer 404. (Django's
-    // `<uuid:>` converter rejects non-UUIDs at the resolver with its
-    // HTML 404; the module answers the endpoint JSON instead, as the
-    // sibling web views do.)
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return sse_not_found(),
-    };
+    // Session fetch + `can_read_chat` (`chat.py:796-798`): missing
+    // and unreadable ids answer the endpoint 404.
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let fetched = match fetch_session_with_runner(&pool, session_id).await {
         Ok(fetched) => fetched,
         Err(response) => return response,
@@ -235,14 +262,9 @@ pub async fn chat_event_stream(
 
     // Replay (`chat.py:815-818`): `seq > after`, ordered, uncapped.
     // A replay failure truncates like any streaming failure.
-    let rows: Vec<ReplayRow> = match sqlx::query_as(
-        r#"SELECT "id", "message_id", "seq", "kind", "payload"::text, "created_at"
-           FROM "agent_chat_event" WHERE "session_id" = $1 AND "seq" > $2 ORDER BY "seq" ASC"#,
-    )
-    .bind(session_id)
-    .bind(after)
-    .fetch_all(&pool)
-    .await
+    let rows: Vec<ReplayRow> = match replay_select(session_id, after)
+        .all(&sea_orm_connection(&pool))
+        .await
     {
         Ok(rows) => rows,
         Err(error) => {
@@ -254,9 +276,8 @@ pub async fn chat_event_stream(
     let session_str = session_id.to_string();
     let mut prefix = String::new();
     let mut last_seq = after;
-    for (id, message_id, seq, kind, payload_text, created_at) in &rows {
-        let payload: Value = serde_json::from_str(payload_text).unwrap_or(Value::Null);
-        let payload_json = dumps_value(&payload);
+    for (id, message_id, seq, kind, payload, created_at) in &rows {
+        let payload_json = dumps_value(payload);
         let message_str = message_id.map(|id| id.to_string());
         let created = py_iso(created_at);
         let data = serialize_event_json(&EventParts {

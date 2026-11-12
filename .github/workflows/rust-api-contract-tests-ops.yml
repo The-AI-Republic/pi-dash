@@ -17,11 +17,7 @@ name: rust-api-contract-tests-ops
 
 on:
   push:
-    branches: [rust-dev]
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-ops.yml"
-  pull_request:
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-ops.yml"
@@ -41,7 +37,7 @@ concurrency:
 jobs:
   ops-repair:
     name: ops oracle vs Rust binary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:
@@ -113,7 +109,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt
@@ -188,7 +184,7 @@ jobs:
 
   ops-boot-storage:
     name: ops boot + storage vs binary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
@@ -228,7 +224,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: rust-api/contract-tests/requirements.txt
 

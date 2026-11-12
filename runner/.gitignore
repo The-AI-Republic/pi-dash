@@ -2,3 +2,6 @@
 Cargo.lock.bak
 *.swp
 *.swo
+/dist-engine
+# Release helpers (the repo-root .gitignore ignores every scripts/ dir).
+!/scripts/

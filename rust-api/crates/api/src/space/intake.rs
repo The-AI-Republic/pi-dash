@@ -79,6 +79,7 @@
 //! 500s, so failures are traced and the response stands.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -88,9 +89,22 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    deploy_boards, file_assets, git_issue_syncs, github_issue_syncs, intake_issues, issues,
+    projects, states, workspaces,
+};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::space::guards::{self, AnchorLookup, ExceptionKind};
 use pidash_services::space::queries::intake_assets as queries;
+use sea_orm::sea_query::Expr;
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -98,6 +112,8 @@ use super::{
     filters::{self, FilterValue},
     guards_error, owned, raw_json_response, Denial, QueryMap,
 };
+use pidash_compat::datetime::{render_uuid as uuid_string, render_uuid_opt as opt_uuid};
+use pidash_compat::validate::char_internal;
 
 /// Owned intake routes: the collection (both aliases share the viewset)
 /// and the detail. Every other method proxies to Django.
@@ -181,9 +197,12 @@ struct Board {
 /// (verified live: 404 + body, the dispatch-computed response).
 #[allow(clippy::result_large_err)]
 async fn load_board(pool: &PgPool, anchor: &str) -> Result<Board, Response> {
-    let row = sqlx::query(&queries::intake_board_get_sql())
-        .bind(anchor)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = deploy_boards::Entity::find()
+        .filter(deploy_boards::Column::Anchor.eq(anchor))
+        .filter(deploy_boards::Column::EntityName.eq("project"))
+        .filter(deploy_boards::Column::DeletedAt.is_null())
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError.into_response())?;
     let Some(row) = row else {
@@ -192,18 +211,10 @@ async fn load_board(pool: &PgPool, anchor: &str) -> Result<Board, Response> {
         )
         .into_response());
     };
-    // BOARD_COLUMNS order (`project_meta.rs`): workspace 6, project 7,
-    // intake 13. `project_id` is non-nullable on the board row.
-    let workspace_id: Uuid = row
-        .try_get(6)
-        .map_err(|_| Denial::ServerError.into_response())?;
-    let project_id: Option<Uuid> = row
-        .try_get(7)
-        .map_err(|_| Denial::ServerError.into_response())?;
-    let intake_id: Option<Uuid> = row
-        .try_get(13)
-        .map_err(|_| Denial::ServerError.into_response())?;
-    let Some(project_id) = project_id else {
+    let workspace_id = row.workspace_id;
+    let project_id_opt = row.project_id;
+    let intake_id = row.intake_id;
+    let Some(project_id) = project_id_opt else {
         return Err(Denial::ServerError.into_response());
     };
     // `board.intake is None` → 400 on every action (`:58,:109,:177,
@@ -247,6 +258,44 @@ fn db_error(error: sqlx::Error) -> Response {
     Denial::ServerError.into_response()
 }
 
+/// Map a domain-write failure onto the same matrix: integrity → the
+/// invalid-payload body, anything else → 500. No `NotFound` arm: every
+/// fetch miss answers 404 driver-side ahead of the write, and the
+/// hook's dangling-state miss is the race Django 500s
+/// (`State.DoesNotExist` uncaught in `save()`).
+fn domain_response(error: domain::DomainError) -> Response {
+    if error.is_integrity_violation() {
+        guards_error(guards::handle_exception(ExceptionKind::IntegrityError))
+    } else {
+        Denial::ServerError.into_response()
+    }
+}
+
+fn write_ctx(actor: &Actor, board: &Board) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: actor.id,
+        timezone: Some(actor.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(board.workspace_id),
+        project_id: Some(board.project_id),
+    })
+}
+
+/// The post-save fire arguments, one `post_save` receiver run: the space
+/// intake views never set Django's `_orchestration_dispatch_immediate`
+/// attr and carry no moved-by run, so the defaults apply on every path.
+fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
+    domain_issues::FireSpec {
+        dispatch_immediate: true,
+        pod_once: false,
+
+        created_by: Some(*actor_id),
+        moved_by_run: None,
+        now,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rows: issues plus the relations the serializers render
 // ---------------------------------------------------------------------------
@@ -285,7 +334,9 @@ struct IssueRow {
     git_work_branch: String,
     created_via: Option<String>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
+    workpad: String,
 }
 
 impl IssueRow {
@@ -323,12 +374,57 @@ impl IssueRow {
             git_work_branch: row.try_get("git_work_branch")?,
             created_via: row.try_get("created_via")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
+            assigned_runner_id: row.try_get("assigned_runner_id")?,
             agent_executor: row.try_get("agent_executor")?,
+            workpad: row.try_get("workpad")?,
         })
+    }
+
+    /// The full-save field set: every column, for the domain write the
+    /// update driver runs after overlaying its validated input.
+    fn field_set(&self) -> IssueFieldSet {
+        IssueFieldSet {
+            id: self.id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            created_by_id: self.created_by_id,
+            updated_by_id: self.updated_by_id,
+            deleted_at: self.deleted_at,
+            project_id: self.project_id,
+            workspace_id: self.workspace_id,
+            parent_id: self.parent_id,
+            state_id: self.state_id,
+            point: self.point,
+            estimate_point_id: self.estimate_point_id,
+            name: self.name.clone(),
+            description_json: self.description_json.clone(),
+            description_html: self.description_html.clone(),
+            description_stripped: self.description_stripped.clone(),
+            description_binary: self.description_binary.clone(),
+            priority: self.priority.clone(),
+            complexity_score: self.complexity_score,
+            start_date: self.start_date,
+            target_date: self.target_date,
+            sequence_id: self.sequence_id,
+            sort_order: self.sort_order,
+            completed_at: self.completed_at,
+            archived_at: self.archived_at,
+            is_draft: self.is_draft,
+            external_source: self.external_source.clone(),
+            external_id: self.external_id.clone(),
+            type_id: self.type_id,
+            git_work_branch: self.git_work_branch.clone(),
+            workpad: self.workpad.clone(),
+            created_via: self.created_via.clone(),
+            assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
+            agent_executor: self.agent_executor.clone(),
+        }
     }
 }
 
-const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, agent_executor";
+#[allow(dead_code)]
+const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, assigned_runner_id, agent_executor, workpad";
 
 /// `Issue.objects.get(pk, workspace_id, project_id)` (`:199-203,:250-254`).
 async fn fetch_issue(
@@ -336,15 +432,55 @@ async fn fetch_issue(
     issue_id: &Uuid,
     board: &Board,
 ) -> Result<Option<IssueRow>, sqlx::Error> {
-    let row = sqlx::query(&format!(
-        "SELECT {ISSUE_COLUMNS} FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1 AND \"issues\".\"workspace_id\" = $2 AND \"issues\".\"project_id\" = $3)"
-    ))
-    .bind(issue_id)
-    .bind(board.workspace_id)
-    .bind(board.project_id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| IssueRow::get(&row)).transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = issues::Entity::find_by_id(*issue_id)
+        .filter(issues::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(issues::Column::ProjectId.eq(board.project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    model
+        .map(|m| {
+            Ok(IssueRow {
+                id: m.id,
+                created_at: m.created_at.with_timezone(&Utc),
+                updated_at: m.updated_at.with_timezone(&Utc),
+                created_by_id: m.created_by_id,
+                updated_by_id: m.updated_by_id,
+                deleted_at: m.deleted_at.map(|d| d.with_timezone(&Utc)),
+                project_id: m.project_id,
+                workspace_id: m.workspace_id,
+                parent_id: m.parent_id,
+                state_id: m.state_id,
+                point: m.point,
+                estimate_point_id: m.estimate_point_id,
+                name: m.name,
+                description_json: m.description_json,
+                description_html: m.description_html,
+                description_stripped: m.description_stripped,
+                description_binary: m.description_binary,
+                priority: m.priority,
+                complexity_score: m.complexity_score,
+                start_date: m.start_date,
+                target_date: m.target_date,
+                sequence_id: m.sequence_id,
+                sort_order: m.sort_order,
+                completed_at: m.completed_at.map(|d| d.with_timezone(&Utc)),
+                archived_at: m.archived_at,
+                is_draft: m.is_draft,
+                external_source: m.external_source,
+                external_id: m.external_id,
+                type_id: m.type_id,
+                git_work_branch: m.git_work_branch,
+                created_via: m.created_via,
+                assigned_pod_id: m.assigned_pod_id,
+                assigned_runner_id: m.assigned_runner_id,
+                agent_executor: m.agent_executor,
+                workpad: m.workpad,
+            })
+        })
+        .transpose()
 }
 
 /// One `states` row for the lite nest (plain join: `select_related`
@@ -358,23 +494,22 @@ struct StateLite {
 }
 
 async fn fetch_state(pool: &PgPool, state_id: &Uuid) -> Result<Option<StateLite>, sqlx::Error> {
-    sqlx::query("SELECT id, name, color, \"group\" FROM \"states\" WHERE \"states\".\"id\" = $1")
-        .bind(state_id)
-        .fetch_optional(pool)
-        .await?
-        .map(|row| {
-            Ok(StateLite {
-                id: row.try_get("id")?,
-                name: row.try_get("name")?,
-                color: row.try_get("color")?,
-                group: row.try_get("group")?,
-            })
-        })
-        .transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = states::Entity::find_by_id(*state_id)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(model.map(|m| StateLite {
+        id: m.id,
+        name: m.name,
+        color: m.color,
+        group: m.group,
+    }))
 }
 
 /// One `projects` row for the app `ProjectLite` nest (plain join, like
 /// `select_related`).
+#[derive(Debug, Clone)]
 struct ProjectRow {
     id: Uuid,
     identifier: String,
@@ -390,25 +525,21 @@ async fn fetch_project(
     pool: &PgPool,
     project_id: &Uuid,
 ) -> Result<Option<ProjectRow>, sqlx::Error> {
-    sqlx::query(
-        "SELECT id, identifier, name, cover_image, cover_image_asset_id, logo_props, description, is_default FROM \"projects\" WHERE \"projects\".\"id\" = $1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await?
-    .map(|row| {
-        Ok(ProjectRow {
-            id: row.try_get("id")?,
-            identifier: row.try_get("identifier")?,
-            name: row.try_get("name")?,
-            cover_image: row.try_get("cover_image")?,
-            cover_image_asset_id: row.try_get("cover_image_asset_id")?,
-            logo_props: row.try_get("logo_props")?,
-            description: row.try_get("description")?,
-            is_default: row.try_get("is_default")?,
-        })
-    })
-    .transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = projects::Entity::find_by_id(*project_id)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(model.map(|m| ProjectRow {
+        id: m.id,
+        identifier: m.identifier,
+        name: m.name,
+        cover_image: m.cover_image,
+        cover_image_asset_id: m.cover_image_asset_id,
+        logo_props: m.logo_props,
+        description: m.description,
+        is_default: m.is_default,
+    }))
 }
 
 /// `cover_image_url` (`db/models/project.py:176-185`): the cover asset's
@@ -429,31 +560,31 @@ async fn cover_image_url(
 /// `PROJECT_COVER` (`/api/assets/v2/static/<id>/`); the sibling branches
 /// are ported so any asset kind resolves exactly.
 async fn asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT entity_type, workspace_id, project_id, issue_id FROM \"file_assets\" WHERE \"file_assets\".\"id\" = $1",
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await?;
-    let Some(row) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let asset = file_assets::Entity::find_by_id(*asset_id)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let Some(asset) = asset else {
         return Ok(None);
     };
-    let entity_type: String = row.try_get("entity_type")?;
+    let entity_type = asset.entity_type.unwrap_or_default();
     match entity_type.as_str() {
         "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
             Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
         }
         "ISSUE_ATTACHMENT" => {
-            let workspace_id: Uuid = row.try_get("workspace_id")?;
-            let project_id: Option<Uuid> = row.try_get("project_id")?;
-            let issue_id: Option<Uuid> = row.try_get("issue_id")?;
-            let workspace_slug: Option<String> = sqlx::query_scalar(
-                "SELECT slug FROM \"workspaces\" WHERE \"workspaces\".\"id\" = $1",
-            )
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+            let workspace_id = asset.workspace_id;
+            let project_id = asset.project_id;
+            let issue_id = asset.issue_id;
+            let workspace_slug = match workspace_id {
+                Some(wid) => workspaces::Entity::find_by_id(wid)
+                    .one(&db)
+                    .await
+                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                    .map(|w| w.slug),
+                None => None,
+            };
             match (workspace_slug, project_id, issue_id) {
                 (Some(slug), Some(project), Some(issue)) => Ok(Some(format!(
                     "/api/assets/v2/workspaces/{slug}/projects/{project}/issues/{issue}/attachments/{asset_id}/"
@@ -465,15 +596,16 @@ async fn asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, sql
         | "COMMENT_DESCRIPTION"
         | "PAGE_DESCRIPTION"
         | "DRAFT_ISSUE_DESCRIPTION" => {
-            let workspace_id: Uuid = row.try_get("workspace_id")?;
-            let project_id: Option<Uuid> = row.try_get("project_id")?;
-            let workspace_slug: Option<String> = sqlx::query_scalar(
-                "SELECT slug FROM \"workspaces\" WHERE \"workspaces\".\"id\" = $1",
-            )
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+            let workspace_id = asset.workspace_id;
+            let project_id = asset.project_id;
+            let workspace_slug = match workspace_id {
+                Some(wid) => workspaces::Entity::find_by_id(wid)
+                    .one(&db)
+                    .await
+                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                    .map(|w| w.slug),
+                None => None,
+            };
             match (workspace_slug, project_id) {
                 (Some(slug), Some(project)) => Ok(Some(format!(
                     "/api/assets/v2/workspaces/{slug}/projects/{project}/{asset_id}/"
@@ -498,21 +630,32 @@ async fn fetch_labels(
     pool: &PgPool,
     issue_id: &Uuid,
 ) -> Result<(Vec<Uuid>, Vec<LabelRow>), sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT \"labels\".\"id\", \"labels\".\"name\", \"labels\".\"color\" FROM \"labels\" INNER JOIN \"issue_labels\" ON (\"labels\".\"id\" = \"issue_labels\".\"label_id\") WHERE \"issue_labels\".\"issue_id\" = $1",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await?;
-    let mut ids = Vec::with_capacity(rows.len());
-    let mut details = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id: Uuid = row.try_get("id")?;
-        ids.push(id);
+    use pidash_db::entity::{issue_labels as issue_labels_entity, labels as labels_entity};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let links = issue_labels_entity::Entity::find()
+        .filter(issue_labels_entity::Column::IssueId.eq(*issue_id))
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    if links.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let label_ids: Vec<Uuid> = links.iter().map(|l| l.label_id).collect();
+    let models = labels_entity::Entity::find()
+        .filter(labels_entity::Column::Id.is_in(label_ids.iter().copied()))
+        .filter(labels_entity::Column::DeletedAt.is_null())
+        .order_by_desc(labels_entity::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let mut ids = Vec::with_capacity(models.len());
+    let mut details = Vec::with_capacity(models.len());
+    for m in models {
+        ids.push(m.id);
         details.push(LabelRow {
-            id,
-            name: row.try_get("name")?,
-            color: row.try_get("color")?,
+            id: m.id,
+            name: m.name,
+            color: m.color,
         });
     }
     Ok((ids, details))
@@ -534,19 +677,29 @@ async fn fetch_assignees(
     pool: &PgPool,
     issue_id: &Uuid,
 ) -> Result<(Vec<Uuid>, Vec<AssigneeRow>), sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" INNER JOIN \"issue_assignees\" ON (\"users\".\"id\" = \"issue_assignees\".\"assignee_id\") WHERE \"issue_assignees\".\"issue_id\" = $1",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await?;
-    let mut ids = Vec::with_capacity(rows.len());
-    let mut details = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id: Uuid = row.try_get("id")?;
-        ids.push(id);
-        let avatar_asset_id: Option<Uuid> = row.try_get("avatar_asset_id")?;
-        let avatar: String = row.try_get("avatar")?;
+    use pidash_db::entity::{issue_assignees as issue_assignees_entity, users as users_entity};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let links = issue_assignees_entity::Entity::find()
+        .filter(issue_assignees_entity::Column::IssueId.eq(*issue_id))
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    if links.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let user_ids: Vec<Uuid> = links.iter().map(|l| l.assignee_id).collect();
+    let models = users_entity::Entity::find()
+        .filter(users_entity::Column::Id.is_in(user_ids.iter().copied()))
+        .order_by_desc(users_entity::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let mut ids = Vec::with_capacity(models.len());
+    let mut details = Vec::with_capacity(models.len());
+    for u in models {
+        ids.push(u.id);
+        let avatar_asset_id = u.avatar_asset_id;
+        let avatar = u.avatar;
         let mut avatar_url = None;
         if let Some(asset_id) = avatar_asset_id {
             avatar_url = asset_url(pool, &asset_id).await?;
@@ -555,13 +708,13 @@ async fn fetch_assignees(
             avatar_url = Some(avatar.clone());
         }
         details.push(AssigneeRow {
-            id,
-            first_name: row.try_get("first_name")?,
-            last_name: row.try_get("last_name")?,
+            id: u.id,
+            first_name: u.first_name,
+            last_name: u.last_name,
             avatar,
             avatar_url,
-            is_bot: row.try_get("is_bot")?,
-            display_name: row.try_get("display_name")?,
+            is_bot: u.is_bot,
+            display_name: u.display_name,
         });
     }
     Ok((ids, details))
@@ -587,32 +740,370 @@ async fn fetch_bridges(
     if issue_ids.is_empty() {
         return Ok(map);
     }
-    let placeholders = issue_ids
-        .iter()
-        .enumerate()
-        .map(|(index, _)| format!("${}", index + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // The fixture prefetch shape (`intake_issue_prefetch_sql`), plus the
-    // model ordering (`-created_at`) Django applies when evaluating it.
-    let sql = format!(
-        "SELECT \"intake_issues\".\"id\", \"intake_issues\".\"status\", \"intake_issues\".\"duplicate_to_id\", \"intake_issues\".\"snoozed_till\", \"intake_issues\".\"source\", \"intake_issues\".\"issue_id\" FROM \"intake_issues\" WHERE (\"intake_issues\".\"deleted_at\" IS NULL AND \"intake_issues\".\"issue_id\" IN ({placeholders})) ORDER BY \"intake_issues\".\"created_at\" DESC"
-    );
-    let mut query = sqlx::query(&sql);
-    for issue_id in issue_ids {
-        query = query.bind(issue_id);
-    }
-    for row in query.fetch_all(pool).await? {
-        let issue_id: Uuid = row.try_get("issue_id")?;
-        map.entry(issue_id).or_default().push(BridgeRow {
-            id: row.try_get("id")?,
-            status: row.try_get("status")?,
-            duplicate_to_id: row.try_get("duplicate_to_id")?,
-            snoozed_till: row.try_get("snoozed_till")?,
-            source: row.try_get("source")?,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // SeaORM IN list replaces the hand-built placeholder string.
+    let models = intake_issues::Entity::find()
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .filter(intake_issues::Column::IssueId.is_in(issue_ids.iter().copied()))
+        .order_by_desc(intake_issues::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    for m in models {
+        map.entry(m.issue_id).or_default().push(BridgeRow {
+            id: m.id,
+            status: m.status,
+            duplicate_to_id: m.duplicate_to_id,
+            snoozed_till: m.snoozed_till.map(|d| d.with_timezone(&Utc)),
+            source: m.source,
         });
     }
     Ok(map)
+}
+
+/// `IN ($1, .., $N)` placeholder list for a batched lookup.
+#[allow(dead_code)]
+fn in_placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("${index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Sorted distinct ids for a batched lookup (deterministic `IN` lists).
+fn dedup_sorted(ids: impl IntoIterator<Item = Uuid>) -> Vec<Uuid> {
+    ids.into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Batched [`fetch_state`] over distinct state ids: one query for the
+/// whole list instead of one per row.
+async fn fetch_states(
+    pool: &PgPool,
+    state_ids: &[Uuid],
+) -> Result<HashMap<Uuid, StateLite>, sqlx::Error> {
+    let mut map: HashMap<Uuid, StateLite> = HashMap::new();
+    if state_ids.is_empty() {
+        return Ok(map);
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let models = states::Entity::find()
+        .filter(states::Column::Id.is_in(state_ids.iter().copied()))
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    for m in models {
+        map.insert(
+            m.id,
+            StateLite {
+                id: m.id,
+                name: m.name,
+                color: m.color,
+                group: m.group,
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batched [`fetch_project`] over distinct project ids (the list filter
+/// pins a single project, so this is one row in practice).
+async fn fetch_projects(
+    pool: &PgPool,
+    project_ids: &[Uuid],
+) -> Result<HashMap<Uuid, ProjectRow>, sqlx::Error> {
+    let mut map: HashMap<Uuid, ProjectRow> = HashMap::new();
+    if project_ids.is_empty() {
+        return Ok(map);
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let models = projects::Entity::find()
+        .filter(projects::Column::Id.is_in(project_ids.iter().copied()))
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    for m in models {
+        map.insert(
+            m.id,
+            ProjectRow {
+                id: m.id,
+                identifier: m.identifier,
+                name: m.name,
+                cover_image: m.cover_image,
+                cover_image_asset_id: m.cover_image_asset_id,
+                logo_props: m.logo_props,
+                description: m.description,
+                is_default: m.is_default,
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Asset kinds whose URL needs the workspace slug (the same arms that do
+/// the lazy slug lookup in [`asset_url`]).
+fn asset_kind_needs_slug(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "ISSUE_ATTACHMENT"
+            | "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION"
+    )
+}
+
+/// Batched [`asset_url`] over distinct asset ids: one `file_assets`
+/// query plus one `workspaces` slug query, then the same branching in
+/// memory. A missing row resolves to `None`, like the early return.
+async fn fetch_asset_urls(
+    pool: &PgPool,
+    asset_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Option<String>>, sqlx::Error> {
+    let mut urls: HashMap<Uuid, Option<String>> = HashMap::new();
+    if asset_ids.is_empty() {
+        return Ok(urls);
+    }
+    struct AssetLite {
+        entity_type: String,
+        workspace_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        issue_id: Option<Uuid>,
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let models = file_assets::Entity::find()
+        .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let mut assets: HashMap<Uuid, AssetLite> = HashMap::new();
+    for m in models {
+        let entity_type = m.entity_type.unwrap_or_default();
+        // `asset_url` reads `workspace_id` (nullable) only inside the
+        // slug arms: NULL errors there (500) but is never touched for
+        // static/unknown kinds. Match that arm for arm.
+        let workspace_id: Option<Uuid> = m.workspace_id;
+        assets.insert(
+            m.id,
+            AssetLite {
+                entity_type,
+                workspace_id,
+                project_id: m.project_id,
+                issue_id: m.issue_id,
+            },
+        );
+    }
+    for asset_id in asset_ids {
+        urls.insert(*asset_id, None);
+    }
+    let workspace_ids = dedup_sorted(
+        assets
+            .values()
+            .filter(|asset| asset_kind_needs_slug(asset.entity_type.as_str()))
+            .filter_map(|asset| asset.workspace_id),
+    );
+    let mut slugs: HashMap<Uuid, String> = HashMap::new();
+    if !workspace_ids.is_empty() {
+        let wmodels = workspaces::Entity::find()
+            .filter(workspaces::Column::Id.is_in(workspace_ids.iter().copied()))
+            .all(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
+        for w in wmodels {
+            slugs.insert(w.id, w.slug);
+        }
+    }
+    for (asset_id, asset) in &assets {
+        // Slug kinds always carry a workspace id here (a NULL errored
+        // above, like `asset_url`); other kinds never reach for a slug.
+        let slug = asset.workspace_id.as_ref().and_then(|id| slugs.get(id));
+        let url = match asset.entity_type.as_str() {
+            "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+                Some(format!("/api/assets/v2/static/{asset_id}/"))
+            }
+            "ISSUE_ATTACHMENT" => {
+                match (slug, asset.project_id, asset.issue_id) {
+                    (Some(slug), Some(project), Some(issue)) => Some(format!(
+                        "/api/assets/v2/workspaces/{slug}/projects/{project}/issues/{issue}/attachments/{asset_id}/"
+                    )),
+                    _ => None,
+                }
+            }
+            "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION" => match (slug, asset.project_id) {
+                (Some(slug), Some(project)) => Some(format!(
+                    "/api/assets/v2/workspaces/{slug}/projects/{project}/{asset_id}/"
+                )),
+                _ => None,
+            },
+            _ => None,
+        };
+        urls.insert(*asset_id, url);
+    }
+    Ok(urls)
+}
+
+/// Batched [`fetch_labels`] over all list rows: one join query, grouped
+/// per issue in row order (same filter and `ORDER BY` as the per-row
+/// fetch; the global newest-first order is preserved per issue).
+async fn fetch_labels_batched(
+    pool: &PgPool,
+    issue_ids: &[Uuid],
+) -> Result<HashMap<Uuid, (Vec<Uuid>, Vec<LabelRow>)>, sqlx::Error> {
+    let mut map: HashMap<Uuid, (Vec<Uuid>, Vec<LabelRow>)> = HashMap::new();
+    if issue_ids.is_empty() {
+        return Ok(map);
+    }
+    use pidash_db::entity::{issue_labels as issue_labels_entity, labels as labels_entity};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let links = issue_labels_entity::Entity::find()
+        .filter(issue_labels_entity::Column::IssueId.is_in(issue_ids.iter().copied()))
+        .order_by_desc(issue_labels_entity::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    if links.is_empty() {
+        return Ok(map);
+    }
+    let label_ids: Vec<Uuid> = links.iter().map(|l| l.label_id).collect();
+    let label_models = labels_entity::Entity::find()
+        .filter(labels_entity::Column::Id.is_in(label_ids.iter().copied()))
+        .filter(labels_entity::Column::DeletedAt.is_null())
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let label_by_id: HashMap<Uuid, labels_entity::Model> =
+        label_models.into_iter().map(|m| (m.id, m)).collect();
+    // Preserve order by issue_labels creation order (newest first) and group per issue.
+    // Django orders by labels.created_at DESC; issue_labels order is similar enough.
+    // We reorder per-issue by label created_at by sorting groups after collection.
+    for link in links {
+        if let Some(label) = label_by_id.get(&link.label_id) {
+            let entry = map
+                .entry(link.issue_id)
+                .or_insert_with(|| (Vec::new(), Vec::new()));
+            entry.0.push(label.id);
+            entry.1.push(LabelRow {
+                id: label.id,
+                name: label.name.clone(),
+                color: label.color.clone(),
+            });
+        }
+    }
+    // Per-issue ordering was by labels.created_at DESC; links are ordered by
+    // issue_labels.created_at, which matches when Django's join also drives
+    // ordering through the same join. To guarantee byte parity, sort each
+    // group's rows by label created_at desc via the models above.
+    for pair in map.values_mut() {
+        let rows = &mut pair.1;
+        rows.sort_by(|a, b| {
+            let ca = label_by_id.get(&a.id).map(|m| m.created_at);
+            let cb = label_by_id.get(&b.id).map(|m| m.created_at);
+            cb.cmp(&ca)
+        });
+        // Also sort ids in same order as rows
+        let mut paired: Vec<(Uuid, LabelRow)> = rows.iter().cloned().map(|r| (r.id, r)).collect();
+        paired.sort_by(|a, b| {
+            let ca = label_by_id.get(&a.0).map(|m| m.created_at);
+            let cb = label_by_id.get(&b.0).map(|m| m.created_at);
+            cb.cmp(&ca)
+        });
+        *rows = paired.into_iter().map(|(_, r)| r).collect();
+    }
+    Ok(map)
+}
+
+/// One assignee row before avatar resolution (the batched half of
+/// [`fetch_assignees`]; `avatar_url` resolves from the shared asset map).
+#[derive(Debug, Clone)]
+struct AssigneeLite {
+    id: Uuid,
+    first_name: String,
+    last_name: String,
+    avatar: String,
+    avatar_asset_id: Option<Uuid>,
+    is_bot: bool,
+    display_name: String,
+}
+
+/// Batched assignee rows over all list rows: one join query, grouped per
+/// issue in row order (same `ORDER BY` as the per-row fetch; the global
+/// newest-first order is preserved per issue).
+async fn fetch_assignee_rows(
+    pool: &PgPool,
+    issue_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<AssigneeLite>>, sqlx::Error> {
+    let mut map: HashMap<Uuid, Vec<AssigneeLite>> = HashMap::new();
+    if issue_ids.is_empty() {
+        return Ok(map);
+    }
+    use pidash_db::entity::{issue_assignees as issue_assignees_entity, users as users_entity};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let links = issue_assignees_entity::Entity::find()
+        .filter(issue_assignees_entity::Column::IssueId.is_in(issue_ids.iter().copied()))
+        .order_by_desc(issue_assignees_entity::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    if links.is_empty() {
+        return Ok(map);
+    }
+    let user_ids: Vec<Uuid> = links.iter().map(|l| l.assignee_id).collect();
+    let users_by_id = users_entity::Entity::find()
+        .filter(users_entity::Column::Id.is_in(user_ids.iter().copied()))
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?
+        .into_iter()
+        .map(|u| (u.id, u))
+        .collect::<HashMap<Uuid, users_entity::Model>>();
+    for link in links {
+        if let Some(u) = users_by_id.get(&link.assignee_id) {
+            map.entry(link.issue_id).or_default().push(AssigneeLite {
+                id: u.id,
+                first_name: u.first_name.clone(),
+                last_name: u.last_name.clone(),
+                avatar: u.avatar.clone(),
+                avatar_asset_id: u.avatar_asset_id,
+                is_bot: u.is_bot,
+                display_name: u.display_name.clone(),
+            });
+        }
+    }
+    Ok(map)
+}
+
+/// Pure [`cover_image_url`] over a pre-resolved asset map: the cover
+/// asset's URL, else the raw `cover_image` text, else null.
+fn cover_image_url_from_map(
+    project: &ProjectRow,
+    urls: &HashMap<Uuid, Option<String>>,
+) -> Option<String> {
+    if let Some(asset_id) = project.cover_image_asset_id {
+        if let Some(url) = urls.get(&asset_id).and_then(|url| url.clone()) {
+            return Some(url);
+        }
+    }
+    project.cover_image.clone()
+}
+
+/// Pure per-assignee `avatar_url` over a pre-resolved asset map: the
+/// avatar asset's URL, else the raw `avatar` text when non-empty, else
+/// null (the [`fetch_assignees`] fallback).
+fn avatar_url_from_map(
+    avatar: &str,
+    asset_id: Option<Uuid>,
+    urls: &HashMap<Uuid, Option<String>>,
+) -> Option<String> {
+    let mut url = asset_id.and_then(|id| urls.get(&id).and_then(|url| url.clone()));
+    if url.is_none() && !avatar.is_empty() {
+        url = Some(avatar.to_string());
+    }
+    url
 }
 
 // ---------------------------------------------------------------------------
@@ -632,16 +1123,6 @@ fn render_dt(moment: &DateTime<Utc>, timezone: chrono_tz::Tz) -> String {
     } else {
         text
     }
-}
-
-fn uuid_string(id: &Uuid) -> serde_json::Value {
-    serde_json::Value::String(id.to_string())
-}
-
-fn opt_uuid(id: &Option<Uuid>) -> serde_json::Value {
-    id.as_ref()
-        .map(uuid_string)
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_string(text: &Option<String>) -> serde_json::Value {
@@ -965,6 +1446,10 @@ fn render_app_detail(
     map.insert("type".to_string(), opt_uuid(&issue.type_id));
     map.insert("assigned_pod".to_string(), opt_uuid(&issue.assigned_pod_id));
     map.insert(
+        "assigned_runner".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
+    );
+    map.insert(
         "assignees".to_string(),
         detail.assignee_ids.iter().map(uuid_string).collect(),
     );
@@ -990,13 +1475,17 @@ fn render_app_issue_create(
     if issue.description_binary.is_some() {
         return Err(Denial::ServerError.into_response());
     }
-    let mut map = serde_json::Map::with_capacity(48);
+    let mut map = serde_json::Map::with_capacity(49);
     map.insert("id".to_string(), uuid_string(&issue.id));
     map.insert("state_id".to_string(), opt_uuid(&issue.state_id));
     map.insert("parent_id".to_string(), opt_uuid(&issue.parent_id));
     map.insert(
         "assigned_pod_id".to_string(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert("project_id".to_string(), uuid_string(&issue.project_id));
     map.insert("workspace_id".to_string(), uuid_string(&issue.workspace_id));
@@ -1129,18 +1618,20 @@ fn render_app_issue_create(
     Ok(serde_json::Value::Object(map))
 }
 
-/// App `IssueSerializer` snapshot (`app/serializers/issue.py:1039-1093`)
+/// App `IssueSerializer` snapshot (`app/serializers/issue.py:1039-1112`)
 /// for the update activity's `current_instance`: `Meta.fields` order with
 /// the unannotated fields skipped (no `cycle_id`/`module_ids`/`label_ids`/
 /// `assignee_ids`/counts on a plain instance — DRF drops read-only fields
-/// whose attribute is missing).
+/// whose attribute is missing). `type_id` is a concrete FK read-out and
+/// `is_epic` a `SerializerMethodField`, so both are always present.
 fn render_issue_snapshot(
     detail: &Detail,
     timezone: chrono_tz::Tz,
     is_synced: bool,
+    is_epic: bool,
 ) -> serde_json::Value {
     let issue = &detail.issue;
-    let mut map = serde_json::Map::with_capacity(24);
+    let mut map = serde_json::Map::with_capacity(25);
     map.insert("id".to_string(), uuid_string(&issue.id));
     map.insert(
         "name".to_string(),
@@ -1189,9 +1680,15 @@ fn render_issue_snapshot(
     );
     map.insert("project_id".to_string(), uuid_string(&issue.project_id));
     map.insert("parent_id".to_string(), opt_uuid(&issue.parent_id));
+    map.insert("type_id".to_string(), opt_uuid(&issue.type_id));
+    map.insert("is_epic".to_string(), serde_json::Value::Bool(is_epic));
     map.insert(
         "assigned_pod_id".to_string(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert(
         "agent_executor".to_string(),
@@ -1232,22 +1729,41 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
     if source.is_empty() {
         return Ok(false);
     }
-    let git: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM \"git_issue_syncs\" WHERE \"git_issue_syncs\".\"deleted_at\" IS NULL AND \"git_issue_syncs\".\"issue_id\" = $1 LIMIT 1")
-            .bind(issue.id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let git = git_issue_syncs::Entity::find()
+        .filter(git_issue_syncs::Column::DeletedAt.is_null())
+        .filter(git_issue_syncs::Column::IssueId.eq(issue.id))
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     if git.is_some() {
         return Ok(true);
     }
-    let github: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM \"github_issue_syncs\" WHERE \"github_issue_syncs\".\"deleted_at\" IS NULL AND \"github_issue_syncs\".\"issue_id\" = $1 LIMIT 1")
-            .bind(issue.id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+    let github = github_issue_syncs::Entity::find()
+        .filter(github_issue_syncs::Column::DeletedAt.is_null())
+        .filter(github_issue_syncs::Column::IssueId.eq(issue.id))
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(github.is_some())
+}
+
+/// `get_is_epic` (`app/serializers/issue.py:1109-1112`): false when the
+/// row is untyped, without a query; otherwise the type row's flag. A
+/// missing row is Django's `DoesNotExist` → the generic 500 (unreachable
+/// — the FK holds). No soft-delete guard: `IssueType` rides the plain
+/// manager. Shares `app_issues::access::issue_type_is_epic` (no new raw
+/// SQL per the raw-sql ratchet).
+async fn fetch_is_epic(pool: &PgPool, type_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(id) = type_id else {
+        return Ok(false);
+    };
+    crate::app_issues::access::issue_type_is_epic(&pidash_db::pool::sea_orm_connection(pool), id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -1329,44 +1845,74 @@ fn json_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
-/// DRF `CharField.to_internal_value` (`trim_whitespace=True`): bools,
-/// dicts and lists fail; numbers stringify; strings strip. `None` is
-/// rejected upstream (`may not be null`).
-fn char_internal(value: &serde_json::Value) -> Result<String, ()> {
+/// Coerce the raw `name` JSON scalar exactly as the retired typed bind
+/// did: the database spelled ints/uints/floats/bools server-side, so the
+/// driver renders those spellings. A uint past `i64::MAX` wraps (the old
+/// `uint as i64` bind — ported quirk); a bool renders lowercase
+/// (`true`/`false`, where Django `str()` spells `True`/`False` — ported
+/// Tier-3 divergence, no client sends bool names). Containers and null
+/// have no adaptation (Django raises → 500).
+fn coerce_name(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::String(text) => Ok(text.trim().to_string()),
-        serde_json::Value::Number(number) => Ok(number.to_string().trim().to_string()),
-        serde_json::Value::Bool(_) | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(())
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                Some(int.to_string())
+            } else if let Some(uint) = number.as_u64() {
+                Some((uint as i64).to_string())
+            } else {
+                number.as_f64().map(pg_float_text)
+            }
         }
-        serde_json::Value::Null => Err(()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
     }
 }
 
-/// Bind a JSON scalar the way psycopg adapts the Python value: typed
-/// binds coerce server-side exactly like inline literals. Containers have
-/// no adaptation (Django raises → 500).
-#[allow(clippy::result_large_err)]
-fn bind_text<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: &serde_json::Value,
-) -> Result<sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>, Response> {
-    match value {
-        serde_json::Value::String(text) => Ok(query.bind(text.clone())),
-        serde_json::Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                Ok(query.bind(int))
-            } else if let Some(uint) = number.as_u64() {
-                Ok(query.bind(uint as i64))
-            } else if let Some(float) = number.as_f64() {
-                Ok(query.bind(float))
+/// `float8::text` (`float8out`, `extra_float_digits = 1`): shortest
+/// roundtrip digits, exponent form when the decimal exponent is below
+/// -4 or at/above 17, two-digit exponents (`1e+20`, `1e-05`). Rust's
+/// `Display` already emits the shortest digits; only the exponent
+/// decision differs. Vectors verified against Postgres 16.
+fn pg_float_text(float: f64) -> String {
+    if float.is_infinite() {
+        return if float.is_sign_negative() {
+            "-Infinity".to_owned()
+        } else {
+            "Infinity".to_owned()
+        };
+    }
+    if float.is_nan() {
+        return "NaN".to_owned();
+    }
+    let plain = format!("{float}");
+    let sign = if plain.starts_with('-') { "-" } else { "" };
+    let digits: String = plain.chars().filter(|c| c.is_ascii_digit()).collect();
+    let sig = digits.trim_start_matches('0');
+    if sig.is_empty() {
+        return "0".to_owned();
+    }
+    let point = plain.find('.');
+    let exp = match point {
+        Some(dot) => {
+            let int_digits = plain[..dot]
+                .trim_start_matches('-')
+                .trim_start_matches('0')
+                .len();
+            if int_digits > 0 {
+                int_digits as i32 - 1
             } else {
-                Err(Denial::ServerError.into_response())
+                -(digits.len() as i32 - sig.len() as i32)
             }
         }
-        serde_json::Value::Bool(flag) => Ok(query.bind(*flag)),
-        _ => Err(Denial::ServerError.into_response()),
+        None => plain.trim_start_matches('-').trim_start_matches('0').len() as i32 - 1,
+    };
+    if !(-4..17).contains(&exp) {
+        let mantissa = format!("{}.{}", &sig[..1], sig[1..].trim_end_matches('0'));
+        let mantissa = mantissa.trim_end_matches('.');
+        return format!("{sign}{mantissa}e{exp:+03}");
     }
+    plain
 }
 
 /// The git-sync lock message (`app/serializers/issue.py:225`).
@@ -1421,6 +1967,7 @@ async fn collection_list(
         };
         sql.insert_str(pos, &compiled.joins);
     }
+    // raw-sql: intake list filter compiler (filters.rs) emits raw JOIN + WHERE fragments for 20+ issue_filters keys that contain dynamic IN/IS NULL/ILIKE branches; expressing them as sea-query Condition would require rewriting the compiler and re-pinning its fixtures.
     let mut statement = sqlx::query(&sql)
         .bind(intake_id)
         .bind(board.workspace_id)
@@ -1453,12 +2000,87 @@ async fn collection_list(
         Ok(bridges) => bridges,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    // One query per lookup for the whole list (Django's `select_related`
+    // + `prefetch_related` shape): per-row `load_detail` here was an N+1
+    // on this unpaginated list (PIDASHCONV-1266). Assembly below mirrors
+    // `load_detail` field for field, so the bytes don't change.
+    let state_ids = dedup_sorted(issues.iter().filter_map(|issue| issue.state_id));
+    let states = match fetch_states(pool, &state_ids).await {
+        Ok(states) => states,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let project_ids = dedup_sorted(issues.iter().map(|issue| issue.project_id));
+    let projects = match fetch_projects(pool, &project_ids).await {
+        Ok(projects) => projects,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let labels_map = match fetch_labels_batched(pool, &issue_ids).await {
+        Ok(labels) => labels,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let assignee_map = match fetch_assignee_rows(pool, &issue_ids).await {
+        Ok(assignees) => assignees,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let asset_ids = dedup_sorted(
+        projects
+            .values()
+            .filter_map(|project| project.cover_image_asset_id)
+            .chain(
+                assignee_map
+                    .values()
+                    .flatten()
+                    .filter_map(|assignee| assignee.avatar_asset_id),
+            ),
+    );
+    let asset_urls = match fetch_asset_urls(pool, &asset_ids).await {
+        Ok(urls) => urls,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let mut rendered = Vec::with_capacity(issues.len());
     for (issue, count) in issues.into_iter().zip(counts) {
         let bridge_rows = bridges.get(&issue.id).cloned().unwrap_or_default();
-        let detail = match load_detail(pool, issue, bridge_rows).await {
-            Ok(detail) => detail,
-            Err(_) => return Denial::ServerError.into_response(),
+        let state = issue
+            .state_id
+            .and_then(|state_id| states.get(&state_id).cloned());
+        let project = projects
+            .get(&issue.project_id)
+            .cloned()
+            .unwrap_or_else(|| missing_project(issue.project_id));
+        let cover_url = cover_image_url_from_map(&project, &asset_urls);
+        let (label_ids, labels) = labels_map.get(&issue.id).cloned().unwrap_or_default();
+        let mut assignee_ids = Vec::new();
+        let mut assignees = Vec::new();
+        if let Some(rows) = assignee_map.get(&issue.id) {
+            assignee_ids.reserve(rows.len());
+            assignees.reserve(rows.len());
+            for row in rows {
+                assignee_ids.push(row.id);
+                assignees.push(AssigneeRow {
+                    id: row.id,
+                    first_name: row.first_name.clone(),
+                    last_name: row.last_name.clone(),
+                    avatar: row.avatar.clone(),
+                    avatar_url: avatar_url_from_map(
+                        row.avatar.as_str(),
+                        row.avatar_asset_id,
+                        &asset_urls,
+                    ),
+                    is_bot: row.is_bot,
+                    display_name: row.display_name.clone(),
+                });
+            }
+        }
+        let detail = Detail {
+            issue,
+            state,
+            project,
+            cover_url,
+            label_ids,
+            labels,
+            assignee_ids,
+            assignees,
+            bridges: bridge_rows,
         };
         match render_app_detail(&detail, actor.timezone, Some(count)) {
             Ok(value) => rendered.push(value),
@@ -1466,6 +2088,21 @@ async fn collection_list(
         }
     }
     raw_json_response(serde_json::Value::Array(rendered).to_string())
+}
+
+/// The missing-`projects`-row fallback [`load_detail`] degrades to (a
+/// null-shaped nest, never a 500).
+fn missing_project(project_id: Uuid) -> ProjectRow {
+    ProjectRow {
+        id: project_id,
+        identifier: String::new(),
+        name: String::new(),
+        cover_image: None,
+        cover_image_asset_id: None,
+        logo_props: serde_json::Value::Object(Default::default()),
+        description: String::new(),
+        is_default: false,
+    }
 }
 
 /// `create` (`views/intake.py:107-173`): name-required and priority
@@ -1529,21 +2166,22 @@ async fn collection_create(
         _ => "low".to_string(),
     };
     // Triage auto-create (`:128-143`): reuse the state, else insert with
-    // the `State.save` resequence (`max+15000`, `65000` on empty).
-    // The queries-layer lookup selects `states.*`; decoding that row as a
-    // scalar fails whenever a triage row exists, so read the `id` column
-    // off the row instead (foundation read-only).
-    let triage_lookup = queries::triage_lookup_sql();
-    let triage_id: Option<Uuid> = match sqlx::query(&triage_lookup)
-        .bind(board.project_id)
-        .bind(board.workspace_id)
-        .fetch_optional(pool)
+    // the `State.save` resequence (`max+15000`, `65000` on empty). The max
+    // runs over `State.objects` — live, non-triage project states
+    // (`db/models/state.py:79-83,131-139`; PIDASHCONV-1638).
+    // SeaORM triage lookup replaces the raw builder.
+    let db_triage = pidash_db::pool::sea_orm_connection(pool);
+    let triage_id: Option<Uuid> = match states::Entity::find()
+        .filter(states::Column::ProjectId.eq(board.project_id))
+        .filter(states::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.eq("triage"))
+        .order_by_asc(states::Column::Sequence)
+        .limit(1)
+        .one(&db_triage)
         .await
     {
-        Ok(Some(row)) => match row.try_get::<Option<Uuid>, _>("id") {
-            Ok(id) => id,
-            Err(_) => return Denial::ServerError.into_response(),
-        },
+        Ok(Some(model)) => Some(model.id),
         Ok(None) => None,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -1551,79 +2189,67 @@ async fn collection_create(
     let state_id = match triage_id {
         Some(id) => id,
         None => {
-            let max_sequence: Option<f64> = match sqlx::query_scalar(
-                "SELECT MAX(sequence) FROM \"states\" WHERE \"states\".\"project_id\" = $1",
-            )
-            .bind(board.project_id)
-            .fetch_one(pool)
-            .await
-            {
-                Ok(max) => max,
-                Err(_) => return Denial::ServerError.into_response(),
+            let max_sequence: Option<f64> = {
+                use sea_orm::sea_query::Func;
+                let db2 = pidash_db::pool::sea_orm_connection(pool);
+                #[derive(Debug, sea_orm::FromQueryResult)]
+                struct MaxRow {
+                    max_seq: Option<f64>,
+                }
+                let row = states::Entity::find()
+                    .filter(states::Column::ProjectId.eq(board.project_id))
+                    .filter(states::Column::DeletedAt.is_null())
+                    .filter(states::Column::Group.ne("triage"))
+                    .select_only()
+                    .expr_as(Func::max(Expr::col(states::Column::Sequence)), "max_seq")
+                    .into_model::<MaxRow>()
+                    .one(&db2)
+                    .await
+                    .map_err(|_| Denial::ServerError.into_response());
+                match row {
+                    Ok(Some(r)) => r.max_seq,
+                    Ok(None) => None,
+                    Err(_e) => return Denial::ServerError.into_response(),
+                }
             };
             let sequence = max_sequence.map(|max| max + 15000.0).unwrap_or(65000.0);
-            let new_id = Uuid::new_v4();
             // Full `State.objects.create` row: the queries-layer helper
             // emits only the explicit create kwargs, so the ORM-filled
             // columns (`description=""`, `slug="triage"` from `save()`,
             // `is_triage=False`) are set here (foundation read-only).
-            if let Err(error) = sqlx::query(
-                "INSERT INTO \"states\" (id, created_at, updated_at, created_by_id, name, description, slug, color, project_id, workspace_id, sequence, \"group\", \"default\", is_triage) VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)",
+            match pidash_services::domain::projects::states::add_triage(
+                &pidash_db::pool::sea_orm_connection(pool),
+                board.project_id,
+                board.workspace_id,
+                sequence,
+                actor.id,
+                now,
+                now,
             )
-            .bind(new_id)
-            .bind(now)
-            .bind(now)
-            .bind(actor.id)
-            .bind(board.project_id)
-            .bind(board.workspace_id)
-            .bind(sequence)
-            .execute(pool)
             .await
             {
-                return db_error(error);
+                Ok(new_id) => new_id,
+                Err(error) => return db_error(error),
             }
-            new_id
         }
     };
-    // `Issue.save` backfills (`db/models/issue.py:305-360`): the project
-    // default pod (or NULL), the next sequence, tag-stripped text, and
-    // triage sort order — all inside the advisory lock the save takes.
-    let issue_id = Uuid::new_v4();
-    let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(sequence) FROM \"issue_sequences\" WHERE \"issue_sequences\".\"project_id\" = $1",
-    )
-    .bind(board.project_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
-        Err(_) => return Denial::ServerError.into_response(),
+    // `Issue.objects.create(...)` + `Issue.save` ride
+    // `domain::issues::create`: the hooks resolve the pod default,
+    // `completed_at` (triage, so NULL), stripped text, sequence and sort
+    // order, and the post-commit chain runs the `post_save` fire Django's
+    // create fires (no m2m legs on this endpoint). The bare created emit
+    // stays driver-side below.
+    // `issue_data.get("description_json", {})` (`:147`): an explicit
+    // null arrives as None and the NOT NULL jsonb column rejects it —
+    // the invalid-payload 400, same as the description_html null arm
+    // below. Any other JSON value stores as-is.
+    let description_json = match issue_data.get("description_json") {
+        Some(serde_json::Value::Null) => {
+            return guards_error(guards::handle_exception(ExceptionKind::IntegrityError));
+        }
+        Some(value) => value.clone(),
+        None => super::sanitize::default_description_json(),
     };
-    let pod_id: Option<Uuid> = match sqlx::query_scalar(
-        "SELECT id FROM \"pod\" WHERE \"pod\".\"deleted_at\" IS NULL AND \"pod\".\"project_id\" = $1 AND \"pod\".\"is_default\" = TRUE ORDER BY \"pod\".\"created_at\" ASC LIMIT 1",
-    )
-    .bind(board.project_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(pod) => pod,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let sort_order: f64 = match sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT MAX(sort_order) FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2",
-    )
-    .bind(board.project_id)
-    .bind(state_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let description_json = issue_data
-        .get("description_json")
-        .cloned()
-        .unwrap_or_else(super::sanitize::default_description_json);
     // `issue_data.get("description_html", DEFAULT_DESCRIPTION)` (`:148`):
     // an explicit null stores NULL (no serializer validation on create).
     let description_html: Option<String> = match issue_data.get("description_html") {
@@ -1632,61 +2258,103 @@ async fn collection_create(
         Some(serde_json::Value::String(html)) => Some(html.clone()),
         Some(_) => return Denial::ServerError.into_response(),
     };
-    // `Issue.save` (`db/models/issue.py:330-334`): `None` only when the
-    // *input* html is `""`/`None`, else `strip_tags(html)` verbatim — an
-    // empty strip (e.g. the `"<p></p>"` default) is stored as `""`, not
-    // collapsed to `None`.
-    let description_stripped: Option<String> = match description_html.as_deref() {
-        None | Some("") => None,
-        Some(html) => Some(super::sanitize::strip_tags(html)),
+    // The old INSERT bound the raw JSON scalar and let Postgres coerce
+    // server-side (psycopg adaptation parity): ints/uints/floats/bools
+    // render exactly as the database spells them. Containers and null
+    // have no adaptation (Django raises → 500).
+    let Some(name) = coerce_name(&name_value) else {
+        return Denial::ServerError.into_response();
     };
-    // The advisory lock serializes sequence assignment
-    // (`db/models/issue.py:336`); failure degrades to the plain path.
-    let lock_key = advisory_key(&board.project_id);
-    let _ = sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(pool)
-        .await;
-    let mut insert = sqlx::query(
-        "INSERT INTO \"issues\" (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, NULL, NULL, $8, $9, $10, $11, NULL, $12, 0, NULL, NULL, $13, $14, NULL, NULL, FALSE, NULL, NULL, NULL, '', '', NULL, $15, NULL)",
-    )
-    .bind(issue_id)
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(board.project_id)
-    .bind(board.workspace_id)
-    .bind(state_id);
-    insert = match bind_text(insert, &name_value) {
-        Ok(query) => query,
-        Err(response) => return response,
+    let Some(description_html) = description_html else {
+        // The old NULL bind tripped the not-null check into the
+        // invalid-payload 400 — same body, without the round trip.
+        return guards_error(guards::handle_exception(ExceptionKind::IntegrityError));
     };
-    insert = insert
-        .bind(description_json)
-        .bind(description_html)
-        .bind(description_stripped)
-        .bind(priority_insert)
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(pod_id);
-    if let Err(error) = insert.execute(pool).await {
-        return db_error(error);
-    }
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"issue_sequences\" (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(board.project_id)
-    .bind(board.workspace_id)
-    .bind(issue_id)
-    .bind(i64::from(sequence_id))
-    .execute(pool)
-    .await
-    {
-        return db_error(error);
+    let issue_id = Uuid::new_v4();
+    let fields = IssueFieldSet {
+        id: issue_id,
+        created_at: now,
+        updated_at: now,
+        created_by_id: Some(actor.id),
+        updated_by_id: None,
+        deleted_at: None,
+        project_id: board.project_id,
+        workspace_id: board.workspace_id,
+        parent_id: None,
+        state_id: Some(state_id),
+        point: None,
+        estimate_point_id: None,
+        name: name.clone(),
+        description_json,
+        description_html,
+        description_stripped: None,
+        description_binary: None,
+        priority: priority_insert,
+        complexity_score: 0,
+        start_date: None,
+        target_date: None,
+        sequence_id: 0,
+        sort_order: 65535.0,
+        completed_at: None,
+        archived_at: None,
+        is_draft: false,
+        external_source: None,
+        external_id: None,
+        type_id: None,
+        git_work_branch: String::new(),
+        workpad: String::new(),
+        created_via: None,
+        assigned_pod_id: None,
+        assigned_runner_id: None,
+        agent_executor: None,
+    };
+    let fire = fire_spec(&actor.id, now);
+    let Some(orm) = state.orm() else {
+        return Denial::ServerError.into_response();
+    };
+    let ctx = write_ctx(&actor, &board);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        // The driver pool is a borrow; the chain needs an owned handle
+        // (`PgPool` is an `Arc` clone, unobservable).
+        let pool = (*pool).clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: Vec::new(),
+                    default_assignee: None,
+                    labels: Vec::new(),
+                    fire,
+                    origin: None,
+                    activity_requested: serde_json::Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    skip_fire: false,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return domain_response(error),
+    };
+    if outcome.chain.stopped().is_some() {
+        return Denial::ServerError.into_response();
     }
     // `issue_activity.delay` (`:155-163`): `requested_data` is the full
     // `request.data` dump, `current_instance` is `None`.
@@ -1702,21 +2370,32 @@ async fn collection_create(
     // The bridge takes `intake_id` from the URL (`:165-170`); the
     // workspace is backfilled from the project (`:165`).
     let bridge_id = Uuid::new_v4();
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"intake_issues\" (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, intake_id, issue_id, status, snoozed_till, duplicate_to_id, source, source_email, external_source, external_id, extra) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, -2, NULL, NULL, 'IN_APP', NULL, NULL, NULL, '{}')",
-    )
-    .bind(bridge_id)
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(board.project_id)
-    .bind(board.workspace_id)
-    .bind(intake_id)
-    .bind(issue_id)
-    .execute(pool)
-    .await
     {
-        return db_error(error);
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_fo = now.fixed_offset();
+        let model = intake_issues::ActiveModel {
+            id: sea_orm::Set(bridge_id),
+            created_at: sea_orm::Set(now_fo),
+            updated_at: sea_orm::Set(now_fo),
+            created_by_id: sea_orm::Set(Some(actor.id)),
+            updated_by_id: sea_orm::Set(None),
+            deleted_at: sea_orm::Set(None),
+            project_id: sea_orm::Set(board.project_id),
+            workspace_id: sea_orm::Set(board.workspace_id),
+            intake_id: sea_orm::Set(intake_id),
+            issue_id: sea_orm::Set(issue_id),
+            status: sea_orm::Set(-2),
+            snoozed_till: sea_orm::Set(None),
+            duplicate_to_id: sea_orm::Set(None),
+            source: sea_orm::Set(Some("IN_APP".to_owned())),
+            source_email: sea_orm::Set(None),
+            external_source: sea_orm::Set(None),
+            external_id: sea_orm::Set(None),
+            extra: sea_orm::Set(serde_json::json!({})),
+        };
+        if let Err(e) = model.insert(&db).await {
+            return db_error(pidash_db::orm_tx::into_sqlx(e));
+        }
     }
     let issue = match fetch_issue(pool, &issue_id, &board).await {
         Ok(Some(issue)) => issue,
@@ -1757,23 +2436,16 @@ async fn fetch_bridge(
     intake_id: &Uuid,
     board: &Board,
 ) -> Result<Option<(Uuid, Option<Uuid>, Uuid)>, sqlx::Error> {
-    sqlx::query(
-        "SELECT \"intake_issues\".\"id\", \"intake_issues\".\"created_by_id\", \"intake_issues\".\"issue_id\" FROM \"intake_issues\" WHERE (\"intake_issues\".\"deleted_at\" IS NULL AND \"intake_issues\".\"id\" = $1 AND \"intake_issues\".\"intake_id\" = $2 AND \"intake_issues\".\"workspace_id\" = $3 AND \"intake_issues\".\"project_id\" = $4)",
-    )
-    .bind(bridge_id)
-    .bind(intake_id)
-    .bind(board.workspace_id)
-    .bind(board.project_id)
-    .fetch_optional(pool)
-    .await?
-    .map(|row| {
-        Ok((
-            row.try_get("id")?,
-            row.try_get("created_by_id")?,
-            row.try_get("issue_id")?,
-        ))
-    })
-    .transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = intake_issues::Entity::find_by_id(*bridge_id)
+        .filter(intake_issues::Column::IntakeId.eq(*intake_id))
+        .filter(intake_issues::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(intake_issues::Column::ProjectId.eq(board.project_id))
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(model.map(|m| (m.id, m.created_by_id, m.issue_id)))
 }
 
 /// `retrieve` (`views/intake.py:236-256`): scoped lookups, APP detail
@@ -2007,8 +2679,16 @@ async fn detail_partial_update(
         Ok(detail) => detail,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let current_instance =
-        super::python_dumps(&render_issue_snapshot(&pre_save, actor.timezone, synced));
+    let is_epic = match fetch_is_epic(pool, pre_save.issue.type_id).await {
+        Ok(is_epic) => is_epic,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let current_instance = super::python_dumps(&render_issue_snapshot(
+        &pre_save,
+        actor.timezone,
+        synced,
+        is_epic,
+    ));
     let mut subset = serde_json::Map::with_capacity(3);
     subset.insert("name".to_string(), serde_json::Value::String(name.clone()));
     subset.insert(
@@ -2027,49 +2707,58 @@ async fn detail_partial_update(
     );
     enqueue_message(pool, publish.message()).await;
     // `update()`: the 3 attrs plus the save backfills (`updated_at`,
-    // `updated_by`, recomputed stripped text, `completed_at`).
+    // `updated_by`, recomputed stripped text, `completed_at`). It rides
+    // `domain::issues::partial_update` with no m2m legs and no activity
+    // trio — the bare `issue.activity.updated` fired driver-side above,
+    // ahead of the save, exactly where Django's view puts it.
     let now = Utc::now();
-    let description_stripped = if description_html.is_empty() {
-        None
-    } else {
-        let stripped = super::sanitize::strip_tags(&description_html);
-        if stripped.is_empty() {
-            None
-        } else {
-            Some(stripped)
-        }
+    let mut fields = pre_save.issue.field_set();
+    fields.name = name;
+    fields.description_html = description_html;
+    fields.description_json = json_raw;
+    fields.updated_at = now;
+    let prev_state = pre_save.issue.state_id;
+    let m2m_audit = (pre_save.issue.created_by_id, pre_save.issue.updated_by_id);
+    let fire = fire_spec(&actor.id, now);
+    let Some(orm) = state.orm() else {
+        return Denial::ServerError.into_response();
     };
-    // `Issue.save`: `completed_at = now` only when the state group is
-    // `completed`, else `None` (the state never changes on this path).
-    let completed_at = match pre_save.issue.state_id {
-        Some(state_id) => match fetch_state(pool, &state_id).await {
-            Ok(state)
-                if state
-                    .as_ref()
-                    .is_some_and(|state| state.group == "completed") =>
-            {
-                Some(now)
-            }
-            Ok(_) => None,
-            Err(_) => return Denial::ServerError.into_response(),
-        },
-        None => None,
+    let ctx = write_ctx(&actor, &board);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        let pool = (*pool).clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    fields,
+                    assignees: None,
+                    labels: None,
+                    m2m_audit,
+                    sequence: None,
+                    prev_state,
+                    fire,
+                    activity: None,
+                },
+            )
+            .await
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return domain_response(error),
     };
-    if let Err(error) = sqlx::query(
-        "UPDATE \"issues\" SET name = $1, description_html = $2, description_json = $3, description_stripped = $4, updated_at = $5, updated_by_id = $6, completed_at = $7 WHERE \"issues\".\"id\" = $8",
-    )
-    .bind(name)
-    .bind(description_html)
-    .bind(json_raw)
-    .bind(description_stripped)
-    .bind(now)
-    .bind(actor.id)
-    .bind(completed_at)
-    .bind(issue_id)
-    .execute(pool)
-    .await
-    {
-        return db_error(error);
+    if outcome.chain.stopped().is_some() {
+        return Denial::ServerError.into_response();
     }
     let issue = match fetch_issue(pool, &issue_id, &board).await {
         Ok(Some(issue)) => issue,
@@ -2139,29 +2828,25 @@ async fn detail_destroy(
     // full `save()` (`updated_at`, CRUM `updated_by`), then the related
     // objects task.
     let now = Utc::now();
-    if let Err(error) = sqlx::query(
-        "UPDATE \"intake_issues\" SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE \"intake_issues\".\"id\" = $4",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(pk)
-    .execute(pool)
-    .await
     {
-        return db_error(error);
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_fo = now.fixed_offset();
+        let res = intake_issues::Entity::update_many()
+            .col_expr(intake_issues::Column::DeletedAt, Expr::value(now_fo))
+            .col_expr(intake_issues::Column::UpdatedAt, Expr::value(now_fo))
+            .col_expr(
+                intake_issues::Column::UpdatedById,
+                Expr::value(Some(actor.id)),
+            )
+            .filter(intake_issues::Column::Id.eq(pk))
+            .exec(&db)
+            .await;
+        if let Err(e) = res {
+            return db_error(pidash_db::orm_tx::into_sqlx(e));
+        }
     }
     enqueue_soft_delete(pool, &pk).await;
     StatusCode::NO_CONTENT.into_response()
-}
-
-/// `convert_uuid_to_integer` (`db/models/issue.py:22-26`): first 8 bytes
-/// of `sha256(str(project_id))` as a signed big-endian integer — the
-/// advisory-lock key `Issue.save` takes.
-fn advisory_key(project_id: &Uuid) -> i64 {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(project_id.to_string().as_bytes());
-    i64::from_be_bytes(digest[..8].try_into().expect("eight bytes"))
 }
 
 #[cfg(test)]
@@ -2186,5 +2871,140 @@ mod tests {
         );
         assert_eq!(message.kwargs.get("using"), Some(&serde_json::Value::Null));
         assert_eq!(message.kwargs.len(), 1);
+    }
+
+    #[test]
+    fn coerce_name_matches_retired_typed_binds() {
+        use serde_json::{Number, Value};
+        // Strings pass through; ints/uints spell decimally.
+        assert_eq!(
+            coerce_name(&Value::String("x".to_owned())),
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(12345))),
+            Some("12345".to_owned())
+        );
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(-7))),
+            Some("-7".to_owned())
+        );
+        // A uint past i64::MAX wraps, as the old `uint as i64` bind did.
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(u64::MAX))),
+            Some("-1".to_owned())
+        );
+        // Bools render lowercase (Postgres spelling, not Django's `True`).
+        assert_eq!(coerce_name(&Value::Bool(true)), Some("true".to_owned()));
+        assert_eq!(coerce_name(&Value::Bool(false)), Some("false".to_owned()));
+        // Containers and null have no adaptation.
+        assert_eq!(coerce_name(&Value::Null), None);
+        assert_eq!(coerce_name(&Value::Array(vec![])), None);
+        assert_eq!(coerce_name(&Value::Object(serde_json::Map::new())), None);
+    }
+
+    #[test]
+    fn issue_snapshot_carries_type_id_and_is_epic() {
+        // App `IssueSerializer` (`app/serializers/issue.py:1039-1112`):
+        // `type_id` is a concrete FK read-out and `is_epic` a method
+        // field, so both are present on the plain-instance snapshot
+        // the intake PATCH enqueues as `current_instance`
+        // (NEWPIDASH-47).
+        let type_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let detail = Detail {
+            issue: IssueRow {
+                id: Uuid::nil(),
+                created_at: DateTime::<Utc>::MIN_UTC,
+                updated_at: DateTime::<Utc>::MIN_UTC,
+                created_by_id: None,
+                updated_by_id: None,
+                deleted_at: None,
+                project_id: Uuid::nil(),
+                workspace_id: Uuid::nil(),
+                parent_id: None,
+                state_id: None,
+                point: None,
+                estimate_point_id: None,
+                name: "n".to_owned(),
+                description_json: serde_json::Value::Object(Default::default()),
+                description_html: String::new(),
+                description_stripped: None,
+                description_binary: None,
+                priority: "none".to_owned(),
+                complexity_score: 0,
+                start_date: None,
+                target_date: None,
+                sequence_id: 1,
+                sort_order: 65535.0,
+                completed_at: None,
+                archived_at: None,
+                is_draft: false,
+                external_source: None,
+                external_id: None,
+                type_id: Some(type_id),
+                git_work_branch: String::new(),
+                created_via: None,
+                assigned_pod_id: None,
+                assigned_runner_id: None,
+                agent_executor: None,
+                workpad: String::new(),
+            },
+            state: None,
+            project: ProjectRow {
+                id: Uuid::nil(),
+                identifier: String::new(),
+                name: String::new(),
+                cover_image: None,
+                cover_image_asset_id: None,
+                logo_props: serde_json::Value::Object(Default::default()),
+                description: String::new(),
+                is_default: false,
+            },
+            cover_url: None,
+            label_ids: Vec::new(),
+            labels: Vec::new(),
+            assignee_ids: Vec::new(),
+            assignees: Vec::new(),
+            bridges: Vec::new(),
+        };
+        let snapshot = render_issue_snapshot(&detail, chrono_tz::UTC, false, true);
+        let map = snapshot.as_object().expect("object");
+        assert_eq!(
+            map.get("type_id"),
+            Some(&serde_json::Value::String(type_id.to_string()))
+        );
+        assert_eq!(map.get("is_epic"), Some(&serde_json::Value::Bool(true)));
+        // The unannotated skips stay skipped.
+        for key in [
+            "cycle_id",
+            "module_ids",
+            "label_ids",
+            "assignee_ids",
+            "sub_issues_count",
+            "attachment_count",
+            "link_count",
+        ] {
+            assert!(!map.contains_key(key), "unexpected {key}");
+        }
+    }
+
+    #[test]
+    fn pg_float_text_matches_float8out() {
+        // Vectors verified against Postgres 16 (`SELECT x::float8::text`).
+        for (input, expected) in [
+            (1.5, "1.5"),
+            (100000.0, "100000"),
+            (1e20, "1e+20"),
+            (0.00001, "1e-05"),
+            (123.456, "123.456"),
+            (0.1, "0.1"),
+            (0.0001, "0.0001"),
+            (-1e20, "-1e+20"),
+            (0.0, "0"),
+        ] {
+            assert_eq!(pg_float_text(input), expected, "float {input}");
+        }
+        assert_eq!(pg_float_text(f64::INFINITY), "Infinity");
+        assert_eq!(pg_float_text(f64::NEG_INFINITY), "-Infinity");
     }
 }

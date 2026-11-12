@@ -39,12 +39,35 @@ def archive_bytes(archive, members):
 class BundleAgentTests(unittest.TestCase):
     def test_exact_linux_and_windows_asset_names(self):
         self.assertEqual(
-            bundle.assets("x86_64-unknown-linux-gnu")[1][1],
-            "codex-x86_64-unknown-linux-musl.tar.gz",
+            bundle.assets("x86_64-unknown-linux-gnu"),
+            [
+                (
+                    "The-AI-Republic/pi-dash",
+                    "pidash-x86_64-unknown-linux-gnu.tar.xz",
+                    "pidash",
+                    "pidash",
+                )
+            ],
         )
         self.assertEqual(
-            bundle.assets("x86_64-pc-windows-msvc")[1][1], "codex-x86_64-pc-windows-msvc.exe.tar.gz"
+            bundle.assets("x86_64-pc-windows-msvc"),
+            [
+                (
+                    "The-AI-Republic/pi-dash",
+                    "pidash-x86_64-pc-windows-msvc.zip",
+                    "pidash.exe",
+                    "pidash.exe",
+                )
+            ],
         )
+
+    def test_no_target_stages_an_engine(self):
+        # The engine ships in the CLI release; no desktop target may carry it.
+        for target in ("universal-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
+            for architecture in bundle.targets(target):
+                for repo, _, _, destination in bundle.assets(architecture):
+                    self.assertNotEqual(repo, "openai/codex")
+                    self.assertNotIn("agent-engine", destination)
 
     def test_all_targets_produce_exact_native_filenames_and_mac_slices(self):
         for target in (
@@ -52,12 +75,16 @@ class BundleAgentTests(unittest.TestCase):
             "x86_64-unknown-linux-gnu",
             "x86_64-pc-windows-msvc",
         ):
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(target=target),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 downloads = []
                 lipo_calls = []
 
-                def download(repo, tag, archive):
+                def download(repo, tag, archive, pinned=None):
                     downloads.append((repo, tag, archive))
+                    self.assertIsNone(pinned)
                     for architecture in bundle.targets(target):
                         for expected_repo, expected_archive, member, _ in bundle.assets(
                             architecture
@@ -85,14 +112,14 @@ class BundleAgentTests(unittest.TestCase):
                     patch.object(bundle, "download", side_effect=download),
                     patch.object(bundle.subprocess, "run", side_effect=lipo),
                 ):
-                    bundle.stage(target, "pidash-test", "engine-test", directory)
+                    bundle.stage(target, "pidash-test", directory)
                 suffix = ".exe" if "windows" in target else ""
                 self.assertEqual(
                     {p.name for p in Path(directory).iterdir()},
-                    {f"pidash{suffix}", f"pidash-agent-engine{suffix}"},
+                    {f"pidash{suffix}"},
                 )
-                self.assertEqual(len(downloads), 4 if target.startswith("universal") else 2)
-                self.assertEqual(len(lipo_calls), 4 if target.startswith("universal") else 0)
+                self.assertEqual(len(downloads), 2 if target.startswith("universal") else 1)
+                self.assertEqual(len(lipo_calls), 2 if target.startswith("universal") else 0)
 
     def test_missing_or_ambiguous_executables_are_refused(self):
         for archive in ("test.tar.gz", "test.zip"):
@@ -118,6 +145,24 @@ class BundleAgentTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         bundle.download("repo/agent", "v1", "agent.tar.gz")
+
+    def test_a_published_digest_that_differs_from_the_pin_is_refused(self):
+        payload = b"fake archive bytes"
+        digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+        metadata = json.dumps({"assets": [{"name": "agent.tar.gz", "digest": digest}]})
+
+        def fetch(command, check):
+            Path(command[-1], "agent.tar.gz").write_bytes(payload)
+
+        with (
+            patch.object(bundle.subprocess, "check_output", return_value=metadata),
+            patch.object(bundle.subprocess, "run", side_effect=fetch),
+        ):
+            self.assertEqual(
+                bundle.download("repo/agent", "v1", "agent.tar.gz", pinned=digest), payload
+            )
+            with self.assertRaises(ValueError):
+                bundle.download("repo/agent", "v1", "agent.tar.gz", pinned="sha256:" + "0" * 64)
 
 
 if __name__ == "__main__":

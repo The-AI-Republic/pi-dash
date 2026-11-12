@@ -120,7 +120,9 @@ async fn probe_latest_release() -> license_commands::LatestProbe {
         .timeout(std::time::Duration::from_secs(RELEASES_TIMEOUT_SECS))
         // `requests` sends a default UA; GitHub 403s UA-less callers.
         .user_agent(concat!("pidash-api/", env!("CARGO_PKG_VERSION")))
-        .no_proxy()
+        // No `.no_proxy()`: like `requests` (`trust_env=True`), the probe
+        // honors HTTPS_PROXY/HTTP_PROXY/NO_PROXY (PIDASHCONV-1271). Test
+        // isolation scrubs the proxy vars at the runner instead.
         .build();
     let client = match client {
         Ok(client) => client,

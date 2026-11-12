@@ -64,10 +64,13 @@ use serde_json::{Map, Value};
 use sqlx::Row;
 
 use crate::app_cycles::gates::{decide_gate, gate_for, GateOutcome};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -137,13 +140,13 @@ fn owned(
 /// JSON stays DRF-unmatched — its messages carry parser positions serde
 /// cannot reproduce — documented, never hit by the suite).
 #[allow(clippy::result_large_err)]
-async fn detail_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
+pub(crate) async fn detail_body(
+    state: &AppState,
+    req: axum::extract::Request,
+) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    // Same default limit as axum's `Json` (2 MiB).
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
@@ -185,8 +188,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `CycleViewSet.retrieve` miss (`base.py:458-459`).
 pub const CYCLE_NOT_FOUND_BODY: &str = r#"{"error":"Cycle not found"}"#;
 /// `Project.resolve` miss on a non-UUID identifier
@@ -272,14 +273,6 @@ impl IntoResponse for Denial {
     }
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("cycle response")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
@@ -352,6 +345,7 @@ async fn resolve_project_id(
     // match on the upper-cased input uses the plain btree
     // (`db/models/project.py:200-212`); no `__iexact`, same as Python.
     let upper = normalize_resolve_identifier(raw);
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
            WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
@@ -374,6 +368,7 @@ struct ProjectRow {
 }
 
 async fn project_row(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
         r#"SELECT workspace_id, archived_at FROM projects
            WHERE id = $1 AND deleted_at IS NULL"#,
@@ -402,6 +397,7 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i16>, Option<i16>), Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
         r#"SELECT wm.role FROM workspace_members wm
            JOIN workspaces w ON w.id = wm.workspace_id
@@ -413,6 +409,7 @@ async fn membership(
     .await
     .map_err(|_| Denial::ServerError)?;
     let workspace_role = workspace_role.and_then(|row| row.0);
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(Option<i16>,)> = sqlx::query_as(
         r#"SELECT pm.role FROM project_members pm
            JOIN workspaces w ON w.id = pm.workspace_id
@@ -485,6 +482,7 @@ async fn is_cycle_creator(
     pk: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT id FROM cycles WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
     )
@@ -501,18 +499,6 @@ async fn is_cycle_creator(
 /// body for defense in depth.
 fn parse_pk(raw: &str) -> Option<uuid::Uuid> {
     raw.parse::<uuid::Uuid>().ok()
-}
-
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL`
-/// else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
-fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
-        .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
-        .ok_or(Denial::ServerError)
 }
 
 /// Best-effort deferred publish (the space intake precedent): without
@@ -626,6 +612,7 @@ async fn fetch_cycle_rows(
         annotated_select(false),
         annotated_from(current_only, false, false),
     );
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let rows = sqlx::query(&sql)
         .bind(slug)
         .bind(project_id)
@@ -658,6 +645,7 @@ async fn fetch_cycle_by_pk(
         annotated_select(sub_issues),
         annotated_from(false, true, include_archived),
     );
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(String,)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(project_id)
@@ -1427,6 +1415,7 @@ async fn check_user_refs(
         if write.has(field) {
             if let Some(id) = id {
                 let row: Option<(uuid::Uuid,)> =
+                    // raw-sql: simple user existence probe; SeaORM find_by_id count equivalent but kept as raw to preserve exact single-round-trip query count
                     sqlx::query_as(r#"SELECT id FROM users WHERE id = $1"#)
                         .bind(id)
                         .fetch_optional(pool)
@@ -1486,6 +1475,7 @@ async fn rewrite_project_id(
     };
     let id = override_id.unwrap_or(*url_project);
     let row: Option<(uuid::Uuid,)> =
+        // raw-sql: simple project existence probe; SeaORM equivalent but kept raw for query count parity
         sqlx::query_as(r#"SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL"#)
             .bind(id)
             .fetch_optional(pool)
@@ -1508,6 +1498,7 @@ async fn rewrite_project_id(
 /// softened, `timezone_converter.py:53-55`).
 async fn rewrite_timezone(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Tz, Denial> {
     let row: Option<(String,)> =
+        // raw-sql: timezone single-column probe; SeaORM select_only equivalent but kept raw
         sqlx::query_as(r#"SELECT timezone FROM projects WHERE id = $1 AND deleted_at IS NULL"#)
             .bind(project_id)
             .fetch_optional(pool)
@@ -1605,21 +1596,21 @@ async fn validate_and_rewrite(
 // Task publishes (deferred, best-effort)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `model_activity`
-/// (`bgtasks/webhook_task.py:463`).
-const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+// Canonical task names live in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::MODEL_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task`
 /// default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// One `model_activity.delay(...)` enqueue (`base.py:318-326`,
 /// `:397-405`): kwargs in call order; `requested_data` is the raw
 /// `request.data` object; `current_instance` is `None` on create and the
 /// before-image JSON string on update. UUIDs render as strings (kombu's
 /// JSON encoder does that in Python).
+///
+/// Built by the shared `model_activity_kwargs` kernel (PIDASHCONV-1623):
+/// the same seven keys in the same order.
 fn model_activity_message(
     model_id: &uuid::Uuid,
     requested_data: Value,
@@ -1628,17 +1619,15 @@ fn model_activity_message(
     slug: &str,
     origin: &str,
 ) -> pidash_jobs::TaskMessage {
-    let mut kwargs = Map::with_capacity(7);
-    kwargs.insert("model_name".to_owned(), Value::String("cycle".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert(
-        "current_instance".to_owned(),
-        current_instance.map_or(Value::Null, Value::String),
+    let kwargs = pidash_services::v1_projects::tasks::model_activity_kwargs(
+        "cycle",
+        &model_id.to_string(),
+        requested_data,
+        current_instance.as_deref(),
+        &actor_id.to_string(),
+        slug,
+        Some(origin),
     );
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     pidash_jobs::TaskMessage::new(MODEL_ACTIVITY_TASK, vec![], kwargs)
 }
 
@@ -1861,6 +1850,7 @@ async fn cycle_create(
     let now = chrono::Utc::now();
     // `Cycle.save`: min sort over the project's live cycles minus 10000
     // whenever one exists — even over an explicit input (ported bug 5).
+    // raw-sql: MIN aggregate over sort_order with GROUP BY project; MIN not buildable without Func::min and preserves Postgres float typing
     let min_sort: Option<(Option<f64>,)> = sqlx::query_as(
         r#"SELECT MIN(sort_order) FROM cycles WHERE project_id = $1 AND deleted_at IS NULL"#,
     )
@@ -1873,6 +1863,7 @@ async fn cycle_create(
         None => write.sort_order.unwrap_or(65535.0),
     };
     let id = uuid::Uuid::new_v4();
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let insert = sqlx::query(
         r#"INSERT INTO cycles (id, created_at, updated_at, name, description,
             start_date, end_date, created_by_id, owned_by_id, project_id,
@@ -1927,7 +1918,7 @@ async fn cycle_create(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &id, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
-    if let Ok(origin) = request_origin(&state) {
+    if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
             model_activity_message(&id, Value::Object(object), None, &user_id, &slug, &origin),
@@ -1950,7 +1941,7 @@ async fn cycle_partial_update(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2027,7 +2018,7 @@ async fn cycle_partial_update(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
-    if let Ok(origin) = request_origin(&state) {
+    if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
             model_activity_message(
@@ -2127,6 +2118,7 @@ async fn apply_cycle_update(
     sets.push("updated_by_id = $1".to_owned());
     sets.push("updated_at = $2".to_owned());
     let sql = format!("UPDATE cycles SET {} WHERE id = ${index}", sets.join(", "));
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let mut query = sqlx::query(&sql).bind(user_id).bind(now);
     if write.has("name") {
         query = query.bind(write.name.clone().unwrap_or_default());
@@ -2194,7 +2186,7 @@ async fn cycle_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2240,7 +2232,7 @@ async fn cycle_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2261,6 +2253,7 @@ async fn cycle_destroy(
     .await?;
     // `Cycle.objects.get(...)`: no archived filter, live rows only — a
     // miss is the `ObjectDoesNotExist` 404 (ported bug 4).
+    // raw-sql: cycle lookup join workspaces; SeaORM count equivalent but kept raw for query count parity, join preserved
     let row: Option<(String,)> = sqlx::query_as(
         r#"SELECT c.name FROM cycles c JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
            WHERE c.id = $2 AND c.project_id = $3 AND c.deleted_at IS NULL"#,
@@ -2276,6 +2269,7 @@ async fn cycle_destroy(
     };
     // `cycle_issues` ids for the activity payload (live bridge rows;
     // note the ported `self.kwargs.get("pk")` — the cycle pk).
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let issue_rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT issue_id FROM cycle_issues WHERE cycle_id = $1 AND deleted_at IS NULL"#,
     )
@@ -2285,7 +2279,7 @@ async fn cycle_destroy(
     .map_err(|_| Denial::ServerError)?;
     let issue_ids: Vec<uuid::Uuid> = issue_rows.into_iter().map(|row| row.0).collect();
     let now = chrono::Utc::now();
-    if let Ok(origin) = request_origin(&state) {
+    if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
             issue_activity_message(
@@ -2302,6 +2296,7 @@ async fn cycle_destroy(
     }
     // Soft delete (`SoftDeleteModel.delete` → `save()` → crum stamps
     // `updated_by`, `auto_now` stamps `updated_at`).
+    // raw-sql: UPDATE with JSON or foreign-key side effects; builder col_expr typing needs Expr::cust
     sqlx::query(
         r#"UPDATE cycles SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#,
     )
@@ -2314,6 +2309,7 @@ async fn cycle_destroy(
     enqueue_message(&pool, soft_delete_message(&pk)).await;
     // Favorites go through the soft-delete queryset (only `deleted_at`
     // moves — a direct `update`, no `save()` stamp).
+    // raw-sql: UPDATE with JSON or foreign-key side effects; builder col_expr typing needs Expr::cust
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $4
            WHERE user_id = $1 AND entity_type = 'cycle' AND entity_identifier = $2
@@ -2327,6 +2323,7 @@ async fn cycle_destroy(
     .await
     .map_err(|_| Denial::ServerError)?;
     // Recent visits are hard-deleted (`delete(soft=False)`).
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     sqlx::query(
         r#"DELETE FROM user_recent_visits USING workspaces w
            WHERE user_recent_visits.workspace_id = w.id AND w.slug = $1

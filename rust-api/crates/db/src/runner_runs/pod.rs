@@ -198,20 +198,151 @@ pub fn pod_from_row(row: &sqlx::postgres::PgRow) -> Result<Pod, sqlx::Error> {
 /// `Pod.default_for_project_id` (`models.py:174-176`): the active
 /// default pod for a project, or `None` (transient pre-signal
 /// window, or the default was soft-deleted without a promoted
-/// replacement). Callers pick the pool and pass an executor in;
-/// every executor is generic over `sqlx::Executor`.
-pub async fn default_for_project_id<'e, E>(
-    ex: E,
+/// replacement). Runs on a SeaORM connection — either
+/// `sea_orm_connection(&pool)` for pool callers or
+/// `TxConn::new(&mut tx)` for sqlx-transaction callers
+/// ([`DEFAULT_FOR_PROJECT_ID_SQL`] pins the statement shape).
+/// SeaORM form of [`DEFAULT_FOR_PROJECT_ID_SQL`]: the active default
+/// pod for a project, default-first then oldest, first row.
+pub fn default_for_project_id_select(
     project_id: uuid::Uuid,
-) -> Result<Option<Pod>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(DEFAULT_FOR_PROJECT_ID_SQL)
-        .bind(project_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| pod_from_row(&r)).transpose()
+) -> sea_orm::Select<crate::entity::pod::Entity> {
+    use crate::entity::pod;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    pod::Entity::find()
+        .filter(pod::Column::DeletedAt.is_null())
+        .filter(pod::Column::IsDefault.eq(true))
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .order_by_desc(pod::Column::IsDefault)
+        .order_by_asc(pod::Column::CreatedAt)
+        .limit(1)
+}
+
+pub async fn default_for_project_id(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<Pod>, sea_orm::DbErr> {
+    let model = default_for_project_id_select(project_id).one(db).await?;
+    Ok(model.map(|m| Pod {
+        id: m.id,
+        workspace_id: m.workspace_id,
+        project_id: m.project_id,
+        name: m.name,
+        description: m.description,
+        created_by_id: m.created_by_id,
+        is_default: m.is_default,
+        deleted_at: m.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+        created_at: m.created_at.with_timezone(&chrono::Utc),
+        updated_at: m.updated_at.with_timezone(&chrono::Utc),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Default-pod creation (`post_save(Project)`, PIDASHCONV-1297)
+// ---------------------------------------------------------------------------
+
+/// Auto-created pod description, verbatim (`signals.py:54`). This is
+/// the receiver's fixed text, not the model field default
+/// ([`DEFAULT_DESCRIPTION`]).
+pub const DEFAULT_POD_DESCRIPTION: &str = "Auto-created default pod. Add tier pods anytime.";
+
+/// The project facts the handler reads (`signals.py:32-58`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProject {
+    pub id: uuid::Uuid,
+    pub workspace_id: uuid::Uuid,
+    pub identifier: String,
+    /// The `post_save` `created` flag: resaves are a no-op.
+    pub created: bool,
+    /// `created_by` fallback chain (`signals.py:56-57`): project lead,
+    /// else default assignee, else `None` (NULL).
+    pub project_lead: Option<uuid::Uuid>,
+    pub default_assignee: Option<uuid::Uuid>,
+}
+
+/// Default pod name: `{identifier}_pod_1` (`signals.py:48`).
+pub fn default_pod_name(identifier: &str) -> String {
+    format!("{identifier}_pod_1")
+}
+
+/// `created_by` fallback (`signals.py:56-57`).
+pub fn pod_created_by(project: &NewProject) -> Option<uuid::Uuid> {
+    project.project_lead.or(project.default_assignee)
+}
+
+/// Exists-guard (`Pod.objects.filter(project=...).exists()`,
+/// `signals.py:45`): the default manager excludes soft-deleted pods.
+/// Param: `$1` the project id.
+pub fn pod_exists_for_project_sql() -> String {
+    r#"SELECT EXISTS(SELECT 1 FROM "pod" WHERE ("pod"."project_id" = $1 AND "pod"."deleted_at" IS NULL))"#.to_owned()
+}
+
+/// Default-pod `INSERT` (`Pod.objects.create(...)`, `signals.py:50-58`):
+/// every column is bound (the live tables carry no `column_default`).
+/// Params: `$1` id, `$2` workspace, `$3` project, `$4` name,
+/// `$5` description, `$6` created_by (nullable), `$7` is_default,
+/// `$8` deleted_at (NULL), `$9` created_at, `$10` updated_at.
+pub fn insert_default_pod_sql() -> String {
+    r#"INSERT INTO "pod" ("id", "workspace_id", "project_id", "name", "description", "created_by_id", "is_default", "deleted_at", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#.to_owned()
+}
+
+/// Ensure a fresh project has a default pod (`signals.py:32-66`):
+/// no-op unless `created`, no-op when any active pod exists, else
+/// insert `{identifier}_pod_1`. Returns the new pod id, or `None`
+/// when the guard hit or the insert was swallowed.
+///
+/// The `try` placement is Django's: the exists-guard sits outside
+/// the `try` (`signals.py:45`), so its storage failure propagates;
+/// only the `create` is swallowed and logged (`signals.py:59-66`) —
+/// pod creation must never block project creation.
+pub async fn ensure_default_pod(
+    pool: &sqlx::PgPool,
+    project: &NewProject,
+) -> Result<Option<uuid::Uuid>, sqlx::Error> {
+    if !project.created {
+        return Ok(None);
+    }
+    use crate::entity::pod;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+    let db = crate::pool::sea_orm_connection(pool);
+    let exists = pod::Entity::find()
+        .filter(pod::Column::ProjectId.eq(project.id))
+        .filter(pod::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(crate::orm_tx::into_sqlx)?
+        > 0;
+    if exists {
+        return Ok(None);
+    }
+    // `auto_now_add` / `auto_now` sample separately on save: two
+    // timestamps, like the source.
+    let created_at = chrono::Utc::now();
+    let updated_at = chrono::Utc::now();
+    let pod_id = uuid::Uuid::new_v4();
+    let result = pod::ActiveModel {
+        id: Set(pod_id),
+        workspace_id: Set(project.workspace_id),
+        project_id: Set(project.id),
+        name: Set(default_pod_name(&project.identifier)),
+        description: Set(DEFAULT_POD_DESCRIPTION.to_owned()),
+        created_by_id: Set(pod_created_by(project)),
+        is_default: Set(true),
+        deleted_at: Set(None),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+    }
+    .insert(&db)
+    .await;
+    if let Err(error) = result {
+        tracing::error!(
+            %error,
+            project_id = %project.id,
+            "runner.signals: failed to auto-create default pod for project",
+        );
+        return Ok(None);
+    }
+    Ok(Some(pod_id))
 }
 
 #[cfg(test)]
@@ -398,6 +529,23 @@ mod tests {
     }
 
     #[test]
+    fn default_selector_statement_shape() {
+        let sql = sea_orm::QueryTrait::build(
+            &default_for_project_id_select(uuid::Uuid::nil()),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.contains("FROM \"pod\""), "table: {sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "soft scope: {sql}");
+        assert!(sql.contains("\"is_default\""), "default flag: {sql}");
+        assert!(
+            sql.contains("ORDER BY \"pod\".\"is_default\" DESC"),
+            "order: {sql}"
+        );
+        assert!(sql.contains("LIMIT 1"), "first-row: {sql}");
+    }
+
+    #[test]
     fn clean_and_save_share_autofill_and_mismatch() {
         let v = ts::fx02();
         let clean_save = &v["pod_clean_save"];
@@ -446,5 +594,55 @@ mod tests {
         // No project: both clean (:136) and save (:151) skip.
         assert_eq!(resolve_workspace_id(Some(other), None), Ok(Some(other)));
         assert_eq!(resolve_workspace_id(None, None), Ok(None));
+    }
+
+    fn fx08() -> serde_json::Value {
+        let raw =
+            include_str!("../../../../fixtures/runner_runs/fx-run-08-handlers-web.golden.json");
+        serde_json::from_str(raw).expect("valid fixture")
+    }
+
+    #[test]
+    fn default_pod_name_and_fallback_match_source() {
+        assert_eq!(default_pod_name("SIG"), "SIG_pod_1");
+        let lead = uuid::Uuid::nil();
+        let assignee = uuid::Uuid::max();
+        let project = NewProject {
+            id: uuid::Uuid::nil(),
+            workspace_id: uuid::Uuid::nil(),
+            identifier: "SIG".to_owned(),
+            created: true,
+            project_lead: Some(lead),
+            default_assignee: Some(assignee),
+        };
+        assert_eq!(pod_created_by(&project), Some(lead));
+        let project = NewProject {
+            project_lead: None,
+            ..project
+        };
+        assert_eq!(pod_created_by(&project), Some(assignee));
+        let project = NewProject {
+            default_assignee: None,
+            ..project
+        };
+        assert_eq!(pod_created_by(&project), None);
+    }
+
+    #[test]
+    fn default_pod_row_shape_matches_fx08() {
+        let fx = fx08();
+        let row = &fx["signals"]["auto"]["row"];
+        assert_eq!(row["name"], "SIG_pod_1");
+        assert_eq!(default_pod_name("SIG"), row["name"].as_str().expect("name"));
+        assert_eq!(row["is_default"], true);
+        assert_eq!(row["description"], DEFAULT_POD_DESCRIPTION);
+        assert_eq!(
+            DEFAULT_POD_DESCRIPTION,
+            "Auto-created default pod. Add tier pods anytime."
+        );
+        assert!(row["created_by"].is_null());
+        assert!(pod_exists_for_project_sql().contains(r#""pod"."deleted_at" IS NULL"#));
+        // The insert binds every column (no live `column_default`).
+        assert!(insert_default_pod_sql().contains("$10"));
     }
 }

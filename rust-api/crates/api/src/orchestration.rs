@@ -6,47 +6,50 @@
 //! pool [`CreationSeam`][pidash_services::orchestration::creation::CreationSeam]
 //! and [`FinalizeAgentRunSeam`][pidash_services::orchestration::creation::FinalizeAgentRunSeam]
 //! twin that lives in `project_move_handoff` (the api-side twin of
-//! `jobs::LiveCreationStore`). Handlers that create runs inside their
-//! own transaction span — the D-26 move (`app_issues`) now, the D-18
-//! move later — consume the twin through this module instead of
-//! copying it:
+//! `jobs::LiveCreationStore`). The move domain service creates handoff
+//! runs inside its own transaction span; its
+//! [`crate::domain_hooks::AppMovePostCommitHook`] drains them through the
+//! public [`MoveHook`][pidash_jobs::hooks::MoveHook], which calls back
+//! into this module for the api-only legs:
 //!
 //! - [`SpanCreationDeps::from_state`] builds the runtime facts
 //!   (executor settings, admission cache, clock) from the request's
 //!   [`AppState`].
-//! - [`handoff_store`] lends the twin a caller-owned span
-//!   transaction; [`split_outboxes`] takes the span back plus the
-//!   collected [`CreationOutboxes`].
-//! - [`drain_creation_outboxes`] runs the outboxes after the caller's
-//!   span commits, in the `complete_project_move_handoff` order: terminal publish
-//!   pairs, dispatches, deferred admission consumes. A dispatch is
-//!   `dispatch_agent_run` per id; a [`DispatchDecision::PodDrain`]
-//!   drains through the caller's own pod-drain recipe (Python drains
-//!   the target pod inline, `dispatch.py:61-70` — the decision is
-//!   acted on, never dropped).
+//! - [`drain_terminal_effects`] runs finalized runs' terminal publish
+//!   pairs after the caller's span commits, inline with the ambient
+//!   user.
 //!
 //! The caller drains creation outboxes before its own post-commit
 //! work: the creation registers its `on_commit` entries first (the
 //! move's dispatch precedes its cancel send and pod drains,
 //! `issue_move.py:353-372`).
 
-use std::future::Future;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_db::tx::Transaction as DbTransaction;
-use pidash_jobs::dispatch::{dispatch_agent_run, DispatchDecision};
-use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::redis::client_from_settings;
+use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
+use pidash_db::runner_sessions::outbox as runner_outbox;
+use pidash_db::runner_sessions::outbox::OutboxError;
+use pidash_db::runner_sessions::RunnerSession;
+use pidash_services::domain::issues_move::MoveDrainError;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
+use pidash_services::runner_sessions::drain::{
+    drain_pod_idle_list_stmt, drain_pod_log, next_for_runner_stmt, plan_assignment,
+    AssignmentFacts, DispatchFacts, DrainEffect,
+};
+use pidash_services::runner_sessions::guards::alive_threshold;
+use pidash_services::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 
-use crate::project_move_handoff::{drain_publish_effects, HandoffStore, RedisAdmissionCache};
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
+use pidash_services::dispatch::admission::RedisAdmissionCache;
 
 /// The creation runtime facts a span store is built from: executor
 /// settings, the admission cache, and the unix clock for the
@@ -70,7 +73,7 @@ impl SpanCreationDeps {
             cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
             cache: RedisAdmissionCache {
-                client: redis_client(state),
+                client: client_from_settings(state.settings()),
             },
             now_unix_secs: unix_now_secs(),
             toolsets: state.toolsets().clone(),
@@ -79,114 +82,36 @@ impl SpanCreationDeps {
     }
 }
 
-/// The creation seam's post-commit outboxes: dispatch ids (collected
-/// by `dispatch_after_commit`), deferred admission consumes, and
-/// finalized-run ids awaiting their terminal publish pairs. The
-/// admission cache rides along so the deferred drain needs no
-/// rebuild.
-pub(crate) struct CreationOutboxes {
-    pub(crate) dispatches: Vec<Uuid>,
-    pub(crate) deferred: Vec<DeferredConsume>,
-    pub(crate) terminal_effects: Vec<Uuid>,
-    pub(crate) cache: RedisAdmissionCache,
-}
-
-/// Lend the twin seam a caller-owned span transaction. The twin runs
-/// the D-12 driver on the span (it sees the caller's uncommitted
-/// writes); the caller takes the span back through
-/// [`split_outboxes`] — on driver failure too, so its own abort still
-/// rolls the span back.
-pub(crate) fn handoff_store<'t, 'p>(
-    tx: DbTransaction<'t>,
-    pool: &'p PgPool,
-    deps: &SpanCreationDeps,
-) -> HandoffStore<'t, 'p> {
-    HandoffStore::new(
-        tx,
-        pool,
-        deps.cloud.clone(),
-        deps.managed.clone(),
-        deps.cache.clone(),
-        deps.now_unix_secs,
-        deps.toolsets.clone(),
-        deps.assistant_seam.clone(),
-    )
-}
-
-/// Take the span transaction back plus the collected outboxes.
-pub(crate) fn split_outboxes<'t>(
-    store: HandoffStore<'t, '_>,
-) -> (DbTransaction<'t>, CreationOutboxes) {
-    let (tx, dispatches, deferred, terminal_effects, cache) = store.into_parts();
-    (
-        tx,
-        CreationOutboxes {
-            dispatches,
-            deferred,
-            terminal_effects,
-            cache,
-        },
-    )
-}
-
-/// Why the creation drain failed. The caller's span already
-/// committed — the caller answers 500 with its writes standing (the
-/// enqueue precedent).
-#[derive(Debug)]
-pub(crate) enum CreationDrainError<E> {
-    /// `dispatch_agent_run` failed.
-    Dispatch(sqlx::Error),
-    /// The caller's target-pod drain failed.
-    PodDrain(E),
-}
-
-/// Drain the creation outboxes after the caller's span commits, in
-/// the `complete_project_move_handoff` order: terminal publish pairs (isolated each,
-/// infallible), dispatches (`dispatch_agent_run` per id, failures
-/// propagate), deferred admission consumes (best-effort). A
-/// [`DispatchDecision::PodDrain`] drains through `drain_pod`, the
-/// caller's own D-14 pod-drain recipe.
-pub(crate) async fn drain_creation_outboxes<F, Fut, E>(
+/// Drain finalized runs' terminal publish pairs after the caller's
+/// span commits: one emit + inline apply per run, each isolated with
+/// its failure log (the old `drain_creation_outboxes` terminal leg;
+/// the dispatch + deferred legs moved to the public
+/// [`MoveHook`][pidash_jobs::hooks::MoveHook], OVL-16).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
+pub(crate) async fn drain_terminal_effects(
     pool: &PgPool,
     state: &AppState,
-    outboxes: CreationOutboxes,
-    drain_pod: F,
-) -> Result<(), CreationDrainError<E>>
-where
-    F: Fn(Uuid) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    if !outboxes.terminal_effects.is_empty() {
-        let mut pairs = Vec::with_capacity(outboxes.terminal_effects.len() * 2);
-        for id in outboxes.terminal_effects {
-            pairs.extend(finalize_kernel::plan_publish_effects(id));
-        }
-        drain_publish_effects(pool, state, pairs).await;
+    run_ids: &[Uuid],
+    terminal_created_by: Option<Uuid>,
+) {
+    if run_ids.is_empty() {
+        return;
     }
-    let cloud = state.settings().cloud_agent.clone();
-    let now = now_micros();
-    for id in outboxes.dispatches {
-        match dispatch_agent_run(pool, &cloud, id, now).await {
-            Ok(DispatchDecision::PodDrain { pod_id }) => {
-                drain_pod(pod_id)
-                    .await
-                    .map_err(CreationDrainError::PodDrain)?;
-            }
-            Ok(_) => {}
-            Err(error) => return Err(CreationDrainError::Dispatch(error)),
-        }
+    let mut pairs = Vec::with_capacity(run_ids.len() * 2);
+    for id in run_ids {
+        pairs.extend(finalize_kernel::plan_publish_effects(*id));
     }
-    for consume in &outboxes.deferred {
-        consume_admission_token(&outboxes.cache, consume);
-    }
-    Ok(())
-}
-
-/// `timezone.now()` truncated to microseconds (the `project_move_handoff`
-/// `now_micros` position).
-fn now_micros() -> DateTime<Utc> {
-    let now = Utc::now();
-    DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range")
+    let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
+    pidash_jobs::orchestration::drain_publish_effects(pairs, |effect| {
+        crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+            pool,
+            &ports,
+            vec![effect],
+            terminal_created_by,
+        )
+    })
+    .await;
 }
 
 /// `int(time.time())` (the `project_move_handoff` `unix_now_secs` position).
@@ -195,4 +120,269 @@ fn unix_now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// Shared with both move drivers (app + v1): one copy of the twins that
+// lived in each move handler file. Failures answer `MoveDrainError`
+// (every site was `Denial::ServerError` in both twins); the move chain
+// maps them to its `PodDrain` stop.
+// ---------------------------------------------------------------------------
+// Move post-commit: cancel send + pod drain
+// ---------------------------------------------------------------------------
+
+/// The 552 [`PubsubStore`] over the pool + Redis (the delete-cmds
+/// shape): same verbs, same outbox helpers, no runner-enroll
+/// dependency.
+pub(crate) struct MovePubsub<'p> {
+    pub(crate) pool: &'p PgPool,
+    pub(crate) redis: Option<&'p redis::Client>,
+    pub(crate) runner: &'p RunnerSettings,
+}
+
+/// The `CLOSE_ACTIVE_SESSIONS_SQL` read (`pubsub.py:95-99`): active
+/// sessions for one runner, newest first — same guards, same order,
+/// full-row projection, no `LIMIT`.
+fn active_sessions_select(
+    runner_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::runner_session::Entity> {
+    use pidash_db::entity::runner_session;
+    runner_session::Entity::find()
+        .filter(runner_session::Column::RunnerId.eq(runner_id))
+        .filter(runner_session::Column::RevokedAt.is_null())
+        .order_by_desc(runner_session::Column::CreatedAt)
+}
+
+fn session_from_model(
+    model: pidash_db::entity::runner_session::Model,
+) -> Result<RunnerSession, OutboxError> {
+    Ok(RunnerSession {
+        id: model.id,
+        runner_id: model.runner_id,
+        protocol_version: model.protocol_version,
+        created_at: model.created_at.with_timezone(&Utc),
+        last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&Utc)),
+        revoked_at: model.revoked_at.map(|at| at.with_timezone(&Utc)),
+        revoked_reason: model.revoked_reason,
+    })
+}
+
+impl PubsubStore for MovePubsub<'_> {
+    async fn enqueue_for_runner(
+        &self,
+        runner_id: Uuid,
+        message: &Map<String, Value>,
+    ) -> Result<Option<String>, OutboxError> {
+        runner_outbox::enqueue_for_runner(self.redis, self.pool, self.runner, runner_id, message)
+            .await
+    }
+
+    async fn enqueue_for_machine(
+        &self,
+        dev_machine_id: Uuid,
+        message: &Map<String, Value>,
+    ) -> Result<Option<String>, MachineOutboxError> {
+        machine_outbox::enqueue_for_machine(
+            self.redis,
+            self.pool,
+            self.runner,
+            dev_machine_id,
+            message,
+        )
+        .await
+    }
+
+    async fn active_runner_sessions(
+        &self,
+        runner_id: Uuid,
+    ) -> Result<Vec<RunnerSession>, OutboxError> {
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let rows = active_sessions_select(runner_id)
+            .all(&db)
+            .await
+            .map_err(|error| OutboxError::from(pidash_db::orm_tx::into_sqlx(error)))?;
+        rows.into_iter().map(session_from_model).collect()
+    }
+
+    async fn revoke_runner_session(
+        &self,
+        session_id: Uuid,
+        reason: &str,
+    ) -> Result<(), OutboxError> {
+        pidash_services::domain::tokens::revoke_runner_session(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            session_id,
+            Utc::now(),
+            reason,
+        )
+        .await
+        .map_err(OutboxError::from)
+    }
+
+    async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {
+        runner_outbox::clear_session_marker(self.redis, &session_id.to_string()).await
+    }
+
+    async fn publish_session_eviction(
+        &self,
+        runner_id: Uuid,
+        old_session_id: Uuid,
+        new_session_id: &str,
+    ) -> Result<(), OutboxError> {
+        runner_outbox::publish_session_eviction(
+            self.redis,
+            &runner_id.to_string(),
+            Some(&old_session_id.to_string()),
+            new_session_id,
+        )
+        .await
+    }
+}
+
+/// The `drain_pod_by_id` executor (`runner/services/matcher.py`,
+/// through the 552 recipe): miss → 0 with no transaction; else one
+/// transaction over the idle list, one `next_for_runner` claim per
+/// runner, the `ASSIGN_RUN_UPDATE_SQL` write per claim — then, past
+/// the commit, one `assign` send per claim. Effects dispatch in
+/// idle-list order; the log line fires only when claims happened.
+///
+/// A dispatch failure propagates (the drain contract: the offline
+/// error must not be swallowed) — rows already committed, mirroring
+/// `on_commit` raising past the commit.
+pub(crate) async fn drain_pod_by_id(
+    pool: &PgPool,
+    pubsub: &MovePubsub<'_>,
+    pod_id: Uuid,
+) -> Result<(), MoveDrainError> {
+    use pidash_db::entity::{agent_run, dev_machine, pod};
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder,
+        TransactionTrait,
+    };
+
+    let map = |error: sea_orm::DbErr| MoveDrainError(error.to_string());
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let pod = pod::Entity::find()
+        .filter(pod::Column::Id.eq(pod_id))
+        .filter(pod::Column::DeletedAt.is_null())
+        .order_by(pod::Column::IsDefault, sea_orm::Order::Desc)
+        .order_by(pod::Column::CreatedAt, sea_orm::Order::Asc)
+        .one(&db)
+        .await
+        .map_err(map)?;
+    if pod.is_none() {
+        return Ok(());
+    }
+    let txn = db.begin().await.map_err(map)?;
+    let threshold = alive_threshold(Utc::now());
+    let runners = txn
+        .query_all(DbBackend::Postgres.build(&drain_pod_idle_list_stmt(threshold, pod_id)))
+        .await
+        .map_err(map)?;
+    let mut effects = Vec::new();
+    for runner_row in &runners {
+        let runner_id: Uuid = runner_row.try_get("", "id").map_err(map)?;
+        let owner_id: Uuid = runner_row.try_get("", "owner_id").map_err(map)?;
+        let provisioning: String = runner_row.try_get("", "provisioning").map_err(map)?;
+        let pod_dispatch: String = runner_row.try_get("", "pod_dispatch").map_err(map)?;
+        let machine_id: Option<Uuid> = runner_row.try_get("", "dev_machine_id").map_err(map)?;
+        let visibility: i32 = runner_row.try_get("", "visibility").map_err(map)?;
+        // §10.2 alternation input: the runner's most recent
+        // assigned run (by `assigned_at`) had a dedicated pin.
+        let last = agent_run::Entity::find()
+            .filter(agent_run::Column::RunnerId.eq(runner_id))
+            .filter(agent_run::Column::AssignedAt.is_not_null())
+            .order_by_desc(agent_run::Column::AssignedAt)
+            .one(&txn)
+            .await
+            .map_err(map)?;
+        let last_dedicated = matches!(last, Some(run) if run.pinned_runner_id.is_some() && run.pin_kind == "dedicated");
+        let facts = {
+            let is_engine = provisioning == "desktop_bundled";
+            let pod_member = pod_dispatch == "pod_member";
+            if !is_engine {
+                DispatchFacts {
+                    is_engine: false,
+                    pod_member,
+                    paused: false,
+                    team_runs: true,
+                    last_dedicated,
+                }
+            } else {
+                let (paused, team_runs) = match machine_id {
+                    Some(id) => {
+                        let machine = dev_machine::Entity::find_by_id(id)
+                            .one(&txn)
+                            .await
+                            .map_err(map)?;
+                        match machine {
+                            Some(machine) => (
+                                machine.engine_paused_by_owner
+                                    || !machine.engine_auto_pause_reason.is_empty(),
+                                machine.engine_team_runs,
+                            ),
+                            None => (false, false),
+                        }
+                    }
+                    None => (false, false),
+                };
+                DispatchFacts {
+                    is_engine: true,
+                    pod_member,
+                    paused,
+                    team_runs,
+                    last_dedicated,
+                }
+            }
+        };
+        let Some(next_stmt) = next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, &facts)
+        else {
+            continue;
+        };
+        let run = txn
+            .query_one(DbBackend::Postgres.build(&next_stmt))
+            .await
+            .map_err(map)?;
+        let Some(run) = run else {
+            continue;
+        };
+        let run_id: Uuid = run.try_get("", "id").map_err(map)?;
+        let work_item_id: Option<Uuid> = run.try_get("", "work_item_id").map_err(map)?;
+        let prompt: String = run.try_get("", "prompt").map_err(map)?;
+        let run_config: Option<Value> = run.try_get("", "run_config").map_err(map)?;
+        let run_config = run_config
+            .and_then(|config| config.as_object().cloned())
+            .ok_or_else(|| {
+                MoveDrainError("move pod drain: run_config is not an object".to_owned())
+            })?;
+        let plan = plan_assignment(&AssignmentFacts {
+            run_id,
+            runner_id,
+            owner_id,
+            work_item_id,
+            prompt,
+            run_config,
+        });
+        use sea_orm::sea_query::Expr;
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::OwnerId, Expr::value(owner_id))
+            .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
+            .col_expr(agent_run::Column::Status, Expr::value("assigned"))
+            .col_expr(agent_run::Column::AssignedAt, Expr::value(Utc::now()))
+            .filter(agent_run::Column::Id.eq(run_id))
+            .exec(&txn)
+            .await
+            .map_err(map)?;
+        effects.push(plan.after_commit);
+    }
+    txn.commit().await.map_err(map)?;
+    for effect in &effects {
+        let DrainEffect::SendAssign { runner_id, message } = effect;
+        send_to_runner(pubsub, *runner_id, message)
+            .await
+            .map_err(|error| MoveDrainError(error.to_string()))?;
+    }
+    if !effects.is_empty() {
+        tracing::info!("{}", drain_pod_log(&pod_id, effects.len()));
+    }
+    Ok(())
 }

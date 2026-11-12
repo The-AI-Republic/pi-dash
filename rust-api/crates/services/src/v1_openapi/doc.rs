@@ -19,6 +19,12 @@
 //! the key (`openapi.py:93` `if parameters:`, `openapi.py:85` `if summary:`),
 //! so the builder omits it too.
 //!
+//! `components.schemas` is *not* optional: the essentials carry 109
+//! `#/components/schemas/<Name>` `$ref`s (44 distinct names), so the
+//! registry captured from Django's document
+//! (`FX-OPENAPI-07.components_schemas.json`) is emitted verbatim and every
+//! reference resolves inside the served document (PIDASHCONV-1208).
+//!
 //! Renderers: [`render_json`] (4-space pretty, like DRF's `JSONRenderer`
 //! with `OpenApiJsonRenderer.get_indent or 4`) and [`render_yaml`] (minimal
 //! block-style emitter; every string double-quoted with JSON escaping so
@@ -78,6 +84,14 @@ pub fn build_document() -> Value {
         meta::API_KEY_AUTH_NAME.to_string(),
         meta::api_key_security_definition(),
     );
+    // `schemas` before `securitySchemes`, matching Django's `components`
+    // key order (`drf-spectacular` builds the registry first).
+    let mut components = Map::new();
+    components.insert("schemas".to_string(), component_schemas());
+    components.insert(
+        "securitySchemes".to_string(),
+        Value::Object(security_schemes),
+    );
     let mut doc = serde_json::json!({
         "openapi": meta::OPENAPI_VERSION,
         "info": {
@@ -97,7 +111,7 @@ pub fn build_document() -> Value {
         "servers": servers,
         "tags": tags,
         "paths": Value::Object(paths),
-        "components": {"securitySchemes": Value::Object(security_schemes)},
+        "components": Value::Object(components),
     });
     hooks::postprocess_project_id_dual_form(&mut doc);
     doc
@@ -195,8 +209,35 @@ fn push_indent(indent: usize, out: &mut String) {
     }
 }
 
+/// The `components.schemas` registry of the served document: the verbatim
+/// `components.schemas` object captured from Django's live document
+/// (`rust-api/fixtures/v1_openapi/FX-OPENAPI-07.components_schemas.json`,
+/// `GET /api/schema/?format=json` with `ENABLE_DRF_SPECTACULAR=1` against
+/// `apps/api` at `origin/main d656243d3`).
+///
+/// drf-spectacular's `SchemaGenerator.get_schema` (`generators.py:282-293`)
+/// writes `components=self.registry.build(...)`, so every component an
+/// operation references is in the served document. The Rust port emits the
+/// same registry: without it every `#/components/schemas/<Name>` `$ref` the
+/// essentials carry dangles (44 targets / 109 refs, PIDASHCONV-1208) and the
+/// document is not a valid OpenAPI 3.0.3 spec. Embedded at build time and
+/// parsed per call like [`OPERATIONS_JSON`], so the served binary reads no
+/// files at runtime.
+const COMPONENT_SCHEMAS_JSON: &str =
+    include_str!("../../../../fixtures/v1_openapi/FX-OPENAPI-07.components_schemas.json");
+
+/// Parse the embedded components fixture and return its `schemas` object.
+fn component_schemas() -> Value {
+    let fixture: Value =
+        serde_json::from_str(COMPONENT_SCHEMAS_JSON).expect("components fixture parses");
+    fixture
+        .get("schemas")
+        .cloned()
+        .expect("components fixture carries `schemas`")
+}
+
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 193 golden operations, pretty JSON
+/// parameters, responses}}}` for all 209 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -625,6 +666,54 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/": {
+    "get": {
+      "operationId": "runner_dev_machines_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "runner_dev_machines_partial_update",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": {
     "post": {
       "operationId": "runner_dev_machines_commands_result_create",
@@ -645,6 +734,56 @@ const OPERATIONS_JSON: &str = r##"
         {
           "in": "path",
           "name": "request_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/": {
+    "post": {
+      "operationId": "runner_dev_machines_merge_into_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/": {
+    "get": {
+      "operationId": "runner_dev_machines_replace_candidates_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
           "schema": {
             "type": "string",
             "format": "uuid"
@@ -713,6 +852,51 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "responses": {
         "204": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/credential/revoke/": {
+    "post": {
+      "operationId": "runner_engine_credential_revoke_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/model-token/": {
+    "post": {
+      "operationId": "runner_engine_model_token_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/profile/": {
+    "get": {
+      "operationId": "runner_engine_profile_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
           "description": "No response body"
         }
       }
@@ -828,6 +1012,29 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "responses": {
         "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "post": {
+      "operationId": "runner_runners_create_2",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "runner_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
           "description": "No response body"
         }
       }
@@ -10923,6 +11130,54 @@ const OPERATIONS_JSON: &str = r##"
           "description": ""
         }
       }
+    },
+    "post": {
+      "operationId": "workspaces_projects_schedulers_create",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
     }
   },
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": {
@@ -10976,6 +11231,174 @@ const OPERATIONS_JSON: &str = r##"
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/": {
+    "delete": {
+      "operationId": "workspaces_projects_schedulers_binding_destroy",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "workspaces_projects_schedulers_binding_partial_update",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerBindingAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/": {
+    "post": {
+      "operationId": "workspaces_projects_schedulers_run_now_create",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerBindingAPI"
               }
             }
           },
@@ -16031,6 +16454,30 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/runners/": {
+    "get": {
+      "operationId": "workspaces_runners_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/schedulers/": {
     "get": {
       "operationId": "workspaces_schedulers_retrieve",
@@ -16039,6 +16486,106 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "summary": null,
       "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    },
+    "post": {
+      "operationId": "workspaces_schedulers_create",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/": {
+    "delete": {
+      "operationId": "workspaces_schedulers_destroy",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "workspaces_schedulers_partial_update",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
         {
           "in": "path",
           "name": "slug",
@@ -16715,7 +17262,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 193);
+        assert_eq!(ops, 209);
     }
 
     #[test]
@@ -16758,6 +17305,75 @@ mod tests {
             *scheme,
             fixture()["security_schemes"]["ApiKeyAuthentication"]
         );
+    }
+
+    #[test]
+    fn every_ref_resolves_inside_document() {
+        let doc = build_document();
+        let mut refs = Vec::new();
+        collect_refs(&doc, &mut refs);
+        assert!(!refs.is_empty(), "served document carries no $ref");
+        let mut dangling: Vec<&str> = refs
+            .iter()
+            .filter(|reference| resolve_pointer(&doc, reference).is_none())
+            .map(String::as_str)
+            .collect();
+        dangling.sort_unstable();
+        dangling.dedup();
+        assert!(dangling.is_empty(), "dangling $ref targets: {dangling:?}");
+    }
+
+    #[test]
+    fn component_schemas_cover_every_referenced_name() {
+        let doc = build_document();
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("components.schemas is an object");
+        assert!(!schemas.is_empty());
+        let mut refs = Vec::new();
+        collect_refs(&doc, &mut refs);
+        for reference in refs {
+            let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+                continue;
+            };
+            assert!(schemas.contains_key(name), "missing schema {name}");
+        }
+    }
+
+    fn collect_refs(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "$ref" {
+                        if let Some(reference) = child.as_str() {
+                            out.push(reference.to_string());
+                        }
+                    } else {
+                        collect_refs(child, out);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_refs(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_pointer<'a>(doc: &'a Value, reference: &str) -> Option<&'a Value> {
+        let path = reference.strip_prefix("#/")?;
+        let mut node = doc;
+        for raw in path.split('/') {
+            let token = raw.replace("~1", "/").replace("~0", "~");
+            node = match node {
+                Value::Object(map) => map.get(&token)?,
+                Value::Array(items) => items.get(token.parse::<usize>().ok()?)?,
+                _ => return None,
+            };
+        }
+        Some(node)
     }
 
     #[test]
@@ -16877,8 +17493,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(omitted_parameters, 16);
-        assert_eq!(omitted_summaries, 99);
+        assert_eq!(omitted_parameters, 19);
+        assert_eq!(omitted_summaries, 115);
     }
 
     #[test]

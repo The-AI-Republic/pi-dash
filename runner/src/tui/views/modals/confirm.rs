@@ -86,10 +86,7 @@ impl ConfirmExitView {
         } else {
             &[ExitChoice::SaveExit, ExitChoice::Cancel]
         };
-        let cur = order
-            .iter()
-            .position(|c| *c == self.selected)
-            .unwrap_or(0);
+        let cur = order.iter().position(|c| *c == self.selected).unwrap_or(0);
         let next = if forward {
             (cur + 1) % order.len()
         } else {
@@ -106,9 +103,8 @@ impl Renderable for ConfirmExitView {
         Clear.render(modal, buf);
         let sel = Style::default().add_modifier(Modifier::REVERSED);
         let unsel = Style::default().add_modifier(Modifier::DIM);
-        let style_for = |choice: ExitChoice| -> Style {
-            if self.selected == choice { sel } else { unsel }
-        };
+        let style_for =
+            |choice: ExitChoice| -> Style { if self.selected == choice { sel } else { unsel } };
 
         let lines: Vec<Line<'_>> = if self.dirty {
             vec![

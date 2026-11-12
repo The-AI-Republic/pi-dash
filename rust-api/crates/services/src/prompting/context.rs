@@ -655,18 +655,24 @@ pub fn tick_context(ticker: &TickerView) -> Option<Value> {
 }
 
 /// Pick the implementation payload the review prompt inspects
-/// (`context.py:401-416`): the run's own parent, else the ticker-stashed
-/// resume parent (fresh review-entry runs have `parent_run=None`).
+/// (`context.py:401-416`): the run's own parent when one exists, else the
+/// ticker-stashed resume parent (fresh review-entry runs have
+/// `parent_run=None`). A parent run with a falsy payload (`NULL`, `{}`,
+/// ...) renders the fallback — the ticker is never consulted then, so
+/// `has_parent_run` must travel separately from `direct` (PIDASHCONV-1232).
 pub fn resolve_parent_payload<'a>(
     direct: Option<&'a Value>,
+    has_parent_run: bool,
     ticker_stored: Option<&'a Value>,
 ) -> Option<&'a Value> {
-    match direct {
+    let candidate = if has_parent_run {
+        direct
+    } else {
+        ticker_stored
+    };
+    match candidate {
         Some(value) if payload_present(value) => Some(value),
-        _ => match ticker_stored {
-            Some(value) if payload_present(value) => Some(value),
-            _ => None,
-        },
+        _ => None,
     }
 }
 
@@ -693,18 +699,41 @@ fn payload_present(value: &Value) -> bool {
 
 /// Render the payload (`context.py:416`): sorted-keys, 2-space JSON like
 /// `json.dumps(payload, indent=2, sort_keys=True)`, or the fallback line.
-///
-/// One accepted delta: Python's `ensure_ascii=True` escapes non-ASCII as
-/// `\uXXXX` while this emits raw UTF-8. The string is injected as an opaque
-/// template variable (never re-parsed as JSON downstream), so both render
-/// the same text; byte-identical escaping is not preserved.
 pub fn parent_done_payload_json(payload: Option<&Value>) -> String {
-    match resolve_parent_payload(payload, None) {
+    match resolve_parent_payload(payload, true, None) {
         Some(value) => {
-            serde_json::to_string_pretty(&sort_value(value)).unwrap_or_else(|_| "{}".to_owned())
+            let pretty = serde_json::to_string_pretty(&sort_value(value))
+                .unwrap_or_else(|_| "{}".to_owned());
+            ensure_ascii_json(&pretty)
         }
         None => NO_PARENT_PAYLOAD_TEXT.to_owned(),
     }
+}
+
+/// `json.dumps(..., ensure_ascii=True)` over `serde_json` output (the
+/// `runner_enroll::tokens::ensure_ascii` twin, which is private there):
+/// `serde_json` already escapes `"`, `\` and control chars identically
+/// and emits raw UTF-8 otherwise, so only DEL (`\u007f`) and non-ASCII
+/// (lowercase `\uXXXX`, surrogate pairs above U+FFFF) need rewriting.
+pub fn ensure_ascii_json(pretty_json: &str) -> String {
+    let mut out = String::with_capacity(pretty_json.len());
+    for c in pretty_json.chars() {
+        if c.is_ascii() && c != '\u{7f}' {
+            out.push(c);
+        } else if c == '\u{7f}' {
+            out.push_str("\\u007f");
+        } else {
+            let n = c as u32;
+            if n < 0x1_0000 {
+                out.push_str(&format!("\\u{n:04x}"));
+            } else {
+                let v = n - 0x1_0000;
+                let (hi, lo) = (0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff));
+                out.push_str(&format!("\\u{hi:04x}\\u{lo:04x}"));
+            }
+        }
+    }
+    out
 }
 
 /// Sort an owned copy of a JSON value by key, recursively.
@@ -2060,16 +2089,57 @@ mod tests {
         let direct = json!({"b": 1, "a": 1});
         let stored = json!({"z": 1});
         assert_eq!(
-            resolve_parent_payload(Some(&direct), Some(&stored)),
+            resolve_parent_payload(Some(&direct), true, Some(&stored)),
             Some(&direct)
         );
         assert_eq!(
-            resolve_parent_payload(Some(&json!({})), Some(&stored)),
+            resolve_parent_payload(None, false, Some(&stored)),
             Some(&stored)
         );
+        assert_eq!(resolve_parent_payload(None, false, None), None);
         // `sort_keys=True` parity: `a` renders before `b`.
         let rendered = parent_done_payload_json(Some(&direct));
         assert!(rendered.find("\"a\"").expect("a") < rendered.find("\"b\"").expect("b"));
+    }
+
+    #[test]
+    fn parent_payload_escapes_non_ascii_like_ensure_ascii() {
+        // PIDASHCONV-1234: `json.dumps(payload, indent=2,
+        // sort_keys=True)` escapes non-ASCII as lowercase `\uXXXX`
+        // (surrogate pairs above the BMP), never raw UTF-8.
+        let rendered =
+            parent_done_payload_json(Some(&json!({"summary": "fix \u{2014} done \u{2713}"})));
+        assert_eq!(
+            rendered,
+            "{\n  \"summary\": \"fix \\u2014 done \\u2713\"\n}"
+        );
+        // Astral plane → surrogate pair; DEL → `\u007f`; ASCII passes
+        // through untouched (incl. serde's own `\"`/`\\` escapes).
+        assert_eq!(ensure_ascii_json("ship \u{1f680}"), "ship \\ud83d\\ude80");
+        assert_eq!(ensure_ascii_json("a\u{7f}b"), "a\\u007fb");
+        assert_eq!(ensure_ascii_json("plain \"q\" \\ ok"), "plain \"q\" \\ ok");
+    }
+
+    #[test]
+    fn parent_payload_ignores_ticker_when_parent_exists_without_payload() {
+        // PIDASHCONV-1232: `run.parent_run` exists but its `done_payload`
+        // is falsy — Django renders the fallback and never consults the
+        // ticker's resume parent (`context.py:409-415`).
+        let stored = json!({"z": 1});
+        for falsy in [json!(null), json!({}), json!([]), json!(""), json!(0)] {
+            assert_eq!(
+                resolve_parent_payload(Some(&falsy), true, Some(&stored)),
+                None,
+                "falsy direct payload must not fall through to the ticker: {falsy}"
+            );
+        }
+        assert_eq!(
+            resolve_parent_payload(None, true, Some(&stored)),
+            None,
+            "NULL direct payload with a parent run must not fall through"
+        );
+        // The ticker side keeps the same truthiness gate.
+        assert_eq!(resolve_parent_payload(None, false, Some(&json!({}))), None);
     }
 
     #[test]

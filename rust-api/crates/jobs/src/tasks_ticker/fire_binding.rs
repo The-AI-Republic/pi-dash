@@ -35,11 +35,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter};
+use sea_query::{Alias, Expr, LockType, Query, SelectStatement};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::rrule::next_fire_from_rrule;
+use super::rrule::next_fire_with_error;
 use super::scan::{scheduler_enabled, FIRE_SCHEDULER_BINDING_TASK};
 use crate::py_repr;
 use crate::queue::JobRow;
@@ -180,8 +182,9 @@ pub fn advanced_last_error(current: &str) -> String {
 
 /// Parse one ISO 8601 string the way `parse_iso_utc` does
 /// (`utils/iso_datetime.py:22-34`): `Z` and `+00:00` suffixes, arbitrary
-/// numeric offsets converted to UTC, naive values assumed UTC, `None` (here:
-/// unparseable) on empty input or parse failure.
+/// numeric offsets (including `:SS[.ffffff]` tails) converted to UTC,
+/// naive values assumed UTC, `None` (here: unparseable) on empty input
+/// or parse failure.
 fn parse_iso_utc(value: &str) -> Option<DateTime<Utc>> {
     if value.is_empty() {
         return None;
@@ -200,17 +203,94 @@ fn parse_iso_utc(value: &str) -> Option<DateTime<Utc>> {
             return Some(aware.with_timezone(&Utc));
         }
     }
-    // Naive → assume UTC. `%.f` matches with or without a fraction.
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(&normalized, format) {
-            return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
-        }
+    // Offsets with seconds are valid `fromisoformat` input (and what
+    // `isoformat()` stores when offset seconds are non-zero) but invalid
+    // RFC 3339, so they reach here: convert manually (PIDASHCONV-1302).
+    if let Some(utc) = parse_iso_utc_with_offset_seconds(&normalized) {
+        return Some(utc);
+    }
+    // Naive → assume UTC.
+    if let Some(naive) = parse_naive_datetime(&normalized) {
+        return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
     }
     if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
         let naive = date.and_hms_opt(0, 0, 0)?;
         return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
     }
     None
+}
+
+/// Parse a naive `YYYY-MM-DD[T ]HH:MM:SS[.ffffff]` stem. `%.f` matches
+/// with or without a fraction.
+fn parse_naive_datetime(stem: &str) -> Option<NaiveDateTime> {
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(stem, format) {
+            return Some(naive);
+        }
+    }
+    None
+}
+
+/// Exactly two ASCII digits as a number (`fromisoformat` rejects any
+/// other offset-field width).
+fn two_digits(field: &str) -> Option<i64> {
+    if field.len() == 2 && field.bytes().all(|b| b.is_ascii_digit()) {
+        field.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Parse an ISO 8601 string whose UTC offset carries seconds, the way
+/// `datetime.fromisoformat` does (`utils/iso_datetime.py:19-33`):
+/// a naive stem plus a `±HH:MM:SS` tail with an optional `.ffffff` part.
+/// `fromisoformat` sums the offset fields without range-checking them,
+/// truncates a sub-second tail past 6 digits, and rejects only totals at
+/// or past 24 hours. `None` on any other shape — including a plain
+/// `±HH:MM` tail, which the RFC 3339 path above already accepted.
+fn parse_iso_utc_with_offset_seconds(normalized: &str) -> Option<DateTime<Utc>> {
+    // The offset sign is the last `+`/`-` past the `YYYY-MM-DD` date stem;
+    // time digits, `.`, `:` and the `T`/space separator carry no sign.
+    let sign_at = normalized
+        .bytes()
+        .rposition(|b| b == b'+' || b == b'-')
+        .filter(|at| *at > 10)?;
+    let (stem, tail) = normalized.split_at(sign_at);
+    let negative = tail.as_bytes()[0] == b'-';
+    let fields: Vec<&str> = tail[1..].split(':').collect();
+    let [hours, minutes, rest] = fields.as_slice() else {
+        return None;
+    };
+    let (seconds, fraction) = match rest.split_once('.') {
+        Some((seconds, fraction)) => {
+            if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (seconds, fraction)
+        }
+        None => (*rest, ""),
+    };
+    let hours = two_digits(hours)?;
+    let minutes = two_digits(minutes)?;
+    let seconds = two_digits(seconds)?;
+    // The truncated fraction, right-padded to microseconds.
+    let mut micros: i64 = 0;
+    for byte in fraction.bytes().take(6) {
+        micros = micros * 10 + i64::from(byte - b'0');
+    }
+    for _ in fraction.len().min(6)..6 {
+        micros *= 10;
+    }
+    // `fromisoformat` sums the fields without range-checking them; only a
+    // total at or past 24 hours is a `ValueError`.
+    let total_us = ((hours * 60 + minutes) * 60 + seconds) * 1_000_000 + micros;
+    if total_us.abs() >= 24 * 3_600 * 1_000_000 {
+        return None;
+    }
+    let offset_us = if negative { -total_us } else { total_us };
+    let naive = parse_naive_datetime(stem)?;
+    let utc_naive = naive.checked_sub_signed(chrono::Duration::microseconds(offset_us))?;
+    Some(DateTime::from_naive_utc_and_offset(utc_naive, Utc))
 }
 
 /// Coerce a JSON `rdates`/`exdates` column the way `coerce_iso_datetimes` does
@@ -266,6 +346,30 @@ impl From<sqlx::Error> for FireError {
     }
 }
 
+impl From<sea_orm::DbErr> for FireError {
+    fn from(error: sea_orm::DbErr) -> Self {
+        FireError::Db(orm_sqlx(error))
+    }
+}
+
+/// A SeaORM failure as the sqlx error the old read raised: the wrapped
+/// sqlx error when there is one (so Postgres codes still classify),
+/// otherwise its message (cf. `tools_exec::orm_error`).
+fn orm_sqlx(error: sea_orm::DbErr) -> sqlx::Error {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner,
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed
+        }
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Phase SQL (mirrors the Django ORM statements arm for arm)
 // ---------------------------------------------------------------------------
@@ -295,6 +399,16 @@ pub fn claim_select_sql() -> &'static str {
 pub fn bad_rrule_update_sql() -> &'static str {
     "UPDATE scheduler_bindings SET last_error = $1, enabled = FALSE, \
      next_run_at = NULL, updated_at = $2 WHERE id = $3"
+}
+
+/// Quiet-completion write (`scheduler.py`, the `series_completed and
+/// binding.next_run_at is None` branch,
+/// `update_fields=["last_error", "enabled", "updated_at"]`): the series is
+/// exhausted with no occurrence claimed, so the binding is disabled with an
+/// empty `last_error` — finished, not broken.
+pub fn complete_quietly_update_sql() -> &'static str {
+    "UPDATE scheduler_bindings SET last_error = $1, enabled = FALSE, \
+     updated_at = $2 WHERE id = $3"
 }
 
 /// Advance write (`scheduler.py:205`,
@@ -332,6 +446,15 @@ pub fn pointer_update_sql() -> &'static str {
      updated_at = $3 WHERE id = $4"
 }
 
+/// Phase 3a pointer write for a series' final occurrence
+/// (`update_fields=["last_run", "last_error", "updated_at", "enabled"]`):
+/// the pointer write plus the quiet disable, so the scanner stops
+/// considering the finished binding without flagging it as broken.
+pub fn pointer_complete_update_sql() -> &'static str {
+    "UPDATE scheduler_bindings SET last_run_id = $1, last_error = $2, \
+     enabled = FALSE, updated_at = $3 WHERE id = $4"
+}
+
 /// Phase 3b rollback write (`scheduler.py:275-277`,
 /// `update_fields=["next_run_at", "last_error", "updated_at"]`; `next_run_at`
 /// may be restored to NULL when the binding had never fired).
@@ -340,9 +463,80 @@ pub fn rollback_update_sql() -> &'static str {
      updated_at = $3 WHERE id = $4"
 }
 
+// SeaORM builders for the phase statements above. The `*_sql` strings stay
+// as the recorded shapes (pinned by the tests below); execution runs the
+// builders, so the two cannot silently diverge (the scan.rs precedent).
+
+/// Phase 1 claim statement: the exact statement [`claim_select_sql`] records
+/// — inner scheduler join, left run join, `deleted_at IS NULL`, pk bind,
+/// `FOR UPDATE OF scheduler_bindings` (binding row only).
+pub fn claim_select_stmt(binding_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("scheduler_bindings", "id"))
+        .column(("scheduler_bindings", "enabled"))
+        .column(("scheduler_bindings", "dtstart"))
+        .column(("scheduler_bindings", "tzid"))
+        .column(("scheduler_bindings", "rrule"))
+        .column(("scheduler_bindings", "rdates"))
+        .column(("scheduler_bindings", "exdates"))
+        .column(("scheduler_bindings", "next_run_at"))
+        .column(("scheduler_bindings", "last_run_id"))
+        .column(("scheduler_bindings", "last_error"))
+        .expr_as(
+            Expr::col(("schedulers", "is_enabled")),
+            Alias::new("scheduler_is_enabled"),
+        )
+        .expr_as(
+            Expr::col(("agent_run", "status")),
+            Alias::new("last_run_status"),
+        )
+        .from("scheduler_bindings")
+        .inner_join(
+            "schedulers",
+            Expr::col(("scheduler_bindings", "scheduler_id")).equals(("schedulers", "id")),
+        )
+        .left_join(
+            "agent_run",
+            Expr::col(("scheduler_bindings", "last_run_id")).equals(("agent_run", "id")),
+        )
+        .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id))
+        .and_where(Expr::col(("scheduler_bindings", "deleted_at")).is_null())
+        .lock_with_tables(LockType::Update, ["scheduler_bindings"]);
+    query.to_owned()
+}
+
+/// Phase 2 re-fetch statement: [`dispatch_select_sql`]'s six FK columns,
+/// no lock, no `deleted_at` filter.
+pub fn dispatch_select_stmt(binding_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("scheduler_bindings", "id"))
+        .column(("scheduler_bindings", "scheduler_id"))
+        .column(("scheduler_bindings", "project_id"))
+        .column(("scheduler_bindings", "workspace_id"))
+        .column(("scheduler_bindings", "actor_id"))
+        .column(("scheduler_bindings", "pod_id"))
+        .from("scheduler_bindings")
+        .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id));
+    query.to_owned()
+}
+
+/// Phase 3 re-acquire statement: [`reacquire_select_sql`]'s pk existence
+/// under `FOR UPDATE OF scheduler_bindings`, no `deleted_at` filter.
+pub fn reacquire_select_stmt(binding_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("scheduler_bindings", "id"))
+        .from("scheduler_bindings")
+        .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id))
+        .lock_with_tables(LockType::Update, ["scheduler_bindings"]);
+    query.to_owned()
+}
+
 /// One phase-1 claim row: the binding's RRULE bundle and runtime state plus
 /// the joined `scheduler.is_enabled` and `last_run.status`.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct ClaimRow {
     pub id: Uuid,
     pub enabled: bool,
@@ -360,7 +554,7 @@ pub struct ClaimRow {
 
 /// The re-fetched binding for dispatch: exactly the FK values the dispatcher
 /// copies onto the `AgentRun` (`scheduler.py:213-214`).
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct DispatchRow {
     pub id: Uuid,
     pub scheduler_id: Uuid,
@@ -401,6 +595,34 @@ impl From<DispatchRow> for BindingForDispatch {
     }
 }
 
+fn claim_row_from(row: &sea_orm::QueryResult) -> Result<ClaimRow, sea_orm::DbErr> {
+    Ok(ClaimRow {
+        id: row.try_get::<Uuid>("", "id")?,
+        enabled: row.try_get::<bool>("", "enabled")?,
+        dtstart: row.try_get::<DateTime<Utc>>("", "dtstart")?,
+        tzid: row.try_get::<String>("", "tzid")?,
+        rrule: row.try_get::<String>("", "rrule")?,
+        rdates: row.try_get::<Value>("", "rdates")?,
+        exdates: row.try_get::<Value>("", "exdates")?,
+        next_run_at: row.try_get::<Option<DateTime<Utc>>>("", "next_run_at")?,
+        last_run_id: row.try_get::<Option<Uuid>>("", "last_run_id")?,
+        last_error: row.try_get::<String>("", "last_error")?,
+        scheduler_is_enabled: row.try_get::<bool>("", "scheduler_is_enabled")?,
+        last_run_status: row.try_get::<Option<String>>("", "last_run_status")?,
+    })
+}
+
+fn dispatch_row_from(row: &sea_orm::QueryResult) -> Result<DispatchRow, sea_orm::DbErr> {
+    Ok(DispatchRow {
+        id: row.try_get::<Uuid>("", "id")?,
+        scheduler_id: row.try_get::<Uuid>("", "scheduler_id")?,
+        project_id: row.try_get::<Option<Uuid>>("", "project_id")?,
+        workspace_id: row.try_get::<Uuid>("", "workspace_id")?,
+        actor_id: row.try_get::<Option<Uuid>>("", "actor_id")?,
+        pod_id: row.try_get::<Option<Uuid>>("", "pod_id")?,
+    })
+}
+
 /// A run the dispatcher produced: the id, terminal-or-not status, and the
 /// `error` text surfaced on `last_error` when the run FAILED.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,24 +659,65 @@ pub type SchedulerDispatch = Arc<
 // Phases
 // ---------------------------------------------------------------------------
 
+/// What the claim does with the expanded RRULE bundle
+/// (`scheduler.py`, the `next_fire_with_error` branches of phase 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimDecision {
+    /// Parse error: the bad-RRULE disable row.
+    BadRrule,
+    /// Clean parse, no occurrence after now, and none claimed either
+    /// (`next_run_at` is NULL — e.g. a bundle created entirely in the past):
+    /// disable quietly with an empty `last_error`.
+    CompleteQuietly,
+    /// Advance `next_run_at` to `next` and dispatch the claimed occurrence.
+    /// `series_completed` (`next` is `None`) marks that occurrence as the
+    /// FINAL one of a finite series (or a single-shot's `dtstart`): phase 3a
+    /// disables the binding after a successful dispatch.
+    Advance {
+        next: Option<DateTime<Utc>>,
+        series_completed: bool,
+    },
+}
+
+/// Decide the claim from the expansion result and the stored cursor.
+/// Only reached once the `next_run_at > now` race guard has passed, so a
+/// non-NULL `next_run_at` here is a claimed, due occurrence.
+pub fn claim_decision(
+    expanded: &Result<Option<DateTime<Utc>>, String>,
+    next_run_at: Option<DateTime<Utc>>,
+) -> ClaimDecision {
+    match expanded {
+        Err(_) => ClaimDecision::BadRrule,
+        Ok(None) if next_run_at.is_none() => ClaimDecision::CompleteQuietly,
+        Ok(next) => ClaimDecision::Advance {
+            next: *next,
+            series_completed: next.is_none(),
+        },
+    }
+}
+
 /// What phase 1 decided inside its commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase1 {
     /// Missing, disabled, scheduler-disabled, future `next_run_at`,
-    /// in-flight, or bad-RRULE row: nothing to dispatch. (The bad-RRULE
-    /// branch commits its disable row first.)
+    /// in-flight, bad-RRULE or quietly-completed row: nothing to dispatch.
+    /// (The bad-RRULE and completion branches commit their row first.)
     Skipped,
     /// Claimed and advanced: the pre-claim cursor travels to phase 3b so a
     /// dispatch failure can restore it.
+    /// `series_completed` travels to phase 3a, which disables the binding
+    /// after dispatching the series' final occurrence.
     Claimed {
         binding: Uuid,
         prev_next_run_at: Option<DateTime<Utc>>,
+        series_completed: bool,
     },
 }
 
 /// Phase 1: claim under SFU and advance `next_run_at` (`scheduler.py:152-205`).
 ///
-/// Commits before returning whenever it wrote (bad-RRULE disable, advance);
+/// Commits before returning whenever it wrote (bad-RRULE disable, quiet
+/// completion, advance);
 /// pure skips return with nothing pending so the dropped transaction rolls
 /// back an empty write set — observably identical to Python's early `False`
 /// returns inside `transaction.atomic()`.
@@ -463,11 +726,15 @@ pub async fn phase1_claim(
     binding_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<Phase1, FireError> {
+    use pidash_db::entity::scheduler_bindings;
     let mut tx = pool.begin().await?;
-    let claim: Option<ClaimRow> = sqlx::query_as(claim_select_sql())
-        .bind(binding_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let claim: Option<ClaimRow> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let found = conn
+            .query_one(DbBackend::Postgres.build(&claim_select_stmt(*binding_id)))
+            .await?;
+        found.as_ref().map(claim_row_from).transpose()?
+    };
     let Some(row) = claim else {
         return Ok(Phase1::Skipped);
     };
@@ -505,7 +772,7 @@ pub async fn phase1_claim(
     } else {
         row.tzid.as_str()
     };
-    let next = next_fire_from_rrule(
+    let expanded = next_fire_with_error(
         row.dtstart,
         row.rrule.as_str(),
         tzid,
@@ -513,35 +780,83 @@ pub async fn phase1_claim(
         &coerce_iso_datetimes(&row.exdates),
         *now,
     );
-    match next {
-        None => {
+    match claim_decision(&expanded, row.next_run_at) {
+        ClaimDecision::BadRrule => {
             // Bad RRULE bundle: record the error and disable the binding so
             // the scanner stops re-attempting every minute; recovery is the
             // API edit endpoint, which validates the RRULE on PATCH
             // (`scheduler.py:183-196`).
             let message = bad_rrule_error(&row.dtstart, &row.rrule);
-            sqlx::query(bad_rrule_update_sql())
-                .bind(&message)
-                .bind(Utc::now())
-                .bind(row.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                scheduler_bindings::Entity::update_many()
+                    .col_expr(scheduler_bindings::Column::LastError, Expr::value(message))
+                    .col_expr(scheduler_bindings::Column::Enabled, Expr::value(false))
+                    .col_expr(
+                        scheduler_bindings::Column::NextRunAt,
+                        Expr::value(Option::<DateTime<Utc>>::None),
+                    )
+                    .col_expr(
+                        scheduler_bindings::Column::UpdatedAt,
+                        Expr::value(Utc::now()),
+                    )
+                    .filter(scheduler_bindings::Column::Id.eq(row.id))
+                    .exec(&conn)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(Phase1::Skipped)
         }
-        Some(advanced) => {
+        ClaimDecision::CompleteQuietly => {
+            // A clean parse with nothing left is a finished series, not an
+            // error: disable without a `last_error` so the UI can badge
+            // "Completed" rather than implying a misconfiguration.
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                scheduler_bindings::Entity::update_many()
+                    .col_expr(
+                        scheduler_bindings::Column::LastError,
+                        Expr::value(String::new()),
+                    )
+                    .col_expr(scheduler_bindings::Column::Enabled, Expr::value(false))
+                    .col_expr(
+                        scheduler_bindings::Column::UpdatedAt,
+                        Expr::value(Utc::now()),
+                    )
+                    .filter(scheduler_bindings::Column::Id.eq(row.id))
+                    .exec(&conn)
+                    .await?;
+            }
+            tx.commit().await?;
+            tracing::info!(
+                binding = %row.id,
+                "scheduler.fire: series completed (nothing due); disabled quietly"
+            );
+            Ok(Phase1::Skipped)
+        }
+        ClaimDecision::Advance {
+            next: advanced,
+            series_completed,
+        } => {
             let cleared = advanced_last_error(&row.last_error);
-            sqlx::query(advance_update_sql())
-                .bind(advanced)
-                .bind(&cleared)
-                .bind(Utc::now())
-                .bind(row.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                scheduler_bindings::Entity::update_many()
+                    .col_expr(scheduler_bindings::Column::NextRunAt, Expr::value(advanced))
+                    .col_expr(scheduler_bindings::Column::LastError, Expr::value(cleared))
+                    .col_expr(
+                        scheduler_bindings::Column::UpdatedAt,
+                        Expr::value(Utc::now()),
+                    )
+                    .filter(scheduler_bindings::Column::Id.eq(row.id))
+                    .exec(&conn)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(Phase1::Claimed {
                 binding: row.id,
                 prev_next_run_at: row.next_run_at,
+                series_completed,
             })
         }
     }
@@ -554,37 +869,48 @@ pub async fn phase1_claim(
 /// cleared for healthy runs. Returns `True` regardless of the run's terminal
 /// status — the tick is recorded and `next_run_at` stays advanced. A binding
 /// deleted between phases keeps its advance (nothing to point at), still
-/// returning `True`.
+/// returning `True`. When `series_completed`, that dispatch was the series'
+/// final occurrence and the same write disables the binding quietly.
 pub async fn phase3a_record_run(
     pool: &PgPool,
     binding_id: &Uuid,
     run: &DispatchRun,
+    series_completed: bool,
 ) -> Result<(), FireError> {
+    use pidash_db::entity::scheduler_bindings;
     let failed = run.status == FAILED_RUN_STATUS;
     let mut tx = pool.begin().await?;
-    let target: Option<(Uuid,)> = sqlx::query_as(reacquire_select_sql())
-        .bind(binding_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let target = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        conn.query_one(DbBackend::Postgres.build(&reacquire_select_stmt(*binding_id)))
+            .await?
+    };
     if target.is_some() {
         let message = if failed {
             prompt_build_error(&run.error)
         } else {
             String::new()
         };
-        sqlx::query(pointer_update_sql())
-            .bind(run.id)
-            .bind(&message)
-            .bind(Utc::now())
-            .bind(binding_id)
-            .execute(&mut *tx)
-            .await?;
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let mut update = scheduler_bindings::Entity::update_many()
+            .col_expr(scheduler_bindings::Column::LastRunId, Expr::value(run.id))
+            .col_expr(scheduler_bindings::Column::LastError, Expr::value(message))
+            .col_expr(
+                scheduler_bindings::Column::UpdatedAt,
+                Expr::value(Utc::now()),
+            )
+            .filter(scheduler_bindings::Column::Id.eq(*binding_id));
+        if series_completed {
+            update = update.col_expr(scheduler_bindings::Column::Enabled, Expr::value(false));
+        }
+        update.exec(&conn).await?;
     }
     tx.commit().await?;
     tracing::info!(
         run = %run.id,
         binding = %binding_id,
         failed = failed,
+        completed = series_completed,
         "scheduler.fire: dispatched"
     );
     Ok(())
@@ -599,19 +925,28 @@ pub async fn phase3b_rollback(
     prev_next_run_at: Option<DateTime<Utc>>,
     fail_reason: Option<&str>,
 ) -> Result<(), FireError> {
+    use pidash_db::entity::scheduler_bindings;
     let mut tx = pool.begin().await?;
-    let target: Option<(Uuid,)> = sqlx::query_as(reacquire_select_sql())
-        .bind(binding_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let target = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        conn.query_one(DbBackend::Postgres.build(&reacquire_select_stmt(*binding_id)))
+            .await?
+    };
     if target.is_some() {
         let message = rollback_error(fail_reason);
-        sqlx::query(rollback_update_sql())
-            .bind(prev_next_run_at)
-            .bind(&message)
-            .bind(Utc::now())
-            .bind(binding_id)
-            .execute(&mut *tx)
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        scheduler_bindings::Entity::update_many()
+            .col_expr(
+                scheduler_bindings::Column::NextRunAt,
+                Expr::value(prev_next_run_at),
+            )
+            .col_expr(scheduler_bindings::Column::LastError, Expr::value(message))
+            .col_expr(
+                scheduler_bindings::Column::UpdatedAt,
+                Expr::value(Utc::now()),
+            )
+            .filter(scheduler_bindings::Column::Id.eq(*binding_id))
+            .exec(&conn)
             .await?;
     }
     tx.commit().await?;
@@ -640,6 +975,7 @@ pub async fn fire_scheduler_binding(
     let Phase1::Claimed {
         binding,
         prev_next_run_at,
+        series_completed,
     } = phase1_claim(pool, binding_id, now).await?
     else {
         return Ok(false);
@@ -648,10 +984,13 @@ pub async fn fire_scheduler_binding(
     // Phase 2 runs outside the claim transaction: holding the row lock across
     // the dispatcher (which registers `transaction.on_commit(drain_pod_by_id)`)
     // would break pod drain (`scheduler.py:207-211`).
-    let target: Option<DispatchRow> = sqlx::query_as(dispatch_select_sql())
-        .bind(binding)
-        .fetch_optional(pool)
-        .await?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let target = db
+        .query_one(DbBackend::Postgres.build(&dispatch_select_stmt(binding)))
+        .await?
+        .as_ref()
+        .map(dispatch_row_from)
+        .transpose()?;
     let Some(target) = target else {
         // Deleted between phases — nothing to roll back to.
         return Ok(false);
@@ -663,7 +1002,7 @@ pub async fn fire_scheduler_binding(
 
     match outcome.run {
         Some(run) => {
-            phase3a_record_run(pool, &binding, &run).await?;
+            phase3a_record_run(pool, &binding, &run, series_completed).await?;
             Ok(true)
         }
         None => {
@@ -966,6 +1305,50 @@ mod tests {
         assert!(coerce_iso_datetimes(&json!({})).is_empty());
     }
 
+    // Offsets with seconds (`utils/iso_datetime.py:19-33` reads them with
+    // `datetime.fromisoformat`): both backends store `parsed.isoformat()`,
+    // and Python 3.12 renders `:SS[.ffffff]` in the offset whenever they
+    // are non-zero, so stored rdates/exdates legitimately carry them
+    // (PIDASHCONV-1302). `fromisoformat` sums the offset fields without
+    // range-checking them, truncates a sub-second tail past 6 digits, and
+    // rejects only totals at or past 24 hours (`ValueError` → skipped).
+    #[test]
+    fn coerce_iso_datetimes_accepts_offset_seconds() {
+        let raw = json!([
+            "2026-11-01T10:00:00+05:30:15",
+            "2026-11-01T10:00:00+05:30:15.500000",
+            "2026-11-01T15:30:15-05:30:15",
+            "2026-11-01 10:00:00+05:30:15",
+            "2026-11-01T10:00:00+05:30:15.5000009",
+            "2026-11-01T10:00:00+05:30:60",
+        ]);
+        let out = coerce_iso_datetimes(&raw);
+        let second = Utc.with_ymd_and_hms(2026, 11, 1, 4, 29, 45).unwrap();
+        let micro = Utc.with_ymd_and_hms(2026, 11, 1, 4, 29, 44).unwrap()
+            + chrono::Duration::microseconds(500_000);
+        assert_eq!(
+            out,
+            vec![
+                second,
+                micro,
+                Utc.with_ymd_and_hms(2026, 11, 1, 21, 0, 30).unwrap(),
+                second,
+                micro,
+                Utc.with_ymd_and_hms(2026, 11, 1, 4, 29, 0).unwrap(),
+            ]
+        );
+        // A 24-hour-or-more offset is a `ValueError` in `fromisoformat`,
+        // so it stays skipped — as do malformed tails.
+        let skipped = json!([
+            "2026-11-01T10:00:00+24:00:15",
+            "2026-11-01T10:00:00-24:00:15",
+            "2026-11-01T10:00:00+05:30:1",
+            "2026-11-01T10:00:00+05:30:15.",
+            "2026-11-01T10:00:00+5:30:15",
+        ]);
+        assert!(coerce_iso_datetimes(&skipped).is_empty());
+    }
+
     fn parse(sql: &str) -> sqlparser::ast::Statement {
         let mut stmts =
             sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
@@ -1052,6 +1435,183 @@ mod tests {
                 "missing {fragment} in:\n{dispatch}"
             );
         }
+    }
+
+    // Parse error vs exhausted series (PDASHOSS01-240): only a parse error
+    // is the bad-RRULE row; a clean parse with nothing left either
+    // completes quietly (no occurrence claimed) or dispatches the claimed
+    // final occurrence and completes after it.
+    #[test]
+    fn claim_decision_tells_exhausted_from_invalid() {
+        let due = Utc.with_ymd_and_hms(2026, 9, 28, 11, 59, 55).unwrap();
+        let next = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        assert_eq!(
+            claim_decision(&Err("bad".to_owned()), Some(due)),
+            ClaimDecision::BadRrule
+        );
+        assert_eq!(
+            claim_decision(&Err("bad".to_owned()), None),
+            ClaimDecision::BadRrule
+        );
+        assert_eq!(
+            claim_decision(&Ok(None), None),
+            ClaimDecision::CompleteQuietly
+        );
+        assert_eq!(
+            claim_decision(&Ok(None), Some(due)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&Ok(Some(next)), Some(due)),
+            ClaimDecision::Advance {
+                next: Some(next),
+                series_completed: false
+            }
+        );
+        assert_eq!(
+            claim_decision(&Ok(Some(next)), None),
+            ClaimDecision::Advance {
+                next: Some(next),
+                series_completed: false
+            }
+        );
+    }
+
+    // End to end through the real expansion: a `COUNT=2` minutely series
+    // whose final occurrence is claimed dispatches it and completes; one
+    // tick later (cursor cleared) it completes quietly; a single-shot fires
+    // once at `dtstart`; garbage is still the bad-RRULE row.
+    #[test]
+    fn claim_decision_over_finite_series_and_single_shot() {
+        let dtstart = Utc.with_ymd_and_hms(2026, 9, 28, 11, 58, 0).unwrap();
+        let last = Utc.with_ymd_and_hms(2026, 9, 28, 11, 59, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 9, 28, 11, 59, 5).unwrap();
+        let expand = |rrule: &str| next_fire_with_error(dtstart, rrule, "UTC", &[], &[], now);
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;COUNT=2"), Some(last)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;COUNT=2"), None),
+            ClaimDecision::CompleteQuietly
+        );
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;UNTIL=20260928T115900Z"), Some(last)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&expand(""), Some(dtstart)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&expand("this is not a real rrule"), Some(last)),
+            ClaimDecision::BadRrule
+        );
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;COUNT=5"), Some(last)),
+            ClaimDecision::Advance {
+                next: Some(Utc.with_ymd_and_hms(2026, 9, 28, 12, 0, 0).unwrap()),
+                series_completed: false
+            }
+        );
+    }
+
+    // The completion writes: quiet completion leaves `next_run_at` alone
+    // and empties `last_error`; the final-occurrence pointer write adds the
+    // disable to the plain pointer write's column set.
+    #[test]
+    fn completion_sqls_pin_column_sets() {
+        let quiet = complete_quietly_update_sql().to_ascii_lowercase();
+        for fragment in ["last_error = $1", "enabled = false", "updated_at = $2"] {
+            assert!(quiet.contains(fragment), "missing {fragment} in:\n{quiet}");
+        }
+        assert!(!quiet.contains("next_run_at"));
+        let pointer = pointer_complete_update_sql().to_ascii_lowercase();
+        for fragment in [
+            "last_run_id = $1",
+            "last_error = $2",
+            "enabled = false",
+            "updated_at = $3",
+        ] {
+            assert!(
+                pointer.contains(fragment),
+                "missing {fragment} in:\n{pointer}"
+            );
+        }
+        assert!(!pointer.contains("next_run_at"));
+    }
+
+    // SeaORM builders pin the recorded shapes: same joins, guards, lock
+    // and bind positions as the `*_sql` goldens they replace at execution.
+    #[test]
+    fn stmt_builders_pin_claim_dispatch_and_reacquire() {
+        use sea_orm::DbBackend;
+        use sea_query::PostgresQueryBuilder;
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let claim = claim_select_stmt(id).to_string(PostgresQueryBuilder);
+        let lower = claim.to_ascii_lowercase();
+        for fragment in [
+            "from \"scheduler_bindings\"",
+            "inner join \"schedulers\"",
+            "left join \"agent_run\"",
+            "is null",
+            "for update of",
+            "scheduler_bindings",
+        ] {
+            assert!(
+                lower.contains(fragment),
+                "claim missing {fragment}:\n{claim}"
+            );
+        }
+        assert!(claim.contains("scheduler_is_enabled"), "alias:\n{claim}");
+        assert!(claim.contains("last_run_status"), "alias:\n{claim}");
+        assert!(!lower.contains("skip locked"), "no queue lock:\n{claim}");
+        let built = DbBackend::Postgres.build(&claim_select_stmt(id));
+        assert!(built.sql.contains("$1"), "bind:\n{}", built.sql);
+
+        let dispatch = dispatch_select_stmt(id).to_string(PostgresQueryBuilder);
+        let lower = dispatch.to_ascii_lowercase();
+        for column in [
+            "scheduler_bindings",
+            "scheduler_id",
+            "project_id",
+            "workspace_id",
+            "actor_id",
+            "pod_id",
+        ] {
+            assert!(lower.contains(column), "dispatch {column}:\n{dispatch}");
+        }
+        assert!(
+            !lower.contains("for update"),
+            "dispatch unlocked:\n{dispatch}"
+        );
+        assert!(
+            !lower.contains("deleted_at"),
+            "dispatch unscoped:\n{dispatch}"
+        );
+
+        let reacquire = reacquire_select_stmt(id).to_string(PostgresQueryBuilder);
+        let lower = reacquire.to_ascii_lowercase();
+        assert!(
+            lower.contains("for update of"),
+            "reacquire lock:\n{reacquire}"
+        );
+        assert!(
+            !lower.contains("deleted_at"),
+            "reacquire unscoped:\n{reacquire}"
+        );
     }
 
     // The registered task name is the exact Python task name, carried by the

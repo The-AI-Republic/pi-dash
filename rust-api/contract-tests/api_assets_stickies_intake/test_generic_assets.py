@@ -9,6 +9,7 @@ installed runners consume, so it is pinned exactly.
 """
 
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -152,6 +153,32 @@ def test_generic_patch_then_download_shape(org):
     assert "response-content-disposition" in body["asset_url"]
 
 
+def test_generic_download_empty_name_bare_disposition(org):
+    """An empty stored name signs a bare ``inline`` disposition, no ``filename*``.
+
+    ``S3Storage._get_content_disposition`` (``storage.py:115-124``) treats
+    ``""`` as falsy and returns the bare disposition; the v1 generic GET
+    (``asset.py:443-445``) passes ``attributes.get("name")`` straight
+    through. The v1 POST rejects an empty name, so the stored state is
+    seeded directly — it is reachable in production through the app v2
+    asset routes (the PIDASHCONV-1150 twin, which fixed the app_assets
+    copy of this presigner).
+    """
+    asset_id = _upload(org)["asset_id"]
+    _mark_uploaded(org, asset_id)
+    org.conn.execute(
+        "UPDATE file_assets SET attributes = jsonb_set(attributes, '{name}', '\"\"') "
+        "WHERE id = %s",
+        (asset_id,),
+    )
+    r = org.request("GET", f"{_base(org)}{asset_id}/", "admin")
+    assert r.status_code == 200, r.text[:500]
+    disposition = parse_qs(urlparse(r.json()["asset_url"]).query)[
+        "response-content-disposition"
+    ][0]
+    assert disposition == "inline"
+
+
 def test_generic_download_unknown_asset_404(org):
     r = org.request("GET", f"{_base(org)}{uuid.uuid4()}/", "admin")
     assert r.status_code == 404
@@ -242,3 +269,24 @@ def test_generic_upload_container_external_source(org, external_source, spelling
     repeat_body = repeat.json()
     assert repeat_body["message"] == "Asset with same external id and source already exists"
     assert repeat_body["asset_id"] == body["asset_id"]
+
+
+def test_generic_upload_stores_empty_storage_metadata(org):
+    """``POST`` stores ``storage_metadata={}``, not NULL (PIDASHCONV-1719).
+
+    Django ``FileAsset.objects.create`` at ``asset.py:553-563`` omits
+    ``storage_metadata`` so the model default ``JSONField(default=dict,
+    null=True)`` at ``db/models/asset.py:62`` stores ``{}``. The SeaORM
+    rewrite (#2975, ``ffe434e20``) stored ``Set(None)`` (SQL NULL) on Rust
+    while the sibling user-asset POST correctly stores
+    ``Some(json!({}))`` (``asset_user.rs:1147``). Serializers with
+    ``fields="__all__"`` then render ``null`` instead of ``{}`` until
+    the metadata job backfills.
+    """
+    body = _upload(org)
+    (storage_metadata,) = org.conn.execute(
+        "SELECT storage_metadata FROM file_assets WHERE id = %s",
+        (body["asset_id"],),
+    ).fetchone()
+    assert storage_metadata is not None, f"storage_metadata is NULL for {body['asset_id']}"
+    assert storage_metadata == {}

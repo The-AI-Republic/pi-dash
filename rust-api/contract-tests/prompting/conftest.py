@@ -79,6 +79,14 @@ def sweep_prompting_side_rows(conn, workspaces):
             (workspaces,),
         )
         cur.execute(
+            "DELETE FROM issue_assignees WHERE workspace_id = ANY(%s)",
+            (workspaces,),
+        )
+        cur.execute(
+            "DELETE FROM issue_labels WHERE workspace_id = ANY(%s)",
+            (workspaces,),
+        )
+        cur.execute(
             "DELETE FROM issues WHERE workspace_id = ANY(%s)",
             (workspaces,),
         )
@@ -88,6 +96,10 @@ def sweep_prompting_side_rows(conn, workspaces):
         )
         cur.execute(
             "DELETE FROM project_members WHERE workspace_id = ANY(%s)",
+            (workspaces,),
+        )
+        cur.execute(
+            "DELETE FROM labels WHERE workspace_id = ANY(%s)",
             (workspaces,),
         )
         cur.execute(

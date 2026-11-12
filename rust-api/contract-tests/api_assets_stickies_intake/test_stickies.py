@@ -158,3 +158,30 @@ def test_sticky_detail_format_suffix_patch(org):
     assert r.json() == SUFFIX_500
     r = org.request("GET", f"{_base(org)}{created['id']}/", "admin")
     assert r.json()["name"] == "before"
+
+
+# PIDASHCONV-1331: ammonia's default per-tag attributes (align, scope,
+# hreflang, cite, datetime, ...) must be stripped like nh3 does — Django
+# passes ATTRIBUTES as the complete per-tag table, so anything outside it
+# goes. Expected output captured from nh3 0.2.18 via validate_html_content.
+SANITIZER_PROBE_HTML = (
+    '<table><tr><th align="left" scope="col">a</th>'
+    '<td align="right">b</td></tr></table>'
+    '<a href="https://x" hreflang="en">l</a>'
+    '<blockquote cite="https://c">q</blockquote>'
+    '<img src="https://i" align="left">'
+    '<ins datetime="2020">i</ins>'
+)
+SANITIZER_PROBE_CLEAN = (
+    '<table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>'
+    '<a href="https://x" rel="noopener noreferrer">l</a>'
+    '<blockquote>q</blockquote><img src="https://i"><ins>i</ins>'
+)
+
+
+def test_sticky_create_strips_ammonia_default_tag_attributes(org):
+    body = _create(org, name="sanitized", description_html=SANITIZER_PROBE_HTML)
+    assert body["description_html"] == SANITIZER_PROBE_CLEAN
+    r = org.request("GET", f"{_base(org)}{body['id']}/", "admin")
+    assert r.status_code == 200
+    assert r.json()["description_html"] == SANITIZER_PROBE_CLEAN

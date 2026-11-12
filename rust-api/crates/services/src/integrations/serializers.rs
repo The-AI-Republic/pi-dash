@@ -26,12 +26,18 @@ use pidash_types::integrations::RemoteRepository;
 
 /// Django `datetime.isoformat()` for a timezone-aware timestamp.
 ///
-/// Renders `YYYY-MM-DDTHH:MM:SS+00:00`, with fractional seconds iff
-/// nonzero (Postgres timestamps carry microseconds, so six digits, exactly
-/// like Python). `serialize_*` take `Option<DateTime<Utc>>` and render
-/// `None` as `null`, matching `… if x else None`.
+/// Renders `YYYY-MM-DDTHH:MM:SS+00:00`, with exactly six fraction
+/// digits iff the sub-second part is nonzero (chrono `AutoSi` trims
+/// trailing zeros and prints nanos, so this branches `Secs` vs
+/// `Micros` instead. PIDASHCONV-1464). `serialize_*` take
+/// `Option<DateTime<Utc>>` and render `None` as `null`, matching
+/// `… if x else None`.
 pub fn isoformat(moment: &DateTime<Utc>) -> String {
-    moment.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    if moment.timestamp_subsec_micros() == 0 {
+        moment.to_rfc3339_opts(SecondsFormat::Secs, false)
+    } else {
+        moment.to_rfc3339_opts(SecondsFormat::Micros, false)
+    }
 }
 
 /// `serialize_repository` (`services.py:232-245`).
@@ -320,6 +326,25 @@ mod tests {
             last_sync_error: String::new(),
             metadata: json!({"raw_url": "https://github.com/acme/web"}),
         }
+    }
+
+    #[test]
+    fn isoformat_matches_python_isoformat() {
+        // Whole seconds render no fraction; trailing-zero micros keep
+        // six digits; nanosecond in-memory values truncate to
+        // microseconds (PIDASHCONV-1464).
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(isoformat(&whole), "2026-10-22T10:00:05+00:00");
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.12+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(isoformat(&trailing), "2026-10-22T10:00:05.120000+00:00");
+        let nanos = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.123456789+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(isoformat(&nanos), "2026-10-22T10:00:05.123456+00:00");
     }
 
     #[test]

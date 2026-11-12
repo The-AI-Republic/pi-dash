@@ -5,12 +5,8 @@
 name: rust-api-contract
 
 on:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract.yml"
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
 
@@ -20,23 +16,23 @@ concurrency:
 
 jobs:
   collect:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - run: cd rust-api/contract-tests && python -m pytest --collect-only -q
 
   live:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: collect
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - name: Run contract suites against the backend
         env:

@@ -11,7 +11,6 @@ access-token verification, and MachineToken bootstrap.
 from __future__ import annotations
 
 import pytest
-from django.utils import timezone
 
 from pi_dash.runner.models import (
     MachineToken,

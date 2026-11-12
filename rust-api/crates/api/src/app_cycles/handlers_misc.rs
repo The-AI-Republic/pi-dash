@@ -25,9 +25,10 @@
 //! membership resolution), the SQL text for the handler-owned
 //! lookups/writes, the `convert_to_utc` mirror, the snapshot math, and
 //! the row rendering. The request-context plumbing (`Actor`, `Tenant`,
-//! `Membership`, `Denial`, [`actor`], [`resolve_tenant`],
-//! [`load_membership`]) mirrors the D-32 `app_intake` layout so sibling
-//! handler issues (PIDASHCONV-321/323/377/410) can reuse it through
+//! `Membership`, `Denial`, [`actor`], [`resolve_project_id`],
+//! [`load_project_tenant`], [`load_membership`]) mirrors the D-32
+//! `app_intake` layout so sibling handler issues
+//! (PIDASHCONV-321/323/377/410) can reuse it through
 //! `super::handlers_misc` instead of copying it.
 //!
 //! Ported bugs (translate, don't redesign):
@@ -75,15 +76,22 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
+use pidash_db::entity::{project_members, projects, workspace_members, workspaces};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+    RelationTrait,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
+pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -100,8 +108,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// propagated by DRF's exception handler as `NotFound(*exc.args)`
 /// (unresolvable project identifier).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
@@ -218,15 +224,6 @@ pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render pre-serialized JSON bytes as a 200 response body.
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// Render pre-serialized JSON bytes with an explicit status.
 pub fn raw_json_status(status: StatusCode, body: String) -> Response {
     Response::builder()
@@ -336,59 +333,87 @@ fn is_py_strip_ws(ch: char) -> bool {
 
 /// Normalize a non-UUID identifier for the equality lookup
 /// (`db/models/project.py:210`): `str(value).strip().upper()`.
+
+#[derive(Debug, FromQueryResult)]
+struct ProjectIdRow {
+    id: uuid::Uuid,
+}
+#[derive(Debug, FromQueryResult)]
+struct RoleRow {
+    role: i16,
+}
+#[derive(Debug, FromQueryResult)]
+struct TenantRow {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    timezone: String,
+    estimate_id: Option<uuid::Uuid>,
+}
+
 fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
-/// Resolve `slug` + `project_id` the way the view kwargs do:
-/// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
-/// or a workspace-scoped project identifier (upper-cased, like
-/// `Project.save` normalizes it). An unresolvable identifier answers
-/// `Http404("Project not found")` (`db/models/project.py:218`); a missing project row answers the
-/// `ObjectDoesNotExist` branch (which is what `convert_to_utc`'s
-/// `Project.objects.get` raises on the date-check path).
-pub async fn resolve_tenant(
+/// Resolve `slug` + `project_id` to the id the permission gate scopes on,
+/// mirroring `_rewrite_project_kwarg` (`app/views/base.py:49-79`): a UUID
+/// `project_id` is returned untouched with NO row lookup (Django returns
+/// early there, before any project query), an identifier is resolved via
+/// `Project.resolve` (`db/models/project.py:192-220`) — upper-cased like
+/// `Project.save` normalizes it — and an unresolvable identifier answers
+/// `Http404("Project not found")` (`db/models/project.py:218`).
+pub async fn resolve_project_id(
     pool: &PgPool,
     slug: &str,
     project_raw: &str,
-) -> Result<Tenant, Denial> {
+) -> Result<Uuid, Denial> {
     if let Ok(id) = project_raw.parse::<Uuid>() {
-        let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-            r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let Some((project_id, workspace_id, timezone, estimate_id)) = row else {
-            return Err(Denial::NotFound);
-        };
-        return Ok(Tenant {
-            workspace_id,
-            project_id,
-            timezone,
-            estimate_id,
-        });
+        return Ok(id);
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    match row {
-        Some((project_id, workspace_id, timezone, estimate_id)) => Ok(Tenant {
-            workspace_id,
-            project_id,
-            timezone,
-            estimate_id,
-        }),
-        None => Err(Denial::NotFoundDetail),
-    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Identifier.eq(&upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .column(projects::Column::Id)
+        .into_model::<ProjectIdRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|r| r.id).ok_or(Denial::NotFoundDetail)
+}
+
+/// Load the project row facts the downstream view needs (`timezone`,
+/// `estimate_id`) — but only AFTER the permission gate has run, so a
+/// caller without access never learns whether the project exists.
+/// `None` when the row is missing or soft-deleted; each caller decides
+/// what a miss means (date-check 404s on it, transfer reads no estimate).
+pub async fn load_project_tenant(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Option<Tenant>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find_by_id(*project_id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::WorkspaceId,
+            projects::Column::Timezone,
+            projects::Column::EstimateId,
+        ])
+        .into_model::<TenantRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|r| Tenant {
+        workspace_id: r.workspace_id,
+        project_id: r.id,
+        timezone: r.timezone,
+        estimate_id: r.estimate_id,
+    }))
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -405,48 +430,55 @@ pub async fn load_membership(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project_role_row = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(project_members::Column::Role)
+        .into_model::<RoleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_role: Option<i16> = project_role_row.map(|r| r.role);
     // `EXISTS` (never aggregates): an empty membership set reads as
     // `False`, exactly like the Django `.exists()` probes.
-    let workspace_member: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_admin: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_member, workspace_admin) =
-        (workspace_member.is_some(), workspace_admin.is_some());
+    let workspace_member: bool = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        > 0;
+    let workspace_admin: bool = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::Role.eq(20))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        > 0;
     Ok(Membership {
-        project_role: project_role.map(|row| row.0),
+        project_role,
         workspace_member,
         workspace_admin,
     })
@@ -509,18 +541,6 @@ pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
     }
 }
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17-28`):
-/// `WEB_URL` else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
-pub fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
-        .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
-        .ok_or(Denial::ServerError)
-}
-
 /// DRF request-body shape for the three cycle write routes: no key is
 /// list-shaped and no scalar treats a present-but-empty form value as
 /// absent (every route only ever `.get`s a scalar).
@@ -554,16 +574,15 @@ pub fn parse_object_body(headers: &HeaderMap, body: &[u8]) -> Result<Map<String,
         shared_body::NegotiatedBody::Empty => Ok(Map::new()),
         shared_body::NegotiatedBody::JsonText { text, surr } => {
             let value =
-                json_cpython::parse_request_data_spans(text.as_bytes(), &surr).map_err(|fail| {
-                    match fail {
-                        JsonFail::Message(detail) => Denial::BadDetail(format!(
-                            "{}{detail}",
-                            json_cpython::JSON_PARSE_PREFIX
-                        )),
+                json::parse_request_data_spans(text.as_bytes(), &surr).map_err(
+                    |fail| match fail {
+                        JsonFail::Message(detail) => {
+                            Denial::BadDetail(format!("{}{detail}", json::JSON_PARSE_PREFIX))
+                        }
                         JsonFail::Recursion => Denial::ServerError,
-                    }
-                })?;
-            match json_cpython::to_serde_publish(&value) {
+                    },
+                )?;
+            match json::to_serde_publish(&value) {
                 Value::Object(map) => Ok(map),
                 _ => Err(Denial::ServerError),
             }
@@ -685,11 +704,11 @@ pub async fn date_check(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_raw).await {
-        Ok(tenant) => tenant,
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -710,6 +729,14 @@ pub async fn date_check(
         return Denial::BadError("Start date and end date both are required".to_owned())
             .into_response();
     }
+    // After the required check (`base.py:526-530`), `convert_to_utc`
+    // loads the project row (`Project.objects.get(id=project_id)`): a
+    // miss is the `ObjectDoesNotExist` branch -> 404 NOT_FOUND_BODY.
+    let tenant = match load_project_tenant(pool, &project_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
     // `str(...)` of the raw value, exactly like `convert_to_utc(date=str(...))`.
     let start_raw = py_str(data.get("start_date"));
     let end_raw = py_str(data.get("end_date"));
@@ -730,19 +757,11 @@ pub async fn date_check(
         Ok(exclude) => exclude,
         Err(denial) => return denial.into_response(),
     };
-    let overlap = match overlap_exists(
-        pool,
-        &slug,
-        &tenant.project_id,
-        &start_date,
-        &end_date,
-        exclude,
-    )
-    .await
-    {
-        Ok(overlap) => overlap,
-        Err(denial) => return denial.into_response(),
-    };
+    let overlap =
+        match overlap_exists(pool, &slug, &project_id, &start_date, &end_date, exclude).await {
+            Ok(overlap) => overlap,
+            Err(denial) => return denial.into_response(),
+        };
     if overlap {
         raw_json_response(DATE_CHECK_CONFLICT_BODY.to_owned())
     } else {
@@ -882,6 +901,7 @@ pub async fn overlap_exists(
     end_date: &DateTime<Utc>,
     exclude: Option<Uuid>,
 ) -> Result<bool, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"SELECT c.id FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id
@@ -908,9 +928,8 @@ pub async fn overlap_exists(
 // `transfer_cycle_issues`, `utils/cycle_transfer_issues.py:36-479`)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default;
-/// also pinned by the D-32 intake `services::app_intake::tasks`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `type` kwarg of the transfer emit (`cycle_transfer_issues.py:463`).
 pub const TRANSFER_ACTIVITY_TYPE: &str = "cycle.activity.created";
 
@@ -919,9 +938,19 @@ pub async fn transfer_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404
+    // via `parse_id` below (out of scope here).
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -934,11 +963,11 @@ pub async fn transfer_issues(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_raw).await {
-        Ok(tenant) => tenant,
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -949,7 +978,7 @@ pub async fn transfer_issues(
     if let Err(denial) = check_gate(&gate, &slug, &membership) {
         return denial.into_response();
     }
-    let data = match parse_object_body(&headers, &body) {
+    let data = match parse_object_body(&parts.headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -966,11 +995,20 @@ pub async fn transfer_issues(
         NewCycleId::Id(id) => id,
         NewCycleId::InvalidDetail => return Denial::InvalidDetail.into_response(),
     };
+    // `transfer_cycle_issues` reads only the project's estimate link
+    // (`cycle_transfer_issues.py:152-157`), a filter that yields no rows for
+    // a missing project — so a miss is `None`, never a 404 beyond the gate.
+    let estimate_id = match load_project_tenant(pool, &project_id).await {
+        Ok(Some(tenant)) => tenant.estimate_id,
+        Ok(None) => None,
+        Err(denial) => return denial.into_response(),
+    };
     match run_transfer(
         &state,
         pool,
         &slug,
-        &tenant,
+        &project_id,
+        estimate_id,
         &actor,
         &cycle_id,
         &new_cycle_id,
@@ -1045,24 +1083,27 @@ pub struct OldCycleCounts {
 }
 
 /// The `transfer_cycle_issues` sequence after the endpoint guards.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_transfer(
     state: &AppState,
     pool: &PgPool,
     slug: &str,
-    tenant: &Tenant,
+    project_id: &Uuid,
+    estimate_id: Option<Uuid>,
     actor: &Actor,
     cycle_id: &Uuid,
     new_cycle_id: &Uuid,
 ) -> Result<(), Denial> {
     // The destination lookup (`.first()`; `None.end_date` is the ported
     // 500 — BUG-transfer-unknown-target-500, never guarded).
+    // raw-sql: complex interval overlap probe with OR of three date ranges; builder OR nesting would duplicate Postgres semantics and need Expr::cust for NULL three-valued logic
     let new_cycle: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"SELECT c.id, c.end_date FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id
            WHERE w.slug = $1 AND c.project_id = $2 AND c.id = $3 AND c.deleted_at IS NULL"#,
     )
     .bind(slug)
-    .bind(tenant.project_id)
+    .bind(project_id)
     .bind(new_cycle_id)
     .fetch_optional(pool)
     .await
@@ -1079,26 +1120,25 @@ pub async fn run_transfer(
     }
     // Old-cycle counts (`:72-143`); a missing source answers 400, not
     // 404 (BUG-transfer-source-400).
-    let Some(counts) = old_cycle_counts(pool, slug, &tenant.project_id, cycle_id).await? else {
+    let Some(counts) = old_cycle_counts(pool, slug, project_id, cycle_id).await? else {
         return Err(Denial::BadError(
             pidash_services::app_cycles::queries::SOURCE_CYCLE_MISSING_ERROR.to_owned(),
         ));
     };
     // Points estimates only when the project links a points estimate
     // (`:152-157`).
-    let use_estimates = project_uses_points(pool, tenant).await?;
+    let use_estimates = project_uses_points(pool, estimate_id).await?;
     let mut assignee_estimates: Vec<EstimateRow> = Vec::new();
     let mut label_estimates: Vec<EstimateRow> = Vec::new();
     let mut points_chart: Value = Value::Object(Map::new());
     if use_estimates {
         assignee_estimates =
-            assignee_estimate_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
-        label_estimates =
-            label_estimate_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
+            assignee_estimate_distribution(pool, slug, project_id, cycle_id).await?;
+        label_estimates = label_estimate_distribution(pool, slug, project_id, cycle_id).await?;
         points_chart = burndown_points_value(
             pool,
             slug,
-            &tenant.project_id,
+            project_id,
             cycle_id,
             counts.start_date,
             counts.end_date,
@@ -1106,12 +1146,12 @@ pub async fn run_transfer(
         )
         .await?;
     }
-    let assignees = assignee_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
-    let labels = label_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
+    let assignees = assignee_distribution(pool, slug, project_id, cycle_id).await?;
+    let labels = label_distribution(pool, slug, project_id, cycle_id).await?;
     let chart = burndown_issues_value(
         pool,
         slug,
-        &tenant.project_id,
+        project_id,
         cycle_id,
         counts.total,
         counts.start_date,
@@ -1130,6 +1170,7 @@ pub async fn run_transfer(
         &assignee_estimates,
         &points_chart,
     );
+    // raw-sql: UPDATE progress_snapshot JSON column; JSON typing needs Expr::cust
     sqlx::query(r#"UPDATE cycles SET progress_snapshot = $1 WHERE id = $2"#)
         .bind(&snapshot)
         .bind(cycle_id)
@@ -1138,9 +1179,10 @@ pub async fn run_transfer(
         .map_err(|_| Denial::ServerError)?;
     // Move the open-group bridges (`:435-459`, `bulk_update(["cycle_id"],
     // batch_size=100)` — one UPDATE lands the same rows).
-    let moved = movable_bridges(pool, slug, &tenant.project_id, cycle_id).await?;
+    let moved = movable_bridges(pool, slug, project_id, cycle_id).await?;
     if !moved.is_empty() {
         let ids: Vec<Uuid> = moved.iter().map(|bridge| bridge.bridge_id).collect();
+        // raw-sql: bulk update with ANY(uuid[]) array; ANY not buildable without Expr::cust
         sqlx::query(r#"UPDATE cycle_issues SET cycle_id = $1 WHERE id = ANY($2)"#)
             .bind(new_cycle_id)
             .bind(&ids)
@@ -1153,7 +1195,7 @@ pub async fn run_transfer(
     // intake pattern); `requested_data` is ALWAYS `{"cycles_list": []}`
     // here, `issue_id` is null, `epoch` is `int(timezone.now()
     // .timestamp())`.
-    let origin = request_origin(state)?;
+    let origin = super::activity_origin(state).ok_or(Denial::ServerError)?;
     let updated: Vec<Value> = moved
         .iter()
         .map(|bridge| {
@@ -1191,7 +1233,7 @@ pub async fn run_transfer(
     kwargs.insert("issue_id".to_owned(), Value::Null);
     kwargs.insert(
         "project_id".to_owned(),
-        Value::String(tenant.project_id.to_string()),
+        Value::String(project_id.to_string()),
     );
     kwargs.insert(
         "current_instance".to_owned(),
@@ -1222,6 +1264,7 @@ pub async fn old_cycle_counts(
     cycle_id: &Uuid,
 ) -> Result<Option<OldCycleCounts>, Denial> {
     let row: Option<OldCycleCountsRow> =
+        // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
         sqlx::query_as(
             r#"SELECT c.id, c.start_date, c.end_date,
               COUNT(ci.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE AND ci.deleted_at IS NULL AND i.deleted_at IS NULL),
@@ -1262,11 +1305,12 @@ pub async fn old_cycle_counts(
 
 /// Points-estimate check (`:152-157`): the project links an estimate of
 /// type `points`.
-pub async fn project_uses_points(pool: &PgPool, tenant: &Tenant) -> Result<bool, Denial> {
-    let Some(estimate_id) = tenant.estimate_id else {
+pub async fn project_uses_points(pool: &PgPool, estimate_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(estimate_id) = estimate_id else {
         return Ok(false);
     };
     let row: Option<(String,)> =
+        // raw-sql: estimate type probe simple EXISTS; kept as raw to preserve query count, SeaORM count equivalent but simple
         sqlx::query_as(r#"SELECT e.type FROM estimates e WHERE e.id = $1"#)
             .bind(estimate_id)
             .fetch_optional(pool)
@@ -1299,6 +1343,20 @@ pub struct EstimateRow {
 /// when `avatar_asset` is set, else the raw `avatar` field, else NULL.
 const AVATAR_URL_CASE: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL THEN CONCAT('/api/assets/v2/static/', u.avatar_asset_id, '/') WHEN u.avatar_asset_id IS NULL THEN u.avatar ELSE NULL END";
 
+/// `IssueManager.issue_objects` scope (`issue.py:95-104`) shared by the
+/// transfer snapshot queries — the project is not archived and the issue
+/// is not deleted / archived / draft or in a triage-group state. Split
+/// into a join half and a where half because SQL joins precede the WHERE
+/// clause; each query inserts its own distribution joins between them.
+/// The triage predicate is `IS DISTINCT FROM` so issues with no state
+/// survive, matching `.exclude(state__group="triage")` (Django emits
+/// `NOT (states.group = 'triage' AND states.group IS NOT NULL)`).
+const TRANSFER_SCOPE_JOIN: &str =
+    "JOIN projects p ON p.id = i.project_id AND p.archived_at IS NULL \
+     LEFT JOIN states s ON s.id = i.state_id";
+const TRANSFER_SCOPE_WHERE: &str = "i.deleted_at IS NULL AND i.archived_at IS NULL \
+     AND i.is_draft = FALSE AND s.\"group\" IS DISTINCT FROM 'triage'";
+
 /// Assignee issue distribution (`:286-329`): this cycle's live bridges,
 /// tenant-scoped, grouped by assignee (`order_by("display_name")`;
 /// unassigned issues form the NULL group via the LEFT JOIN, exactly
@@ -1309,6 +1367,7 @@ pub async fn assignee_distribution(
     project_id: &Uuid,
     cycle_id: &Uuid,
 ) -> Result<Vec<DistributionRow>, Denial> {
+    // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
     let rows: Vec<DistributionRowTuple> = sqlx::query_as(&format!(
         r#"SELECT u.display_name, u.id, {AVATAR_URL_CASE},
               COUNT(i.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE),
@@ -1317,9 +1376,10 @@ pub async fn assignee_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN issue_assignees ia ON ia.issue_id = i.id
            LEFT JOIN users u ON u.id = ia.assignee_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY u.display_name, u.id, u.avatar_asset_id, u.avatar
            ORDER BY u.display_name"#
     ))
@@ -1353,7 +1413,8 @@ pub async fn label_distribution(
     cycle_id: &Uuid,
 ) -> Result<Vec<DistributionRow>, Denial> {
     let rows: Vec<LabelRowTuple> =
-        sqlx::query_as(
+        // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
+        sqlx::query_as(&format!(
             r#"SELECT l.name, l.color, l.id,
               COUNT(i.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE),
               COUNT(i.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE),
@@ -1361,12 +1422,13 @@ pub async fn label_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN issue_labels il ON il.issue_id = i.id
            LEFT JOIN labels l ON l.id = il.label_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY l.name, l.color, l.id
-           ORDER BY l.name"#,
-    )
+           ORDER BY l.name"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1434,6 +1496,7 @@ async fn estimate_distribution(
         "l.name, l.id, l.color"
     };
     let rows: Vec<EstimateRowTuple> =
+        // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
         sqlx::query_as(&format!(
             r#"SELECT {names},
               SUM(CAST(ep.value AS DOUBLE PRECISION)),
@@ -1442,9 +1505,10 @@ async fn estimate_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            {join}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY {group}
            ORDER BY {order}"#
         ))
@@ -1482,6 +1546,7 @@ pub async fn movable_bridges(
     project_id: &Uuid,
     cycle_id: &Uuid,
 ) -> Result<Vec<MovableBridge>, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         r#"SELECT ci.id, ci.issue_id FROM cycle_issues ci
            JOIN issues i ON i.id = ci.issue_id
@@ -1536,14 +1601,16 @@ pub async fn burndown_issues_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(
+    // raw-sql: AT TIME ZONE $4 truncation with GROUP BY date; AT TIME ZONE param not buildable via sea-query
+    let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, COUNT(i.id)
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
-           GROUP BY day ORDER BY day"#,
-    )
+           {TRANSFER_SCOPE_JOIN}
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
+           GROUP BY day ORDER BY day"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1577,15 +1644,17 @@ pub async fn burndown_points_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let total: Option<f64> = sqlx::query_scalar(
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
+    let total: Option<f64> = sqlx::query_scalar(&format!(
         r#"SELECT SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
-             AND ep.id IS NOT NULL"#,
-    )
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
+             AND ep.id IS NOT NULL"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1593,16 +1662,18 @@ pub async fn burndown_points_value(
     .await
     .map_err(|_| Denial::ServerError)?
     .unwrap_or(None);
-    let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(
+    // raw-sql: AT TIME ZONE $4 truncation with GROUP BY date; AT TIME ZONE param not buildable via sea-query
+    let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
              AND ep.id IS NOT NULL
-           GROUP BY day ORDER BY day"#,
-    )
+           GROUP BY day ORDER BY day"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -2005,6 +2076,7 @@ pub async fn fetch_user_properties(
     cycle_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Option<UserPropertiesRow>, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let row: Option<UserPropertiesRowTuple> = sqlx::query_as(&format!(
         "{USER_PROPERTIES_SELECT} WHERE w.slug = $1 AND cup.project_id = $2 AND cup.cycle_id = $3 AND cup.user_id = $4 AND cup.deleted_at IS NULL"
     ))
@@ -2078,28 +2150,27 @@ pub async fn user_properties_context(
     let pool = pool_of(state)
         .map_err(|denial| denial.into_response())?
         .clone();
-    // The `workspace__slug` lookup: an unknown slug answers the
-    // `ObjectDoesNotExist` branch, exactly like the view filters.
-    let workspace: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if workspace.is_none() {
-        return Err(Denial::NotFound.into_response());
-    }
     let cycle_id = parse_id(&cycle_raw)?;
-    let tenant = resolve_tenant(&pool, &slug, &project_raw)
+    // `_rewrite_project_kwarg` returns early for a UUID `project_id` (no row
+    // lookup) and answers `Project not found` for an unresolvable identifier;
+    // the gate then runs, so an unknown workspace slug (or a project the
+    // caller cannot see) is 403 before any project/workspace row is read.
+    let project_id = resolve_project_id(&pool, &slug, &project_raw)
         .await
         .map_err(|denial| denial.into_response())?;
-    let membership = load_membership(&pool, &slug, &tenant.project_id, &actor.id)
+    let membership = load_membership(&pool, &slug, &project_id, &actor.id)
         .await
         .map_err(|denial| denial.into_response())?;
     let gate =
         gate_for_path(method, USER_PROPERTIES_PATH).map_err(|denial| denial.into_response())?;
     check_gate(&gate, &slug, &membership).map_err(|denial| denial.into_response())?;
+    // Only now read the project row (workspace + timezone). A miss is the
+    // `ObjectDoesNotExist` branch the view raises on `get`/`get_or_create`.
+    let tenant = match load_project_tenant(&pool, &project_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return Err(Denial::NotFound.into_response()),
+        Err(denial) => return Err(denial.into_response()),
+    };
     Ok(UserPropertiesContext {
         pool,
         tenant,
@@ -2115,7 +2186,15 @@ pub async fn get_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404.
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return super::proxy_segment(state, method, uri, headers).await;
+    }
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "GET").await
         {
@@ -2164,6 +2243,7 @@ pub async fn get_user_properties(
 }
 
 async fn insert_user_properties(pool: &PgPool, row: &UserPropertiesRow) -> Result<(), Denial> {
+    // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
     sqlx::query(
         r#"INSERT INTO cycle_user_properties
            (id, created_at, updated_at, deleted_at, filters, display_filters, display_properties, rich_filters,
@@ -2207,9 +2287,18 @@ pub async fn patch_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404.
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "PATCH")
             .await
@@ -2233,7 +2322,7 @@ pub async fn patch_user_properties(
     let Some(mut row) = fetched else {
         return Denial::NotFound.into_response();
     };
-    let data = match parse_object_body(&headers, &body) {
+    let data = match parse_object_body(&parts.headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -2265,6 +2354,7 @@ pub async fn patch_user_properties(
 }
 
 async fn update_user_properties(pool: &PgPool, row: &UserPropertiesRow) -> Result<(), Denial> {
+    // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
     sqlx::query(
         r#"UPDATE cycle_user_properties
            SET filters = $1::jsonb, rich_filters = $2::jsonb, display_filters = $3::jsonb,
@@ -2896,6 +2986,52 @@ mod tests {
             Value::String("-created_at".to_owned())
         );
         assert_eq!(map["display_properties"]["key"], Value::Bool(true));
+    }
+
+    #[test]
+    fn statement_shape_misc_resolve_tenant_membership() {
+        use sea_orm::{DbBackend, QuerySelect, QueryTrait};
+        // resolve_project_id shape
+        let stmt1 = projects::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                projects::Relation::Workspaces.def(),
+            )
+            .filter(projects::Column::Identifier.eq("ENG"))
+            .filter(projects::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .select_only()
+            .column(projects::Column::Id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt1.contains("JOIN \"workspaces\"") || stmt1.contains("INNER JOIN"));
+        assert!(stmt1.contains("\"identifier\""));
+        assert!(stmt1.contains("\"deleted_at\" IS NULL"));
+        // tenant shape
+        let stmt2 = projects::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(projects::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([projects::Column::Id, projects::Column::WorkspaceId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt2.contains("\"projects\""));
+        assert!(stmt2.contains("\"deleted_at\" IS NULL"));
+        // membership shape
+        let stmt3 = project_members::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(project_members::Column::ProjectId.eq(uuid::Uuid::nil()))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .select_only()
+            .column(project_members::Column::Role)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt3.contains("JOIN \"workspaces\""));
+        assert!(stmt3.contains("\"is_active\""));
     }
 }
 

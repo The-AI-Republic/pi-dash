@@ -13,7 +13,9 @@
 //!   every matched prefix flag OFF, no `X-Api-Key` (both backends stamp
 //!   `last_used` on every such request, so a shadow re-dispatch would
 //!   double-write), path not on [`DENYLIST`], sampled in, inflight permit
-//!   available. Anything else counts `skipped`.
+//!   available. Anything else counts `skipped` — except non-GET/HEAD
+//!   requests, which leave no trace in metrics at all (their paths can
+//!   carry tokens; PIDASHCONV-1305).
 //! - The client response is built by the same [`crate::edge`] funnel with
 //!   or without shadow: the Django body streams to the client untouched
 //!   while a tee ([`TeeStream`]) captures a bounded copy. Shadow work runs
@@ -33,7 +35,13 @@
 //! - A mismatch logs one structured `shadow mismatch` line (route
 //!   template, method, both statuses, redacted body excerpt capped at
 //!   [`DIFF_CAP_BYTES`], never the full body) and is counted; counters
-//!   live on [`METRICS_PATH`].
+//!   live on [`METRICS_PATH`], gated by [`METRICS_TOKEN_ENV`]. The HTTP
+//!   body carries route/method/status tuples only — excerpts stay in the
+//!   logs (PIDASHCONV-1305).
+//! - Counter keys come from a fixed template list ([`route_template`]):
+//!   denylist templates, exact static paths, and [`OVERFLOW_TEMPLATE`]
+//!   for everything else. Raw request paths are never keys, so keys can
+//!   neither leak secrets nor grow memory (PIDASHCONV-1305).
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -70,7 +78,16 @@ pub const MAX_INFLIGHT_DEFAULT: usize = 8;
 pub const SAMPLE_DEFAULT: f64 = 1.0;
 /// Internal metrics endpoint. Always served by Rust (like `/healthz`);
 /// Django has no `/internal/*` route, so there is nothing to collide with.
+/// Gated: callers must send [`METRICS_TOKEN_HEADER`] matching
+/// [`METRICS_TOKEN_ENV`], otherwise the endpoint answers 404 exactly as if
+/// it did not exist (PIDASHCONV-1305).
 pub const METRICS_PATH: &str = "/internal/shadow-metrics";
+/// Env var holding the shared secret that unlocks [`METRICS_PATH`].
+/// Unset or empty means the endpoint answers 404 to everyone (fail
+/// closed): there is no default token.
+pub const METRICS_TOKEN_ENV: &str = "PIDASH_RUST_SHADOW_METRICS_TOKEN";
+/// Request header carrying the [`METRICS_TOKEN_ENV`] secret.
+pub const METRICS_TOKEN_HEADER: &str = "x-shadow-metrics-token";
 /// Mismatch body excerpts are capped at 2 KB total, redacted, never the
 /// full body.
 pub const DIFF_CAP_BYTES: usize = 2048;
@@ -84,9 +101,15 @@ const SHADOW_TIMEOUT: Duration = Duration::from_secs(10);
 /// Counter map cap: distinct route templates beyond this collapse into
 /// [`OVERFLOW_TEMPLATE`] so a pathological path space cannot grow memory.
 const MAX_TEMPLATES: usize = 4096;
-/// Overflow bucket for templates past [`MAX_TEMPLATES`].
+/// Counter key length cap, in characters. Fixed-list templates are far
+/// shorter; this bounds any future caller that passes a raw path, so one
+/// key can never pin more than a few hundred bytes (PIDASHCONV-1305).
+const MAX_KEY_LEN: usize = 256;
+/// Overflow bucket for templates past [`MAX_TEMPLATES`], and for every
+/// path outside the fixed template list (see [`route_template`]).
 const OVERFLOW_TEMPLATE: &str = "_other";
-/// Recent-mismatch ring kept for the metrics endpoint (redacted excerpts).
+/// Recent-mismatch ring kept for the metrics endpoint (route, method and
+/// statuses only — excerpts stay in the logs).
 const RECENT_CAP: usize = 20;
 
 // ---------------------------------------------------------------------------
@@ -94,7 +117,7 @@ const RECENT_CAP: usize = 20;
 // ---------------------------------------------------------------------------
 
 /// Shadow-read configuration. Default is fully off.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShadowConfig {
     /// [`SHADOW_ENV`] truthy.
     pub enabled: bool,
@@ -103,6 +126,9 @@ pub struct ShadowConfig {
     pub max_inflight: usize,
     /// [`SHADOW_SAMPLE_ENV`], clamped to 0.0–1.0.
     pub sample_rate: f64,
+    /// [`METRICS_TOKEN_ENV`]. `None` (unset or empty) locks
+    /// [`METRICS_PATH`] for everyone; there is no default token.
+    pub metrics_token: Option<String>,
 }
 
 impl Default for ShadowConfig {
@@ -111,6 +137,7 @@ impl Default for ShadowConfig {
             enabled: false,
             max_inflight: MAX_INFLIGHT_DEFAULT,
             sample_rate: SAMPLE_DEFAULT,
+            metrics_token: None,
         }
     }
 }
@@ -130,10 +157,15 @@ impl ShadowConfig {
             .filter(|v| v.is_finite())
             .map(|v| v.clamp(0.0, 1.0))
             .unwrap_or(SAMPLE_DEFAULT);
+        let metrics_token = std::env::var(METRICS_TOKEN_ENV)
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
         Self {
             enabled,
             max_inflight,
             sample_rate,
+            metrics_token,
         }
     }
 
@@ -361,15 +393,16 @@ pub(crate) enum Outcome {
     Errored,
 }
 
-/// One ring entry: a redacted mismatch summary for [`METRICS_PATH`].
+/// One ring entry: which route template mismatched, served on
+/// [`METRICS_PATH`]. Route, method and statuses only — the body excerpt
+/// stays in the `shadow mismatch` log line and is never served over HTTP
+/// (PIDASHCONV-1305).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MismatchRecord {
     pub route: String,
     pub method: String,
     pub django_status: u16,
     pub rust_status: u16,
-    /// Redacted body excerpt, already capped at [`DIFF_CAP_BYTES`].
-    pub diff: String,
 }
 
 #[derive(Debug, Default)]
@@ -387,11 +420,16 @@ struct ShadowMetrics {
 impl ShadowMetrics {
     fn count(&self, template: &str, outcome: Outcome) {
         let mut inner = self.inner.lock().expect("shadow metrics lock");
-        let key = if inner.routes.contains_key(template) || inner.routes.len() < MAX_TEMPLATES {
-            template.to_owned()
-        } else {
-            OVERFLOW_TEMPLATE.to_owned()
-        };
+        // Length cap first (char-boundary safe: byte slicing can split
+        // UTF-8), then the entry cap: worst case the map pins
+        // (MAX_TEMPLATES + 1) short keys, about a megabyte.
+        let capped = truncate_chars(template, MAX_KEY_LEN);
+        let key =
+            if inner.routes.contains_key(capped.as_str()) || inner.routes.len() < MAX_TEMPLATES {
+                capped
+            } else {
+                OVERFLOW_TEMPLATE.to_owned()
+            };
         Self::bump(inner.routes.entry(key).or_default(), outcome);
         Self::bump(&mut inner.totals, outcome);
     }
@@ -481,45 +519,33 @@ impl ShadowGate {
 // Route templates
 // ---------------------------------------------------------------------------
 
-/// Collapse a concrete path to its counter key: integer and UUID segments
-/// become `{id}`, everything else stays. Keeps counter cardinality bounded
-/// without a route table; the map cap plus [`OVERFLOW_TEMPLATE`] bounds the
-/// rest (slugs).
-pub fn route_template(path: &str) -> String {
-    let collapsed: Vec<&str> = path.split('/').collect();
-    let mut out = String::with_capacity(path.len());
-    for (index, segment) in collapsed.iter().enumerate() {
-        if index > 0 {
-            out.push('/');
-        }
-        if index > 0 && is_id_segment(segment) {
-            out.push_str("{id}");
-        } else {
-            out.push_str(segment);
-        }
-    }
-    out
-}
+/// Paths with no variable segments, safe to use verbatim as counter
+/// keys. Exact match only — anything else goes to [`OVERFLOW_TEMPLATE`].
+const STATIC_TEMPLATES: &[&str] = &["/", "/robots.txt"];
 
-/// An all-digit segment, a dashed UUID, or a 32-hex UUID.
-fn is_id_segment(segment: &str) -> bool {
-    if segment.is_empty() {
-        return false;
+/// Resolve a concrete path to its counter key, from a fixed list only:
+///
+/// - a [`DENYLIST`] template (matched param-aware, so the key is the
+///   canonical template, never the concrete segments);
+/// - an exact [`STATIC_TEMPLATES`] path, which has no segments to leak;
+/// - [`OVERFLOW_TEMPLATE`] for everything else.
+///
+/// No request bytes ever become a key: slugs, base64 uids and tokens in
+/// the path cannot leak into metrics or the mismatch log (PIDASHCONV-1305).
+/// `MatchedPath` cannot serve here — [`precheck`] runs in the proxy
+/// fallback, where by definition no route matched — so the fixed list is
+/// the template source.
+pub fn route_template(path: &str) -> String {
+    if let Some((template, _)) = DENYLIST
+        .iter()
+        .find(|(template, _)| template_matches(template, path))
+    {
+        return (*template).to_owned();
     }
-    if segment.bytes().all(|b| b.is_ascii_digit()) {
-        return true;
+    if STATIC_TEMPLATES.contains(&path) {
+        return path.to_owned();
     }
-    let hex = segment.strip_prefix("urn:uuid:").unwrap_or(segment);
-    let dashed = hex.len() == 36
-        && hex.bytes().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        });
-    let plain = hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit());
-    dashed || plain
+    OVERFLOW_TEMPLATE.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -537,9 +563,15 @@ pub(crate) struct ShadowPlan {
 /// Decide, before proxying, whether this request shadows. Rejections count
 /// `skipped` when shadow is enabled; when disabled this returns `None`
 /// without touching anything, so the proxy path is exactly today's.
+/// Non-GET/HEAD requests return `None` without counting: only GET/HEAD
+/// candidates appear in metrics, so a write to a token-bearing path can
+/// never land a secret in a counter key (PIDASHCONV-1305).
 pub(crate) fn precheck(state: &AppState, req: &Request) -> Option<ShadowPlan> {
     let gate = state.shadow_gate()?.clone();
     if !gate.config.enabled {
+        return None;
+    }
+    if !matches!(*req.method(), Method::GET | Method::HEAD) {
         return None;
     }
     let path = req.uri().path().to_owned();
@@ -548,10 +580,6 @@ pub(crate) fn precheck(state: &AppState, req: &Request) -> Option<ShadowPlan> {
         gate.count(&template, outcome);
         None
     };
-
-    if !matches!(*req.method(), Method::GET | Method::HEAD) {
-        return reject(Outcome::Skipped);
-    }
     // Shadow only reads Django currently serves: any flipped prefix means
     // Rust may already own the response.
     if state
@@ -913,7 +941,7 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
     let django_status = django_response.status;
 
     let app = gate.shadow_app.clone();
-    let dispatch = tokio::spawn(async move {
+    let mut dispatch = tokio::spawn(async move {
         let rust_http = app
             .oneshot(parts.into_request())
             .await
@@ -944,7 +972,11 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
         DispatchOutcome::Compared(compare(&django_response, &rust_response), rust_status)
     });
 
-    match tokio::time::timeout(SHADOW_TIMEOUT, dispatch).await {
+    // Borrow the handle so a timeout still owns it below: dropping a
+    // `JoinHandle` detaches the task instead of stopping it, which would
+    // leak the handler past the inflight cap while holding its pool
+    // connection (PIDASHCONV-1306).
+    match tokio::time::timeout(SHADOW_TIMEOUT, &mut dispatch).await {
         Ok(Ok(DispatchOutcome::Compared(Verdict::Match, _))) => {
             gate.count(&template, Outcome::Matched);
         }
@@ -962,7 +994,6 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
                 method,
                 django_status,
                 rust_status,
-                diff,
             });
             gate.count(&template, Outcome::Mismatched);
         }
@@ -978,6 +1009,11 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
             gate.count(&template, Outcome::Errored);
         }
         Err(_) => {
+            // Stop the dispatch and wait until it is actually gone before
+            // counting: this task still holds the permit, so live
+            // dispatches never exceed max_inflight.
+            dispatch.abort();
+            let _ = dispatch.await;
             gate.count(&template, Outcome::Errored);
         }
     }
@@ -1002,7 +1038,7 @@ pub(crate) struct CapturedResponse {
 }
 
 /// The comparison result. [`Verdict::Match`] needs no payload; a mismatch
-/// carries the redacted excerpt for the log line and the ring.
+/// carries the redacted excerpt for the log line (never served over HTTP).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Match,
@@ -1191,6 +1227,15 @@ fn common_affixes(a: &[u8], b: &[u8]) -> (usize, usize) {
     (prefix, suffix)
 }
 
+/// First `max_chars` characters of `text`, without a marker. Byte
+/// slicing would panic on a UTF-8 boundary; characters never split one.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    text.chars().take(max_chars).collect()
+}
+
 /// Lossy text of at most `max_chars` characters, with a truncation marker
 /// that keeps the "never the full body" promise honest for large middles.
 fn truncate_lossy(bytes: &[u8], max_chars: usize) -> String {
@@ -1247,8 +1292,10 @@ fn redact_key(text: &str, key: &str) -> String {
             Some((value_start, value_end, quoted)) => {
                 out.push_str(&text[cursor..value_start]);
                 out.push_str("[REDACTED]");
-                if quoted {
+                if quoted && value_end < text.len() {
                     // Keep the closing quote; the opening quote is already out.
+                    // An unterminated quote runs to the end of the text, so
+                    // there is no closing quote to keep.
                     out.push_str(&text[value_end..value_end + 1]);
                     cursor = value_end + 1;
                 } else {
@@ -1338,15 +1385,33 @@ fn redact_bearer(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// `GET /internal/shadow-metrics`: the gate's counters plus the recent
-/// mismatch ring. Served even when shadow is disabled (all zeros,
-/// `enabled: false`) so deployments can verify the wiring.
-pub async fn metrics(State(state): State<AppState>) -> Response {
+/// mismatch ring (route/method/status tuples, no excerpts). Served even
+/// when shadow is disabled (all zeros, `enabled: false`) so deployments
+/// can verify the wiring — but only to callers presenting the
+/// [`METRICS_TOKEN_ENV`] secret in [`METRICS_TOKEN_HEADER`]. Anything
+/// else answers 404, exactly as if the route did not exist (which is what
+/// Django serves for `/internal/*`); with no token configured the endpoint
+/// answers 404 to everyone (PIDASHCONV-1305).
+pub async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
     #[derive(Serialize)]
     struct Body {
         enabled: bool,
         totals: RouteCounters,
         routes: HashMap<String, RouteCounters>,
         recent_mismatches: Vec<MismatchRecord>,
+    }
+    let authorized = state
+        .shadow_gate()
+        .and_then(|gate| gate.config.metrics_token.as_deref())
+        .filter(|token| !token.is_empty())
+        .is_some_and(|token| {
+            headers
+                .get(METRICS_TOKEN_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|presented| presented == token)
+        });
+    if !authorized {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let body = match state.shadow_gate() {
         Some(gate) => {
@@ -1417,13 +1482,30 @@ impl<S: SessionStore> SessionStore for ReadOnlySessionStore<S> {
         Box::pin(async move { Ok(key) })
     }
 
-    fn user_exists(
+    fn load_user(
         &self,
         user_id: String,
     ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<bool, crate::middleware::StoreError>> + Send>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::middleware::SessionUser>,
+                        crate::middleware::StoreError,
+                    >,
+                > + Send,
+        >,
     > {
-        self.inner.user_exists(user_id)
+        self.inner.load_user(user_id)
+    }
+
+    fn delete(
+        &self,
+        _key: String,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), crate::middleware::StoreError>> + Send>>
+    {
+        // Shadow dispatch is read-only: a stale hash is rejected in memory,
+        // but the shared session row must not be deleted.
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -1484,36 +1566,51 @@ mod tests {
     fn config_from_env_defaults_off_parses_and_clamps() {
         // One test: the cases share process env, and parallel tests racing
         // on set_var/remove_var would flake.
-        for var in [SHADOW_ENV, SHADOW_MAX_INFLIGHT_ENV, SHADOW_SAMPLE_ENV] {
+        for var in [
+            SHADOW_ENV,
+            SHADOW_MAX_INFLIGHT_ENV,
+            SHADOW_SAMPLE_ENV,
+            METRICS_TOKEN_ENV,
+        ] {
             std::env::remove_var(var);
         }
         assert_eq!(ShadowConfig::from_env(), ShadowConfig::default());
         assert!(!ShadowConfig::default().enabled);
         assert_eq!(ShadowConfig::default().max_inflight, MAX_INFLIGHT_DEFAULT);
         assert_eq!(ShadowConfig::default().sample_rate, SAMPLE_DEFAULT);
+        assert_eq!(ShadowConfig::default().metrics_token, None);
 
         std::env::set_var(SHADOW_ENV, "1");
         std::env::set_var(SHADOW_MAX_INFLIGHT_ENV, "3");
         std::env::set_var(SHADOW_SAMPLE_ENV, "0.5");
+        std::env::set_var(METRICS_TOKEN_ENV, "  ops-secret-1305  ");
         let config = ShadowConfig::from_env();
         assert!(config.enabled);
         assert_eq!(config.max_inflight, 3);
         assert_eq!(config.sample_rate, 0.5);
+        assert_eq!(config.metrics_token.as_deref(), Some("ops-secret-1305"));
 
         std::env::set_var(SHADOW_ENV, "banana");
         std::env::set_var(SHADOW_MAX_INFLIGHT_ENV, "banana");
         std::env::set_var(SHADOW_SAMPLE_ENV, "banana");
+        std::env::set_var(METRICS_TOKEN_ENV, "   ");
         let config = ShadowConfig::from_env();
         assert!(!config.enabled);
         assert_eq!(config.max_inflight, MAX_INFLIGHT_DEFAULT);
         assert_eq!(config.sample_rate, SAMPLE_DEFAULT);
+        assert_eq!(config.metrics_token, None);
 
         std::env::set_var(SHADOW_SAMPLE_ENV, "9.5");
         assert_eq!(ShadowConfig::from_env().sample_rate, 1.0);
         std::env::set_var(SHADOW_SAMPLE_ENV, "-2.0");
         assert_eq!(ShadowConfig::from_env().sample_rate, 0.0);
 
-        for var in [SHADOW_ENV, SHADOW_MAX_INFLIGHT_ENV, SHADOW_SAMPLE_ENV] {
+        for var in [
+            SHADOW_ENV,
+            SHADOW_MAX_INFLIGHT_ENV,
+            SHADOW_SAMPLE_ENV,
+            METRICS_TOKEN_ENV,
+        ] {
             std::env::remove_var(var);
         }
     }
@@ -1528,26 +1625,64 @@ mod tests {
     }
 
     #[test]
-    fn templates_collapse_ids() {
+    fn templates_come_from_the_fixed_list_only() {
+        // Exact static paths resolve to themselves.
         assert_eq!(route_template("/"), "/");
         assert_eq!(route_template("/robots.txt"), "/robots.txt");
+        // Denylist templates resolve to the canonical template: the
+        // concrete segments never become a key.
         assert_eq!(
-            route_template("/api/workspaces/acme/projects/123/pages/"),
-            "/api/workspaces/acme/projects/{id}/pages/"
+            route_template("/auth/github/callback/"),
+            "/auth/github/callback/"
         );
         assert_eq!(
-            route_template("/api/x/550e8400-e29b-41d4-a716-446655440000/"),
-            "/api/x/{id}/"
+            route_template("/api/v1/workspaces/acme/assets/9/"),
+            "/api/v1/workspaces/{slug}/assets/{asset_id}/"
         );
-        assert_eq!(
-            route_template("/api/x/550e8400e29b41d4a716446655440000/"),
-            "/api/x/{id}/"
-        );
-        // Slugs survive: the map cap plus _other bounds them instead.
-        assert_eq!(
-            route_template("/api/workspaces/acme/"),
-            "/api/workspaces/acme/"
-        );
+        // Everything else — ids, UUIDs, slugs, base64 uids, tokens,
+        // near-miss statics — collapses into the overflow bucket, so no
+        // request bytes ever become a counter key.
+        for path in [
+            "/api/workspaces/acme/projects/123/pages/",
+            "/api/x/550e8400-e29b-41d4-a716-446655440000/",
+            "/api/x/550e8400e29b41d4a716446655440000/",
+            "/api/workspaces/acme/",
+            "/auth/reset-password/Mg/cvTEST1305-secret-token/",
+            "/robots.txt/",
+        ] {
+            assert_eq!(route_template(path), OVERFLOW_TEMPLATE, "{path}");
+        }
+    }
+
+    #[test]
+    fn counter_keys_are_bounded_in_length_and_count() {
+        // Adversarial path space: thousands of distinct 100 KB paths, each
+        // carrying a high-entropy segment. Every key in the snapshot must
+        // fit MAX_KEY_LEN characters and the map must fit MAX_TEMPLATES + 1
+        // entries, so the whole map pins about a megabyte at most.
+        let metrics = ShadowMetrics::default();
+        for index in 0..(MAX_TEMPLATES + 100) {
+            let path = format!("/probe/{index}/{}", "A".repeat(100_000));
+            metrics.count(&route_template(&path), Outcome::Skipped);
+            // And through count() directly, the way any future caller that
+            // passes a raw path would: the length cap holds there too.
+            metrics.count(&path, Outcome::Skipped);
+        }
+        let snapshot = metrics.snapshot();
+        assert!(snapshot.routes.len() <= MAX_TEMPLATES + 1);
+        let mut key_bytes = 0;
+        for key in snapshot.routes.keys() {
+            assert!(
+                key.chars().count() <= MAX_KEY_LEN,
+                "key of {} chars: {key:.80}...",
+                key.chars().count()
+            );
+            key_bytes += key.len();
+        }
+        assert!(key_bytes <= (MAX_TEMPLATES + 1) * MAX_KEY_LEN);
+        // The fixed-list resolution itself never emits request bytes: the
+        // only long keys possible are the truncated direct-count ones.
+        assert!(snapshot.routes.contains_key(OVERFLOW_TEMPLATE));
     }
 
     #[test]
@@ -1669,6 +1804,30 @@ mod tests {
     }
 
     #[test]
+    fn redaction_redacts_unterminated_quoted_value() {
+        assert_eq!(
+            redact_secrets("note: token='abc"),
+            "note: token='[REDACTED]"
+        );
+        assert_eq!(
+            redact_secrets("note: token=\"abc"),
+            "note: token=\"[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn mismatch_with_unterminated_quoted_secret_is_recorded() {
+        let django = captured(200, "text/plain", b"note: token='abc");
+        let rust = captured(200, "text/plain", b"note: token='abd");
+        let Verdict::Mismatch { diff } = compare(&django, &rust) else {
+            panic!("bodies differ, must mismatch");
+        };
+        for leaked in ["abc", "abd"] {
+            assert!(!diff.contains(leaked), "{diff}");
+        }
+    }
+
+    #[test]
     fn counters_balance_and_overflow() {
         let metrics = ShadowMetrics::default();
         metrics.count("/a", Outcome::Matched);
@@ -1748,7 +1907,6 @@ mod tests {
                 method: "GET".to_owned(),
                 django_status: 200,
                 rust_status: 200,
-                diff: "d".to_owned(),
             });
         }
         assert_eq!(metrics.snapshot().recent_mismatches.len(), RECENT_CAP);

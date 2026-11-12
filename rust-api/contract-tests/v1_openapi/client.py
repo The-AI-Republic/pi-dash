@@ -99,3 +99,22 @@ def request_patient(method: str, path: str) -> httpx.Response:
         if r.status_code != 429 or time.monotonic() >= deadline:
             return r
         time.sleep(2)
+
+
+def negotiate(
+    path: str, accept: str, params: dict | None = None, method: str = "GET"
+) -> httpx.Response:
+    """Send ``path`` with an explicit ``Accept`` header, waiting out 429s.
+
+    Same anonymous-budget patience as :func:`get_patient` /
+    :func:`request_patient`, but with a caller-chosen ``Accept`` so the
+    content-negotiation tests can drive the renderer the way DRF's
+    ``DefaultContentNegotiation.select_renderer`` does.
+    """
+    deadline = time.monotonic() + ANON_WAIT
+    while True:
+        with client() as c:
+            r = c.request(method, path, headers={"Accept": accept}, params=params)
+        if r.status_code != 429 or time.monotonic() >= deadline:
+            return r
+        time.sleep(2)

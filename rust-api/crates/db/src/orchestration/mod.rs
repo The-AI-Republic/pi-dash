@@ -15,8 +15,10 @@
 //! Reads reuse the D-11 [`dispatch`](crate::dispatch) `AgentRun`
 //! shape + `AgentRunStatus` and the L1
 //! [`pidash_types::orchestration`] parser — never re-ported. All
-//! queries are executor-generic (`sqlx::query`, no build-time
-//! database); multi-statement flows take `&mut PgConnection`.
+//! queries are SeaORM statements over a [`ConnectionTrait`]
+//! (the pool connection or a transaction-held
+//! [`TxConn`](crate::orm_tx::TxConn)); multi-statement flows share
+//! one transaction.
 //!
 //! Fixture id replayed by the unit tests alongside each module:
 //! FX-ORCH-02 (`rust-api/fixtures/orchestration/fx02_reads/`).
@@ -36,7 +38,4 @@ pub use querysets::{
 pub use runs::{
     active_run_for, ingest_into_run, is_terminal_status, latest_prior_run, plan_ingest,
 };
-pub use workpad::{
-    fetch_workpad, get_agent_system_user, set_workpad, AgentSystemUser, AgentUserCollisionError,
-    GetAgentUserError,
-};
+pub use workpad::fetch_workpad;

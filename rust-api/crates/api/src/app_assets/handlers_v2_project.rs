@@ -83,17 +83,29 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::app_assets::guards;
 use crate::app_assets::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_json_string;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
+use pidash_db::entity::{file_assets, project_members, projects, workspace_members, workspaces};
 use pidash_services::app_assets::queries_v2_project as q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_types::WorkspaceId;
+use sea_orm::sea_query::{Expr, InsertStatement, Query};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Select, UpdateMany,
+};
 
 /// All ten `EntityTypeContext` values (`db/models/asset.py:33-43`): the
 /// project mint accepts any of them (`v2.py:521`).
@@ -129,8 +141,6 @@ const DOES_NOT_EXIST_BODY: &str = r#"{"error":"The required object does not exis
 /// `BaseAPIView.handle_exception`: `ValidationError` branch (`:226-230`),
 /// also raised by `UUIDField.to_python` on bad UUID writes.
 const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `BaseAPIView.handle_exception`: generic branch (`:238-243`).
-const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` denial: anonymous on a guarded route.
 const UNAUTHENTICATED_BODY: &str = r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `Project.resolve` miss (`db/models/project.py:190-217` via `Http404`).
@@ -203,28 +213,6 @@ pub fn routes() -> Router<AppState> {
 // Small responders
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through
 /// `BaseAPIView.handle_exception` (`app/views/base.py:232-236`).
 fn does_not_exist() -> Response {
@@ -237,10 +225,6 @@ fn page_not_found() -> Response {
 
 fn valid_detail() -> Response {
     raw(StatusCode::BAD_REQUEST, VALID_DETAIL_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn redirect(location: String) -> Response {
@@ -258,6 +242,13 @@ fn redirect(location: String) -> Response {
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
     state.pools().map(|pools| pools.primary())
+}
+
+fn orm_connection(state: &AppState) -> Option<pidash_db::DatabaseConnection> {
+    state
+        .orm()
+        .cloned()
+        .or_else(|| pool(state).map(pidash_db::pool::sea_orm_connection))
 }
 
 // ---------------------------------------------------------------------------
@@ -290,52 +281,70 @@ async fn require_actor(
 /// `workspaces` row carries no `deleted_at` filter (Django does not
 /// filter joined tables) while the membership row uses the default
 /// manager (`deleted_at IS NULL`) plus `is_active`.
-// `Response` is axum's handle type, so boxing it buys no runtime win;
-// the crate-wide `Result<_, Response>` helper shape stays as-is.
+fn workspace_role_query(user_id: &Uuid, slug: &str) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .limit(1u64)
+}
+
 #[allow(clippy::result_large_err)]
 async fn workspace_role(
-    pool: &sqlx::PgPool,
+    db: &pidash_db::DatabaseConnection,
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Response> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let row: Option<i16> = workspace_role_query(user_id, slug)
+        .into_tuple::<i16>()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(i32::from))
 }
 
 /// Active project role for `(user, project_id, slug)`, or `None`.
 /// Mirrors the project-level lookup (`app/permissions/base.py:53-64`).
-// `Response` is axum's handle type, so boxing it buys no runtime win;
-// the crate-wide `Result<_, Response>` helper shape stays as-is.
+fn project_role_query(
+    user_id: &Uuid,
+    project_id: &Uuid,
+    slug: &str,
+) -> Select<project_members::Entity> {
+    project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(project_members::Column::Role)
+        .limit(1u64)
+}
+
 #[allow(clippy::result_large_err)]
 async fn project_role(
-    pool: &sqlx::PgPool,
+    db: &pidash_db::DatabaseConnection,
     user_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Response> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let row: Option<i16> = project_role_query(user_id, project_id, slug)
+        .into_tuple::<i16>()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(i32::from))
 }
 
 /// Roles every gate in this module lists
@@ -348,12 +357,12 @@ const GATE_ROLES: &[i32] = &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST];
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
 async fn gate_workspace(
-    pool: &sqlx::PgPool,
+    db: &pidash_db::DatabaseConnection,
     slug: &str,
     actor_id: &Uuid,
     endpoint: guards::AssetEndpoint,
 ) -> Result<(), Response> {
-    let role = workspace_role(pool, actor_id, slug).await?;
+    let role = workspace_role(db, actor_id, slug).await?;
     let facts = AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -379,14 +388,14 @@ async fn gate_workspace(
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
 async fn gate_project(
-    pool: &sqlx::PgPool,
+    db: &pidash_db::DatabaseConnection,
     slug: &str,
     project_id: &Uuid,
     actor_id: &Uuid,
     endpoint: guards::AssetEndpoint,
 ) -> Result<(), Response> {
-    let ws_role = workspace_role(pool, actor_id, slug).await?;
-    let pm_role = project_role(pool, actor_id, project_id, slug).await?;
+    let ws_role = workspace_role(db, actor_id, slug).await?;
+    let pm_role = project_role(db, actor_id, project_id, slug).await?;
     let facts = AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -424,11 +433,20 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// anything else resolves as a workspace-scoped upper-cased identifier
 /// (soft-deleted projects excluded); an unresolvable value answers
 /// `{"detail":"Project not found"}` 404.
-// `Response` is axum's handle type, so boxing it buys no runtime win;
-// the crate-wide `Result<_, Response>` helper shape stays as-is.
+fn resolve_project_query(slug: &str, identifier: &str) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .column(projects::Column::Id)
+        .limit(1u64)
+}
+
 #[allow(clippy::result_large_err)]
 async fn resolve_project_id(
-    pool: &sqlx::PgPool,
+    db: &pidash_db::DatabaseConnection,
     slug: &str,
     value: &str,
 ) -> Result<Uuid, Response> {
@@ -436,32 +454,36 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let normalized = normalize_resolve_identifier(value);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(normalized)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    row.map(|(id,)| id)
-        .ok_or_else(|| raw(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
+    let row: Option<Uuid> = resolve_project_query(slug, &normalized)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
+    row.ok_or_else(|| raw(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
 }
 
 /// `Workspace.objects.get(slug=slug)` (`v2.py:548,748`): default manager,
 /// so a soft-deleted slug answers the `DoesNotExist` 404 envelope.
-// `Response` is axum's handle type, so boxing it buys no runtime win;
-// the crate-wide `Result<_, Response>` helper shape stays as-is.
+fn workspace_lookup_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspaces::Column::Id)
+        .limit(1u64)
+}
+
 #[allow(clippy::result_large_err)]
-async fn workspace_lookup(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    row.map(|(id,)| id).ok_or_else(does_not_exist)
+async fn workspace_lookup(
+    db: &pidash_db::DatabaseConnection,
+    slug: &str,
+) -> Result<Uuid, Response> {
+    let row: Option<Uuid> = workspace_lookup_query(slug)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
+    row.ok_or_else(does_not_exist)
 }
 
 /// Enforce the duplicate throttle after the gate (DRF `initial()` order):
@@ -670,7 +692,10 @@ fn python_str(value: Option<&Value>) -> (String, Value) {
 }
 
 /// `UUIDField.to_python` for FK writes (`django/db/models/fields.py`):
-/// `None`/null stays NULL; strings must parse (else `ValidationError` →
+/// `None`/null stays NULL; `""` also stores NULL
+/// (`ForeignKey.get_db_prep_save`: `value == ""` → `None` for a UUID
+/// target — the comment composer sends `entity_identifier: ""` for a new
+/// comment); other strings must parse (else `ValidationError` →
 /// the 400 envelope); ints/bools coerce via `uuid.UUID(int=...)`
 /// (negative or over-wide values reject); every other JSON shape rejects.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
@@ -679,6 +704,7 @@ fn python_str(value: Option<&Value>) -> (String, Value) {
 fn coerce_uuid_or_400(value: Option<&Value>) -> Result<Option<Uuid>, Response> {
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.is_empty() => Ok(None),
         Some(Value::String(s)) => s.parse::<Uuid>().map(Some).map_err(|_| valid_detail()),
         Some(Value::Number(n)) => {
             let int = n
@@ -794,7 +820,11 @@ fn asset_url_for(
 /// ([`q::PROJECT_SCOPED_GET_SQL`], [`q::WORKSPACE_DOWNLOAD_SQL`],
 /// [`q::PROJECT_DOWNLOAD_SQL`], [`q::DUPLICATE_ORIGINAL_SQL`]); Django's
 /// `.get()` fetches full rows, so the SELECT list carries the columns the
-/// bodies need rather than the golden's abbreviated `id`.
+/// bodies need rather than the golden's abbreviated `id`. `asset_key`
+/// decodes the `asset` column: every select aliases it with
+/// `column_as(.., "asset_key")`, so output names stay unique by
+/// construction.
+#[derive(FromQueryResult)]
 struct AssetRow {
     is_uploaded: bool,
     storage_metadata: Option<Value>,
@@ -803,42 +833,186 @@ struct AssetRow {
     size: f64,
 }
 
-fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
-    Ok(AssetRow {
-        is_uploaded: row.try_get("is_uploaded")?,
-        storage_metadata: row.try_get("storage_metadata")?,
-        attributes: row.try_get("attributes")?,
-        asset_key: row.try_get("asset")?,
-        size: row.try_get("size")?,
-    })
-}
-
-const ASSET_ROW_COLS: &str = r#""file_assets"."is_uploaded", "file_assets"."storage_metadata", "file_assets"."attributes", "file_assets"."asset", "file_assets"."size""#;
-
 /// Scoped project read (`v2.py:582,598,609`): default manager plus
-/// `workspace__slug` join plus `project_id`. `$1` asset id, `$2` slug,
-/// `$3` project id. The `get` spelling uses `pk=pk` (BUG-FLAG, identical
-/// predicate — kept).
-async fn project_scoped_get(
-    pool: &sqlx::PgPool,
+/// `workspace__slug` join plus `project_id`. The `get` spelling uses
+/// `pk=pk` (BUG-FLAG, identical predicate — kept).
+fn project_scoped_get_query(
     asset_id: &Uuid,
     slug: &str,
     project_id: &Uuid,
-) -> Result<Option<AssetRow>, sqlx::Error> {
-    let sql = format!(
-        "SELECT {ASSET_ROW_COLS} FROM \"file_assets\" \
-         INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" \
-         WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"id\" = $1 \
-         AND \"workspaces\".\"slug\" = $2 AND \"file_assets\".\"project_id\" = $3)"
-    );
-    sqlx::query(&sql)
-        .bind(asset_id)
-        .bind(slug)
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await?
-        .map(|row| asset_row(&row))
-        .transpose()
+) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .filter(file_assets::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .columns([
+            file_assets::Column::IsUploaded,
+            file_assets::Column::StorageMetadata,
+            file_assets::Column::Attributes,
+            file_assets::Column::Size,
+        ])
+        .column_as(file_assets::Column::Asset, "asset_key")
+        .limit(1u64)
+}
+
+async fn project_scoped_get(
+    db: &pidash_db::DatabaseConnection,
+    asset_id: &Uuid,
+    slug: &str,
+    project_id: &Uuid,
+) -> Result<Option<AssetRow>, sea_orm::DbErr> {
+    project_scoped_get_query(asset_id, slug, project_id)
+        .into_model::<AssetRow>()
+        .one(db)
+        .await
+}
+
+/// A create spread's suffix column name -> its entity column. The names
+/// are the closed set [`resolve_spread`] passes through (`user_id`,
+/// `issue_id`, `page_id`, `comment_id`, `draft_issue_id`, from the
+/// services-layer `get_entity_id_field` maps); any other name would be a
+/// bug in those maps, and the old `format!("\"{col}\"")` SQL would have
+/// died in the database exactly like the `None` here.
+fn fk_column(name: &str) -> Option<file_assets::Column> {
+    Some(match name {
+        "user_id" => file_assets::Column::UserId,
+        "issue_id" => file_assets::Column::IssueId,
+        "page_id" => file_assets::Column::PageId,
+        "comment_id" => file_assets::Column::CommentId,
+        "draft_issue_id" => file_assets::Column::DraftIssueId,
+        _ => return None,
+    })
+}
+
+/// Project mint INSERT (`v2.py:554-563`): the column list is the Django
+/// create-kwarg set (fixed prefix, optional per-entity-type FK suffix,
+/// the trailing flags) — the same columns in the same order as the
+/// hand-written statement this replaces, so omitted columns keep
+/// whatever the database does with them.
+#[allow(clippy::too_many_arguments)]
+fn project_mint_insert_query(
+    asset_id: Uuid,
+    now: DateTime<Utc>,
+    attributes: Value,
+    asset_key: &str,
+    size: f64,
+    workspace_id: Option<Uuid>,
+    created_by_id: Uuid,
+    entity_type: &str,
+    project_id: Uuid,
+    suffix: Option<file_assets::Column>,
+    suffix_value: Option<Uuid>,
+) -> InsertStatement {
+    let mut columns = vec![
+        file_assets::Column::Id,
+        file_assets::Column::CreatedAt,
+        file_assets::Column::UpdatedAt,
+        file_assets::Column::Attributes,
+        file_assets::Column::Asset,
+        file_assets::Column::Size,
+        file_assets::Column::WorkspaceId,
+        file_assets::Column::CreatedById,
+        file_assets::Column::EntityType,
+        file_assets::Column::ProjectId,
+    ];
+    let mut values = vec![
+        Expr::value(asset_id),
+        Expr::value(now),
+        Expr::value(now),
+        Expr::value(attributes),
+        Expr::value(asset_key.to_owned()),
+        Expr::value(size),
+        Expr::val(workspace_id).into(),
+        Expr::value(created_by_id),
+        Expr::value(entity_type.to_owned()),
+        Expr::value(project_id),
+    ];
+    if let Some(column) = suffix {
+        columns.push(column);
+        values.push(Expr::val(suffix_value).into());
+    }
+    columns.extend([
+        file_assets::Column::IsUploaded,
+        file_assets::Column::IsDeleted,
+        file_assets::Column::IsArchived,
+        file_assets::Column::StorageMetadata,
+    ]);
+    values.extend([
+        Expr::value(false),
+        Expr::value(false),
+        Expr::value(false),
+        Expr::value(serde_json::json!({})),
+    ]);
+    let mut stmt = Query::insert();
+    stmt.into_table(file_assets::Entity);
+    stmt.columns(columns);
+    stmt.values_panic(values);
+    stmt
+}
+
+/// Duplicate create INSERT (`v2.py:761-775`): like
+/// [`project_mint_insert_query`] but with `created_by_id` in the
+/// explicit-`_id` position and `storage_metadata` copied verbatim
+/// (bind or SQL NULL).
+#[allow(clippy::too_many_arguments)]
+fn duplicate_insert_query(
+    new_id: Uuid,
+    now: DateTime<Utc>,
+    attributes: Value,
+    destination_key: &str,
+    size: f64,
+    workspace_id: Option<Uuid>,
+    created_by_id: Uuid,
+    entity_type: &str,
+    project_id: Option<Uuid>,
+    storage_metadata: Option<Value>,
+    suffix: Option<file_assets::Column>,
+    suffix_value: Option<Uuid>,
+) -> InsertStatement {
+    let mut columns = vec![
+        file_assets::Column::Id,
+        file_assets::Column::CreatedAt,
+        file_assets::Column::UpdatedAt,
+        file_assets::Column::Attributes,
+        file_assets::Column::Asset,
+        file_assets::Column::Size,
+        file_assets::Column::WorkspaceId,
+        file_assets::Column::CreatedById,
+        file_assets::Column::EntityType,
+        file_assets::Column::ProjectId,
+        file_assets::Column::StorageMetadata,
+    ];
+    let mut values = vec![
+        Expr::value(new_id),
+        Expr::value(now),
+        Expr::value(now),
+        Expr::value(attributes),
+        Expr::value(destination_key.to_owned()),
+        Expr::value(size),
+        Expr::val(workspace_id).into(),
+        Expr::value(created_by_id),
+        Expr::value(entity_type.to_owned()),
+        Expr::val(project_id).into(),
+        Expr::val(storage_metadata).into(),
+    ];
+    if let Some(column) = suffix {
+        columns.push(column);
+        values.push(Expr::val(suffix_value).into());
+    }
+    columns.extend([
+        file_assets::Column::IsUploaded,
+        file_assets::Column::IsDeleted,
+        file_assets::Column::IsArchived,
+    ]);
+    values.extend([Expr::value(false), Expr::value(false), Expr::value(false)]);
+    let mut stmt = Query::insert();
+    stmt.into_table(file_assets::Entity);
+    stmt.columns(columns);
+    stmt.values_panic(values);
+    stmt
 }
 
 // ---------------------------------------------------------------------------
@@ -857,16 +1031,18 @@ async fn post_project_asset(
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+    let project_id = match resolve_project_id(&db, &slug, &project_raw).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     if let Err(denial) = gate_project(
-        &pool,
+        &db,
         &slug,
         &project_id,
         &actor.id,
@@ -897,7 +1073,7 @@ async fn post_project_asset(
     }
     let size_limit = state.settings().file_size_limit.min(size);
     // `Workspace.objects.get(slug=slug)` (`:548`) — after the 400s.
-    let workspace_id = match workspace_lookup(&pool, &slug).await {
+    let workspace_id = match workspace_lookup(&db, &slug).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
@@ -935,35 +1111,38 @@ async fn post_project_asset(
     } else {
         Some(workspace_id)
     };
-    let mut sql = "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"attributes\", \"asset\", \"size\", \"workspace_id\", \"created_by_id\", \"entity_type\", \"project_id\"".to_owned();
-    if let Some(col) = suffix {
-        sql.push_str(&format!(", \"{col}\""));
-    }
-    sql.push_str(", \"is_uploaded\", \"is_deleted\", \"is_archived\", \"storage_metadata\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10");
-    if suffix.is_some() {
-        sql.push_str(", $11, false, false, false, '{}')");
-    } else {
-        sql.push_str(", false, false, false, '{}')");
-    }
-    let mut insert = sqlx::query(&sql)
-        .bind(asset_id)
-        .bind(now)
-        .bind(now)
-        .bind(sqlx::types::Json(attributes))
-        .bind(&asset_key)
-        .bind(size_limit as f64)
-        .bind(ws_value)
-        .bind(actor.id)
-        .bind(&entity_type)
-        .bind(project_id);
-    if suffix.is_some() {
-        insert = insert.bind(spread_val);
-    }
-    if insert.execute(&pool).await.is_err() {
+    let suffix_col = match suffix {
+        Some(name) => match fk_column(name) {
+            Some(col) => Some(col),
+            None => return server_error(),
+        },
+        None => None,
+    };
+    let insert = project_mint_insert_query(
+        asset_id,
+        now,
+        attributes,
+        &asset_key,
+        size_limit as f64,
+        ws_value,
+        actor.id,
+        &entity_type,
+        project_id,
+        suffix_col,
+        spread_val,
+    );
+    if db
+        .execute(DbBackend::Postgres.build(&insert))
+        .await
+        .is_err()
+    {
         return server_error();
     }
     let issue_display: Option<String> = match data.get("entity_identifier") {
         None | Some(Value::Null) => None,
+        // `""` stores NULL, so `asset_url` renders `None` (the model
+        // property interpolates the stored FK, not the raw input).
+        Some(Value::String(s)) if s.is_empty() => None,
         Some(v) => Some(python_str(Some(v)).0),
     };
     let asset_url = asset_url_for(
@@ -998,6 +1177,28 @@ async fn post_project_asset(
     )
 }
 
+/// `save(update_fields=["is_uploaded", "attributes"])` (`v2.py:592`):
+/// exactly these two columns, no `updated_at` bump.
+fn project_patch_update(pk: Uuid, attributes: Value) -> UpdateMany<file_assets::Entity> {
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsUploaded, Expr::value(true))
+        .col_expr(file_assets::Column::Attributes, Expr::value(attributes))
+        .filter(file_assets::Column::Id.eq(pk))
+}
+
+/// Soft-delete with timestamp (`v2.py:600-603`): both columns (unlike
+/// the v1 delete). The timestamp renders `CURRENT_TIMESTAMP` (the
+/// builder spelling of SQL `now()`).
+fn project_delete_update(pk: Uuid) -> UpdateMany<file_assets::Entity> {
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsDeleted, Expr::value(true))
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            Expr::current_timestamp().into(),
+        )
+        .filter(file_assets::Column::Id.eq(pk))
+}
+
 // ---------------------------------------------------------------------------
 // PATCH — mark uploaded (+ metadata task)
 // ---------------------------------------------------------------------------
@@ -1010,9 +1211,12 @@ async fn patch_project_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:pk>` canonically only; anything else is a
+    // resolver 404 before auth, answered locally like garbage (no proxy
+    // plumbing in this module — PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1021,13 +1225,15 @@ async fn patch_project_asset(
     let Some(pool) = pool(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+    let Some(db) = orm_connection(&state) else {
+        return server_error();
+    };
+    let project_id = match resolve_project_id(&db, &slug, &project_raw).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     if let Err(denial) = gate_project(
-        &pool,
+        &db,
         &slug,
         &project_id,
         &actor.id,
@@ -1037,7 +1243,7 @@ async fn patch_project_asset(
     {
         return denial;
     }
-    let row = match project_scoped_get(&pool, &pk, &slug, &project_id).await {
+    let row = match project_scoped_get(&db, &pk, &slug, &project_id).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
@@ -1062,7 +1268,7 @@ async fn patch_project_asset(
             Value::Array(message.args.clone()),
             Value::Object(message.kwargs.clone()),
         );
-        if let Err(error) = pidash_jobs::queue::enqueue(&pool, &job).await {
+        if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
             tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
         }
     }
@@ -1080,10 +1286,8 @@ async fn patch_project_asset(
     }
     // `save(update_fields=["is_uploaded", "attributes"])` (`:592`):
     // exactly these two columns, no `updated_at` bump.
-    if sqlx::query(q::PROJECT_PATCH_SAVE_SQL)
-        .bind(pk)
-        .bind(sqlx::types::Json(attributes))
-        .execute(&pool)
+    if project_patch_update(pk, attributes)
+        .exec(&db)
         .await
         .is_err()
     {
@@ -1102,24 +1306,27 @@ async fn delete_project_asset(
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+    let project_id = match resolve_project_id(&db, &slug, &project_raw).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     if let Err(denial) = gate_project(
-        &pool,
+        &db,
         &slug,
         &project_id,
         &actor.id,
@@ -1129,7 +1336,7 @@ async fn delete_project_asset(
     {
         return denial;
     }
-    let row = match project_scoped_get(&pool, &pk, &slug, &project_id).await {
+    let row = match project_scoped_get(&db, &pk, &slug, &project_id).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
@@ -1138,12 +1345,7 @@ async fn delete_project_asset(
     }
     // `is_deleted=True; deleted_at=now; save(...)` (`:600-603`) — both
     // columns (unlike the v1 delete).
-    if sqlx::query(q::PROJECT_DELETE_SQL)
-        .bind(pk)
-        .execute(&pool)
-        .await
-        .is_err()
-    {
+    if project_delete_update(pk).exec(&db).await.is_err() {
         return server_error();
     }
     no_content()
@@ -1160,24 +1362,27 @@ async fn get_project_asset(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+    let project_id = match resolve_project_id(&db, &slug, &project_raw).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     if let Err(denial) = gate_project(
-        &pool,
+        &db,
         &slug,
         &project_id,
         &actor.id,
@@ -1187,7 +1392,7 @@ async fn get_project_asset(
     {
         return denial;
     }
-    let row = match project_scoped_get(&pool, &pk, &slug, &project_id).await {
+    let row = match project_scoped_get(&db, &pk, &slug, &project_id).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
@@ -1234,9 +1439,70 @@ async fn get_project_asset(
 
 /// One bulk candidate: id plus the first-row-governing type (creation
 /// order comes from the `ORDER BY created_at DESC` below).
+#[derive(FromQueryResult)]
 struct BulkRow {
     id: Uuid,
     entity_type: Option<String>,
+}
+
+/// Bulk candidate list (`v2.py:645`): `id__in` plus `workspace__slug`,
+/// default-manager scope, `-created_at` ordering. The id list is
+/// provably non-empty here (an empty one answers 400 above), so the
+/// `IN` list is never empty.
+fn bulk_lookup_query(asset_ids: &[Uuid], slug: &str) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .filter(file_assets::Column::Id.is_in(asset_ids.to_vec()))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .select_only()
+        .columns([file_assets::Column::Id, file_assets::Column::EntityType])
+}
+
+/// One branch's link update (`v2.py:658-686`): the branch column(s) only
+/// (`QuerySet.update`, no `updated_at` bump). `None` for the `Noop`
+/// branch, which writes nothing.
+fn bulk_link_update(
+    asset_ids: &[Uuid],
+    workspace_id: Uuid,
+    entity_id: Uuid,
+    project_id: Uuid,
+    branch: q::BulkBranch,
+) -> Option<UpdateMany<file_assets::Entity>> {
+    let base = file_assets::Entity::update_many()
+        .filter(file_assets::Column::Id.is_in(asset_ids.to_vec()))
+        .filter(file_assets::Column::WorkspaceId.eq(workspace_id))
+        .filter(file_assets::Column::DeletedAt.is_null());
+    Some(match branch {
+        q::BulkBranch::ProjectCover => {
+            base.col_expr(file_assets::Column::ProjectId, Expr::value(project_id))
+        }
+        q::BulkBranch::IssueDescription => base
+            .col_expr(file_assets::Column::IssueId, Expr::value(entity_id))
+            .col_expr(file_assets::Column::ProjectId, Expr::value(project_id)),
+        q::BulkBranch::CommentDescription => {
+            base.col_expr(file_assets::Column::CommentId, Expr::value(entity_id))
+        }
+        q::BulkBranch::PageDescription => {
+            base.col_expr(file_assets::Column::PageId, Expr::value(entity_id))
+        }
+        q::BulkBranch::DraftIssueDescription => {
+            base.col_expr(file_assets::Column::DraftIssueId, Expr::value(entity_id))
+        }
+        q::BulkBranch::Noop => return None,
+    })
+}
+
+/// `save_project_cover`'s per-row re-get (`v2.py:631-634`): the default
+/// manager, so soft-deleted projects read as missing.
+fn save_project_cover_query(project_id: &Uuid) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .column(projects::Column::Id)
+        .limit(1u64)
 }
 
 /// `ProjectBulkAssetEndpoint.post` (`v2.py:636-688`).
@@ -1247,9 +1513,11 @@ async fn post_bulk_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let entity_id = match entity_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:entity_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let entity_id = match classify_uuid_segment(&entity_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1258,13 +1526,15 @@ async fn post_bulk_asset(
     let Some(pool) = pool(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+    let Some(db) = orm_connection(&state) else {
+        return server_error();
+    };
+    let project_id = match resolve_project_id(&db, &slug, &project_raw).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     if let Err(denial) = gate_project(
-        &pool,
+        &db,
         &slug,
         &project_id,
         &actor.id,
@@ -1314,169 +1584,89 @@ async fn post_bulk_asset(
     // `filter(id__in=asset_ids, workspace__slug=slug)` (`:645`) with the
     // default manager scope; default ordering is `-created_at`, so the
     // first row governs the single dispatch below.
-    let rows = match sqlx::query(
-        r#"SELECT "file_assets"."id", "file_assets"."entity_type"
-           FROM "file_assets"
-           INNER JOIN "workspaces" ON "workspaces"."id" = "file_assets"."workspace_id"
-           WHERE ("file_assets"."deleted_at" IS NULL AND "file_assets"."id" = ANY($1)
-           AND "workspaces"."slug" = $2) ORDER BY "file_assets"."created_at" DESC"#,
-    )
-    .bind(&asset_ids)
-    .bind(&slug)
-    .fetch_all(&pool)
-    .await
+    let ordered = match bulk_lookup_query(&asset_ids, &slug)
+        .into_model::<BulkRow>()
+        .all(&db)
+        .await
     {
         Ok(rows) => rows,
         Err(_) => return server_error(),
     };
-    let mut ordered = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let Ok(id) = row.try_get::<Uuid, _>("id") else {
-            return server_error();
-        };
-        let Ok(entity_type) = row.try_get::<Option<String>, _>("entity_type") else {
-            return server_error();
-        };
-        ordered.push(BulkRow { id, entity_type });
-    }
     let Some(first) = ordered.first() else {
         return raw(StatusCode::NOT_FOUND, BULK_MISSING_BODY);
     };
-    let workspace_id = match workspace_id_of(&pool, &slug).await {
+    let workspace_id = match workspace_id_of(&db, &slug).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     // Single dispatch off the first row's type (`:657-686`): a mixed-type
     // id list follows ONLY the first row — ported as-is.
-    match q::bulk_branch(first.entity_type.as_deref().unwrap_or("")) {
-        q::BulkBranch::ProjectCover => {
-            // `assets.update(project_id=project_id)` (`:658`) plus the
-            // per-row cover stamp (`:659`); the LAST row wins.
-            if sqlx::query(
-                r#"UPDATE "file_assets" SET "project_id" = $3
-                   WHERE ("file_assets"."id" = ANY($1)
-                   AND "file_assets"."workspace_id" = $2
-                   AND "file_assets"."deleted_at" IS NULL)"#,
-            )
-            .bind(&asset_ids)
-            .bind(workspace_id)
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .is_err()
-            {
-                return server_error();
-            }
-            for row in &ordered {
-                // `save_project_cover` (`:631-634`): re-get the project
-                // per row (default manager) and stamp
-                // `cover_image_asset_id` — a full `save()`, so
-                // `updated_by`/`updated_at` too.
-                let exists: Option<(Uuid,)> = match sqlx::query_as(q::SAVE_PROJECT_COVER_GET_SQL)
-                    .bind(project_id)
-                    .fetch_optional(&pool)
-                    .await
-                {
-                    Ok(exists) => exists,
-                    Err(_) => return server_error(),
-                };
-                if exists.is_none() {
-                    return does_not_exist();
+    let branch = q::bulk_branch(first.entity_type.as_deref().unwrap_or(""));
+    if let Some(update) = bulk_link_update(&asset_ids, workspace_id, entity_id, project_id, branch)
+    {
+        let result = update.exec(&db).await;
+        match branch {
+            q::BulkBranch::ProjectCover => {
+                if result.is_err() {
+                    return server_error();
                 }
-                if sqlx::query(q::SAVE_PROJECT_COVER_SQL)
-                    .bind(project_id)
-                    .bind(row.id)
-                    .bind(Utc::now())
-                    .bind(actor.id)
-                    .execute(&pool)
+                // `assets.update(project_id=project_id)` (`:658`) plus
+                // the per-row cover stamp (`:659`); the LAST row wins.
+                for row in &ordered {
+                    // `save_project_cover` (`:631-634`): re-get the
+                    // project per row (default manager) and stamp
+                    // `cover_image_asset_id` — a full `save()`, so
+                    // `updated_by`/`updated_at` too.
+                    let exists: Option<Uuid> = match save_project_cover_query(&project_id)
+                        .into_tuple::<Uuid>()
+                        .one(&db)
+                        .await
+                    {
+                        Ok(exists) => exists,
+                        Err(_) => return server_error(),
+                    };
+                    if exists.is_none() {
+                        return does_not_exist();
+                    }
+                    if domain_projects::save_project_cover(
+                        &pidash_db::pool::sea_orm_connection(pool),
+                        project_id,
+                        row.id,
+                        Utc::now(),
+                        actor.id,
+                    )
                     .await
                     .is_err()
-                {
-                    return server_error();
+                    {
+                        return server_error();
+                    }
                 }
             }
-        }
-        q::BulkBranch::IssueDescription => {
-            // Integrity errors swallowed (`:664-667`).
-            let result = sqlx::query(
-                r#"UPDATE "file_assets" SET "issue_id" = $3, "project_id" = $4
-                   WHERE ("file_assets"."id" = ANY($1)
-                   AND "file_assets"."workspace_id" = $2
-                   AND "file_assets"."deleted_at" IS NULL)"#,
-            )
-            .bind(&asset_ids)
-            .bind(workspace_id)
-            .bind(entity_id)
-            .bind(project_id)
-            .execute(&pool)
-            .await;
-            if let Err(error) = result {
-                if !is_integrity_error(&error) {
-                    return server_error();
+            // Integrity errors swallowed (`:664-667`, `:672-675`,
+            // `:683-686`).
+            q::BulkBranch::IssueDescription
+            | q::BulkBranch::CommentDescription
+            | q::BulkBranch::DraftIssueDescription => {
+                if let Err(error) = result {
+                    let error = pidash_db::orm_tx::into_sqlx(error);
+                    if !is_integrity_error(&error) {
+                        return server_error();
+                    }
                 }
             }
-        }
-        q::BulkBranch::CommentDescription => {
-            // Integrity errors swallowed (`:672-675`); note: no
-            // `project_id` here — differs from the issue branch.
-            let result = sqlx::query(
-                r#"UPDATE "file_assets" SET "comment_id" = $3
-                   WHERE ("file_assets"."id" = ANY($1)
-                   AND "file_assets"."workspace_id" = $2
-                   AND "file_assets"."deleted_at" IS NULL)"#,
-            )
-            .bind(&asset_ids)
-            .bind(workspace_id)
-            .bind(entity_id)
-            .execute(&pool)
-            .await;
-            if let Err(error) = result {
-                if !is_integrity_error(&error) {
-                    return server_error();
-                }
-            }
-        }
-        q::BulkBranch::PageDescription => {
             // No swallow (`:680-682`): an `IntegrityError` propagates to
             // `handle_exception` → 400; anything else → 500.
-            let result = sqlx::query(
-                r#"UPDATE "file_assets" SET "page_id" = $3
-                   WHERE ("file_assets"."id" = ANY($1)
-                   AND "file_assets"."workspace_id" = $2
-                   AND "file_assets"."deleted_at" IS NULL)"#,
-            )
-            .bind(&asset_ids)
-            .bind(workspace_id)
-            .bind(entity_id)
-            .execute(&pool)
-            .await;
-            if let Err(error) = result {
-                if is_integrity_error(&error) {
-                    return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
-                }
-                return server_error();
-            }
-        }
-        q::BulkBranch::DraftIssueDescription => {
-            // Integrity errors swallowed (`:683-686`).
-            let result = sqlx::query(
-                r#"UPDATE "file_assets" SET "draft_issue_id" = $3
-                   WHERE ("file_assets"."id" = ANY($1)
-                   AND "file_assets"."workspace_id" = $2
-                   AND "file_assets"."deleted_at" IS NULL)"#,
-            )
-            .bind(&asset_ids)
-            .bind(workspace_id)
-            .bind(entity_id)
-            .execute(&pool)
-            .await;
-            if let Err(error) = result {
-                if !is_integrity_error(&error) {
+            q::BulkBranch::PageDescription => {
+                if let Err(error) = result {
+                    let error = pidash_db::orm_tx::into_sqlx(error);
+                    if is_integrity_error(&error) {
+                        return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
+                    }
                     return server_error();
                 }
             }
+            q::BulkBranch::Noop => {}
         }
-        q::BulkBranch::Noop => {}
     }
     no_content()
 }
@@ -1490,14 +1680,68 @@ async fn post_bulk_asset(
 /// row this maps to a 500 stays unreachable through Django.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
+fn workspace_id_of_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .column(workspaces::Column::Id)
+        .limit(1u64)
+}
+
 #[allow(clippy::result_large_err)]
-async fn workspace_id_of(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
-    let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1"#)
-        .bind(slug)
-        .fetch_optional(pool)
+async fn workspace_id_of(db: &pidash_db::DatabaseConnection, slug: &str) -> Result<Uuid, Response> {
+    let row: Option<Uuid> = workspace_id_of_query(slug)
+        .into_tuple::<Uuid>()
+        .one(db)
         .await
         .map_err(|_| server_error())?;
-    row.map(|(id,)| id).ok_or_else(server_error)
+    row.ok_or_else(server_error)
+}
+
+/// `AssetCheckEndpoint.get` (`v2.py:691-697`): existence check —
+/// `exists()` over `all_objects` plus `deleted_at`, so v1-style deletes
+/// (which set only `is_deleted`) still report `exists: true`. One probe
+/// row decides.
+fn check_exists_query(asset_id: &Uuid, slug: &str) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .column(file_assets::Column::Id)
+        .limit(1u64)
+}
+
+/// Duplicate optional-project probe (`v2.py:750`): `exists()` under the
+/// default manager — a soft-deleted project reads as missing.
+fn duplicate_project_query(project_id: &Uuid, workspace_id: &Uuid) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::WorkspaceId.eq(*workspace_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .column(projects::Column::Id)
+        .limit(1u64)
+}
+
+/// Original lookup for the duplicate create (`v2.py:755`): default
+/// manager plus `is_uploaded`; soft-deleted or never-uploaded originals
+/// are invisible.
+fn duplicate_original_query(asset_id: &Uuid) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .filter(file_assets::Column::IsUploaded.eq(true))
+        .select_only()
+        .columns([
+            file_assets::Column::IsUploaded,
+            file_assets::Column::StorageMetadata,
+            file_assets::Column::Attributes,
+            file_assets::Column::Size,
+        ])
+        .column_as(file_assets::Column::Asset, "asset_key")
+        .limit(1u64)
 }
 
 /// `AssetCheckEndpoint.get` (`v2.py:691-697`): existence from
@@ -1508,33 +1752,39 @@ async fn get_check_asset(
     Path((slug, asset_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:asset_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
     if let Err(denial) =
-        gate_workspace(&pool, &slug, &actor.id, guards::AssetEndpoint::CheckGet).await
+        gate_workspace(&db, &slug, &actor.id, guards::AssetEndpoint::CheckGet).await
     {
         return denial;
     }
-    let exists: bool = match sqlx::query_scalar(q::CHECK_EXISTS_SQL)
-        .bind(asset_id)
-        .bind(&slug)
-        .fetch_one(&pool)
+    let exists: Option<Uuid> = match check_exists_query(&asset_id, &slug)
+        .into_tuple::<Uuid>()
+        .one(&db)
         .await
     {
         Ok(exists) => exists,
         Err(_) => return server_error(),
     };
-    json_status(StatusCode::OK, serde_json::json!({ "exists": exists }))
+    json_status(
+        StatusCode::OK,
+        serde_json::json!({ "exists": exists.is_some() }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,25 +1799,23 @@ async fn post_duplicate_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    if let Err(denial) = gate_workspace(
-        &pool,
-        &slug,
-        &actor.id,
-        guards::AssetEndpoint::DuplicatePost,
-    )
-    .await
+    if let Err(denial) =
+        gate_workspace(&db, &slug, &actor.id, guards::AssetEndpoint::DuplicatePost).await
     {
         return denial;
     }
@@ -1585,7 +1833,7 @@ async fn post_duplicate_asset(
         _ => return raw(StatusCode::BAD_REQUEST, DUPLICATE_INVALID_ENTITY_BODY),
     };
     // `Workspace.objects.get(slug=slug)` (`:748`).
-    let workspace_id = match workspace_lookup(&pool, &slug).await {
+    let workspace_id = match workspace_lookup(&db, &slug).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
@@ -1605,50 +1853,41 @@ async fn post_duplicate_asset(
         Some(_) => return valid_detail(),
     };
     if let Some(project_id) = project_id {
-        let exists: bool = match sqlx::query_scalar(q::DUPLICATE_PROJECT_CHECK_SQL)
-            .bind(project_id)
-            .bind(workspace_id)
-            .fetch_one(&pool)
+        let exists: Option<Uuid> = match duplicate_project_query(&project_id, &workspace_id)
+            .into_tuple::<Uuid>()
+            .one(&db)
             .await
         {
             Ok(exists) => exists,
             Err(_) => return server_error(),
         };
-        if !exists {
+        if exists.is_none() {
             return raw(StatusCode::NOT_FOUND, DUPLICATE_PROJECT_BODY);
         }
     }
-    // `S3Storage(request)` (`:754`) is constructed before the original
-    // lookup, so an unsignable region 500s here — ahead of the 404
-    // below and with no row left behind.
+    // `S3Storage(request, is_server=True)` (`:754`) is constructed
+    // before the original lookup, so an unsignable region 500s here —
+    // ahead of the 404 below and with no row left behind. The server
+    // client never reads the request Host (`storage.py:50-57`: the
+    // `request.get_host()` branch needs `not is_server`), so a missing
+    // Host falls through instead of 500ing.
     let storage = &state.settings().storage;
-    let Some(host) = host_of(&headers) else {
-        return server_error();
-    };
-    if endpoint_parts(storage, &scheme_of(&headers), &host, false).is_err() {
+    let host = host_of(&headers).unwrap_or_default();
+    if endpoint_parts(storage, &scheme_of(&headers), &host, false, true).is_err() {
         return server_error();
     }
     // Original lookup on the default manager + `is_uploaded` (`:755`):
     // soft-deleted or never-uploaded originals answer 404.
-    let original_sql = format!(
-        "SELECT {ASSET_ROW_COLS} FROM \"file_assets\" \
-         WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"id\" = $1 \
-         AND \"file_assets\".\"is_uploaded\")"
-    );
-    let row = match sqlx::query(&original_sql)
-        .bind(asset_id)
-        .fetch_optional(&pool)
+    let original = match duplicate_original_query(&asset_id)
+        .into_model::<AssetRow>()
+        .one(&db)
         .await
     {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
-    let Some(row) = row else {
+    let Some(original) = original else {
         return raw(StatusCode::NOT_FOUND, DUPLICATE_ASSET_BODY);
-    };
-    let original = match asset_row(&row) {
-        Ok(asset) => asset,
-        Err(_) => return server_error(),
     };
     // A NULL or non-object `attributes` raises on the first `.get` in the
     // destination-key f-string (`:760`) — before any insert or S3 copy.
@@ -1703,48 +1942,51 @@ async fn post_duplicate_asset(
     } else {
         Some(workspace_id)
     };
-    let mut sql = "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"attributes\", \"asset\", \"size\", \"workspace_id\", \"created_by_id\", \"entity_type\", \"project_id\", \"storage_metadata\"".to_owned();
-    if let Some(col) = suffix {
-        sql.push_str(&format!(", \"{col}\""));
-    }
-    sql.push_str(", \"is_uploaded\", \"is_deleted\", \"is_archived\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11");
-    if suffix.is_some() {
-        sql.push_str(", $12, false, false, false)");
-    } else {
-        sql.push_str(", false, false, false)");
-    }
+    let suffix_col = match suffix {
+        Some(name) => match fk_column(name) {
+            Some(col) => Some(col),
+            None => return server_error(),
+        },
+        None => None,
+    };
     let attributes = serde_json::json!({
         "name": attr_name,
         "type": attr_type,
         "size": attr_size,
     });
-    let mut insert = sqlx::query(&sql)
-        .bind(new_id)
-        .bind(now)
-        .bind(now)
-        .bind(sqlx::types::Json(attributes))
-        .bind(&destination_key)
-        .bind(original.size)
-        .bind(ws_value)
-        .bind(actor.id)
-        .bind(&entity_type)
-        .bind(project_id)
-        .bind(original.storage_metadata.clone().map(sqlx::types::Json));
-    if suffix.is_some() {
-        insert = insert.bind(spread_val);
-    }
-    if insert.execute(&pool).await.is_err() {
+    let insert = duplicate_insert_query(
+        new_id,
+        now,
+        attributes,
+        &destination_key,
+        original.size,
+        ws_value,
+        actor.id,
+        &entity_type,
+        project_id,
+        original.storage_metadata.clone(),
+        suffix_col,
+        spread_val,
+    );
+    if db
+        .execute(DbBackend::Postgres.build(&insert))
+        .await
+        .is_err()
+    {
         return server_error();
     }
     // QUIRK (`:776-778`): the row above is committed before the copy;
     // `copy_object` swallows `ClientError` (an S3 error status still
     // flips and 200s), while a transport failure escapes to the 500
-    // fallback with the row left behind unflipped. (`storage`/`host`
-    // resolved above at the `:754` construction point.)
+    // fallback with the row left behind unflipped. The copy signs
+    // against the configured endpoint (`is_server=True` at `:754`),
+    // never the request Host. (`storage` resolved above at the `:754`
+    // construction point.)
     match s3_copy_object(
         storage,
         &scheme_of(&headers),
         &host,
+        true,
         &original.asset_key,
         &destination_key,
     )
@@ -1753,9 +1995,10 @@ async fn post_duplicate_asset(
         Ok(()) | Err(CopyError::Refused) => {}
         Err(CopyError::Transport) => return server_error(),
     }
-    if sqlx::query(q::DUPLICATE_MARK_UPLOADED_SQL)
-        .bind(new_id)
-        .execute(&pool)
+    if file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsUploaded, Expr::value(true))
+        .filter(file_assets::Column::Id.eq(new_id))
+        .exec(&db)
         .await
         .is_err()
     {
@@ -1778,9 +2021,10 @@ async fn get_workspace_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     download_asset(
         &state,
@@ -1801,24 +2045,27 @@ async fn get_project_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let pool = pool.clone();
-    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+    let project_id = match resolve_project_id(&db, &slug, &project_raw).await {
         Ok(id) => id,
         Err(denial) => return denial,
     };
     if let Err(denial) = gate_project(
-        &pool,
+        &db,
         &slug,
         &project_id,
         &actor.id,
@@ -1828,7 +2075,7 @@ async fn get_project_download(
     {
         return denial;
     }
-    download_lookup(&state, &pool, &slug, Some(&project_id), &asset_id, &headers).await
+    download_lookup(&state, &db, &slug, Some(&project_id), &asset_id, &headers).await
 }
 
 /// Shared download lookup: the `is_uploaded` conjunct lives in the
@@ -1847,62 +2094,67 @@ async fn download_asset(
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(state) else {
+    if pool(state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(state) else {
         return server_error();
     };
-    let pool = pool.clone();
     if project_id.is_none() {
-        if let Err(denial) = gate_workspace(&pool, slug, &actor.id, endpoint).await {
+        if let Err(denial) = gate_workspace(&db, slug, &actor.id, endpoint).await {
             return denial;
         }
     }
-    download_lookup(state, &pool, slug, project_id, asset_id, headers).await
+    download_lookup(state, &db, slug, project_id, asset_id, headers).await
+}
+
+/// Download lookup (`:788-798`, `:815-826`): default-manager scope plus
+/// `is_uploaded` in the lookup itself; the project leg adds `project_id`
+/// scoping.
+fn download_query(
+    asset_id: &Uuid,
+    slug: &str,
+    project_id: Option<&Uuid>,
+) -> Select<file_assets::Entity> {
+    let mut select = file_assets::Entity::find()
+        .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(file_assets::Column::IsUploaded.eq(true))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            file_assets::Column::IsUploaded,
+            file_assets::Column::StorageMetadata,
+            file_assets::Column::Attributes,
+            file_assets::Column::Size,
+        ])
+        .column_as(file_assets::Column::Asset, "asset_key")
+        .limit(1u64);
+    if let Some(project_id) = project_id {
+        select = select.filter(file_assets::Column::ProjectId.eq(*project_id));
+    }
+    select
 }
 
 async fn download_lookup(
     state: &AppState,
-    pool: &sqlx::PgPool,
+    db: &pidash_db::DatabaseConnection,
     slug: &str,
     project_id: Option<&Uuid>,
     asset_id: &Uuid,
     headers: &HeaderMap,
 ) -> Response {
-    let (sql, binds_project) = if project_id.is_some() {
-        (
-            format!(
-                "SELECT {ASSET_ROW_COLS} FROM \"file_assets\" \
-                 INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" \
-                 WHERE (\"file_assets\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 \
-                 AND \"file_assets\".\"project_id\" = $3 AND \"file_assets\".\"is_uploaded\" \
-                 AND \"file_assets\".\"deleted_at\" IS NULL)"
-            ),
-            true,
-        )
-    } else {
-        (
-            format!(
-                "SELECT {ASSET_ROW_COLS} FROM \"file_assets\" \
-                 INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" \
-                 WHERE (\"file_assets\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 \
-                 AND \"file_assets\".\"is_uploaded\" AND \"file_assets\".\"deleted_at\" IS NULL)"
-            ),
-            false,
-        )
-    };
-    let mut lookup = sqlx::query(&sql).bind(asset_id).bind(slug);
-    if binds_project {
-        lookup = lookup.bind(project_id);
-    }
-    let row = match lookup.fetch_optional(pool).await {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return raw(StatusCode::NOT_FOUND, ASSET_MISSING_BODY);
-    };
-    let asset = match asset_row(&row) {
+    let asset = match download_query(asset_id, slug, project_id)
+        .into_model::<AssetRow>()
+        .one(db)
+        .await
+    {
         Ok(asset) => asset,
         Err(_) => return server_error(),
+    };
+    let Some(asset) = asset else {
+        return raw(StatusCode::NOT_FOUND, ASSET_MISSING_BODY);
     };
     // `attributes.get("name", uuid.hex)` (`:804, :832`): a NULL or
     // non-object `attributes` raises (`AttributeError` → 500); a fresh hex
@@ -2037,24 +2289,30 @@ impl std::fmt::Display for InvalidEndpoint {
 impl std::error::Error for InvalidEndpoint {}
 
 /// Endpoint + host/path split for signing, mirroring
-/// `S3Storage.__init__` with a request (`is_server=False`):
-/// MinIO mode signs `{scheme}://{Host}` path-style; an explicit
-/// endpoint URL signs path-style against it; otherwise the
-/// virtual-hosted AWS default. Presigned URLs resolve the global
-/// endpoint for every region (`use_global_endpoint`,
-/// `botocore/signers.py:859`); header auth keeps the regional host.
+/// `S3Storage.__init__` with a request: MinIO mode signs
+/// `{scheme}://{Host}` path-style unless `is_server`, in which case
+/// the caller signs against the configured endpoint like every other
+/// non-MinIO caller; an explicit endpoint URL signs path-style
+/// against it; otherwise the virtual-hosted AWS default. Presigned
+/// URLs resolve the global endpoint for every region
+/// (`use_global_endpoint`, `botocore/signers.py:859`); header auth
+/// keeps the regional host.
 fn endpoint_parts(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
     presign: bool,
+    is_server: bool,
 ) -> Result<(String, String), InvalidEndpoint> {
     if !pidash_db::config::is_valid_region_name(&storage.region) {
         return Err(InvalidEndpoint);
     }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
-    if storage.use_minio {
+    // `is_server` skips the request-Host branch (`storage.py:50-57`:
+    // `if request is not None and not is_server`), so the duplicate
+    // copy signs against the configured endpoint.
+    if storage.use_minio && !is_server {
         Ok((format!("{scheme}://{host}"), host.to_owned()))
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/');
@@ -2137,7 +2395,8 @@ fn presigned_get_url(
     now: &DateTime<Utc>,
 ) -> Result<String, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, true)?;
+    // Presigns keep the public host: `S3Storage(request)` (`is_server=False`).
+    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, true, false)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -2216,7 +2475,8 @@ fn presigned_post(
     now: &DateTime<Utc>,
 ) -> Result<Value, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, _) = endpoint_parts(storage, scheme, host, true)?;
+    // Presigns keep the public host: `S3Storage(request)` (`is_server=False`).
+    let (endpoint, _) = endpoint_parts(storage, scheme, host, true, false)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -2282,37 +2542,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Standard base64 with padding (policy documents).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2354,13 +2583,17 @@ fn copy_auth_headers(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
+    is_server: bool,
     src_key: &str,
     dst_key: &str,
     now: &DateTime<Utc>,
 ) -> Result<(String, Vec<(String, String)>), InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, false)?;
-    let path_style = storage.use_minio
+    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, false, is_server)?;
+    // A server copy in MinIO mode without a configured endpoint signs
+    // the AWS default like any non-MinIO caller (boto3 `endpoint_url`
+    // `None`), so only the request-Host branch stays path-style.
+    let path_style = (storage.use_minio && !is_server)
         || storage
             .endpoint_url
             .as_deref()
@@ -2408,18 +2641,29 @@ fn copy_auth_headers(
 
 /// `S3Storage.copy_object` (`storage.py:172-184`) over plain HTTPS: an
 /// empty-body `PUT` to the destination key with `x-amz-copy-source`.
+/// `is_server` mirrors the `S3Storage` constructor flag: the duplicate
+/// copy passes `True` and signs against the configured endpoint.
 async fn s3_copy_object(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
+    is_server: bool,
     src_key: &str,
     dst_key: &str,
 ) -> Result<(), CopyError> {
     // An unsignable region never reaches the wire (`ValueError` at
     // `S3Storage.__init__`); like a transport failure it escapes to the
     // 500 fallback with the row left behind.
-    let (url, headers) = copy_auth_headers(storage, scheme, host, src_key, dst_key, &Utc::now())
-        .map_err(|_| CopyError::Transport)?;
+    let (url, headers) = copy_auth_headers(
+        storage,
+        scheme,
+        host,
+        is_server,
+        src_key,
+        dst_key,
+        &Utc::now(),
+    )
+    .map_err(|_| CopyError::Transport)?;
     // botocore's defaults apply (`storage.py` passes no timeout
     // `Config`): 60s to connect, 60s to read. Bound the client the same
     // way so a wedged object store yields a transport error (→ the 500
@@ -2438,24 +2682,6 @@ async fn s3_copy_object(
         Ok(())
     } else {
         Err(CopyError::Refused)
-    }
-}
-
-/// Django `IntegrityError` (unique/fk/not-null/check) as sqlx sees it:
-/// these branches `pass`, anything else 500s.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => {
-            let kind = db.kind();
-            matches!(
-                kind,
-                sqlx::error::ErrorKind::UniqueViolation
-                    | sqlx::error::ErrorKind::ForeignKeyViolation
-                    | sqlx::error::ErrorKind::NotNullViolation
-                    | sqlx::error::ErrorKind::CheckViolation
-            )
-        }
-        _ => false,
     }
 }
 
@@ -2483,14 +2709,14 @@ mod tests {
         let mut ssl = test_storage();
         ssl.minio_endpoint_ssl = true;
         assert_eq!(
-            endpoint_parts(&ssl, "http", "h:9", true).expect("minio"),
+            endpoint_parts(&ssl, "http", "h:9", true, false).expect("minio"),
             ("https://h:9".to_owned(), "h:9".to_owned())
         );
         // us-east-1 resolves to the global endpoint (botocore probe A/L).
         let mut aws = test_storage();
         aws.use_minio = false;
         assert_eq!(
-            endpoint_parts(&aws, "http", "h:9", true).expect("aws"),
+            endpoint_parts(&aws, "http", "h:9", true, false).expect("aws"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned()
@@ -2507,14 +2733,14 @@ mod tests {
         regional.use_minio = false;
         regional.region = "eu-west-1".to_owned();
         assert_eq!(
-            endpoint_parts(&regional, "http", "h:9", true).expect("presign"),
+            endpoint_parts(&regional, "http", "h:9", true, false).expect("presign"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned()
             )
         );
         assert_eq!(
-            endpoint_parts(&regional, "http", "h:9", false).expect("header auth"),
+            endpoint_parts(&regional, "http", "h:9", false, false).expect("header auth"),
             (
                 "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
                 "uploads.s3.eu-west-1.amazonaws.com".to_owned()
@@ -2527,18 +2753,50 @@ mod tests {
         empty.use_minio = false;
         empty.region = String::new();
         assert_eq!(
-            endpoint_parts(&empty, "http", "h:9", true),
+            endpoint_parts(&empty, "http", "h:9", true, false),
             Err(InvalidEndpoint)
         );
         assert_eq!(
-            endpoint_parts(&empty, "http", "h:9", false),
+            endpoint_parts(&empty, "http", "h:9", false, false),
             Err(InvalidEndpoint)
         );
         let mut garbage = test_storage();
         garbage.region = "!!".to_owned();
         assert_eq!(
-            endpoint_parts(&garbage, "http", "h:9", true),
+            endpoint_parts(&garbage, "http", "h:9", true, false),
             Err(InvalidEndpoint)
+        );
+    }
+
+    #[test]
+    fn endpoint_parts_server_skips_request_host() {
+        // `is_server=True` (`storage.py:50-57`): MinIO mode signs the
+        // configured endpoint, never `{scheme}://{Host}`.
+        let mut server = test_storage();
+        server.endpoint_url = Some("http://minio:9000/".to_owned());
+        assert_eq!(
+            endpoint_parts(&server, "http", "public.example", false, true).expect("server"),
+            ("http://minio:9000".to_owned(), "minio:9000".to_owned())
+        );
+        // Without a configured endpoint the server call signs the AWS
+        // default (boto3 `endpoint_url` `None`): global for presigns,
+        // regional for header auth.
+        let minio = test_storage();
+        assert_eq!(
+            endpoint_parts(&minio, "http", "public.example", true, true).expect("server"),
+            (
+                "https://uploads.s3.amazonaws.com".to_owned(),
+                "uploads.s3.amazonaws.com".to_owned()
+            )
+        );
+        let mut regional = test_storage();
+        regional.region = "eu-west-1".to_owned();
+        assert_eq!(
+            endpoint_parts(&regional, "http", "public.example", false, true).expect("server"),
+            (
+                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
+                "uploads.s3.eu-west-1.amazonaws.com".to_owned()
+            )
         );
     }
 
@@ -2716,6 +2974,7 @@ mod tests {
             &test_storage(),
             "http",
             "127.0.0.1:8486",
+            false,
             "ws-id/orig.png",
             "ws-id/ab12-orig.png",
             &test_now(),
@@ -2777,6 +3036,7 @@ mod tests {
             &regional,
             "https",
             "public.example",
+            false,
             "ws-id/orig.png",
             "ws-id/ab12-orig.png",
             &test_now(),
@@ -2796,12 +3056,53 @@ mod tests {
                 &empty,
                 "https",
                 "public.example",
+                false,
                 "ws-id/orig.png",
                 "ws-id/ab12-orig.png",
                 &test_now(),
             ),
             Err(InvalidEndpoint)
         );
+    }
+
+    #[test]
+    fn copy_auth_server_targets_configured_endpoint() {
+        // The duplicate copy (`is_server=True`) PUTs to the configured
+        // endpoint path-style even when the request Host differs.
+        let mut server = test_storage();
+        server.endpoint_url = Some("http://minio:9000".to_owned());
+        let (url, headers) = copy_auth_headers(
+            &server,
+            "http",
+            "public.example",
+            true,
+            "ws-id/orig.png",
+            "ws-id/ab12-orig.png",
+            &test_now(),
+        )
+        .expect("server signs");
+        assert_eq!(url, "http://minio:9000/uploads/ws-id/ab12-orig.png");
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .unwrap_or_else(|| panic!("header {name}"))
+                .1
+                .clone()
+        };
+        assert_eq!(get("x-amz-copy-source"), "/uploads/ws-id/orig.png");
+        // No configured endpoint: virtual-hosted AWS default, not path-style.
+        let (url, _) = copy_auth_headers(
+            &test_storage(),
+            "http",
+            "public.example",
+            true,
+            "ws-id/orig.png",
+            "ws-id/ab12-orig.png",
+            &test_now(),
+        )
+        .expect("server signs");
+        assert_eq!(url, "https://uploads.s3.amazonaws.com/ws-id/ab12-orig.png");
     }
 
     #[test]
@@ -2866,8 +3167,16 @@ mod tests {
             coerce_uuid_or_400(Some(&Value::from(id.to_string()))).expect("str"),
             Some(id)
         );
+        // Empty string stores NULL (Django ForeignKey.get_db_prep_save:
+        // `""` → None for a UUID target) — the comment composer's
+        // new-comment grant sends "".
+        assert!(coerce_uuid_or_400(Some(&Value::from("")))
+            .expect("empty")
+            .is_none());
         // Garbage strings reject (Django `ValidationError` → 400).
         assert!(coerce_uuid_or_400(Some(&Value::from("nope"))).is_err());
+        // Whitespace is not empty: it still rejects.
+        assert!(coerce_uuid_or_400(Some(&Value::from(" "))).is_err());
         // Small ints coerce via `uuid.UUID(int=...)`.
         assert_eq!(
             coerce_uuid_or_400(Some(&Value::from(5))).expect("int"),
@@ -2973,6 +3282,7 @@ mod tests {
                 &storage,
                 "http",
                 &addr.to_string(),
+                true,
                 "ws/orig.png",
                 "ws/dup.png",
             ),
@@ -2985,6 +3295,232 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(75),
             "copy took {elapsed:?}, expected ~60s"
+        );
+    }
+
+    // -- SeaORM statement-shape pins (orm-migration.md §7) -------------------
+    // These pin the converted query shapes without a database: joins,
+    // soft-delete scope, ordering and column selection must match the
+    // previous sqlx text in meaning (unique output names by construction).
+
+    fn build_select<E: sea_orm::EntityTrait>(select: sea_orm::Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn test_ids() -> (Uuid, Uuid) {
+        (
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            Uuid::parse_str("6a1a2b3c-4d5e-4f60-8172-446655440001").unwrap(),
+        )
+    }
+
+    #[test]
+    fn workspace_role_shape_pins_join_and_scope() {
+        let (user_id, _) = test_ids();
+        let sql = build_select(workspace_role_query(&user_id, "my-slug"));
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(
+            sql.contains(r#""workspace_members"."member_id" = "#),
+            "member: {sql}"
+        );
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "slug: {sql}");
+        assert!(sql.contains(r#""is_active" = "#), "active: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains("LIMIT 1"), "single row: {sql}");
+    }
+
+    #[test]
+    fn project_role_shape_pins_project_scope() {
+        let (user_id, project_id) = test_ids();
+        let sql = build_select(project_role_query(&user_id, &project_id, "my-slug"));
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(sql.contains(r#""project_id" = "#), "project: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains("LIMIT 1"), "single row: {sql}");
+    }
+
+    #[test]
+    fn resolve_project_shape_pins_identifier_scope() {
+        let sql = build_select(resolve_project_query("my-slug", "ENG"));
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(sql.contains(r#""identifier" = "#), "identifier: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+    }
+
+    #[test]
+    fn scoped_get_shape_pins_alias_and_scope() {
+        let (asset_id, project_id) = test_ids();
+        let sql = build_select(project_scoped_get_query(&asset_id, "my-slug", &project_id));
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(sql.contains(r#"AS "asset_key""#), "unique alias: {sql}");
+        assert!(sql.contains(r#""project_id" = "#), "project: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains("LIMIT 1"), "single row: {sql}");
+    }
+
+    #[test]
+    fn bulk_lookup_shape_pins_in_and_ordering() {
+        let (a, b) = test_ids();
+        let sql = build_select(bulk_lookup_query(&[a, b], "my-slug"));
+        assert!(sql.contains("IN"), "in list: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains(r#""created_at" DESC"#), "ordering: {sql}");
+    }
+
+    #[test]
+    fn bulk_link_update_shapes_pin_branch_columns() {
+        use sea_orm::QueryTrait;
+        let (a, b) = test_ids();
+        let ids = [a, b];
+        // ProjectCover sets only project_id.
+        let cover = bulk_link_update(&ids, a, b, a, q::BulkBranch::ProjectCover)
+            .expect("cover branch writes");
+        let sql = cover.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""project_id""#), "cover column: {sql}");
+        assert!(!sql.contains(r#""issue_id""#), "no issue column: {sql}");
+        // IssueDescription sets issue_id + project_id; comment does not
+        // carry project_id (ported difference).
+        let issue = bulk_link_update(&ids, a, b, a, q::BulkBranch::IssueDescription)
+            .expect("issue branch writes");
+        let sql = issue.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""issue_id""#), "issue column: {sql}");
+        assert!(
+            sql.contains(r#""project_id""#),
+            "issue carries project: {sql}"
+        );
+        let comment = bulk_link_update(&ids, a, b, a, q::BulkBranch::CommentDescription)
+            .expect("comment branch writes");
+        let sql = comment.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""comment_id""#), "comment column: {sql}");
+        assert!(!sql.contains(r#""project_id""#), "no project column: {sql}");
+        // Noop writes nothing.
+        assert!(
+            bulk_link_update(&ids, a, b, a, q::BulkBranch::Noop).is_none(),
+            "noop writes nothing"
+        );
+    }
+
+    #[test]
+    fn mint_insert_shape_pins_columns_and_suffix() {
+        let (asset_id, project_id) = test_ids();
+        let now = Utc::now();
+        let base = project_mint_insert_query(
+            asset_id,
+            now,
+            serde_json::json!({}),
+            "ws/key",
+            42.0,
+            Some(asset_id),
+            asset_id,
+            "ISSUE_ATTACHMENT",
+            project_id,
+            None,
+            None,
+        );
+        let sql = sea_orm::DbBackend::Postgres.build(&base).to_string();
+        assert!(
+            sql.contains(r#""storage_metadata""#),
+            "trailing flags: {sql}"
+        );
+        assert!(!sql.contains(r#""issue_id""#), "no suffix column: {sql}");
+        let with_suffix = project_mint_insert_query(
+            asset_id,
+            now,
+            serde_json::json!({}),
+            "ws/key",
+            42.0,
+            Some(asset_id),
+            asset_id,
+            "ISSUE_ATTACHMENT",
+            project_id,
+            Some(file_assets::Column::IssueId),
+            Some(asset_id),
+        );
+        let sql = sea_orm::DbBackend::Postgres.build(&with_suffix).to_string();
+        assert!(sql.contains(r#""issue_id""#), "suffix column: {sql}");
+    }
+
+    #[test]
+    fn duplicate_insert_shape_pins_storage_metadata_position() {
+        let (new_id, project_id) = test_ids();
+        let stmt = duplicate_insert_query(
+            new_id,
+            Utc::now(),
+            serde_json::json!({}),
+            "ws/key",
+            1.5,
+            Some(new_id),
+            new_id,
+            "USER_AVATAR",
+            Some(project_id),
+            Some(serde_json::json!({"a": 1})),
+            None,
+            None,
+        );
+        let sql = sea_orm::DbBackend::Postgres.build(&stmt).to_string();
+        assert!(
+            sql.contains(r#""storage_metadata""#),
+            "verbatim column: {sql}"
+        );
+        assert!(sql.contains(r#""is_uploaded""#), "flags: {sql}");
+    }
+
+    #[test]
+    fn download_shape_pins_uploaded_scope_and_project_arm() {
+        let (asset_id, project_id) = test_ids();
+        let ws = build_select(download_query(&asset_id, "my-slug", None));
+        assert!(ws.contains(r#""is_uploaded" = "#), "uploaded: {ws}");
+        assert!(ws.contains(r#""deleted_at" IS NULL"#), "scope: {ws}");
+        assert!(!ws.contains(r#""project_id""#), "no project arm: {ws}");
+        let project = build_select(download_query(&asset_id, "my-slug", Some(&project_id)));
+        assert!(
+            project.contains(r#""project_id" = "#),
+            "project arm: {project}"
+        );
+    }
+
+    #[test]
+    fn check_exists_shape_pins_unfiltered_by_is_deleted() {
+        let (asset_id, _) = test_ids();
+        let sql = build_select(check_exists_query(&asset_id, "my-slug"));
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(!sql.contains("is_deleted"), "is_deleted untouched: {sql}");
+    }
+
+    #[test]
+    fn patch_and_delete_shapes_pin_exact_columns() {
+        use sea_orm::QueryTrait;
+        let (asset_id, _) = test_ids();
+        let patch = project_patch_update(asset_id, serde_json::json!({}));
+        let sql = patch.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""is_uploaded""#), "uploaded set: {sql}");
+        assert!(!sql.contains("updated_at"), "no updated_at touch: {sql}");
+        let delete = project_delete_update(asset_id);
+        let sql = delete.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""is_deleted""#), "deleted set: {sql}");
+        assert!(sql.contains("CURRENT_TIMESTAMP"), "db clock: {sql}");
+    }
+
+    #[test]
+    fn cover_and_original_shapes_pin_scopes() {
+        let (asset_id, project_id) = test_ids();
+        let cover = build_select(save_project_cover_query(&project_id));
+        assert!(
+            cover.contains(r#""deleted_at" IS NULL"#),
+            "cover scope: {cover}"
+        );
+        let original = build_select(duplicate_original_query(&asset_id));
+        assert!(
+            original.contains(r#""is_uploaded" = "#),
+            "uploaded: {original}"
+        );
+        assert!(original.contains(r#"AS "asset_key""#), "alias: {original}");
+        let project = build_select(duplicate_project_query(&project_id, &asset_id));
+        assert!(
+            project.contains(r#""workspace_id" = "#),
+            "workspace: {project}"
         );
     }
 }

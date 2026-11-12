@@ -30,6 +30,35 @@ pub const STDERR_LINE_CAP_BYTES: usize = 512;
 /// to diagnose most failures (auth errors, panics, segfaults).
 pub const STDERR_RING_LINES: usize = 30;
 
+/// Startup budget for an engine: how long `run` / `run_one_shot` / `warm` may
+/// take to finish the handshake (Claude's `system/init`, Codex's
+/// `initialize` and `thread/start`, the ACP `initialize` and `session/new`,
+/// ...) before run setup fails. Callers apply it to the whole call via
+/// [`within_startup_deadline`], so multi-step handshakes get the same total
+/// budget as single-step ones; each bridge also bounds every individual step
+/// by it. Generous on purpose: a cold engine may install itself via `npx`,
+/// authenticate against its provider, and boot MCP servers before it emits
+/// anything. Only covers startup; once a run is live the activity watchdog
+/// takes over.
+pub const ENGINE_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Bound a whole engine startup call by [`ENGINE_STARTUP_TIMEOUT`].
+///
+/// Dropping a startup call part-way leaves the bridge mid-handshake, so a
+/// caller that times out or abandons one must discard the bridge rather than
+/// reuse it.
+pub async fn within_startup_deadline<T>(
+    start: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(ENGINE_STARTUP_TIMEOUT, start).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "engine startup timed out after {}s",
+            ENGINE_STARTUP_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 /// Bounded ring buffer of recent stderr lines from an agent subprocess.
 /// Each agent's `drain_stderr` task pushes here; the supervisor reads
 /// when it needs to enrich a `RunFailed` detail.
@@ -265,7 +294,6 @@ pub struct RunPayload {
     pub model: Option<String>,
 }
 
-
 /// Build the Pi Dash-controlled environment for this runner's agent.
 ///
 /// Empty for a user-enrolled runner, so its agent inherits the operator's
@@ -401,13 +429,35 @@ impl AgentBridge {
                 let engine_settings = mode
                     .map(crate::approval::engine_thread_settings)
                     .unwrap_or_default();
-                let b = crate::codex::bridge::Bridge::spawn_with_env(
+                let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
                     runner.codex.effort_default.clone(),
                     engine_settings,
                     &agent_env_for_config(runner),
+                    resume_session_id,
+                )
+                .await?;
+                Ok(AgentBridge::Codex(b))
+            }
+            AgentKind::Engine => {
+                // The built-in engine is Codex: the daemon supplies its
+                // binary, CODEX_HOME and auth helper (`engine::agent`).
+                let prepared = crate::engine::agent::prepare(runner)?;
+                let engine_settings = mode
+                    .map(crate::approval::engine_thread_settings)
+                    .unwrap_or_default();
+                let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
+                    &prepared.codex.binary,
+                    cwd,
+                    // The model is the profile's (CODEX_HOME/config.toml); a
+                    // per-run override could name one the gateway lacks.
+                    None,
+                    None,
+                    engine_settings,
+                    &agent_env_for_config(&prepared),
+                    resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))
