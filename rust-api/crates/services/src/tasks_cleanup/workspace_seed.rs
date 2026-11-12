@@ -97,6 +97,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{Map, Value};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// Seed-file names in read order, mirroring the `workspace_seed :543-564`
 /// call sequence (bot + membership rows first, then these files).
@@ -135,13 +136,28 @@ pub fn read_seed_file(seed_data_dir: &Path, filename: &str) -> Option<Vec<Value>
 }
 
 /// `create_project_and_member :84`: alnum-only chars of the workspace name,
-/// truncated to 5 chars. Python `str.isalnum` is Unicode-aware, as is
-/// `char::is_alphanumeric`; `[:5]` counts code points, as does
+/// truncated to 5 chars. Python `str.isalnum` keeps general categories L*
+/// and N* only, so combining marks (M*) and symbols (S*) are dropped;
+/// `char::is_alphanumeric` instead follows the Alphabetic property, which
+/// admits Other_Alphabetic marks (Mn/Mc) and symbols such as U+24B6, so it
+/// must not be used here. `[:5]` counts code points, as does
 /// `chars().take(5)`.
 pub fn project_identifier(workspace_name: &str) -> String {
     workspace_name
         .chars()
-        .filter(|ch| ch.is_alphanumeric())
+        .filter(|ch| {
+            matches!(
+                get_general_category(*ch),
+                GeneralCategory::UppercaseLetter
+                    | GeneralCategory::LowercaseLetter
+                    | GeneralCategory::TitlecaseLetter
+                    | GeneralCategory::ModifierLetter
+                    | GeneralCategory::OtherLetter
+                    | GeneralCategory::DecimalNumber
+                    | GeneralCategory::LetterNumber
+                    | GeneralCategory::OtherNumber
+            )
+        })
         .take(5)
         .collect()
 }
@@ -435,12 +451,6 @@ pub fn next_view_sort_order(max_sort_order: Option<f64>) -> Option<f64> {
 /// `IssueManager` scope); the jobs layer binds it.
 pub fn next_issue_sort_order(max_sort_order: Option<f64>) -> Option<f64> {
     max_sort_order.map(|largest| largest + 10_000.0)
-}
-
-/// `Issue.save` (`issue.py:324-328`): `sequence_id = max + 1`, else `1` —
-/// always overwritten, even though the seed row carries `sequence_id`.
-pub fn next_issue_sequence_id(max_sequence: Option<i64>) -> i64 {
-    max_sequence.map(|largest| largest + 1).unwrap_or(1)
 }
 
 /// `Issue.save` (`issue.py:303-310`, the `state is not None` branch — seed
@@ -807,6 +817,13 @@ mod tests {
         assert_eq!(project_identifier("!!!"), "");
         // Unicode alnum counts, like Python `str.isalnum`.
         assert_eq!(project_identifier("héllo wörld"), "héllo");
+        // PIDASHCONV-1702: combining marks (Mn/Mc) and symbols (So) are
+        // dropped like `str.isalnum` drops them (goldens from the
+        // interpreter, Python 3.12 / Unicode 15.0).
+        assert_eq!(project_identifier("สวัสดี"), "สวสด");
+        assert_eq!(project_identifier("हिन्दी"), "हनद");
+        assert_eq!(project_identifier("தமிழ்"), "தமழ");
+        assert_eq!(project_identifier("ⒶBC"), "BC");
     }
 
     #[test]
@@ -937,8 +954,9 @@ mod tests {
         assert_eq!(next_view_sort_order(Some(75_535.0)), Some(85_535.0));
         assert_eq!(next_issue_sort_order(None), None);
         assert_eq!(next_issue_sort_order(Some(1_000.0)), Some(11_000.0));
-        assert_eq!(next_issue_sequence_id(None), 1);
-        assert_eq!(next_issue_sequence_id(Some(7)), 8);
+        // The sequence kernel folded into
+        // `app_project::ser_project::next_work_item_sequence` (pinned by
+        // `next_sequence_kernel_matches_fixture` there).
         assert!(issue_completed("completed"));
         assert!(!issue_completed("started"));
         assert!(!issue_completed("backlog"));

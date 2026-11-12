@@ -26,7 +26,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -36,9 +36,9 @@ use pidash_db::config::AssistantSettings;
 use uuid::Uuid;
 
 use super::common::{
-    json_response, or_empty_str, owned_thread, parse_after, parse_json_body, parse_limit, pool_ref,
-    py_iso, query_last, request_actor, require_member, role_for, server_error, thread_not_found,
-    title_from, unauthenticated, HandlerResult,
+    body_get, json_response, or_empty_body, owned_thread, parse_after, parse_body, parse_limit,
+    pool_ref, py_iso, query_last, request_actor, request_content_type, require_member, role_for,
+    server_error, thread_not_found, title_from, unauthenticated, HandlerResult, ParsedBody,
 };
 use super::redis::{check_message_throttle, signal_cancel, ThrottleVerdict};
 use crate::middleware::SessionHandle;
@@ -70,7 +70,6 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// One transcript row as the list and the POST response read it.
-#[derive(sqlx::FromRow)]
 struct MessageRow {
     id: Uuid,
     kind: String,
@@ -78,21 +77,19 @@ struct MessageRow {
     status: String,
     seq: i64,
     turn_id: Option<Uuid>,
-    payload_text: String,
+    payload: serde_json::Value,
     created_at: DateTime<Utc>,
     completed_at: Option<DateTime<Utc>>,
 }
 
 /// Wire envelope (`runtime/events.py:128-140`) rendered through
 /// [`message_envelope_json`]: kind→role, display_content→content, exact
-/// Python key order. The payload arrives as the column's `::text` and is
-/// re-parsed (order-preserving) into compact DRF form — the owning-layer
-/// compaction the `MessageParts` docs require. Stamps use [`py_iso`]
+/// Python key order. The payload is the `Json` column value rendered
+/// compactly (order-preserving) — the owning-layer compaction the
+/// `MessageParts` docs require. Stamps use [`py_iso`]
 /// (`.isoformat()`, never the DRF `Z` path).
 fn envelope(row: &MessageRow) -> String {
-    let payload: serde_json::Value =
-        serde_json::from_str(&row.payload_text).unwrap_or(serde_json::Value::Null);
-    let payload_json = serde_json::to_string(&payload).expect("value serializes");
+    let payload_json = serde_json::to_string(&row.payload).expect("value serializes");
     let created = py_iso(&row.created_at);
     let completed = row.completed_at.as_ref().map(py_iso);
     message_envelope_json(&MessageParts {
@@ -133,19 +130,31 @@ async fn list_messages(
     };
     let after = parse_after(query_last(&params, "after").as_deref());
     let limit = parse_limit(query_last(&params, "limit").as_deref());
-    let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT \"id\", \"kind\", \"display_content\", \"status\", \"seq\", \"turn_id\", \
-         \"payload\"::text AS \"payload_text\", \"created_at\", \"completed_at\" \
-         FROM \"assistant_message\" \
-         WHERE (\"thread_id\" = $1 AND \"seq\" > $2) \
-         ORDER BY \"seq\" ASC LIMIT $3",
-    )
-    .bind(thread_id)
-    .bind(after)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let rows = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        pidash_db::entity::assistant_message::Entity::find()
+            .filter(pidash_db::entity::assistant_message::Column::ThreadId.eq(thread_id))
+            .filter(pidash_db::entity::assistant_message::Column::Seq.gt(after))
+            .order_by_asc(pidash_db::entity::assistant_message::Column::Seq)
+            .limit(limit as u64)
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?
+            .into_iter()
+            .map(|row| MessageRow {
+                id: row.id,
+                kind: row.kind,
+                display_content: row.display_content,
+                status: row.status,
+                seq: row.seq,
+                turn_id: row.turn_id,
+                payload: row.payload,
+                created_at: row.created_at.with_timezone(&Utc),
+                completed_at: row.completed_at.map(|v| v.with_timezone(&Utc)),
+            })
+            .collect::<Vec<_>>()
+    };
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
         bodies.push(envelope(row));
@@ -167,8 +176,12 @@ const THREAD_FULL_BODY: &str = r#"{"error":"thread_full","detail":"Start a new t
 
 /// `AssistantMessageListCreateEndpoint.post` (`messages.py:63-111`).
 ///
-/// Gate order, preserved: member gate → owned-thread scope → POST-only
-/// throttle → content validation → LLM-config gate → the atomic creation.
+/// Gate order, preserved: POST-only throttle → member gate → owned-thread
+/// scope → content validation → LLM-config gate → the atomic creation.
+/// DRF `initial()` runs `check_throttles` before the handler body, so a
+/// throttled caller answers 429 even when a gate would also deny it; the
+/// throttle follows the UUID parse because Django's `<uuid:thread_id>`
+/// route converter 404s garbage ids before any view code runs.
 /// The creation runs in one transaction under a `SELECT ... FOR UPDATE`
 /// thread lock: reject an in-flight turn (409), reject a full thread (409),
 /// insert the queued turn, insert the user message (`seq = MAX+1`,
@@ -180,27 +193,34 @@ async fn post_message(
     State(state): State<AppState>,
     Path((slug, thread_id)): Path<(String, String)>,
     extension: Option<Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
     let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
-    let role = role_for(pool, &actor.id, &slug).await?;
-    require_member(role)?;
     let thread_id: Uuid = thread_id.parse().map_err(|_| thread_not_found())?;
-    let Some(_thread) = owned_thread(pool, &thread_id, &actor.id, &slug).await? else {
-        return Err(thread_not_found());
-    };
     // POST-only throttle (`get_throttles`, `messages.py:39-42`): DRF runs
-    // `check_throttles` before the handler body, so a throttled caller
-    // answers 429 even when a later gate would also deny it (see
-    // `redis::check_message_throttle`).
+    // `check_throttles` before the handler body, so denied POSTs count and
+    // a throttled caller answers 429 even when a gate would also deny it
+    // (see `redis::check_message_throttle`).
     if check_message_throttle(&state, &actor.id).await == ThrottleVerdict::Deny {
         return Err(crate::assistant::throttles::Throttled.into_response());
     }
-    let data = parse_json_body(&body)?;
-    let content = or_empty_str(data.get("content"))?.trim().to_owned();
+    let role = role_for(pool, &actor.id, &slug).await?;
+    require_member(role)?;
+    let Some(_thread) = owned_thread(pool, &thread_id, &actor.id, &slug).await? else {
+        return Err(thread_not_found());
+    };
+    let data = match parse_body(&body, request_content_type(&headers)) {
+        Ok(ParsedBody::Object(map)) => map,
+        // A non-object body has no `.get`: `AttributeError` → generic
+        // 500. (JSON `null` takes the same path: `None.get` raises too.)
+        Ok(_) => return Err(server_error()),
+        Err(failure) => return Err(failure.into_response()),
+    };
+    let content = or_empty_body(body_get(&data, "content"))?.trim().to_owned();
     if content.is_empty() {
         return Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -228,20 +248,23 @@ async fn post_message(
     // and the lock raises `DoesNotExist`, which `handle_exception` maps to
     // the `ObjectDoesNotExist` 404 (`app/views/base.py:79-83`) — a
     // different body from the scope-miss 404 above.
-    let locked: Option<(Uuid, Option<Uuid>, String)> = sqlx::query_as(
-        "SELECT \"id\", \"active_turn_id\", \"title\" FROM \"assistant_thread\" \
-         WHERE \"id\" = $1 FOR UPDATE",
-    )
-    .bind(thread_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((_id, active_turn_id, title)) = locked else {
+    let locked = {
+        use sea_orm::{EntityTrait, QuerySelect};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        pidash_db::entity::assistant_thread::Entity::find_by_id(thread_id)
+            .lock_exclusive()
+            .one(&conn)
+            .await
+            .map_err(|_| server_error())?
+    };
+    let Some(locked) = locked else {
         return Err(json_response(
             StatusCode::NOT_FOUND,
             super::common::OBJECT_NOT_FOUND_BODY.to_owned(),
         ));
     };
+    let active_turn_id = locked.active_turn_id;
+    let title = locked.title;
     if active_turn_id.is_some() {
         return Err(json_response(
             StatusCode::CONFLICT,
@@ -250,12 +273,15 @@ async fn post_message(
     }
     // `AssistantMessage.objects.filter(thread=locked).count() >=
     // MAX_THREAD_MESSAGES` (`errors.py:106`, 200; `messages.py:87-91`).
-    let (message_count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM \"assistant_message\" WHERE \"thread_id\" = $1")
-            .bind(thread_id)
-            .fetch_one(&mut *tx)
+    let message_count = {
+        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        pidash_db::entity::assistant_message::Entity::find()
+            .filter(pidash_db::entity::assistant_message::Column::ThreadId.eq(thread_id))
+            .count(&conn)
             .await
-            .map_err(|_| server_error())?;
+            .map_err(|_| server_error())? as i64
+    };
     if message_count >= 200 {
         return Err(json_response(
             StatusCode::CONFLICT,
@@ -267,48 +293,91 @@ async fn post_message(
     // model defaults (`model_used=""`, `error_code=""`, `error_detail=""`,
     // `models.py:88-94`) — the columns are `NOT NULL` with no database
     // default, so the insert must carry the defaults explicitly.
-    let (turn_id, turn_status): (Uuid, String) = sqlx::query_as(
-        "INSERT INTO \"assistant_turn\" \
-         (\"id\", \"thread_id\", \"status\", \"model_used\", \"error_code\", \
-         \"error_detail\", \"created_at\") \
-         VALUES (gen_random_uuid(), $1, 'queued', '', '', '', now()) \
-         RETURNING \"id\", \"status\"",
-    )
-    .bind(thread_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
+    let turn_row = {
+        use sea_orm::{ActiveModelTrait, Set};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let now = Utc::now();
+        let model = pidash_db::entity::assistant_turn::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            thread_id: Set(thread_id),
+            status: Set("queued".to_owned()),
+            model_used: Set(String::new()),
+            error_code: Set(String::new()),
+            error_detail: Set(String::new()),
+            created_at: Set(now.into()),
+            model_messages: Set(None),
+            usage: Set(None),
+            started_at: Set(None),
+            completed_at: Set(None),
+            user_message_id: Set(None),
+        };
+        model.insert(&conn).await.map_err(|_| server_error())?
+    };
+    let turn_id = turn_row.id;
+    let turn_status = turn_row.status.clone();
     // `events.create_message(locked, USER, turn, content, COMPLETED)`
     // (`messages.py:93-95`): `seq = MAX+1` under the thread lock.
-    let (next_seq,): (i64,) = sqlx::query_as(
-        "SELECT COALESCE(MAX(\"seq\"), 0) + 1 FROM \"assistant_message\" WHERE \"thread_id\" = $1",
+    // One `MAX` aggregate as before, decoded by its `next_seq` alias.
+    let next_seq = {
+        use sea_orm::sea_query::{Alias, Expr, Func, Query};
+        use sea_orm::{ConnectionTrait, DbBackend};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let stmt = Query::select()
+            .expr_as(
+                Expr::expr(Func::coalesce([
+                    Expr::col((Alias::new("assistant_message"), Alias::new("seq"))).max(),
+                    Expr::val(0).into(),
+                ]))
+                .add(1),
+                Alias::new("next_seq"),
+            )
+            .from(Alias::new("assistant_message"))
+            .and_where(Expr::col(Alias::new("thread_id")).eq(thread_id))
+            .to_owned();
+        let built = DbBackend::Postgres.build(&stmt);
+        let row = conn
+            .query_one(built)
+            .await
+            .map_err(|_| server_error())?
+            .ok_or_else(server_error)?;
+        row.try_get::<i64>("", "next_seq")
+            .map_err(|_| server_error())?
+    };
+    let created = pidash_services::domain::assistant::create_user_message(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        thread_id,
+        turn_id,
+        next_seq,
+        &content,
     )
-    .bind(thread_id)
-    .fetch_one(&mut *tx)
     .await
     .map_err(|_| server_error())?;
-    let message = sqlx::query_as::<_, MessageRow>(
-        "INSERT INTO \"assistant_message\" \
-         (\"id\", \"thread_id\", \"turn_id\", \"seq\", \"kind\", \"display_content\", \
-         \"payload\", \"status\", \"created_at\", \"completed_at\") \
-         VALUES (gen_random_uuid(), $1, $2, $3, 'user', $4, '{}', 'completed', now(), NULL) \
-         RETURNING \"id\", \"kind\", \"display_content\", \"status\", \"seq\", \
-         \"turn_id\", \"payload\"::text AS \"payload_text\", \"created_at\", \"completed_at\"",
-    )
-    .bind(thread_id)
-    .bind(turn_id)
-    .bind(next_seq)
-    .bind(&content)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
+    let message = MessageRow {
+        id: created.id,
+        kind: created.kind,
+        display_content: created.display_content,
+        status: created.status,
+        seq: created.seq,
+        turn_id: created.turn_id,
+        payload: serde_json::from_str(&created.payload_text).unwrap_or(serde_json::Value::Null),
+        created_at: created.created_at,
+        completed_at: created.completed_at,
+    };
     // `turn.user_message = user_msg; turn.save(...)` (`messages.py:96-97`).
-    sqlx::query("UPDATE \"assistant_turn\" SET \"user_message_id\" = $1 WHERE \"id\" = $2")
-        .bind(message.id)
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| server_error())?;
+    {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        pidash_db::entity::assistant_turn::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::assistant_turn::Column::UserMessageId,
+                Expr::value(message.id),
+            )
+            .filter(pidash_db::entity::assistant_turn::Column::Id.eq(turn_id))
+            .exec(&conn)
+            .await
+            .map_err(|_| server_error())?;
+    }
     // `locked.active_turn = turn`, auto-title when empty, always bump the
     // stamp (`messages.py:98-101`). A non-empty title is written back
     // verbatim (no re-truncation — `CharField.max_length` is not a database
@@ -319,16 +388,29 @@ async fn post_message(
     } else {
         title
     };
-    sqlx::query(
-        "UPDATE \"assistant_thread\" SET \"active_turn_id\" = $1, \"title\" = $2, \
-         \"updated_at\" = now() WHERE \"id\" = $3",
-    )
-    .bind(turn_id)
-    .bind(&title)
-    .bind(thread_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
+    {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let now = Utc::now();
+        pidash_db::entity::assistant_thread::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::assistant_thread::Column::ActiveTurnId,
+                Expr::value(turn_id),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_thread::Column::Title,
+                Expr::value(title.clone()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_thread::Column::UpdatedAt,
+                Expr::value(now),
+            )
+            .filter(pidash_db::entity::assistant_thread::Column::Id.eq(thread_id))
+            .exec(&conn)
+            .await
+            .map_err(|_| server_error())?;
+    }
     tx.commit().await.map_err(|_| server_error())?;
 
     // `transaction.on_commit(lambda: run_assistant_turn.delay(tid))`
@@ -368,14 +450,17 @@ async fn llm_gate_allows(
 /// The OSS half of the gate: a `UserLLMConfig` row whose
 /// `api_key_encrypted` is set (`has_api_key`, `models.py:260-262`).
 async fn has_oss_api_key(pool: &sqlx::PgPool, user_id: &Uuid) -> HandlerResult<bool> {
-    let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
-        "SELECT \"api_key_encrypted\" FROM \"assistant_user_llm_config\" WHERE \"user_id\" = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(matches!(row, Some((Some(key),)) if !key.is_empty()))
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_user_llm_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(*user_id))
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row
+        .and_then(|row| row.api_key_encrypted)
+        .map(|key| !key.is_empty())
+        .unwrap_or(false))
 }
 
 /// The queue `run_turn` jobs land on: `ASSISTANT_TURN_QUEUE` when the
@@ -663,5 +748,44 @@ mod tests {
             r#"{"error":"thread_full","detail":"Start a new thread."}"#
         );
         assert_eq!(NO_ACTIVE_TURN_BODY, r#"{"error":"no_active_turn"}"#);
+    }
+
+    #[test]
+    fn list_messages_seaorm_shape_pins_cursor_and_order() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+        let sql = pidash_db::entity::assistant_message::Entity::find()
+            .filter(pidash_db::entity::assistant_message::Column::ThreadId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::assistant_message::Column::Seq.gt(0))
+            .order_by_asc(pidash_db::entity::assistant_message::Column::Seq)
+            .limit(100)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("assistant_message"), "table: {sql}");
+        assert!(sql.contains("thread_id"), "thread filter: {sql}");
+        assert!(sql.contains("seq"), "seq filter/order: {sql}");
+        assert!(sql.contains("ORDER BY"), "ordering: {sql}");
+    }
+
+    #[test]
+    fn thread_lock_seaorm_shape_is_for_update() {
+        use sea_orm::{EntityTrait, QuerySelect, QueryTrait};
+        let sql = pidash_db::entity::assistant_thread::Entity::find_by_id(uuid::Uuid::nil())
+            .lock_exclusive()
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("FOR UPDATE"), "lock: {sql}");
+    }
+
+    #[test]
+    fn has_oss_api_key_seaorm_shape_reads_by_user() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
+        let sql = pidash_db::entity::assistant_user_llm_config::Entity::find()
+            .filter(
+                pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(uuid::Uuid::nil()),
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("assistant_user_llm_config"), "table: {sql}");
+        assert!(sql.contains("user_id"), "user filter: {sql}");
     }
 }

@@ -11,7 +11,7 @@
 //! [`ROUTES`] row against the real router (all flags on, dead
 //! upstream) — owned methods must serve, proxied methods must 502,
 //! unlisted methods must 405 — and the mirror test rebuilds the worker
-//! registry exactly like `worker()` and compares it against [`TASKS`].
+//! registry exactly like the worker builder and compares it against [`TASKS`].
 //! Any router or registry drift fails `cargo test` here first.
 
 #[cfg(test)]
@@ -289,6 +289,11 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/bulk-delete-issues/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+    // Bulk operation/subscribe (app_issues::handlers_bulk; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/bulk-operation-issues/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/bulk-subscribe-issues/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/comments/{comment_id}/reactions/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/comments/{comment_id}/reactions/{reaction_code}/",
@@ -304,7 +309,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["GET", "DELETE"], proxied: &["POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/progress/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/transfer-issues/",
@@ -315,6 +320,14 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/deleted-issues/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // Epics collection/detail (app_issues::handlers_core) + epic work
+    // items (app_issues::handlers_reads; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/epics/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/epics/{epic_id}/issues/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/epics/{pk}/",
+        owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/estimates/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/estimates/{estimate_id}/",
@@ -361,6 +374,9 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issue-labels/{pk}/",
         owned: &["GET", "PUT", "PATCH", "DELETE"], proxied: &["POST", "HEAD", "OPTIONS"] },
+    // Project issue types (app_issues::handlers_issue_types; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issue-types/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues-detail/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/",
@@ -413,6 +429,11 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/versions/{pk}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // Issue worklogs (app_issues::handlers_engage; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/{pk}/",
+        owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
         owned: &["GET", "PUT", "PATCH", "DELETE"], proxied: &["POST", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{pk}/archive/",
@@ -750,11 +771,13 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["DELETE", "PATCH"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/{request_id}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/revoke/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/rotate/",
@@ -781,6 +804,12 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/",
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
+    // Operator pause/resume (port 09738d222): POST owned, HEAD falls
+    // through to the GET proxy arm (NEWPIDASH-31).
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/pause/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/resume/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/revive/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/revoke/",
@@ -800,11 +829,11 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "api_v1", path: "/api/v1/auth/device/token/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/machine-token/",
-        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/revoke/",
-        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/workspaces/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/runners/{runner_id}/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/users/me/",
@@ -914,9 +943,16 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/",
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // v1 scheduler writes (PDASHOSS01-318, f0fde5a53): owned methods serve
+    // from v1_schedulers::writes, everything else proxies via the
+    // MethodRouter fallback (NEWPIDASH-31).
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/",
+        owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/states/",
@@ -971,8 +1007,13 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
-    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/",
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/runners/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // v1 scheduler definition write (PDASHOSS01-318, f0fde5a53; NEWPIDASH-31).
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/",
+        owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/stickies.{format}/?",
         owned: &[], proxied: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/stickies/",
@@ -1005,14 +1046,26 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/desktop-enroll/",
         owned: &["POST", "DELETE"], proxied: &["GET", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/",
+        owned: &["GET", "PATCH"], proxied: &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/poll",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/credential/revoke/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/model-token/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/profile/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/health/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/machine-tokens/",
@@ -1150,7 +1203,7 @@ pub const TASKS: &[TaskRow] = &[
     // Provenance: every Pi Dash task name Django defines (worker-boot
     // registered or statically defined); the Celery canvas builtins and
     // dead code are excluded (PIDASHCONV-1108). Ownership mirrors
-    // `worker()`'s registrations, re-verified by
+    // the worker builder's registrations, re-verified by
     // `mirror_registry_matches_tasks_table` on each `cargo test` run.
     TaskRow {
         name: "assistant.run_turn",
@@ -1351,10 +1404,16 @@ pub const TASKS: &[TaskRow] = &[
         name: "runner.expire_stale_approvals",
     },
     TaskRow {
+        name: "runner.fail_dedicated_runs",
+    },
+    TaskRow {
         name: "runner.fail_runs_on_offline_runners",
     },
     TaskRow {
         name: "runner.mark_offline_runners",
+    },
+    TaskRow {
+        name: "runner.pause_engines_with_expired_credentials",
     },
     TaskRow {
         name: "runner.reconcile_agent_run_terminal_effects",
@@ -1382,6 +1441,9 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.sweep_stale_runners",
+    },
+    TaskRow {
+        name: "runner.sweep_stranded_dedicated_runs",
     },
 ];
 
@@ -1566,6 +1628,25 @@ async fn probe_status(
 mod tests {
     use super::*;
 
+    /// Assistant-model seam double for registration-only tests: the
+    /// trait defaults with a canned title (no test here drives
+    /// dispatch).
+    #[derive(Debug)]
+    struct DefaultSeam;
+
+    impl pidash_services::extensions::AssistantModelSeam for DefaultSeam {
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
+    }
+
     /// Structural sanity: sorted, unique, well-formed rows over known
     /// groups and tracked methods, owned/proxied disjoint.
     #[test]
@@ -1671,7 +1752,7 @@ mod tests {
         (allow, len)
     }
 
-    /// The worker registry, rebuilt exactly like `worker()` (mirror it
+    /// The worker registry, rebuilt exactly like the worker builder (mirror it
     /// on any registration change): `PgPool` groups register for real
     /// over a lazy pool (no I/O); `Pools` groups register stubs over
     /// the same name constants the real register fns consume (`Pools`
@@ -1680,6 +1761,38 @@ mod tests {
     /// table's rust names. Residual: a registration outside these
     /// consts is invisible here (`Registry` has no iterator) — review
     /// catches it, and the parity diff flags the behavior change.
+    /// The mirror's `ToolCtx` needs a transition hook; handlers never run
+    /// here, so it is never called.
+    struct NoopTransitionHook;
+
+    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
+        fn enqueue_completion_comment(
+            &self,
+            _issue_id: uuid::Uuid,
+            _prev_state_id: Option<uuid::Uuid>,
+            _current_state_id: Option<uuid::Uuid>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: uuid::Uuid,
+            _request: pidash_services::orchestration::entries::FireRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
+            })
+        }
+    }
+
     #[tokio::test]
     async fn mirror_registry_matches_tasks_table() {
         use pidash_jobs::tasks_cleanup;
@@ -1741,7 +1854,7 @@ mod tests {
             pidash_jobs::tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME,
             stub(),
         );
-        // Real registrations (the same calls `worker()` makes).
+        // Real registrations (the same calls the worker builder makes).
         tasks_cleanup::register_versions(&mut registry, pool.clone());
         tasks_cleanup::assets::register_assets(
             &mut registry,
@@ -1751,9 +1864,18 @@ mod tests {
             )),
             std::sync::Arc::new(tasks_cleanup::assets::NoopLiveConvert),
         );
-        tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
+        let seed_settings = pidash_db::config::Settings::test_defaults();
+        tasks_cleanup::register_workspace_seed(
+            &mut registry,
+            pool.clone(),
+            std::env::temp_dir(),
+            seed_settings.cloud_agent.clone(),
+            seed_settings.managed_runner.clone(),
+            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            std::sync::Arc::new(DefaultSeam),
+        );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
-        // The same call `worker()` makes (PIDASHCONV-858): construction
+        // The same call the worker builder makes (PIDASHCONV-858): construction
         // does no I/O (lazy client, resolved settings), so the lazy
         // pool suffices and no S3 endpoint is needed here.
         tasks_cleanup::register_expiry(
@@ -1767,23 +1889,34 @@ mod tests {
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
+            None,
         );
         pidash_jobs::integrations::github_sync::register_github_sync_tasks(
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
+            None,
         );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
-        pidash_jobs::assistant::register_sweep_handler(&mut registry, pool.clone());
+        pidash_jobs::assistant::register_sweep_handler(
+            &mut registry,
+            pool.clone(),
+            None,
+            // The same configured limit the worker builder passes (test defaults:
+            // 330, like Django's unset default).
+            pidash_db::config::Settings::test_defaults()
+                .assistant
+                .turn_hard_limit,
+        );
         pidash_jobs::loop_scan::register_scanner(&mut registry, pool.clone());
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
         pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());
-        // Real registrations (the same calls `worker()` makes): the
+        // Real registrations (the same calls the worker builder makes): the
         // live tick seam over test-default settings, and the live
         // scheduler dispatch. Construction does no I/O, so the lazy
         // pool suffices.
         let dispatch_settings = pidash_db::config::Settings::test_defaults();
-        // The same CE assistant seam `worker()` installs (PIDASHCONV-1054).
+        // The same CE assistant seam the worker builder installs (PIDASHCONV-1054).
         let dispatch_assistant_seam =
             std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
                 std::sync::Arc::new(dispatch_settings.clone()),
@@ -1795,6 +1928,8 @@ mod tests {
                 pool.clone(),
                 dispatch_settings.cloud_agent.clone(),
                 dispatch_settings.managed_runner.clone(),
+                None,
+                dispatch_settings.runner.clone(),
                 std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam.clone(),
             )),
@@ -1806,19 +1941,21 @@ mod tests {
                 pool.clone(),
                 dispatch_settings.cloud_agent,
                 dispatch_settings.managed_runner,
+                None,
+                dispatch_settings.runner.clone(),
                 std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam,
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
         // D-07 membership mail (PIDASHCONV-1104): the same calls
-        // `worker()` makes — the T6 four plus project_invitation.
+        // `the worker builder makes — the T6 four plus project_invitation.
         pidash_jobs::tasks_mail::register_membership_mail_tasks(&mut registry, pool.clone());
         pidash_jobs::tasks_mail::register_project_invitation_task(&mut registry, pool.clone());
-        // The same call `worker()` makes (PIDASHCONV-1103): pool-only
+        // The same call the worker builder makes (PIDASHCONV-1103): pool-only
         // handlers over the lazy pool, no I/O.
         pidash_jobs::tasks_mail::register_auth_mail_tasks(&mut registry, pool.clone());
-        // Runner tasks (PIDASHCONV-859): the real `worker()` calls —
+        // Runner tasks (PIDASHCONV-859): the real worker-builder calls —
         // the providers construct with no I/O (lazy pool, no Redis
         // client, test-default settings).
         let runner_settings = pidash_db::config::Settings::test_defaults();
@@ -1847,8 +1984,9 @@ mod tests {
             pool.clone(),
             runner_seams,
         );
+        pidash_jobs::runner_runs::register_engine_pause_tasks(&mut registry, pool.clone());
         // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
-        // the same calls `worker()` makes — real register over the
+        // the same calls the worker builder makes — real register over the
         // lazy pool, no forward override (handlers never run here).
         let execute_settings =
             pidash_db::config::Settings::from_env().expect("settings parse in test env");
@@ -1856,6 +1994,7 @@ mod tests {
             tools: crate::model_runtime::tools_exec::ToolCtx {
                 toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 pool: pool.clone(),
+                orm: pidash_db::pool::sea_orm_connection(&pool),
                 cloud: execute_settings.cloud_agent.clone(),
                 managed: execute_settings.managed_runner.clone(),
                 http: reqwest::Client::new(),
@@ -1864,6 +2003,12 @@ mod tests {
                     pidash_db::redis::RedisHandle::from_settings(&execute_settings),
                     execute_settings.secret_key.clone(),
                 ),
+                // No Redis client in the mirror (handlers never run
+                // here), like the runner-seams and turn-seam mirrors
+                // above; the worker builder builds this from REDIS_URL.
+                redis: None,
+                runner: execute_settings.runner.clone(),
+                transition_hook: std::sync::Arc::new(NoopTransitionHook),
             },
             keys: crate::model_runtime::keys::KeyResolver::from_env(
                 execute_settings.assistant.key_cache_ttl_secs,
@@ -1879,10 +2024,13 @@ mod tests {
                 pool.clone(),
                 execute_settings.cloud_agent.block_private_urls,
                 invoke,
+                std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
+                    std::sync::Arc::new(execute_settings.clone()),
+                )),
             )),
             std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
         );
-        // The same call `worker()` makes (PIDASHCONV-865): every seam
+        // The same call the worker builder makes (PIDASHCONV-865): every seam
         // constructor is lazy (no I/O), so the mirror builds them over
         // the lazy pool and a never-dialed Redis URL.
         pidash_jobs::tasks_mail::register_email_notification_tasks(
@@ -1908,24 +2056,27 @@ mod tests {
                 std::sync::Arc::new(pidash_jobs::tasks_mail::live::SmtpMailer::new()),
             ),
         );
-        // Export tasks (PIDASHCONV-1106): the same calls `worker()` makes
+        // Export tasks (PIDASHCONV-1106): the same calls the worker builder makes
         // (pool-only handlers, no I/O at registration).
         pidash_jobs::tasks_export::register_issue_export_task(&mut registry, pool.clone());
         pidash_jobs::tasks_export::register_analytic_task(&mut registry, pool.clone());
-        // Assistant turn (PIDASHCONV-863): the same call `worker()` makes
+        // Assistant turn (PIDASHCONV-863): the same call the worker builder makes
         // (live seam over the lazy pool, no Redis client, test-default
         // settings; construction does no I/O).
         pidash_jobs::assistant::register_turn_handler(
             &mut registry,
             pool.clone(),
             std::sync::Arc::new(
-                crate::turn::live::LiveTurnSeam::new(
+                pidash_api::turn::live::LiveTurnSeam::new(
                     pool.clone(),
                     std::sync::Arc::new(execute_settings.clone()),
                     None,
                 )
                 .expect("live turn seam builds"),
             ),
+            // The same configured soft limit the worker builder passes (test env:
+            // 300, like Django's unset default).
+            execute_settings.assistant.turn_soft_limit,
         );
 
         // The const union, independent of the table.
@@ -2010,7 +2161,7 @@ mod tests {
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            13,
+            16,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2023,7 +2174,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 80, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2050,7 +2201,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 31);
         let find = |name: &str| {
             schedule
                 .iter()

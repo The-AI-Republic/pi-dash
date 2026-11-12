@@ -198,6 +198,50 @@ def test_project_repository_unbind(admin, world):
     assert response.json() == {"bound": False}
 
 
+def test_unbind_with_issue_syncs(admin, world, seeder, db):
+    """Unbind hard-deletes the binding/sync and every issue/comment sync row.
+
+    PIDASHCONV-1461: the sync FKs are plain DEFERRABLE constraints with no
+    ON DELETE CASCADE, so the port must run the ORM Collector's cascade in
+    SQL (comment syncs, then issue syncs, live AND soft-deleted) before the
+    parent DELETEs, in one transaction. The github-legacy family rides the
+    same unbind and the same shared child-delete SQL as the rebind paths.
+    """
+    ws_id, proj_id = world["workspace"]["id"], world["project"]["id"]
+    owner_id = world["owner"]["id"]
+    account = seeder.create_git_provider_account(ws_id)
+    repo = seeder.create_git_repository()
+    binding = seeder.create_git_binding(ws_id, proj_id, owner_id, repo["id"], account["id"])
+    issue1 = seeder.create_issue(ws_id, proj_id, name="sync issue 1", sequence_id=101)
+    issue2 = seeder.create_issue(ws_id, proj_id, name="sync issue 2", sequence_id=102)
+    comment1 = seeder.create_comment(ws_id, proj_id, issue1["id"], owner_id)
+    comment2 = seeder.create_comment(ws_id, proj_id, issue2["id"], owner_id)
+    live = seeder.create_git_issue_sync(ws_id, proj_id, binding["id"], issue1["id"])
+    dead = seeder.create_git_issue_sync(ws_id, proj_id, binding["id"], issue2["id"], deleted=True)
+    seeder.create_git_comment_sync(ws_id, proj_id, live["id"], comment1["id"])
+    seeder.create_git_comment_sync(ws_id, proj_id, dead["id"], comment2["id"], deleted=True)
+    wi = seeder.create_workspace_integration(ws_id, owner_id)
+    sync = seeder.create_github_repo_sync(ws_id, proj_id, owner_id, wi["id"])
+    ghi_live = seeder.create_github_issue_sync(ws_id, proj_id, sync["id"], issue1["id"])
+    ghi_dead = seeder.create_github_issue_sync(ws_id, proj_id, sync["id"], issue2["id"], deleted=True)
+    seeder.create_github_comment_sync(ws_id, proj_id, ghi_live["id"], comment1["id"])
+    seeder.create_github_comment_sync(ws_id, proj_id, ghi_dead["id"], comment2["id"], deleted=True)
+
+    response = admin.delete(proj_url(world, "repository"))
+    assert response.status_code == 200
+    assert response.json() == {"bound": False}
+
+    for table in (
+        "git_repository_bindings",
+        "git_issue_syncs",
+        "git_comment_syncs",
+        "github_repository_syncs",
+        "github_issue_syncs",
+        "github_comment_syncs",
+    ):
+        assert db.fetchval(f"SELECT count(*) FROM {table} WHERE project_id = %s", (proj_id,)) == 0, table
+
+
 def test_project_repository_toggle_member_denied(member_client, world):
     response = member_client.patch(proj_url(world, "repository"), json={"enabled": True})
     assert response.status_code == 403

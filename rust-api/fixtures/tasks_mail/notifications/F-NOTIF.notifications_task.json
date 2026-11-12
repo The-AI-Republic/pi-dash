@@ -22,7 +22,7 @@
     "sender": "per-subscriber branch",
     "title": "activity.comment"
   },
-  "PORT_BUG_3": "new_mentions email logs (:573-576 description-branch, :622-625 per-activity branch) set receiver_id=subscriber \u2014 the STALE loop variable from the subscriber loop, not mention_id. If issue_subscribers is empty the name is unbound -> NameError -> outer except. Port verbatim.",
+  "PORT_BUG_3": "new_mentions email logs (:573-576 description-branch, :622-625 per-activity branch) set receiver_id=subscriber \u2014 the STALE loop variable from the subscriber loop, not mention_id. If issue_subscribers is empty the name still holds the bool task parameter (:196): EmailNotificationLog(receiver_id=True/False) builds, update_mentions_for_issue + Notification.bulk_create commit, and only the final email bulk_create dies (UUID-as-bool user-FK IntegrityError, swallowed by the outer except :672-674). See no_subscriber_description_mention (recorded). Port verbatim.",
   "PORT_NOTE_uuid_filter": "comment_mentions filtered by `UUID(mention) in set(project_members)`: a non-UUID mention raises ValueError -> whole task dies via outer except (print + return, partial in-memory bulks discarded). Port verbatim.",
   "_fixture": "F-NOTIF",
   "_method": "source-derived record (multi-table writes; live coverage is the worker-plane oracle). Branch tables and bulk shapes transcribed verbatim.",
@@ -56,6 +56,15 @@
     "comment_mentions": "create_mention_notification(message=f'{display} has mentioned you in a comment in issue {name}'); email field forced to 'mention' iff preference.mention",
     "description_mentions_otherwise": "one create_mention_notification per activity",
     "description_mentions_with_actor_last_activity": "single Notification 'You have been mentioned in the issue {name}'"
+  },
+  "no_subscriber_description_mention": {
+    "_recorded_from": "Django main b6114ae64 via the worker-plane oracle, 2026-10-23 (PIDASHCONV-1285). Supersedes the source-derived PORT_BUG_3 no-subscriber paragraph.",
+    "world": "issue with zero IssueSubscriber rows; actor A; active member B unsubscribed with a preference row; stale IssueMention row for C; last IssueActivity is A's description row (single-row branch :525-529); subscriber=True wire arg",
+    "args": "notifications(type=issue.activity.created, subscriber=True, issue_activities_created=[description activity with non-null old/new_identifier], requested_data mentions B, current_instance mentions C)",
+    "stale_reads": "issue_activity is bound by the :249 comment-mention loop over every activity, so the Notification identifiers come from the last activity even with no subscribers; subscriber still holds the bool task parameter",
+    "preference_mention_false": "1 Notification for B (sender in_app:issue_activities:mentioned, message 'You have been mentioned in the issue {name}'), 1 live IssueMention for B, C soft-deleted, 0 email log rows, no error",
+    "preference_mention_true": "same Notification + IssueMention writes; 0 email log rows; worker prints the swallowed FK error: insert or update on table email_notification_logs violates foreign key constraint ... Key (receiver_id)=(00000000-0000-0000-0000-000000000001) is not present in table users",
+    "contract": "rust-api/contract-tests/tasks_mail/test_mail_tasks.py::test_notifications_no_subscriber_description_mention + test_rust_replay.py mirror"
   },
   "preference_reads": "UserNotificationPreference.objects.get(user_id=...) per subscriber and per mention_id (DoesNotExist -> outer except, nothing persisted)",
   "send_email_rules": [

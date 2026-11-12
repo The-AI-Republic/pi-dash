@@ -46,12 +46,12 @@
 //!   `X-Forwarded-For` entry is taken unstripped, else `REMOTE_ADDR` (which
 //!   may be absent → NULL stamp columns → 500 on NOT NULL, same as Django's
 //!   `IntegrityError`).
-//! * QUIRK-no-transaction: no `transaction.atomic` anywhere, so the
-//!   project-invite `IntegrityError` (missing `project_id`, kept) still
-//!   500s *after* the workspace-member writes commit.
+//! * QUIRK-no-transaction: no `transaction.atomic` anywhere, so a later
+//!   statement failure still leaves the earlier writes committed.
 //! * QUIRK-csrf-rotate: `login()` rotates the CSRF secret, so success sets
-//!   a fresh masked `csrftoken` cookie (Django defaults: 1-year age,
-//!   `/`, `Lax`; secure/domain/httponly from settings).
+//!   a fresh 32-char `csrftoken` cookie (`rotate_token` stores the raw
+//!   secret; Django defaults: 1-year age, `/`, `Lax`;
+//!   secure/domain/httponly from settings).
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
@@ -59,12 +59,10 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 
 use pidash_services::auth_session::guards::{
-    allow_request, parse_rate, throttle_cache_key, throttle_denied_json,
-    AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE, DEFAULT_ANON_RATE,
+    allow_request, parse_rate, retry_after_secs, throttle_cache_key, throttle_denied_json,
+    throttle_wait, AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE, DEFAULT_ANON_RATE,
     DEFAULT_ANON_SCOPE,
 };
 use pidash_services::auth_session::magic::{
@@ -72,6 +70,8 @@ use pidash_services::auth_session::magic::{
     strip_magic_prefix, token_from_u32, verify_decision, verify_error, InitGate, InitiateOutcome,
     VerifyOutcome, TOKEN_REJECTION_LIMIT,
 };
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
 
 /// Unwrap a `Result`, answering the uncaught-exception 500 on any error
 /// (every fallible I/O on these paths propagates in Python).
@@ -84,9 +84,6 @@ macro_rules! or_500 {
     };
 }
 use pidash_db::config::encryption::Keyring;
-use pidash_services::auth_session::queries::{
-    user_by_email_sql, user_email_exists_sql, USER_TABLE,
-};
 use pidash_services::auth_session::shapes::{
     allowed_hosts_for, base_host, error_code, error_dict_json, error_pairs, get_safe_redirect_url,
     redirection_path_str, select_redirection_path, url_has_allowed_host_and_scheme,
@@ -98,11 +95,14 @@ use pidash_services::auth_session::tasks::{
 };
 
 use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
 use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
+use pidash_compat::response::empty_response_no_content_type;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// `POST /auth/magic-generate/`.
 pub const APP_GENERATE_PATH: &str = "/auth/magic-generate/";
@@ -181,7 +181,7 @@ fn json_400(code: i32, message: &str, payload: &[(&str, ParamValue)]) -> Respons
 fn redirect_302(location: String) -> Response {
     let too_long =
         location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
@@ -200,21 +200,26 @@ fn redirect_302(location: String) -> Response {
 /// the bramched handling): empty body, like the F-08 session layer's
 /// `server_error`.
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Throttle denial: the `auth_exception_handler` rewrite of DRF's
-/// `Throttled` (`exception.py:26-31`), 429 + the 5900 dict.
-fn throttled() -> Response {
-    (
+/// `Throttled` (`exception.py:26-31`), 429 + the 5900 dict, plus the
+/// ceiled `Retry-After` when the wait is known and nonzero
+/// (`guards::retry_after_secs`).
+fn throttled(wait: Option<f64>) -> Response {
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
         throttle_denied_json(),
     )
-        .into_response()
+        .into_response();
+    if let Some(secs) = retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 /// Malformed JSON body on a JSON post: DRF `ParseError`
@@ -341,45 +346,10 @@ enum CsrfDenial {
     BadToken,
 }
 
-/// Where the request token came from (`CsrfViewMiddleware._check_token`:
-/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
-/// `X-CSRFToken` header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
-    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header
-/// when present (even empty — an empty header fails format, it does
-/// not fall through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
-}
+use pidash_compat::http::{
+    csrf_failure_json, csrf_failure_response, csrf_token_source, hex_encode, session_auth_hash,
+    TokenSource,
+};
 
 /// `_check_token` + `_does_token_match` over one token: the format
 /// gate first (`has incorrect length` / `has invalid characters`),
@@ -403,9 +373,8 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 /// Django's `_get_secret` (`csrf.py:230-256`) over the cookie value:
 /// the cookie must pass the format gate, and a 64-char cookie is
 /// unmasked first ("Django versions before 4.0 masked the secret before
-/// storing" — and this module's own `login_user` rotation still mints
-/// masked cookies, QUIRK-csrf-rotate, so without this step a client
-/// sending its rotated cookie back as the header would never verify).
+/// storing", so without this step a client sending such a cookie back
+/// as the header would never verify).
 fn csrf_cookie_secret(cookie: &str) -> Result<String, String> {
     if let Err(error) = csrf_kernel::check_token_format(cookie) {
         return Err(format!("CSRF cookie {}.", error.reason()));
@@ -434,43 +403,6 @@ fn csrf_gate(
         return Err(CsrfDenial::BadToken);
     };
     csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
-}
-
-/// DRF `SessionAuthentication.enforce_csrf` denial
-/// (`authentication.py:148`): 403 with the middleware's reason after
-/// `CSRF Failed: `. Only reachable for authenticated callers —
-/// anonymous requests return `None` before the check. Lowercase
-/// `detail`: DRF 3.15.2's `exception_handler` (`views.py:96`) renders
-/// `{'detail': exc.detail}`, and the project's
-/// `auth_exception_handler` only rewrites `Throttled`/`NotAuthenticated`
-/// (live Django bytes: `{"detail":"CSRF Failed: CSRF cookie not set."}`).
-fn csrf_failure_json(reason: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::VARY, "Cookie"),
-        ],
-        format!(
-            "{{\"detail\":\"CSRF Failed: {}\"}}",
-            reason.replace('\\', "\\\\").replace('"', "\\\"")
-        ),
-    )
-        .into_response()
-}
-
-/// The `csrf_failure` page: 200 + `text/html`, `root_url` =
-/// `base_host(request)` with no surface flags.
-fn csrf_failure_response(root_url: &str) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(root_url),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +453,7 @@ impl Cache {
     fn from_state(state: &AppState) -> Option<Self> {
         let redis = &state.settings().redis;
         let url = redis.url.as_deref().filter(|u| !u.is_empty())?;
-        redis::Client::open(url).ok().map(|client| Self {
+        pidash_db::redis::open_client(url).ok().map(|client| Self {
             client,
             connect_timeout: timeout_duration(
                 redis.socket_connect_timeout_secs,
@@ -582,32 +514,20 @@ impl Cache {
     }
 }
 
-/// DRF `AnonRateThrottle` ident (`throttling.py` `get_ident`): the
-/// `X-Forwarded-For` value with all whitespace stripped when present, else
-/// `REMOTE_ADDR` (which may itself be absent → the `"None"` ident Python's
-/// `%`-formatting produces).
-fn throttle_ident(headers: &axum::http::HeaderMap, peer: Option<String>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.unwrap_or_else(|| "None".to_owned())
-}
-
 /// Evaluate the generate throttle *before* the handler body (DRF
 /// `initial()` order: `check_throttles` precedes `post()`). App uses the
 /// `AuthenticationThrottle` scope, space the default `Anon` scope (both
 /// 30/minute). Histories are compact-JSON float arrays; a miss, an
 /// unreadable value, or a failed re-cache fails open to allow (the merged
 /// assistant-throttle precedent — cutover traffic owns these keys, and a
-/// blip must never 500 an auth endpoint).
+/// blip must never 500 an auth endpoint). Denial carries the DRF wait for
+/// the `Retry-After` header (NEWPIDASH-16).
 async fn check_generate_throttle(
     cache: Option<&Cache>,
     headers: &axum::http::HeaderMap,
     peer: Option<String>,
     app: bool,
-) -> bool {
+) -> Result<(), Option<f64>> {
     let (rate, scope) = if app {
         (AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE)
     } else {
@@ -615,9 +535,9 @@ async fn check_generate_throttle(
     };
     let (num_requests, duration_secs) = match parse_rate(Some(rate)) {
         Some(parsed) => parsed,
-        None => return true,
+        None => return Ok(()),
     };
-    let Some(cache) = cache else { return true };
+    let Some(cache) = cache else { return Ok(()) };
     let key = throttle_cache_key(scope, &throttle_ident(headers, peer));
     let now = now_secs_f64();
     let history: Vec<f64> = match cache.get(&key).await {
@@ -626,7 +546,12 @@ async fn check_generate_throttle(
     };
     let decision = allow_request(&history, num_requests, duration_secs, now);
     if !decision.allowed {
-        return false;
+        return Err(throttle_wait(
+            &decision.history,
+            num_requests,
+            duration_secs,
+            now,
+        ));
     }
     if let Err(error) = cache
         .set_ex(
@@ -638,7 +563,7 @@ async fn check_generate_throttle(
     {
         tracing::debug!(%error, key = key.as_str(), "magic.throttle: re-cache failed; allowance stands");
     }
-    true
+    Ok(())
 }
 
 fn now_secs_f64() -> f64 {
@@ -668,15 +593,19 @@ async fn generate_session_user_active(
     let Ok(id) = uuid::Uuid::parse_str(&uid) else {
         return false;
     };
-    matches!(
-        sqlx::query_as::<_, (bool,)>(
-            "SELECT \"is_active\" FROM \"users\" WHERE \"users\".\"id\" = $1"
+    {
+        use pidash_db::entity::users;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        matches!(
+            users::Entity::find_by_id(id)
+                .select_only()
+                .columns([users::Column::IsActive])
+                .into_tuple::<bool>()
+                .one(&db)
+                .await,
+            Ok(Some(true))
         )
-        .bind(id)
-        .fetch_optional(pool)
-        .await,
-        Ok(Some((true,)))
-    )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,14 +616,18 @@ async fn generate_session_user_active(
 /// (`views/app/magic.py:40-46`): `None` or not-setup-done answers
 /// `INSTANCE_NOT_CONFIGURED`. The projection carries the gate column of
 /// [`pidash_services::auth_session::queries::instance_first_sql`].
-async fn instance_setup_done(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        "SELECT \"instances\".\"is_setup_done\" FROM \"instances\" \
-         WHERE \"instances\".\"deleted_at\" IS NULL ORDER BY \"instances\".\"created_at\" DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(done,)| done).unwrap_or(false))
+async fn instance_setup_done(pool: &sqlx::PgPool) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::instances;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = instances::Entity::find()
+        .filter(instances::Column::DeletedAt.is_null())
+        .order_by_desc(instances::Column::CreatedAt)
+        .select_only()
+        .columns([instances::Column::IsSetupDone])
+        .into_tuple::<bool>()
+        .one(&db)
+        .await?;
+    Ok(row.unwrap_or(false))
 }
 
 /// One `instance_configurations` read with the caller's env default — the
@@ -708,14 +641,17 @@ async fn config_value(
     secret_key: &str,
     key: &str,
     env_default: Option<String>,
-) -> Result<Option<String>, sqlx::Error> {
-    let row: Option<(Option<String>, bool)> = sqlx::query_as(
-        "SELECT value, is_encrypted FROM instance_configurations \
-         WHERE key = $1 AND deleted_at IS NULL",
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
+) -> Result<Option<String>, sea_orm::DbErr> {
+    use pidash_db::entity::instance_configurations as cfg;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = cfg::Entity::find()
+        .filter(cfg::Column::Key.eq(key))
+        .filter(cfg::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([cfg::Column::Value, cfg::Column::IsEncrypted])
+        .into_tuple::<(Option<String>, bool)>()
+        .one(&db)
+        .await?;
     match row {
         Some((Some(value), true)) => Ok(Some(Keyring::from_secret(secret_key).decrypt(&value))),
         Some((Some(value), false)) => Ok(Some(value)),
@@ -738,7 +674,7 @@ fn env_default(name: &str, fallback: Option<&str>) -> Option<String> {
 async fn provider_config(
     pool: &sqlx::PgPool,
     secret_key: &str,
-) -> Result<(Option<String>, String), sqlx::Error> {
+) -> Result<(Option<String>, String), sea_orm::DbErr> {
     let email_host = config_value(
         pool,
         secret_key,
@@ -862,60 +798,50 @@ struct DbUser {
 }
 
 /// `User.objects.filter(email=).first()` (`adapter/base.py:297`, the
-/// views): exact match, `Meta.ordering = ("-created_at",)` — the full
-/// select from [`user_by_email_sql`], decoded by column name.
-async fn fetch_user(pool: &sqlx::PgPool, email: &str) -> Result<Option<DbUser>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&user_by_email_sql(USER_TABLE, "$1"))
-        .bind(email)
-        .fetch_optional(pool)
+/// views): exact match, `Meta.ordering = ("-created_at",)` — the five
+/// columns the magic closure reads.
+async fn fetch_user(pool: &sqlx::PgPool, email: &str) -> Result<Option<DbUser>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::Email,
+            users::Column::Password,
+            users::Column::IsPasswordAutoset,
+            users::Column::IsActive,
+        ])
+        .into_tuple::<(uuid::Uuid, Option<String>, String, bool, bool)>()
+        .one(&db)
         .await?;
-    let Some(row) = row else { return Ok(None) };
-    use sqlx::Row;
-    Ok(Some(DbUser {
-        id: row.try_get("id")?,
-        email: row
-            .try_get::<Option<String>, _>("email")?
-            .unwrap_or_default(),
-        password: row.try_get("password")?,
-        is_password_autoset: row.try_get("is_password_autoset")?,
-        is_active: row.try_get("is_active")?,
-    }))
+    Ok(row.map(
+        |(id, email, password, is_password_autoset, is_active)| DbUser {
+            id,
+            email: email.unwrap_or_default(),
+            password,
+            is_password_autoset,
+            is_active,
+        },
+    ))
 }
 
 /// `User.objects.filter(email=).exists()` (the magic-code paths
 /// `magic_code.py:70,122,136`): same WHERE arm under `SELECT (1)`.
-async fn user_exists(pool: &sqlx::PgPool, email: &str) -> Result<bool, sqlx::Error> {
-    let row: Option<(i32,)> = sqlx::query_as(&user_email_exists_sql(USER_TABLE, "$1"))
-        .bind(email)
-        .fetch_optional(pool)
+async fn user_exists(pool: &sqlx::PgPool, email: &str) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .select_only()
+        .columns([users::Column::Id])
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await?;
     Ok(row.is_some())
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()` (`django/contrib/auth/base_user.py`). The salt
-/// is shared with the license plumbing ([`crate::license::SESSION_AUTH_HASH_SALT`]).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }
 
 /// Draw `n` characters from Django's `get_random_string` alphabet
@@ -971,106 +897,15 @@ fn autoset_password() -> (String, String) {
     (hash, raw)
 }
 
-/// New-user INSERT (`adapter/base.py:301-342` + `User.save()` side
-/// effects `user.py:167-187`): every NOT NULL column is supplied (Django
-/// emits no DB-level defaults); the password hash lands before the insert
-/// and `token` stays `""` (`token_updated_at` NULL → no rotation).
-#[allow(clippy::too_many_arguments)]
-async fn insert_user(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    display_name: &str,
-    login_ip: Option<&str>,
-    login_uagent: Option<&str>,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
-         \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
-         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
-         \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
-         \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
-         \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
-         \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, NULL, $3, NULL, $4, $5, '', '', '', NULL, NULL, NULL, $6, $6, $6, \
-         '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE, '', $6, NULL, NULL, $7, '', \
-         'email', $8, NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(now)
-    .bind(login_ip)
-    .bind(login_uagent)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525), which runs the
+// entity insert (the `after_save` hook fires) plus the service-level
+// profile row. The signup arm below calls it directly.
 
-/// `post_save` receiver `create_user_notification` (`user.py:327-340`):
-/// a preferences row on every non-bot create.
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Profile row (`Profile.objects.create(user=user)`, `base.py:342`) with
-/// the model defaults (`user.py:198-288` + `color.py:9-14`).
-async fn insert_profile(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    // `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
-    let color = format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]));
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \
-         \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
-         \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
-         \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
-         \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \
-           \"workspace_invite\": false, \"workspace_join\": false}', \
-         NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, '', 'full', FALSE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}', \
-         FALSE, 'en', 0, '{}', $4, FALSE, FALSE, FALSE, \
-         '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
-           \"pages\": false}', '{}')",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(color)
-    .execute(pool)
-    .await?;
-    Ok(())
+/// `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
+fn profile_background_color() -> String {
+    format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]))
 }
 
 /// `save_user_data` (`adapter/base.py:220-234`): the login stamp UPDATE
@@ -1101,21 +936,29 @@ async fn save_user_data(
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    let updated: Result<_, sqlx::Error> = sqlx::query(
-        "UPDATE \"users\" SET \"last_login_medium\" = 'magic-code', \"last_active\" = $1, \
-         \"last_login_time\" = $1, \"last_login_ip\" = $2, \"last_login_uagent\" = $3, \
-         \"token_updated_at\" = $1, \"token\" = $4, \"is_active\" = TRUE, \"updated_at\" = $1 \
-         WHERE \"users\".\"id\" = $5",
+    let updated = identity::save_user_data(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user.id,
+        &identity::LoginStamps {
+            medium: Some("magic-code"),
+            login_ip,
+            login_uagent,
+            avatar: None,
+            avatar_asset_id: None,
+            // `user.save()` (`base.py:232`) is a full save, so every
+            // `User.save()` effect applies (`user.py:169-187`): the
+            // empty-`display_name` backfill and the superuser staff sync
+            // (NEWPIDASH-41; the email twin got them in NEWPIDASH-17).
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
+            rotated_token: &rotated,
+            now,
+        },
     )
-    .bind(now)
-    .bind(login_ip)
-    .bind(login_uagent)
-    .bind(rotated)
-    .bind(user.id)
-    .execute(pool)
     .await;
     match updated {
-        Ok(_) => Ok(()),
+        Ok(()) => Ok(()),
         Err(_) => Err(server_error()),
     }
 }
@@ -1126,26 +969,23 @@ async fn save_user_data(
 
 /// `Profile.objects.get_or_create(user=user)`: the live row's
 /// `is_onboarded` + `last_workspace_id`, creating the default row first
-/// when missing.
+/// when missing. `Profile` extends `TimeAuditModel` (`user.py:200`), not
+/// the full `BaseModel`: no `deleted_at` soft-delete column, so the
+/// domain lookup carries no filter either.
 async fn get_or_create_profile(
     pool: &sqlx::PgPool,
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
-) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    // `Profile` extends `TimeAuditModel` (`user.py:200`), not the full
-    // `BaseModel`: no `deleted_at` soft-delete column, so no filter here.
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
-         WHERE \"user_id\" = $1 LIMIT 1",
+) -> Result<(bool, Option<uuid::Uuid>), sea_orm::DbErr> {
+    let path = identity::get_or_create_profile(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *user_id,
+        now,
+        &profile_background_color(),
     )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(found) = row {
-        return Ok(found);
-    }
-    insert_profile(pool, now, user_id).await?;
-    Ok((false, None))
+    .await
+    .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+    Ok((path.is_onboarded, path.last_workspace_id))
 }
 
 /// `get_redirection_path` (`utils/redirection_path.py:8-46`): the pure
@@ -1157,54 +997,75 @@ async fn redirection_path(
     user: &DbUser,
     is_onboarded: bool,
     last_workspace_id: Option<uuid::Uuid>,
-) -> Result<String, sqlx::Error> {
+) -> Result<String, sea_orm::DbErr> {
     if !is_onboarded {
         return Ok(
             redirection_path_str(&select_redirection_path(false, None, None, false)).to_owned(),
         );
     }
+    use pidash_db::entity::{workspace_member_invites as winv, workspace_members, workspaces};
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let mut last_slug: Option<String> = None;
     if let Some(workspace_id) = last_workspace_id {
-        last_slug = sqlx::query_scalar(
-            "SELECT \"workspaces\".\"slug\" FROM \"workspaces\" \
-             WHERE \"workspaces\".\"id\" = $1 AND \"workspaces\".\"deleted_at\" IS NULL \
-             AND EXISTS (SELECT 1 FROM \"workspace_members\" WHERE \"workspace_members\".\"workspace_id\" = \
-             \"workspaces\".\"id\" AND \"workspace_members\".\"member_id\" = $2 \
-             AND \"workspace_members\".\"is_active\" = TRUE \
-             AND \"workspace_members\".\"deleted_at\" IS NULL) LIMIT 1",
-        )
-        .bind(workspace_id)
-        .bind(user.id)
-        .fetch_optional(pool)
-        .await?;
+        // `EXISTS` membership arm (inner join — two reads, same rows).
+        // Unlike the email twin, the member row must be live
+        // (`deleted_at IS NULL` here).
+        let member = workspace_members::Entity::find()
+            .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+            .filter(workspace_members::Column::MemberId.eq(user.id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([workspace_members::Column::Id])
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await?;
+        if member.is_some() {
+            last_slug = workspaces::Entity::find_by_id(workspace_id)
+                .filter(workspaces::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([workspaces::Column::Slug])
+                .into_tuple::<String>()
+                .one(&db)
+                .await?;
+        }
     }
-    let fallback_slug: Option<String> = sqlx::query_scalar(
-        "SELECT \"workspaces\".\"slug\" FROM \"workspaces\" \
-         JOIN \"workspace_members\" ON \"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\" \
-         WHERE \"workspace_members\".\"member_id\" = $1 \
-         AND \"workspace_members\".\"is_active\" = TRUE \
-         AND \"workspaces\".\"deleted_at\" IS NULL AND \"workspace_members\".\"deleted_at\" IS NULL \
-         ORDER BY \"workspaces\".\"created_at\" ASC LIMIT 1",
-    )
-    .bind(user.id)
-    .fetch_optional(pool)
-    .await?;
+    let memberships = workspace_members::Entity::find()
+        .filter(workspace_members::Column::MemberId.eq(user.id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([workspace_members::Column::WorkspaceId])
+        .into_tuple::<uuid::Uuid>()
+        .all(&db)
+        .await?;
+    let fallback_slug = if memberships.is_empty() {
+        None
+    } else {
+        workspaces::Entity::find()
+            .filter(workspaces::Column::Id.is_in(memberships))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::CreatedAt)
+            .select_only()
+            .columns([workspaces::Column::Slug])
+            .into_tuple::<String>()
+            .one(&db)
+            .await?
+    };
     // `get_redirection_path` (`redirection_path.py:36`): unfiltered
     // `.filter(email=)` under the soft-delete manager — unaccepted
     // invites count too (unlike the join arm above, which takes
     // `accepted=True`).
-    let invite_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM \"workspace_member_invites\" \
-         WHERE \"email\" = $1 AND \"deleted_at\" IS NULL",
-    )
-    .bind(&user.email)
-    .fetch_one(pool)
-    .await?;
+    let invite_count = winv::Entity::find()
+        .filter(winv::Column::Email.eq(&user.email))
+        .filter(winv::Column::DeletedAt.is_null())
+        .count(&db)
+        .await?;
     let target = select_redirection_path(
         true,
         last_slug.as_deref(),
         fallback_slug.as_deref(),
-        invite_count.0 > 0,
+        invite_count > 0,
     );
     Ok(redirection_path_str(&target).to_owned())
 }
@@ -1224,6 +1085,7 @@ struct WorkspaceInvite {
 /// Invite row for the project arm.
 struct ProjectInvite {
     workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
     role: i16,
     created_by_id: Option<uuid::Uuid>,
 }
@@ -1232,10 +1094,10 @@ struct ProjectInvite {
 /// (`utils/workspace_project_join.py:20-91`): workspace joins +
 /// per-workspace cache invalidation and `track_event`, then the project
 /// arm (workspace membership with the mapped role, then the `ProjectMember`
-/// write *as written* — without `project_id`, so an accepted project
-/// invite raises `IntegrityError`, kept), then both invite sets are
-/// soft-deleted. No transaction anywhere: earlier writes stand when a
-/// later one raises (QUIRK-no-transaction).
+/// write *as written* — with each invite's `project_id`, Django main;
+/// PB-1008 retired), then both invite sets are soft-deleted. No
+/// transaction anywhere: earlier writes stand when a later one raises
+/// (QUIRK-no-transaction).
 async fn process_workspace_project_invitations(
     pool: &sqlx::PgPool,
     cache: &Cache,
@@ -1243,19 +1105,45 @@ async fn process_workspace_project_invitations(
     user: &DbUser,
 ) -> Result<(), Response> {
     let map_err = |_: sqlx::Error| server_error();
-    let invites: Vec<(uuid::Uuid, i16, String)> = sqlx::query_as(
-        "SELECT \"workspace_member_invites\".\"workspace_id\", \
-         \"workspace_member_invites\".\"role\", \"workspaces\".\"slug\" \
-         FROM \"workspace_member_invites\" JOIN \"workspaces\" \
-         ON \"workspaces\".\"id\" = \"workspace_member_invites\".\"workspace_id\" \
-         WHERE \"workspace_member_invites\".\"email\" = $1 \
-         AND \"workspace_member_invites\".\"accepted\" = TRUE \
-         AND \"workspace_member_invites\".\"deleted_at\" IS NULL",
-    )
-    .bind(&user.email)
-    .fetch_all(pool)
-    .await
-    .map_err(map_err)?;
+    let map_db_err = |_: sea_orm::DbErr| server_error();
+    let invites: Vec<(uuid::Uuid, i16, String)> = {
+        use pidash_db::entity::{workspace_member_invites as winv, workspaces};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        // No ORDER BY in the old SQL: invite order is unspecified, and
+        // the bulk/invalidate/track side effects do not depend on it.
+        let rows = winv::Entity::find()
+            .filter(winv::Column::Email.eq(&user.email))
+            .filter(winv::Column::Accepted.eq(true))
+            .filter(winv::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([winv::Column::WorkspaceId, winv::Column::Role])
+            .into_tuple::<(uuid::Uuid, i16)>()
+            .all(&db)
+            .await
+            .map_err(map_db_err)?;
+        let ids: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
+        let slugs = if ids.is_empty() {
+            Vec::new()
+        } else {
+            workspaces::Entity::find()
+                .filter(workspaces::Column::Id.is_in(ids))
+                .select_only()
+                .columns([workspaces::Column::Id, workspaces::Column::Slug])
+                .into_tuple::<(uuid::Uuid, String)>()
+                .all(&db)
+                .await
+                .map_err(map_db_err)?
+        };
+        use std::collections::HashMap;
+        let by_id: HashMap<uuid::Uuid, String> = slugs.into_iter().collect();
+        rows.into_iter()
+            .filter_map(|(workspace_id, role)| {
+                by_id
+                    .get(&workspace_id)
+                    .map(|slug| (workspace_id, role, slug.clone()))
+            })
+            .collect()
+    };
     let invites: Vec<WorkspaceInvite> = invites
         .into_iter()
         .map(|(workspace_id, role, slug)| WorkspaceInvite {
@@ -1266,29 +1154,31 @@ async fn process_workspace_project_invitations(
         .collect();
 
     if !invites.is_empty() {
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(invites.len());
-        for invite in &invites {
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', '{}', '{}', {}, NULL, NULL, NULL, \
-                 '{props}', '{props}', '{issue}', TRUE, '{{}}', '{{}}', '{{}}')",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                invite.role,
-                props = workspace_default_props(),
-                issue = workspace_issue_props(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"workspace_id\", \"member_id\", \"role\", \"created_by_id\", \"updated_by_id\", \
-             \"deleted_at\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-             \"getting_started_checklist\", \"tips\", \"explored_features\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        // The interpolated defaults reparse from the same fixed text
+        // (jsonb storage normalizes key order either way, so the
+        // committed bytes match the old inline literals).
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: invite.role,
+                created_by: None,
+            })
+            .collect();
+        members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        .map_err(map_err)?;
 
         for invite in &invites {
             // `invalidate_cache_directly(path, url_params=False, user=False,
@@ -1324,106 +1214,129 @@ async fn process_workspace_project_invitations(
         }
     }
 
-    let project_invites: Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"workspace_id\", \"role\", \"created_by_id\" FROM \"project_member_invites\" \
-         WHERE \"email\" = $1 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
-    )
-    .bind(&user.email)
-    .fetch_all(pool)
-    .await
-    .map_err(map_err)?;
+    let project_invites: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = {
+        use pidash_db::entity::project_member_invites as pinv;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        pinv::Entity::find()
+            .filter(pinv::Column::Email.eq(&user.email))
+            .filter(pinv::Column::Accepted.eq(true))
+            .filter(pinv::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([
+                pinv::Column::WorkspaceId,
+                pinv::Column::ProjectId,
+                pinv::Column::Role,
+                pinv::Column::CreatedById,
+            ])
+            .into_tuple::<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)>()
+            .all(&db)
+            .await
+            .map_err(map_db_err)?
+    };
     let project_invites: Vec<ProjectInvite> = project_invites
         .into_iter()
-        .map(|(workspace_id, role, created_by_id)| ProjectInvite {
-            workspace_id,
-            role,
-            created_by_id,
-        })
+        .map(
+            |(workspace_id, project_id, role, created_by_id)| ProjectInvite {
+                workspace_id,
+                project_id,
+                role,
+                created_by_id,
+            },
+        )
         .collect();
 
     if !project_invites.is_empty() {
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
-        for invite in &project_invites {
-            let created_by = invite
-                .created_by_id
-                .map(|id| format!("'{id}'"))
-                .unwrap_or_else(|| "NULL".to_owned());
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', {created_by}, NULL, NULL, '{}', '{}', {}, \
-                 '{props}', '{props}', '{issue}', TRUE, '{{}}', '{{}}', '{{}}')",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                map_invite_role(invite.role),
-                props = workspace_default_props(),
-                issue = workspace_issue_props(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"member_id\", \
-             \"role\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-             \"getting_started_checklist\", \"tips\", \"explored_features\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = project_invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: map_invite_role(invite.role),
+                created_by: invite.created_by_id,
+            })
+            .collect();
+        members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        .map_err(map_err)?;
 
-        // Ported bug kept (`workspace_project_join.py:76-87`): the
-        // `ProjectMember` write omits `project_id` although the column is
-        // NOT NULL — Postgres raises `IntegrityError` despite
-        // `ignore_conflicts=True`.
-        let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
-        for invite in &project_invites {
-            let created_by = invite
-                .created_by_id
-                .map(|id| format!("'{id}'"))
-                .unwrap_or_else(|| "NULL".to_owned());
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', {created_by}, NULL, NULL, '{}', '{}', NULL, {}, \
-                 '{props}', '{props}', '{prefs}', 65535.0, TRUE)",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                map_invite_role(invite.role),
-                props = project_default_props(),
-                prefs = project_default_preferences(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"project_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"member_id\", \
-             \"comment\", \"role\", \"view_props\", \"default_props\", \"preferences\", \
-             \"sort_order\", \"is_active\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        // The missing `project_id` raises here when the arm fires — the
-        // earlier writes above already committed (no transaction).
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        // `workspace_project_join.py:76-87` sets `project_id` on every
+        // `ProjectMember` row (Django main; PB-1008 retired), so the
+        // join succeeds and the invites are consumed.
+        let props: serde_json::Value =
+            serde_json::from_str(project_default_props()).map_err(|_| server_error())?;
+        let prefs: serde_json::Value =
+            serde_json::from_str(project_default_preferences()).map_err(|_| server_error())?;
+        let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = project_invites
+            .iter()
+            .map(
+                |invite| pidash_services::domain::projects::members::BulkRow {
+                    workspace_id: invite.workspace_id,
+                    project_id: Some(invite.project_id),
+                    user_id: user.id,
+                    role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                        map_invite_role(invite.role),
+                    )),
+                    created_by: invite.created_by_id,
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .collect();
+        // The project bulk runs after every workspace row committed above
+        // (no transaction).
+        pidash_services::domain::projects::members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &bulk,
+            &props,
+            &prefs,
+            false,
+        )
+        .await
+        .map_err(map_err)?;
     }
 
     // Both querysets are (soft-)deleted after the joins (`:90-91`): the
     // default manager's `delete()` stamps `deleted_at`.
-    sqlx::query(
-        "UPDATE \"workspace_member_invites\" SET \"deleted_at\" = $1 \
-         WHERE \"email\" = $2 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
-    )
-    .bind(now)
-    .bind(&user.email)
-    .execute(pool)
-    .await
-    .map_err(map_err)?;
-    sqlx::query(
-        "UPDATE \"project_member_invites\" SET \"deleted_at\" = $1 \
-         WHERE \"email\" = $2 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
-    )
-    .bind(now)
-    .bind(&user.email)
-    .execute(pool)
-    .await
-    .map_err(map_err)?;
+    {
+        use pidash_db::entity::workspace_member_invites as winv;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        winv::Entity::update_many()
+            .col_expr(
+                winv::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(winv::Column::Email.eq(&user.email))
+            .filter(winv::Column::Accepted.eq(true))
+            .filter(winv::Column::DeletedAt.is_null())
+            .exec(&db)
+            .await
+            .map_err(map_db_err)?;
+    }
+    {
+        use pidash_db::entity::project_member_invites as pinv;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        pinv::Entity::update_many()
+            .col_expr(
+                pinv::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(pinv::Column::Email.eq(&user.email))
+            .filter(pinv::Column::Accepted.eq(true))
+            .filter(pinv::Column::DeletedAt.is_null())
+            .exec(&db)
+            .await
+            .map_err(map_db_err)?;
+    }
     Ok(())
 }
 
@@ -1500,7 +1413,7 @@ struct LoginRequest<'a> {
 /// on the session, i.e. `flush()` + `cycle_key()`), the `user_logged_in`
 /// signal stamps `users.last_login`, and `device_info` lands in the
 /// session. The tower layer persists the mutated session and sets the
-/// `session-id` cookie; the fresh masked `csrftoken` cookie below mirrors
+/// `session-id` cookie; the fresh 32-char `csrftoken` cookie below mirrors
 /// the `rotate_token` half of `login()`.
 async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     let LoginRequest {
@@ -1534,11 +1447,9 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
         let old: Option<String> = handle.lock().key.clone();
         handle.lock().clear();
         if let Some(old) = old {
-            let deleted: Result<_, sqlx::Error> =
-                sqlx::query("DELETE FROM \"sessions\" WHERE \"session_key\" = $1")
-                    .bind(&old)
-                    .execute(pool)
-                    .await;
+            use pidash_db::entity::sessions;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let deleted = sessions::Entity::delete_by_id(old).exec(&db).await;
             if deleted.is_err() {
                 return Err(server_error());
             }
@@ -1569,23 +1480,20 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    if sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"users\".\"id\" = $2")
-        .bind(now)
-        .bind(user.id)
-        .execute(pool)
+    if identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user.id, now)
         .await
         .is_err()
     {
         return Err(server_error());
     }
-    // `rotate_token` half: a fresh secret, masked, with Django's cookie
-    // attributes (secure/domain from settings, httponly per the project
-    // override, `/` + `Lax` defaults).
+    // `rotate_token` half: a fresh secret with Django's cookie attributes
+    // (secure/domain from settings, httponly per the project override,
+    // `/` + `Lax` defaults). The cookie carries the raw 32-char secret
+    // (`_add_new_csrf_cookie`); only bodies and headers carry masked tokens.
     let secret = pidash_auth::csrf::new_secret();
-    let masked = pidash_auth::csrf::mask_secret(&secret).map_err(|_| server_error())?;
     let set_cookie = pidash_auth::session::render_set_cookie(&pidash_auth::session::SetCookie {
         name: CSRF_COOKIE_NAME.to_owned(),
-        value: masked,
+        value: secret,
         expires: Some(pidash_auth::session::http_date(
             now.timestamp() + CSRF_COOKIE_MAX_AGE,
         )),
@@ -1634,6 +1542,11 @@ async fn generate(
     // before the throttle (DRF `initial()` order: auth → throttle), so a
     // CSRF failure leaves the throttle history untouched.
     if authenticated {
+        // `process_view` verifies Origin/Referer before the cookie
+        // (NEWPIDASH-12).
+        if let Err(reason) = super::csrf_origin_gate(state.settings(), &headers) {
+            return csrf_failure_json(&reason);
+        }
         let cookie_header = headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
@@ -1658,11 +1571,13 @@ async fn generate(
             return csrf_failure_json(&reason);
         }
     }
-    if !authenticated
-        && !check_generate_throttle(cache.as_ref(), &headers, Some(peer.0.ip().to_string()), app)
-            .await
-    {
-        return throttled();
+    if !authenticated {
+        if let Err(wait) =
+            check_generate_throttle(cache.as_ref(), &headers, Some(peer.0.ip().to_string()), app)
+                .await
+        {
+            return throttled(wait);
+        }
     }
     if !or_500!(instance_setup_done(&pool).await) {
         let slug = "INSTANCE_NOT_CONFIGURED";
@@ -1835,6 +1750,10 @@ async fn sign(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
     {
+        // Origin/Referer first (`process_view`, NEWPIDASH-12).
+        if super::csrf_origin_gate(&settings, &headers).is_err() {
+            return csrf_failure_response(render_csrf_failure(&root));
+        }
         let cookie_header = headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
@@ -1848,7 +1767,7 @@ async fn sign(
         )
         .is_err()
         {
-            return csrf_failure_response(&root);
+            return csrf_failure_response(render_csrf_failure(&root));
         }
     }
     let form = parse_sign_form(content_type.unwrap_or(""), &body);
@@ -1972,22 +1891,40 @@ async fn sign(
                 .next()
                 .unwrap_or(&form.email)
                 .to_owned();
-            let id = insert_user(
-                &pool,
-                now,
-                &form.email,
-                &username,
-                &password_hash,
-                &display_name,
-                login_ip.as_deref(),
-                headers
-                    .get(header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok()),
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            let Some(orm) = state.orm() else {
+                return server_error();
+            };
+            let id = identity::create_user(
+                orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &form.email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: "",
+                    last_name: "",
+                    display_name,
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: login_ip.as_deref(),
+                    login_uagent: headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok()),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: profile_background_color(),
+                    }),
+                },
             )
             .await;
             let id = or_500!(id);
-            or_500!(insert_notification_prefs(&pool, now, &id).await);
-            or_500!(insert_profile(&pool, now, &id).await);
             DbUser {
                 id,
                 email: form.email.clone(),
@@ -2079,7 +2016,7 @@ async fn signup_disabled(
     pool: &sqlx::PgPool,
     secret_key: &str,
     email: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, sea_orm::DbErr> {
     let enabled = config_value(
         pool,
         secret_key,
@@ -2091,13 +2028,16 @@ async fn signup_disabled(
     if enabled != "0" {
         return Ok(false);
     }
-    let invite: Option<(i32,)> = sqlx::query_as(
-        "SELECT (1) FROM \"workspace_member_invites\" WHERE \"email\" = $1 \
-         AND \"deleted_at\" IS NULL LIMIT 1",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
+    use pidash_db::entity::workspace_member_invites as winv;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let invite = winv::Entity::find()
+        .filter(winv::Column::Email.eq(email))
+        .filter(winv::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([winv::Column::Id])
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await?;
     Ok(invite.is_none())
 }
 
@@ -2180,6 +2120,104 @@ async fn sign_up_space(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrated_read_shapes() {
+        // Pin the SeaORM statement shapes for the migrated reads (no DB):
+        // columns, filters and ordering must stay byte-identical to the
+        // Django lookups they replaced.
+        use pidash_db::entity::{instance_configurations as cfg, instances, users};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let id = uuid::Uuid::nil();
+        let gate = instances::Entity::find()
+            .filter(instances::Column::DeletedAt.is_null())
+            .order_by_desc(instances::Column::CreatedAt)
+            .select_only()
+            .columns([instances::Column::IsSetupDone])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            gate.contains("\"instances\".\"is_setup_done\"")
+                && gate.contains("ORDER BY \"instances\".\"created_at\" DESC"),
+            "instance gate shape: {gate}"
+        );
+        let by_id = users::Entity::find_by_id(id)
+            .select_only()
+            .columns([users::Column::IsActive])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            by_id.contains("\"users\".\"is_active\""),
+            "session-user shape: {by_id}"
+        );
+        let fetch = users::Entity::find()
+            .filter(users::Column::Email.eq("a@b.c"))
+            .order_by_desc(users::Column::CreatedAt)
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::Email,
+                users::Column::Password,
+                users::Column::IsPasswordAutoset,
+                users::Column::IsActive,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            fetch.contains("\"users\".\"email\" = 'a@b.c'")
+                && fetch.contains("ORDER BY \"users\".\"created_at\" DESC"),
+            "fetch_user shape: {fetch}"
+        );
+        let config = cfg::Entity::find()
+            .filter(cfg::Column::Key.eq("EMAIL_HOST"))
+            .filter(cfg::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([cfg::Column::Value, cfg::Column::IsEncrypted])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            config.contains("\"instance_configurations\".\"value\""),
+            "config shape: {config}"
+        );
+    }
+
+    #[test]
+    fn migrated_invite_shapes() {
+        use pidash_db::entity::{project_member_invites as pinv, workspace_member_invites as winv};
+        use sea_orm::{ColumnTrait, DbBackend, EntityTrait, QueryFilter, QuerySelect, QueryTrait};
+        let winv_q = winv::Entity::find()
+            .filter(winv::Column::Email.eq("a@b.c"))
+            .filter(winv::Column::Accepted.eq(true))
+            .filter(winv::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([winv::Column::WorkspaceId, winv::Column::Role])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            winv_q.contains("\"workspace_member_invites\".\"workspace_id\"")
+                && winv_q.contains("\"workspace_member_invites\".\"role\""),
+            "workspace invites shape: {winv_q}"
+        );
+        let pinv_q = pinv::Entity::find()
+            .filter(pinv::Column::Email.eq("a@b.c"))
+            .filter(pinv::Column::Accepted.eq(true))
+            .filter(pinv::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([
+                pinv::Column::WorkspaceId,
+                pinv::Column::ProjectId,
+                pinv::Column::Role,
+                pinv::Column::CreatedById,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            pinv_q.contains("\"project_member_invites\".\"project_id\""),
+            "project invites shape: {pinv_q}"
+        );
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {

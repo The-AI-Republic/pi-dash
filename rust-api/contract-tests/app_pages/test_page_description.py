@@ -180,3 +180,84 @@ def test_description_update_binary_suspicious_pattern_split_by_invalid_byte_issu
     assert response.status_code == 400
     assert response.json() == SUSPICIOUS_BINARY_ERROR
     assert db.fetchval("SELECT description_binary FROM pages WHERE id=%s", (page["id"],)) is None
+
+
+# PIDASHCONV-1689: page body nodes (PAGE-040 embeds, PAGE-043 entity
+# references) survive the description_html sanitizer with their allowlisted
+# attributes. Vectors mirror test_content_validator.py; (input, stored)
+# pairs were captured by executing validate_html_content on Django main
+# (nh3 0.2.18). The Rust allowlist predated NEWFRONT-914 and stripped the
+# elements from the stored HTML.
+
+EMBED_KEEP_VECTORS = [
+    # The issue vector.
+    (
+        '<p><issue-embed-component entity_identifier="i1" project_identifier="P"></issue-embed-component></p>',
+        '<p><issue-embed-component entity_identifier="i1" project_identifier="P"></issue-embed-component></p>',
+    ),
+    # All embed identifiers survive.
+    (
+        '<p><issue-embed-component id="emb-1" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="acme" entity_name="issue"></issue-embed-component></p>',
+        '<p><issue-embed-component id="emb-1" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="acme" entity_name="issue"></issue-embed-component></p>',
+    ),
+    # All entity-reference attributes survive, including data-label.
+    (
+        '<p>see <entity-reference-component entity_name="issue" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="acme" project_id="p-1" data-label="Fix login"></entity-reference-component></p>',
+        '<p>see <entity-reference-component entity_name="issue" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="acme" project_id="p-1" data-label="Fix login"></entity-reference-component></p>',
+    ),
+    # A bare node round-trips rather than vanishing.
+    (
+        "<p><entity-reference-component></entity-reference-component></p>",
+        "<p><entity-reference-component></entity-reference-component></p>",
+    ),
+]
+
+
+@pytest.mark.parametrize("html,stored", EMBED_KEEP_VECTORS)
+def test_description_update_html_keeps_embed_and_entity_reference(
+    user_client, world, seeder, db, html, stored
+):
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Embed nodes")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    response = user_client.patch(_desc_url(world, page["id"]), json={"description_html": html})
+    assert response.status_code == 200
+    assert response.json() == {"message": "Updated successfully"}
+    assert db.fetchval("SELECT description_html FROM pages WHERE id=%s", (page["id"],)) == stored
+
+
+def test_description_update_html_strips_handlers_from_embed_nodes(user_client, world, seeder, db):
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Embed hostile")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    response = user_client.patch(
+        _desc_url(world, page["id"]),
+        json={
+            "description_html": (
+                '<p><issue-embed-component id="e" entity_identifier="ISS-2" '
+                'onclick="alert(1)">x</issue-embed-component>'
+                '<entity-reference-component entity_name="issue" '
+                'onerror="alert(1)">y</entity-reference-component></p>'
+            )
+        },
+    )
+    assert response.status_code == 200
+    assert db.fetchval("SELECT description_html FROM pages WHERE id=%s", (page["id"],)) == (
+        '<p><issue-embed-component id="e" entity_identifier="ISS-2">x</issue-embed-component>'
+        '<entity-reference-component entity_name="issue">y</entity-reference-component></p>'
+    )
+
+
+@pytest.mark.parametrize(
+    "html,stored",
+    [
+        ("<p>hi</p><script>alert(1)</script>", "<p>hi</p>"),
+        ("<p><marquee>scrolling</marquee></p>", "<p>scrolling</p>"),
+    ],
+)
+def test_description_update_html_still_strips_hostile_markup(
+    user_client, world, seeder, db, html, stored
+):
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Hostile markup")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    response = user_client.patch(_desc_url(world, page["id"]), json={"description_html": html})
+    assert response.status_code == 200
+    assert db.fetchval("SELECT description_html FROM pages WHERE id=%s", (page["id"],)) == stored

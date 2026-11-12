@@ -36,6 +36,47 @@ pub use render::{
     THROTTLE_429_STATUS, UNAUTHENTICATED_401_STATUS,
 };
 
+/// DRF `AnonRateThrottle` ident (`throttling.py` `get_ident`,
+/// `NUM_PROXIES` unset): the `X-Forwarded-For` value with all
+/// whitespace stripped when present, else `REMOTE_ADDR` (which may
+/// itself be absent → the `"None"` ident Python's `%`-formatting
+/// produces). Shared by the magic and email-check throttles; the
+/// first-entry `client_ip` helper stays reserved for the stamp
+/// columns (`utils/ip_address.py:get_client_ip`).
+/// `CsrfViewMiddleware.process_view`'s Origin/Referer phase for the auth
+/// CSRF gates (NEWPIDASH-12). Django runs it before the cookie and token
+/// checks on every gated unsafe request: the plain Views through the
+/// middleware, the DRF views through `SessionAuthentication.enforce_csrf`.
+/// `CSRF_TRUSTED_ORIGINS` is the CORS list (`settings/common.py:617`);
+/// `is_secure()` follows `X-Forwarded-Proto` only when
+/// `SECURE_PROXY_SSL_HEADER` is configured (the served URI never carries
+/// a scheme behind the edge). `Err` carries Django's reason string.
+pub(crate) fn csrf_origin_gate(
+    settings: &pidash_db::config::Settings,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), String> {
+    let secure = pidash_compat::csrf_origin::request_is_secure(
+        None,
+        headers,
+        settings.secure_proxy_ssl_header,
+    );
+    pidash_compat::csrf_origin::check_origin_and_referer(
+        headers,
+        secure,
+        &settings.csrf_trusted_origins,
+        settings.session.cookie_domain.as_deref(),
+    )
+}
+
+pub(crate) fn throttle_ident(headers: &axum::http::HeaderMap, peer: Option<String>) -> String {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if !xff.is_empty() {
+            return xff.split_whitespace().collect();
+        }
+    }
+    peer.unwrap_or_else(|| "None".to_owned())
+}
+
 /// Owned D-16 auth routes (cutover granularity: registered paths
 /// serve Rust, sibling paths keep proxying through the fallback).
 /// Email sessions (PIDASHCONV-422) plus the magic-link family

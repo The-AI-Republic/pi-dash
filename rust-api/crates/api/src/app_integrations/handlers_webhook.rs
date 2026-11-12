@@ -83,10 +83,12 @@ use pidash_services::app_integrations::serializers::{
     validate_create_url, validate_update_url, SystemResolver, WebhookUrlError,
 };
 
-use super::{actor, owned, parse_id, pool_of, require_workspace_admin, workspace_id_or_404};
+use super::{actor, parse_id, pool_of, require_workspace_admin, workspace_id_or_404};
 use super::{json_response, Denial};
+use crate::edge;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::datetime::render_uuid_opt as opt_uuid;
 
 /// Gate-table paths for the four webhook routes, in
 /// [`super::gates::GATES`] spelling.
@@ -101,33 +103,30 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/webhooks/",
-            owned(
+            edge::owned(
                 axum::routing::get(list_webhooks).post(create_webhook),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/webhooks/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(retrieve_webhook)
                     .patch(partial_update_webhook)
                     .delete(destroy_webhook),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/webhooks/{pk}/regenerate/",
-            owned(
+            edge::owned(
                 axum::routing::post(regenerate_secret),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/webhook-logs/{webhook_id}/",
-            owned(
-                axum::routing::get(list_webhook_logs),
-                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-            ),
+            edge::owned(axum::routing::get(list_webhook_logs), &["GET", "TRACE"]),
         )
 }
 
@@ -194,7 +193,12 @@ async fn list_webhooks(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let rows = match queries_webhook::fetch_webhook_list(pool, &slug).await {
+    let rows = match queries_webhook::fetch_webhook_list(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &slug,
+    )
+    .await
+    {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -278,7 +282,9 @@ async fn create_webhook(
         is_internal: input.is_internal.unwrap_or(false),
         version: input.version.unwrap_or_else(|| "v1".to_owned()),
     };
-    if let Err(error) = queries_webhook::create_webhook(pool, &row).await {
+    if let Err(error) =
+        queries_webhook::create_webhook(&pidash_db::pool::sea_orm_connection(pool), &row).await
+    {
         return insert_error(error);
     }
     json_response(
@@ -307,7 +313,13 @@ async fn retrieve_webhook(
         Ok(pk) => pk,
         Err(response) => return response,
     };
-    let row = match queries_webhook::fetch_webhook_detail(pool, pk, &slug).await {
+    let row = match queries_webhook::fetch_webhook_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        pk,
+        &slug,
+    )
+    .await
+    {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -343,7 +355,13 @@ async fn partial_update_webhook(
         Ok(pk) => pk,
         Err(response) => return response,
     };
-    let row = match queries_webhook::fetch_webhook_detail(pool, pk, &slug).await {
+    let row = match queries_webhook::fetch_webhook_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        pk,
+        &slug,
+    )
+    .await
+    {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -394,7 +412,9 @@ async fn partial_update_webhook(
     // `updated_by` (`db/models/base.py:41-42`).
     row.updated_at = Utc::now();
     row.updated_by_id = Some(ctx.actor_id);
-    if let Err(error) = queries_webhook::update_webhook_full(pool, &row).await {
+    if let Err(error) =
+        queries_webhook::update_webhook_full(&pidash_db::pool::sea_orm_connection(pool), &row).await
+    {
         return update_error(error);
     }
     json_response(
@@ -424,7 +444,13 @@ async fn destroy_webhook(
         Ok(pk) => pk,
         Err(response) => return response,
     };
-    let row = match queries_webhook::fetch_webhook_detail(pool, pk, &slug).await {
+    let row = match queries_webhook::fetch_webhook_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        pk,
+        &slug,
+    )
+    .await
+    {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -435,7 +461,9 @@ async fn destroy_webhook(
     // `delete()` goes through `save()`, so CRUM stamps `updated_by`
     // exactly like a patch (`db/models/base.py:41-42`).
     row.updated_by_id = Some(ctx.actor_id);
-    if let Err(error) = queries_webhook::update_webhook_full(pool, &row).await {
+    if let Err(error) =
+        queries_webhook::update_webhook_full(&pidash_db::pool::sea_orm_connection(pool), &row).await
+    {
         return update_error(error);
     }
     enqueue_soft_delete(pool, &pk).await;
@@ -464,7 +492,13 @@ async fn regenerate_secret(
         Ok(pk) => pk,
         Err(response) => return response,
     };
-    let row = match queries_webhook::fetch_webhook_detail(pool, pk, &slug).await {
+    let row = match queries_webhook::fetch_webhook_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        pk,
+        &slug,
+    )
+    .await
+    {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -474,7 +508,9 @@ async fn regenerate_secret(
     queries_webhook::stamp_secret_regenerate(&mut row);
     // `save()` stamps `updated_by` through CRUM, like every update.
     row.updated_by_id = Some(ctx.actor_id);
-    if let Err(error) = queries_webhook::update_webhook_full(pool, &row).await {
+    if let Err(error) =
+        queries_webhook::update_webhook_full(&pidash_db::pool::sea_orm_connection(pool), &row).await
+    {
         return update_error(error);
     }
     json_response(
@@ -504,7 +540,13 @@ async fn list_webhook_logs(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let rows = match queries_webhook::fetch_webhook_logs(pool, &slug, webhook_id).await {
+    let rows = match queries_webhook::fetch_webhook_logs(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &slug,
+        webhook_id,
+    )
+    .await
+    {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -906,19 +948,25 @@ fn is_duplicate_url(error: &sqlx::Error) -> bool {
 /// `handle_exception` 400 branch (the re-raised `IntegrityError` lands
 /// there — the fixture's "500" note contradicts the code); transport
 /// failures → 500.
-fn insert_error(error: sqlx::Error) -> Response {
+fn insert_error(error: sea_orm::DbErr) -> Response {
+    let error = pidash_db::orm_tx::into_sqlx(error);
     if is_duplicate_url(&error) {
         return Denial::Conflict.into_response();
     }
-    update_error(error)
+    update_error_internal(&error)
 }
 
 /// Map a write failure onto the `handle_exception` matrix: integrity
 /// violations (SQLSTATE 23xxx) → 400 `{"error": "The payload is not
 /// valid"}`; anything else → the 500 envelope (the D-02 `space`
 /// `db_error` precedent).
-fn update_error(error: sqlx::Error) -> Response {
-    if let sqlx::Error::Database(db_error) = &error {
+fn update_error(error: sea_orm::DbErr) -> Response {
+    let error = pidash_db::orm_tx::into_sqlx(error);
+    update_error_internal(&error)
+}
+
+fn update_error_internal(error: &sqlx::Error) -> Response {
+    if let sqlx::Error::Database(db_error) = error {
         if db_error.code().as_deref().unwrap_or("").starts_with("23") {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -932,13 +980,6 @@ fn update_error(error: sqlx::Error) -> Response {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-
-fn opt_uuid(value: &Option<Uuid>) -> Value {
-    match value {
-        Some(id) => Value::String(id.to_string()),
-        None => Value::Null,
-    }
-}
 
 fn opt_datetime<Tz: chrono::TimeZone>(value: &Option<DateTime<Tz>>, zone: &chrono_tz::Tz) -> Value
 where

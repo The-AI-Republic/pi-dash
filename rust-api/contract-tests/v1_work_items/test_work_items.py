@@ -46,6 +46,9 @@ ISSUE_ROW_KEYS = {
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "assignees",
     "labels",
 }
@@ -123,6 +126,25 @@ def test_issue_create_invalid(api, world):
         "name": ["This field is required."],
         "priority": ['"bogus" is not a valid choice.'],
     }
+
+
+def test_issue_patch_executor_translates(api, world, db_conn):
+    # #2903: a cloud_agent write through the v1 serializer is stored as
+    # local_runner (normalize_issue_executor parity).
+    response = api.patch(
+        issue_url(world, world["issue"]["id"]),
+        json={"agent_executor": "cloud_agent"},
+    )
+    assert response.status_code == 200, response.text
+    from _harness.db import fetchone, get_database_url
+
+    db_conn.commit()
+    row = fetchone(
+        get_database_url(),
+        "SELECT agent_executor FROM issues WHERE id=%s",
+        (world["issue"]["id"],),
+    )
+    assert row["agent_executor"] == "local_runner"
 
 
 def test_issue_patch_bad_state(api, world):
@@ -269,3 +291,38 @@ def test_issue_patch_strips_ammonia_default_tag_attributes(api, world):
     )
     assert response.status_code == 200, response.text
     assert response.json()["description_html"] == SANITIZER_PROBE_CLEAN
+
+
+def test_advanced_search_datetimes_utc_for_non_utc_user(api, db, world):
+    """PIDASHCONV-1382: ``IssueAdvancedSearchEndpoint`` copies raw
+    ``.values()`` datetimes into a plain dict (issue.py:2912-2914) with no
+    DRF ``DateTimeField``, so ``TimezoneMixin`` has no effect and DRF's
+    ``JSONEncoder`` renders them UTC with a ``Z`` suffix no matter what
+    zone the API-key user is in.
+    """
+    db.execute(
+        "UPDATE users SET user_timezone = %s WHERE id = %s",
+        ("Asia/Kolkata", world["owner"]["id"]),
+    )
+    db.execute(
+        "UPDATE issues SET completed_at = %s WHERE id = %s",
+        ("2026-10-02T23:17:12.025108+00:00", world["issue"]["id"]),
+    )
+    response = api.get(
+        f"/api/v1/workspaces/{world['workspace']['slug']}/work-items/search/advanced/",
+        params={"q": "Contract"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["count"] >= 1
+    assert len(body["results"]) >= 1
+    for row in body["results"]:
+        assert row["created_at"].endswith("Z"), row["created_at"]
+        assert row["updated_at"].endswith("Z"), row["updated_at"]
+        if row["completed_at"] is not None:
+            assert row["completed_at"].endswith("Z"), row["completed_at"]
+    completed = [row for row in body["results"] if row["completed_at"] is not None]
+    assert completed, "expected at least one completed row"
+    assert "2026-10-02T23:17:12.025108Z" in [
+        row["completed_at"] for row in completed
+    ]

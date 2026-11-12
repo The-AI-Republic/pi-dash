@@ -216,6 +216,18 @@ pub fn is_date_axis(axis: &str) -> bool {
     DATE_AXES.contains(&axis)
 }
 
+/// Date axes over timestamptz columns: Django's `Extract`/`Trunc` on these
+/// converts `AT TIME ZONE '<active zone>'`, while the date-column axes
+/// (`start_date`, `target_date`) extract with no conversion.
+pub const TZ_AXES: [&str; 2] = ["created_at", "completed_at"];
+
+/// Quote an IANA zone name as a SQL string literal for `AT TIME ZONE`.
+/// Callers pass a parsed `Tz::name()` (already a valid name); quotes double
+/// defensively because this SQL is interpolated, not bound.
+pub fn sql_zone_literal(zone: &str) -> String {
+    format!("'{}'", zone.replace('\'', "''"))
+}
+
 /// `true` when the axis is a known analytics field (`analytics_plot.py:54,74`).
 pub fn is_valid_axis(axis: &str) -> bool {
     VALID_ANALYTICS_FIELDS.contains(&axis)
@@ -281,11 +293,18 @@ pub fn segment_error_body() -> Value {
 /// Monthly dimension for date axes (`annotate_with_monthly_dimension`,
 /// `analytics_plot.py:43-50`): `Concat(ExtractYear, '-', ExtractMonth)`.
 /// `field` must be one of [`DATE_AXES`]; callers validate first.
-pub fn month_dimension_expr(field: &str) -> String {
-    format!(
-        "CONCAT(EXTRACT(YEAR FROM \"{ISSUE_TABLE}\".\"{field}\"), '-', \
-         EXTRACT(MONTH FROM \"{ISSUE_TABLE}\".\"{field}\"))"
-    )
+/// `zone` is the active IANA zone: the timestamptz axes ([`TZ_AXES`])
+/// extract from `(col AT TIME ZONE '<zone>')` (Django's `Extract` converts
+/// with the `TimezoneMixin`-activated zone); the date-column axes extract
+/// with no conversion (Django emits no zone for `DateField` extracts).
+pub fn month_dimension_expr(field: &str, zone: &str) -> String {
+    let column = format!("\"{ISSUE_TABLE}\".\"{field}\"");
+    let source = if TZ_AXES.contains(&field) {
+        format!("({column} AT TIME ZONE {})", sql_zone_literal(zone))
+    } else {
+        column
+    };
+    format!("CONCAT(EXTRACT(YEAR FROM {source}), '-', EXTRACT(MONTH FROM {source}))")
 }
 
 /// SQL for the `F(x_axis)` dimension (`extract_axis`, `analytics_plot.py:53-61`)
@@ -294,12 +313,13 @@ pub fn month_dimension_expr(field: &str) -> String {
 /// are excluded for every axis by the caller (`analytics_plot.py:84-86`; the
 /// `is_null`/`dimension_ex` annotations at `:97-104` are dead code).
 /// Returns `None` for an unknown axis (handlers reject those in validation first).
-pub fn dimension_sql(x_axis: &str) -> Option<(String, String)> {
+/// `zone` is the active IANA zone (see [`month_dimension_expr`]).
+pub fn dimension_sql(x_axis: &str, zone: &str) -> Option<(String, String)> {
     let direct = |column: &str| Some((format!("\"{ISSUE_TABLE}\".\"{column}\""), String::new()));
     match x_axis {
         "priority" | "state_id" | "start_date" | "target_date" | "created_at" | "completed_at" => {
             if is_date_axis(x_axis) {
-                Some((month_dimension_expr(x_axis), String::new()))
+                Some((month_dimension_expr(x_axis, zone), String::new()))
             } else {
                 direct(x_axis)
             }
@@ -383,18 +403,21 @@ pub fn base_count_sql(filters_sql: &str) -> String {
 /// `dimension_ex` annotations at `:97-104` are dead — a later
 /// `.values("dimension")` drops them).
 /// Returns `None` for an unknown `x_axis` or `segment`.
-/// Params: `$1` = workspace slug.
+/// Params: `$1` = workspace slug. `zone` is the active IANA zone for date
+/// axes (see [`month_dimension_expr`]); request paths pass the actor zone,
+/// the export worker passes `UTC` (no activated zone there).
 pub fn base_plot_count_sql(
     x_axis: &str,
     segment: Option<&str>,
     filters_sql: &str,
+    zone: &str,
 ) -> Option<String> {
-    let (dim_expr, dim_join) = dimension_sql(x_axis)?;
+    let (dim_expr, dim_join) = dimension_sql(x_axis, zone)?;
     let (seg_select, seg_outer, seg_group, seg_join) = match segment {
         Some(segment) if !segment.is_empty() => {
-            let (expr, join) = dimension_sql(segment)?;
+            let (expr, join) = dimension_sql(segment, zone)?;
             let aliased = if is_date_axis(segment) {
-                month_dimension_expr(segment)
+                month_dimension_expr(segment, zone)
             } else {
                 expr
             };
@@ -425,16 +448,18 @@ pub fn base_plot_count_sql(
 /// always returns `"dimension"`, so the exclude is unconditional — same guard as
 /// [`base_plot_count_sql`]; segment NULLs are NOT excluded, matching Python).
 /// Returns `None` for an unknown `x_axis` or `segment`. Params: `$1` = workspace slug.
+/// `zone` is the active IANA zone for date axes (see [`month_dimension_expr`]).
 pub fn base_plot_estimate_sql(
     x_axis: &str,
     segment: Option<&str>,
     filters_sql: &str,
+    zone: &str,
 ) -> Option<String> {
-    let (dim_expr, dim_join) = dimension_sql(x_axis)?;
+    let (dim_expr, dim_join) = dimension_sql(x_axis, zone)?;
     // The estimate join is the base table of this branch — except when the dimension or the
     // segment already brings it (`estimate_point__value`), where a second join would be a
     // duplicate table reference. Each join below is emitted exactly once.
-    let (_, estimate_join) = dimension_sql("estimate_point__value").expect("known axis");
+    let (_, estimate_join) = dimension_sql("estimate_point__value", zone).expect("known axis");
     // The estimate table joins exactly once: through the dimension when
     // `x_axis` is `estimate_point__value`, otherwise through this base join.
     let extra_joins = if dim_join.contains(ESTIMATE_POINT_TABLE) {
@@ -444,9 +469,9 @@ pub fn base_plot_estimate_sql(
     };
     let (seg_select, seg_group, seg_join) = match segment {
         Some(segment) if !segment.is_empty() => {
-            let (expr, join) = dimension_sql(segment)?;
+            let (expr, join) = dimension_sql(segment, zone)?;
             let aliased = if is_date_axis(segment) {
-                month_dimension_expr(segment)
+                month_dimension_expr(segment, zone)
             } else {
                 expr
             };
@@ -1141,23 +1166,29 @@ pub fn advance_project_chart_count_sql(table: &str, where_sql: &str) -> String {
 /// month-start happens in Python over [`month_keys_between`]; each row is
 /// `{key, name, count=created, completed_issues, created_issues}` with
 /// [`COMPLETION_SCHEMA_COMPLETED`] / [`COMPLETION_SCHEMA_CREATED`].
+/// `zone` is the active IANA zone: the `TruncMonth` bucket and the
+/// `created_at__date` window both convert with it (Django's `TruncBase`
+/// uses the `TimezoneMixin`-activated zone). The month column decodes as a
+/// naive local timestamp (`date_trunc` over `AT TIME ZONE`).
 pub fn advance_completion_monthly_sql(
     base_where_sql: &str,
     date_range: Option<(&str, &str)>,
+    zone: &str,
 ) -> String {
+    let literal = sql_zone_literal(zone);
     let scope = match date_range {
         Some((gte_ph, lte_ph)) => format!(
-            "{base_where_sql} AND \"issues\".\"created_at\"::date >= {gte_ph} \
-             AND \"issues\".\"created_at\"::date <= {lte_ph}"
+            "{base_where_sql} AND (\"issues\".\"created_at\" AT TIME ZONE {literal})::date >= {gte_ph} \
+             AND (\"issues\".\"created_at\" AT TIME ZONE {literal})::date <= {lte_ph}"
         ),
         None => base_where_sql.to_owned(),
     };
-    "SELECT date_trunc('month', \"issues\".\"created_at\") AS \"month\", \
-     COUNT(\"issues\".\"id\") AS \"created_count\", \
-     COUNT(\"issues\".\"id\") FILTER (WHERE \"states\".\"group\" = 'completed') AS \"completed_count\" \
-     FROM \"issues\" WHERE (".to_owned()
-        + &scope
-        + ") GROUP BY \"month\" ORDER BY \"month\""
+    format!(
+        "SELECT date_trunc('month', \"issues\".\"created_at\" AT TIME ZONE {literal}) AS \"month\", \
+         COUNT(\"issues\".\"id\") AS \"created_count\", \
+         COUNT(\"issues\".\"id\") FILTER (WHERE \"states\".\"group\" = 'completed') AS \"completed_count\" \
+         FROM \"issues\" WHERE ({scope}) GROUP BY \"month\" ORDER BY \"month\""
+    )
 }
 
 /// `{"completed_issues": "completed_issues", "created_issues": "created_issues"}`
@@ -1777,10 +1808,17 @@ mod tests {
 
     #[test]
     fn completion_monthly_and_zero_fill_helpers() {
-        let sql = advance_completion_monthly_sql(SCOPE, None);
+        let sql = advance_completion_monthly_sql(SCOPE, None, "UTC");
         assert!(sql.contains("date_trunc('month'"));
         assert!(sql.contains("AS \"created_count\""));
         assert!(sql.contains("AS \"completed_count\""));
+        // The bucket and the window convert with the active zone.
+        let zoned = advance_completion_monthly_sql(SCOPE, Some(("$2", "$3")), "America/New_York");
+        assert!(zoned.contains(
+            "date_trunc('month', \"issues\".\"created_at\" AT TIME ZONE 'America/New_York')"
+        ));
+        assert!(zoned
+            .contains("(\"issues\".\"created_at\" AT TIME ZONE 'America/New_York')::date >= $2"));
         assert_eq!(
             month_keys_between((2026, 11), (2027, 2)),
             vec!["2026-11-01", "2026-12-01", "2027-01-01", "2027-02-01"]
@@ -1869,8 +1907,13 @@ mod tests {
         assert_eq!(VALID_YAXIS, ["issue_count", "estimate"]);
         assert!(is_date_axis("created_at"));
         assert!(!is_date_axis("priority"));
-        assert!(month_dimension_expr("created_at").contains("EXTRACT(YEAR"));
-        assert!(month_dimension_expr("created_at").contains("EXTRACT(MONTH"));
+        assert!(month_dimension_expr("created_at", "UTC").contains("EXTRACT(YEAR"));
+        assert!(month_dimension_expr("created_at", "UTC").contains("EXTRACT(MONTH"));
+        // Timestamptz axes convert with the active zone; date-column axes do not.
+        assert!(month_dimension_expr("created_at", "America/New_York")
+            .contains("(\"issues\".\"created_at\" AT TIME ZONE 'America/New_York')"));
+        assert!(!month_dimension_expr("start_date", "America/New_York").contains("AT TIME ZONE"));
+        assert_eq!(sql_zone_literal("UTC"), "'UTC'");
     }
 
     #[test]
@@ -1888,7 +1931,7 @@ mod tests {
     fn plot_count_sql_matches_q01b_shape() {
         let fixture = part1();
         assert!(fixture.contains("annotate(count=Count('*')).order_by(dimension)"));
-        let sql = base_plot_count_sql("priority", None, "TRUE").expect("known axis");
+        let sql = base_plot_count_sql("priority", None, "TRUE", "UTC").expect("known axis");
         assert!(sql.contains("COUNT(*) AS \"count\""));
         // The FROM subquery must carry an alias or Postgres rejects the
         // whole statement (`subquery in FROM must have an alias`, PIDASHCONV-1119).
@@ -1896,8 +1939,8 @@ mod tests {
             sql.contains(") AS \"plot\" GROUP BY \"dimension\""),
             "count plot FROM subquery lacks an alias: {sql}"
         );
-        let segmented_sql =
-            base_plot_count_sql("priority", Some("state_id"), "TRUE").expect("segmented axis");
+        let segmented_sql = base_plot_count_sql("priority", Some("state_id"), "TRUE", "UTC")
+            .expect("segmented axis");
         assert!(
             segmented_sql.contains(") AS \"plot\" GROUP BY \"dimension\""),
             "segmented count plot FROM subquery lacks an alias: {segmented_sql}"
@@ -1918,19 +1961,20 @@ mod tests {
         assert!(sql.contains("ORDER BY \"dimension\" ASC"));
         assert!(sql.contains("\"workspaces\".\"slug\" = $1"));
         // Unknown axes never reach SQL: handlers reject them in validation first.
-        assert!(base_plot_count_sql("nope", None, "TRUE").is_none());
-        assert!(base_plot_count_sql("priority", Some("nope"), "TRUE").is_none());
+        assert!(base_plot_count_sql("nope", None, "TRUE", "UTC").is_none());
+        assert!(base_plot_count_sql("priority", Some("nope"), "TRUE", "UTC").is_none());
         // Date axes exclude NULL dimensions (analytics_plot.py:85-86).
-        let dated = base_plot_count_sql("created_at", None, "TRUE").expect("date axis");
+        let dated = base_plot_count_sql("created_at", None, "TRUE", "UTC").expect("date axis");
         assert!(dated.contains("EXTRACT(YEAR"));
         // Every axis excludes NULL dimensions: `extract_axis` always returns
         // "dimension", so `if x_axis == "dimension"` (analytics_plot.py:85) is
         // always true and the exclude runs unconditionally (PIDASHCONV-496).
         // The guard repeats the inlined dimension expression (a SELECT alias is
         // not visible in the same level's WHERE).
-        let plain = base_plot_count_sql("priority", None, "TRUE").expect("plain axis");
+        let plain = base_plot_count_sql("priority", None, "TRUE", "UTC").expect("plain axis");
         assert!(plain.contains("\"issues\".\"priority\" IS NOT NULL"));
-        let nullable = base_plot_count_sql("labels__id", None, "TRUE").expect("nullable axis");
+        let nullable =
+            base_plot_count_sql("labels__id", None, "TRUE", "UTC").expect("nullable axis");
         assert!(nullable.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
     }
 
@@ -1938,7 +1982,7 @@ mod tests {
     fn plot_estimate_sql_matches_q01c_shape() {
         let fixture = part1();
         assert!(fixture.contains("SUM(CAST"));
-        let sql = base_plot_estimate_sql("priority", None, "TRUE").expect("known axis");
+        let sql = base_plot_estimate_sql("priority", None, "TRUE", "UTC").expect("known axis");
         assert!(sql.contains("SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION))"));
         assert!(sql.contains("GROUP BY \"dimension\""));
         // Forward FK (`db/models/issue.py:130-136`): the estimate table joins on
@@ -1948,26 +1992,27 @@ mod tests {
              ON (\"issues\".\"estimate_point_id\" = \"estimate_points\".\"id\")"
         ));
         assert_eq!(sql.matches("\"estimate_points\"").count(), 3);
-        assert!(base_plot_estimate_sql("nope", None, "TRUE").is_none());
-        assert!(base_plot_estimate_sql("priority", Some("nope"), "TRUE").is_none());
+        assert!(base_plot_estimate_sql("nope", None, "TRUE", "UTC").is_none());
+        assert!(base_plot_estimate_sql("priority", Some("nope"), "TRUE", "UTC").is_none());
         // Every axis excludes NULL dimensions: `extract_axis` always returns
         // "dimension", so `if x_axis == "dimension"` (analytics_plot.py:85) is
         // always true and the exclude runs unconditionally (PIDASHCONV-506,
         // mirroring PIDASHCONV-496 for the count branch). The guard repeats the
         // inlined dimension expression (a SELECT alias is not visible in the
         // same level's WHERE).
-        let plain = base_plot_estimate_sql("priority", None, "TRUE").expect("plain axis");
+        let plain = base_plot_estimate_sql("priority", None, "TRUE", "UTC").expect("plain axis");
         assert!(plain.contains("\"issues\".\"priority\" IS NOT NULL"));
-        let nullable = base_plot_estimate_sql("labels__id", None, "TRUE").expect("nullable axis");
+        let nullable =
+            base_plot_estimate_sql("labels__id", None, "TRUE", "UTC").expect("nullable axis");
         assert!(nullable.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
-        let dated = base_plot_estimate_sql("created_at", None, "TRUE").expect("date axis");
+        let dated = base_plot_estimate_sql("created_at", None, "TRUE", "UTC").expect("date axis");
         assert!(dated.contains("IS NOT NULL"));
         assert!(dated.contains("EXTRACT(YEAR"));
         // Segment interplay: segment NULLs are NOT excluded in Python
         // (analytics_plot.py:89-115 has no segment exclude) — only the
         // dimension carries the guard.
-        let segmented =
-            base_plot_estimate_sql("priority", Some("labels__id"), "TRUE").expect("segmented axis");
+        let segmented = base_plot_estimate_sql("priority", Some("labels__id"), "TRUE", "UTC")
+            .expect("segmented axis");
         assert!(segmented.contains("\"issues\".\"priority\" IS NOT NULL"));
         assert!(!segmented.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
     }
@@ -1999,11 +2044,11 @@ mod tests {
         ] {
             statements.push((
                 "count",
-                base_plot_count_sql(axis, None, filters).expect("known axis"),
+                base_plot_count_sql(axis, None, filters, "UTC").expect("known axis"),
             ));
             statements.push((
                 "estimate",
-                base_plot_estimate_sql(axis, None, filters).expect("known axis"),
+                base_plot_estimate_sql(axis, None, filters, "UTC").expect("known axis"),
             ));
         }
         for (name, sql) in &statements {

@@ -99,6 +99,13 @@ from .api import APITokenSerializer, APITokenReadSerializer
 
 from .importer import ImporterSerializer
 
+from .worklog import IssueWorklogSerializer
+
+from .bulk import BulkOperationSerializer, BulkSubscribeSerializer
+
+from .epic import EpicIssueSerializer
+from .issue_type import IssueTypeCreateSerializer, IssueTypeSerializer
+
 from .page import (
     PageSerializer,
     PageDetailSerializer,

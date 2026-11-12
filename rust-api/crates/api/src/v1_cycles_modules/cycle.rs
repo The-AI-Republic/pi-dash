@@ -59,40 +59,57 @@
 //!   cross-project moves keep the bridge's old `project_id`
 //!   (`views/cycle.py:946-987`).
 //!
-//! Request bodies parse through [`super::json_cpython`] (PIDASHCONV-626),
-//! the shared CPython-envelope JSON layer:
+//! Request bodies parse through [`super::json`] (PIDASHCONV-626; serde
+//! since PIDASHCONV-1555), the shared JSON layer behind DRF's envelope:
 //!
-//! * `NaN`/`Infinity`/`-Infinity` in value position are strict-constant
-//!   400s under DRF's `STRICT_JSON` (the default); lone `\uD800-\uDFFF`
-//!   surrogates are accepted and flow through the `JStr` units.
-//! * Nesting parses to the measured 9939-deep cap (past it Django's JSON
-//!   500); `str()` echoes render to 9937-deep (past it the same).
+//! * `NaN`/`Infinity`/`-Infinity` in value position are 400s (serde's
+//!   text, not the strict-constant text); lone `\uD800-\uDFFF`
+//!   surrogates are 400s too (tier 3; accepted before PIDASHCONV-1555).
+//! * Nesting past serde's recursion limit (~128) is a 400 (tier 3; was
+//!   the measured 9939-deep cap with Django's JSON 500 past it).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/cycle.golden.json`).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use chrono::{Datelike, LocalResult, TimeZone};
 use chrono_tz::Tz;
+use sea_orm::sea_query::{
+    Alias, Asterisk, Condition, Expr, Func, OnConflict, Order, Query, SelectStatement, SimpleExpr,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, FromQueryResult, JoinType,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait, Set,
+};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
+use super::module::{check_max_length, CoerceFail};
 use pidash_auth::permissions::project;
+use pidash_compat::response::{json_created, json_ok, no_content};
+use pidash_db::entity::{
+    api_tokens, cycle_issues, cycles, dev_machine, estimate_points, file_assets, issue_assignees,
+    issue_labels, issues, labels, machine_token, project_members, projects, states, user_favorites,
+    users, workspace_members, workspaces,
+};
+use pidash_db::v1_cycles_modules::cycle_queries::{self as queries, TenantScope};
 
 #[cfg(test)]
-use super::json_cpython::JNum;
-use super::json_cpython::{
+use super::json::JNum;
+use super::json::{
     to_serde_publish, to_serde_publish_map, JObject, JStr, JVal, JsonFail, PLAIN_CRASH_BODY,
     PLAIN_CRASH_CONTENT_TYPE,
 };
 use crate::state::AppState;
+use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid, render_uuid_opt};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -116,8 +133,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// survives instead of the `"Not found."` default
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s Django-`ValidationError` branch
 /// (`api/views/base.py:148-152`): invalid UUIDs inside `pk__in` lookups on
 /// the cycle-issues POST path.
@@ -223,32 +238,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render a 201 JSON response with exact bytes.
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render an empty 204 response.
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("handler empty response")
-}
-
 fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
     state
         .pools()
@@ -279,6 +268,53 @@ fn db_write_error(error: sqlx::Error, site: &str) -> Denial {
     } else {
         db_error(error, site)
     }
+}
+
+/// [`db_write_error`] for a SeaORM write: the driver error behind the
+/// `DbErr` keeps its SQLSTATE, so the integrity mapping is unchanged.
+fn orm_write_error(error: DbErr, site: &str) -> Denial {
+    db_write_error(pidash_db::orm_tx::into_sqlx(error), site)
+}
+
+/// SeaORM over the request pool (a wrapper, no I/O).
+fn orm(pool: &PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// A row decoded by column name (SeaORM's `QueryResult`).
+type Row = sea_orm::QueryResult;
+
+/// Run a sea-query select (the db-layer builders) and keep every row.
+async fn fetch_rows(pool: &PgPool, stmt: &SelectStatement, site: &str) -> Result<Vec<Row>, Denial> {
+    orm(pool)
+        .query_all(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|error| db_error(error, site))
+}
+
+/// Run a sea-query select and keep its first row, if any.
+async fn fetch_row(
+    pool: &PgPool,
+    stmt: &SelectStatement,
+    site: &str,
+) -> Result<Option<Row>, Denial> {
+    orm(pool)
+        .query_one(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|error| db_error(error, site))
+}
+
+/// Run an entity select (`Entity::find()` keeps every column of the base
+/// table under its plain name) and keep its first row, if any.
+async fn fetch_entity_row<E: EntityTrait>(
+    pool: &PgPool,
+    select: sea_orm::Select<E>,
+    site: &str,
+) -> Result<Option<Row>, Denial> {
+    orm(pool)
+        .query_one(select.build(DbBackend::Postgres))
+        .await
+        .map_err(|error| db_error(error, site))
 }
 
 // ---------------------------------------------------------------------------
@@ -374,72 +410,177 @@ pub fn owned_unarchive(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (same shape as the D-19 `v1_projects`
-/// family: axum's `Query` backend does not coerce a lone `?key=value` into
-/// a sequence, so callers read first/last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
 
-/// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (
-    String,
-    bool,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-);
+// The request preamble reads, on SeaORM. These mirror
+// `v1_work_items::auth_reads` (same shapes and names) so the two can be
+// folded together mechanically once both are on `main`.
 
-/// Decoded `machine_token` row for [`resolve_machine_token`].
-type MachineTokenLookup = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-);
+/// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct ApiTokenLookup {
+    token: String,
+    is_active: bool,
+    expired_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: uuid::Uuid,
+}
 
-/// Decoded `file_assets` row for [`file_asset_url`].
-type FileAssetLookup = (
-    Option<String>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-);
+/// The live `api_tokens` row with exactly this token (`deleted_at IS
+/// NULL`, the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a
+/// soft-deleted token 403s instead of authenticating). `is_active` /
+/// `expired_at` are judged by `pidash_auth::token::validate_api_token`.
+async fn live_api_token<C: ConnectionTrait>(
+    db: &C,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, DbErr> {
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Token,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+            api_tokens::Column::UserId,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(db)
+        .await
+}
+
+/// A `machine_token` row by hash plus the revocation bit of its device.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct MachineTokenLookup {
+    token_hash: String,
+    user_id: uuid::Uuid,
+    dev_machine_id: Option<uuid::Uuid>,
+    workspace_id: uuid::Uuid,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
+    /// when the token has no device.
+    dev_revoked: Option<bool>,
+}
+
+/// `MachineToken` by `token_hash`, LEFT JOIN `dev_machine` for its
+/// revocation (`api_authentication.py:47-70`). No liveness scope: the
+/// table has no soft delete.
+async fn machine_token_with_device<C: ConnectionTrait>(
+    db: &C,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, DbErr> {
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::TokenHash,
+            machine_token::Column::UserId,
+            machine_token::Column::DevMachineId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
+            "dev_revoked",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(db)
+        .await
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member<C: ConnectionTrait>(
+    db: &C,
+    workspace_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<uuid::Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// The stored `users.user_timezone` name, unparsed (`None` when the user
+/// row is missing).
+async fn user_timezone<C: ConnectionTrait>(
+    db: &C,
+    user_id: uuid::Uuid,
+) -> Result<Option<String>, DbErr> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(user_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// The workspace id for a slug. No liveness predicate (the old read had
+/// none either): an unknown slug is `None`, and every gate then denies.
+async fn workspace_id_by_slug<C: ConnectionTrait>(
+    db: &C,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// The roles of the user's active, live `project_members` rows on the
+/// project, workspace-scoped (`app/permissions/project.py:85-116`).
+async fn project_member_roles<C: ConnectionTrait>(
+    db: &C,
+    workspace_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+) -> Result<Vec<i16>, DbErr> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .filter(project_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// The `file_assets` columns `asset_url` resolves on.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct FileAssetLookup {
+    entity_type: Option<String>,
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
 
 /// Gate-table path keys (`super::gates::GATES`): the route shapes the
 /// permission layer matches on.
@@ -490,10 +631,11 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -509,14 +651,16 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let row = live_api_token(&orm(pool), presented)
+        .await
+        .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some(ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -542,17 +686,19 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
-    )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    let db = orm(pool);
+    let row = machine_token_with_device(&db, &presented_hash)
+        .await
+        .map_err(|error| db_error(error, "machine-token-lookup"))?;
+    let Some(MachineTokenLookup {
+        token_hash,
+        user_id,
+        dev_machine_id: _,
+        workspace_id,
+        revoked_at,
+        expires_at,
+        dev_revoked,
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -560,38 +706,36 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
     // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    let member = is_active_workspace_member(&db, workspace_id, user_id)
+        .await
+        .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
         )
-        .bind(&presented_hash)
-        .execute(pool)
         .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -599,13 +743,9 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    user_timezone(&orm(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -666,16 +806,17 @@ pub async fn rewrite_project_id(
     // `Project.resolve` (`db/models/project.py:192-219`): upper-cased
     // identifier match on the live row, else `Http404("Project not found")`.
     let identifier = normalize_resolve_identifier(raw);
-    let row: Option<uuid::Uuid> = sqlx::query_scalar(
-        r#"SELECT p."id" FROM "projects" p
-           INNER JOIN "workspaces" w ON p."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND p."identifier" = $2 AND p."deleted_at" IS NULL"#,
-    )
-    .bind(workspace_slug)
-    .bind(identifier)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "rewrite-project"))?;
+    let row: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "rewrite-project"))?;
     row.ok_or(Denial::ProjectNotFound)
 }
 
@@ -692,15 +833,9 @@ pub async fn project_entity_facts(
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
 ) -> Result<project::ProjectFacts, Denial> {
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "entity-facts"))?;
+    let roles = project_member_roles(&orm(pool), *workspace_id, *user_id, *project_id)
+        .await
+        .map_err(|error| db_error(error, "entity-facts"))?;
     Ok(project::ProjectFacts {
         workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
         project_id: pidash_types::ProjectId::from(project_id.to_string()),
@@ -770,13 +905,9 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
+    let workspace_id = workspace_id_by_slug(&orm(&pool), slug)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(Preamble {
         pool,
         actor,
@@ -787,11 +918,12 @@ pub async fn preamble(
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
 /// origin for task kwargs, never the inbound host.
 pub fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -855,100 +987,71 @@ pub fn micros_now() -> chrono::DateTime<chrono::Utc> {
 // Row decoding + rendering primitives
 // ---------------------------------------------------------------------------
 
-fn row_uuid(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<uuid::Uuid, Denial> {
-    row.try_get::<uuid::Uuid, _>(column)
+fn row_uuid(row: &Row, column: &str, site: &str) -> Result<uuid::Uuid, Denial> {
+    row.try_get::<uuid::Uuid>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_uuid_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    site: &str,
-) -> Result<Option<uuid::Uuid>, Denial> {
-    row.try_get::<Option<uuid::Uuid>, _>(column)
+fn row_uuid_opt(row: &Row, column: &str, site: &str) -> Result<Option<uuid::Uuid>, Denial> {
+    row.try_get::<Option<uuid::Uuid>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_string(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<String, Denial> {
-    row.try_get::<String, _>(column)
+fn row_string(row: &Row, column: &str, site: &str) -> Result<String, Denial> {
+    row.try_get::<String>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_string_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    site: &str,
-) -> Result<Option<String>, Denial> {
-    row.try_get::<Option<String>, _>(column)
+fn row_string_opt(row: &Row, column: &str, site: &str) -> Result<Option<String>, Denial> {
+    row.try_get::<Option<String>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
 fn row_datetime(
-    row: &sqlx::postgres::PgRow,
+    row: &Row,
     column: &str,
     site: &str,
 ) -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-    row.try_get::<chrono::DateTime<chrono::Utc>, _>(column)
+    row.try_get::<chrono::DateTime<chrono::Utc>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_f64_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    site: &str,
-) -> Result<Option<f64>, Denial> {
-    row.try_get::<Option<f64>, _>(column)
+fn row_f64_opt(row: &Row, column: &str, site: &str) -> Result<Option<f64>, Denial> {
+    row.try_get::<Option<f64>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
 fn row_datetime_opt(
-    row: &sqlx::postgres::PgRow,
+    row: &Row,
     column: &str,
     site: &str,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
-    row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column)
+    row.try_get::<Option<chrono::DateTime<chrono::Utc>>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_date_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    site: &str,
-) -> Result<Option<chrono::NaiveDate>, Denial> {
-    row.try_get::<Option<chrono::NaiveDate>, _>(column)
+fn row_date_opt(row: &Row, column: &str, site: &str) -> Result<Option<chrono::NaiveDate>, Denial> {
+    row.try_get::<Option<chrono::NaiveDate>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_i64(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<i64, Denial> {
-    row.try_get::<i64, _>(column)
+fn row_i64(row: &Row, column: &str, site: &str) -> Result<i64, Denial> {
+    row.try_get::<i64>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_i32(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<i32, Denial> {
-    row.try_get::<i32, _>(column)
+fn row_i32(row: &Row, column: &str, site: &str) -> Result<i32, Denial> {
+    row.try_get::<i32>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_i32_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    site: &str,
-) -> Result<Option<i32>, Denial> {
-    row.try_get::<Option<i32>, _>(column)
+fn row_i32_opt(row: &Row, column: &str, site: &str) -> Result<Option<i32>, Denial> {
+    row.try_get::<Option<i32>>("", column)
         .map_err(|error| db_error(error, site))
 }
 
-fn row_json(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<Value, Denial> {
-    row.try_get::<Value, _>(column)
-        .map_err(|error| db_error(error, site))
-}
-
-fn row_json_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    site: &str,
-) -> Result<Option<Value>, Denial> {
-    row.try_get::<Option<Value>, _>(column)
+fn row_json(row: &Row, column: &str, site: &str) -> Result<Value, Denial> {
+    row.try_get::<Value>("", column)
         .map_err(|error| db_error(error, site))
 }
 
@@ -958,33 +1061,10 @@ fn render_f64(value: f64) -> Value {
     serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
 
-fn render_uuid(value: &uuid::Uuid) -> Value {
-    Value::String(value.to_string())
-}
-
-fn render_uuid_opt(value: &Option<uuid::Uuid>) -> Value {
-    value.as_ref().map_or(Value::Null, render_uuid)
-}
-
 fn render_string_opt(value: &Option<String>) -> Value {
     value
         .as_ref()
         .map_or(Value::Null, |v| Value::String(v.clone()))
-}
-
-fn render_date_opt(value: &Option<chrono::NaiveDate>) -> Value {
-    value
-        .map(|d| Value::String(d.format("%Y-%m-%d").to_string()))
-        .unwrap_or(Value::Null)
-}
-
-/// DRF `DateTimeField` rendering in the request time zone (`Z` for UTC,
-/// six-digit micros only when nonzero): the shared
-/// `crate::serializer::render_datetime_in` kernel.
-fn render_datetime_opt(value: &Option<chrono::DateTime<chrono::Utc>>, timezone: &Tz) -> Value {
-    value.map_or(Value::Null, |dt| {
-        Value::String(crate::serializer::render_datetime_in(&dt, timezone))
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,7 +1165,7 @@ pub struct CycleDetail {
 }
 
 impl CycleDetail {
-    pub fn decode(row: &sqlx::postgres::PgRow, site: &str) -> Result<Self, Denial> {
+    pub fn decode(row: &Row, site: &str) -> Result<Self, Denial> {
         Ok(CycleDetail {
             id: row_uuid(row, "id", site)?,
             created_at: row_datetime(row, "created_at", site)?,
@@ -1102,7 +1182,7 @@ impl CycleDetail {
             owned_by_id: row_uuid(row, "owned_by_id", site)?,
             view_props: row_json(row, "view_props", site)?,
             sort_order: row
-                .try_get::<f64, _>("sort_order")
+                .try_get::<f64>("", "sort_order")
                 .map_err(|error| db_error(error, site))?,
             external_source: row_string_opt(row, "external_source", site)?,
             external_id: row_string_opt(row, "external_id", site)?,
@@ -1115,11 +1195,7 @@ impl CycleDetail {
         })
     }
 
-    pub fn with_list_annotations(
-        mut self,
-        row: &sqlx::postgres::PgRow,
-        site: &str,
-    ) -> Result<Self, Denial> {
+    pub fn with_list_annotations(mut self, row: &Row, site: &str) -> Result<Self, Denial> {
         self.annotations = Some(CycleAnnotations {
             total: row_i64(row, "total_issues", site)?,
             cancelled: row_i64(row, "cancelled_issues", site)?,
@@ -1132,21 +1208,17 @@ impl CycleDetail {
         Ok(self)
     }
 
-    pub fn with_archived_annotations(
-        self,
-        row: &sqlx::postgres::PgRow,
-        site: &str,
-    ) -> Result<Self, Denial> {
+    pub fn with_archived_annotations(self, row: &Row, site: &str) -> Result<Self, Denial> {
         let mut detail = self.with_list_annotations(row, site)?;
         let estimates = CycleEstimateAnnotations {
             total: row
-                .try_get::<Option<i64>, _>("total_estimates")
+                .try_get::<Option<i64>>("", "total_estimates")
                 .map_err(|error| db_error(error, site))?,
             completed: row
-                .try_get::<Option<i64>, _>("completed_estimates")
+                .try_get::<Option<i64>>("", "completed_estimates")
                 .map_err(|error| db_error(error, site))?,
             started: row
-                .try_get::<Option<i64>, _>("started_estimates")
+                .try_get::<Option<i64>>("", "started_estimates")
                 .map_err(|error| db_error(error, site))?,
         };
         if let Some(annotations) = detail.annotations.as_mut() {
@@ -1349,7 +1421,7 @@ pub struct BridgeDetail {
 }
 
 impl BridgeDetail {
-    pub fn decode(row: &sqlx::postgres::PgRow, site: &str) -> Result<Self, Denial> {
+    pub fn decode(row: &Row, site: &str) -> Result<Self, Denial> {
         Ok(BridgeDetail {
             id: row_uuid(row, "id", site)?,
             sub_issues_count: None,
@@ -1365,11 +1437,7 @@ impl BridgeDetail {
         })
     }
 
-    pub fn with_sub_issues_count(
-        mut self,
-        row: &sqlx::postgres::PgRow,
-        site: &str,
-    ) -> Result<Self, Denial> {
+    pub fn with_sub_issues_count(mut self, row: &Row, site: &str) -> Result<Self, Denial> {
         self.sub_issues_count = Some(row_i64(row, "sub_issues_count", site)?);
         Ok(self)
     }
@@ -1498,11 +1566,12 @@ pub async fn expand_issue_full(
     // No `deleted_at` filter: `getattr(instance, "issue")` resolves through
     // `_base_manager` (unfiltered), so a soft-deleted issue still renders
     // 200 here (verified live against Django).
-    let row = sqlx::query(r#"SELECT * FROM "issues" WHERE "id" = $1"#)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "bridge-expand-issue"))?;
+    let row = fetch_entity_row(
+        pool,
+        issues::Entity::find_by_id(*issue_id),
+        "bridge-expand-issue",
+    )
+    .await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -1513,13 +1582,8 @@ pub async fn expand_issue_full(
     // (`_base_manager`, PK-only): a soft-deleted project still renders its
     // url (Django 200 — F-N6). Only a hard-missing row 404s (unreachable
     // via the FK; preserves the previous 404).
-    let identifier: Option<String> =
-        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-            .bind(detail.project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "bridge-expand-identifier"))?
-            .flatten();
+    let identifier =
+        project_identifier(pool, &detail.project_id, "bridge-expand-identifier").await?;
     let Some(identifier) = identifier else {
         return Err(Denial::NotFound);
     };
@@ -1532,132 +1596,74 @@ pub async fn expand_issue_full(
     // Single-item `IssueSerializer` appends the blocker keys
     // (`serializers/issue.py:474-481`; skipped only under `many=True`,
     // which the list path uses — this expansion is always single, with no
-    // requested-fields gating and no relations viewer).
+    // requested-fields gating and no relations viewer). The shared
+    // `orchestration::blockers` read: both capped open-first lists plus
+    // the full-set open check (3 statements, as before).
     if let Value::Object(ref mut map) = rendered {
+        let summary = pidash_services::orchestration::blockers::fetch_relations_summary(
+            &orm(pool),
+            *issue_id,
+        )
+        .await
+        .map_err(|error| db_error(error, "relations-summary"))?;
         map.insert(
             "relations_summary".to_owned(),
-            fetch_relations_summary(pool, issue_id).await?,
+            serde_json::to_value(summary.relations_summary)
+                .map_err(|error| db_error(error, "relations-summary"))?,
         );
         map.insert(
             "has_open_blockers".to_owned(),
-            Value::Bool(has_open_blockers(pool, issue_id).await?),
+            Value::Bool(summary.has_open_blockers),
         );
     }
     Ok(rendered)
 }
 
-/// Per-direction cap on `relations_summary` lists
-/// (`orchestration/blockers.py:SUMMARY_LIMIT`).
-const SUMMARY_LIMIT: i64 = 100;
-
-/// `{"relations_summary": {"blocked_by": [...], "blocking": [...]}}`
-/// (`orchestration/blockers.py:relations_summary`): live targets ordered
-/// open-first, then project identifier, then sequence, capped per
-/// direction. Each item is `{identifier, state, state_group}`.
+/// `relations_summary` value for one issue (the `IssueSerializer`
+/// single-item shape: both capped open-first lists).
+///
+/// Kept as the public seam for callers that render the full issue
+/// shape (`v1_assets::intake`); delegates to the shared
+/// `orchestration::blockers` read, which runs the same 3 statements.
 pub async fn fetch_relations_summary(
     pool: &PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<Value, Denial> {
-    let mut summary = serde_json::Map::with_capacity(2);
-    summary.insert(
-        "blocked_by".to_owned(),
-        Value::Array(fetch_summary_list(pool, issue_id, false).await?),
-    );
-    summary.insert(
-        "blocking".to_owned(),
-        Value::Array(fetch_summary_list(pool, issue_id, true).await?),
-    );
-    Ok(Value::Object(summary))
-}
-
-/// One direction of `relations_summary` (`_summary_list` over
-/// `blockers_queryset` / `dependents_queryset`): live relation rows
-/// (self-refs excluded), forward `blocked_by` plus stored-reversed
-/// `blocking` edges, targets in `Issue.issue_objects` (live, non-triage,
-/// unarchived issue and project, non-draft) in the relation's workspace.
-/// Open targets first (a stateless target is open), then project
-/// identifier, then sequence; capped at [`SUMMARY_LIMIT`].
-pub async fn fetch_summary_list(
-    pool: &PgPool,
-    issue_id: &uuid::Uuid,
-    blocking: bool,
-) -> Result<Vec<Value>, Denial> {
-    // `_blocked_by_edges` / `_blocking_edges`: in the forward rows the
-    // target sits on one end, in the stored-reversed rows on the other.
-    let edges = if blocking {
-        r#"(r."related_issue_id" = $1 AND r."relation_type" = 'blocked_by' AND t."id" = r."issue_id")
-        OR (r."issue_id" = $1 AND r."relation_type" = 'blocking' AND t."id" = r."related_issue_id")"#
-    } else {
-        r#"(r."issue_id" = $1 AND r."relation_type" = 'blocked_by' AND t."id" = r."related_issue_id")
-        OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking' AND t."id" = r."issue_id")"#
-    };
-    let sql = format!(
-        r#"SELECT DISTINCT p."identifier", t."sequence_id", s."name", s."group",
-                  CASE WHEN s."group" IN ('completed', 'cancelled') THEN 1 ELSE 0 END AS "resolved"
-           FROM "issue_relations" r
-           JOIN "issues" t ON ({edges})
-           JOIN "projects" p ON p."id" = t."project_id"
-           LEFT JOIN "states" s ON s."id" = t."state_id"
-           WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
-             AND t."workspace_id" = r."workspace_id"
-             AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND NOT t."is_draft"
-             AND (s."id" IS NULL OR s."group" <> 'triage')
-             AND p."archived_at" IS NULL
-           ORDER BY "resolved", p."identifier", t."sequence_id"
-           LIMIT {SUMMARY_LIMIT}"#,
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(issue_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "relations-summary"))?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let identifier = row_string(row, "identifier", "relations-summary")?;
-        let sequence_id: i32 = row
-            .try_get("sequence_id")
+    let summary =
+        pidash_services::orchestration::blockers::fetch_relations_summary(&orm(pool), *issue_id)
+            .await
             .map_err(|error| db_error(error, "relations-summary"))?;
-        let mut item = serde_json::Map::with_capacity(3);
-        item.insert(
-            "identifier".to_owned(),
-            Value::String(format!("{identifier}-{sequence_id}")),
-        );
-        item.insert(
-            "state".to_owned(),
-            render_string_opt(&row_string_opt(row, "name", "relations-summary")?),
-        );
-        item.insert(
-            "state_group".to_owned(),
-            render_string_opt(&row_string_opt(row, "group", "relations-summary")?),
-        );
-        items.push(Value::Object(item));
-    }
-    Ok(items)
+    serde_json::to_value(summary.relations_summary)
+        .map_err(|error| db_error(error, "relations-summary"))
 }
 
-/// `has_open_blockers` over the FULL blocker set (never the capped list):
-/// a live `blocked_by` target whose state group is neither `completed`
-/// nor `cancelled` — a stateless target counts as open.
+/// `has_open_blockers` over the FULL blocker set (never the capped
+/// list): a live `blocked_by` target whose state group is neither
+/// `completed` nor `cancelled` — a stateless target counts as open.
+/// Same shared read as [`fetch_relations_summary`].
 pub async fn has_open_blockers(pool: &PgPool, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
-    let open: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(
-             SELECT 1 FROM "issue_relations" r
-             JOIN "issues" t ON ((r."issue_id" = $1 AND r."relation_type" = 'blocked_by' AND t."id" = r."related_issue_id")
-               OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking' AND t."id" = r."issue_id"))
-             JOIN "projects" p ON p."id" = t."project_id"
-             LEFT JOIN "states" s ON s."id" = t."state_id"
-             WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
-               AND t."workspace_id" = r."workspace_id"
-               AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND NOT t."is_draft"
-               AND (s."id" IS NULL OR s."group" <> 'triage')
-               AND p."archived_at" IS NULL
-               AND (s."group" IS NULL OR s."group" NOT IN ('completed', 'cancelled')))"#,
-    )
-    .bind(issue_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "has-open-blockers"))?;
-    Ok(open)
+    let summary =
+        pidash_services::orchestration::blockers::fetch_relations_summary(&orm(pool), *issue_id)
+            .await
+            .map_err(|error| db_error(error, "has-open-blockers"))?;
+    Ok(summary.has_open_blockers)
+}
+
+/// `projects.identifier` by pk, deliberately unfiltered (`_base_manager`
+/// resolution through the FK): `None` only for a hard-missing row.
+async fn project_identifier(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+    site: &str,
+) -> Result<Option<String>, Denial> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Identifier)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, site))
 }
 
 /// The workspace slug for `IssueSerializer.get_url`
@@ -1665,14 +1671,25 @@ pub async fn has_open_blockers(pool: &PgPool, issue_id: &uuid::Uuid) -> Result<b
 pub async fn workspace_slug(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<String, Denial> {
     // Deliberately unfiltered: `instance.workspace` resolves through
     // `_base_manager`, so a soft-deleted workspace still renders its slug.
-    let slug: Option<String> =
-        sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "workspace-slug"))?
-            .flatten();
-    slug.ok_or(Denial::NotFound)
+    workspace_slug_opt(pool, workspace_id, "workspace-slug")
+        .await?
+        .ok_or(Denial::NotFound)
+}
+
+/// `workspaces.slug` by pk, unfiltered (`None` for a missing row).
+async fn workspace_slug_opt(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    site: &str,
+) -> Result<Option<String>, Denial> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, site))
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,7 +1741,7 @@ pub struct IssueDetail {
 }
 
 impl IssueDetail {
-    pub fn decode(row: &sqlx::postgres::PgRow, site: &str) -> Result<Self, Denial> {
+    pub fn decode(row: &Row, site: &str) -> Result<Self, Denial> {
         Ok(IssueDetail {
             id: row_uuid(row, "id", site)?,
             created_at: row_datetime(row, "created_at", site)?,
@@ -1734,22 +1751,20 @@ impl IssueDetail {
             name: row_string(row, "name", site)?,
             description_html: row_string(row, "description_html", site)?,
             description_binary: row
-                .try_get::<Option<Vec<u8>>, _>("description_binary")
+                .try_get::<Option<Vec<u8>>>("", "description_binary")
                 .map_err(|error| db_error(error, site))?,
             priority: row_string_opt(row, "priority", site)?,
             complexity_score: row_i32_opt(row, "complexity_score", site)?,
             start_date: row_date_opt(row, "start_date", site)?,
             target_date: row_date_opt(row, "target_date", site)?,
-            sequence_id: row
-                .try_get::<i32, _>("sequence_id")
-                .map_err(|error| db_error(error, site))?,
+            sequence_id: row_i32(row, "sequence_id", site)?,
             sort_order: row
-                .try_get::<f64, _>("sort_order")
+                .try_get::<f64>("", "sort_order")
                 .map_err(|error| db_error(error, site))?,
             completed_at: row_datetime_opt(row, "completed_at", site)?,
             archived_at: row_date_opt(row, "archived_at", site)?,
             is_draft: row
-                .try_get::<bool, _>("is_draft")
+                .try_get::<bool>("", "is_draft")
                 .map_err(|error| db_error(error, site))?,
             external_source: row_string_opt(row, "external_source", site)?,
             external_id: row_string_opt(row, "external_id", site)?,
@@ -2097,14 +2112,26 @@ pub async fn file_asset_url(
     pool: &PgPool,
     asset_id: &uuid::Uuid,
 ) -> Result<Option<String>, Denial> {
-    let row: Option<FileAssetLookup> = sqlx::query_as(
-        r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "file-asset"))?;
-    let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
+    let row = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .into_model::<FileAssetLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "file-asset"))?;
+    let Some(FileAssetLookup {
+        entity_type,
+        workspace_id,
+        project_id,
+        issue_id,
+    }) = row
+    else {
         return Ok(None);
     };
     match entity_type.as_deref() {
@@ -2114,14 +2141,7 @@ pub async fn file_asset_url(
         | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
         Some("ISSUE_ATTACHMENT") => {
             let slug: Option<String> = match workspace_id {
-                Some(id) => {
-                    sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                        .bind(id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|error| db_error(error, "file-asset-workspace"))?
-                        .flatten()
-                }
+                Some(id) => workspace_slug_opt(pool, &id, "file-asset-workspace").await?,
                 None => None,
             };
             Ok(slug.map(|s| {
@@ -2137,14 +2157,7 @@ pub async fn file_asset_url(
         | Some("PAGE_DESCRIPTION")
         | Some("DRAFT_ISSUE_DESCRIPTION") => {
             let slug: Option<String> = match workspace_id {
-                Some(id) => {
-                    sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                        .bind(id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|error| db_error(error, "file-asset-workspace"))?
-                        .flatten()
-                }
+                Some(id) => workspace_slug_opt(pool, &id, "file-asset-workspace").await?,
                 None => None,
             };
             Ok(slug.map(|s| {
@@ -2179,51 +2192,50 @@ pub fn render_avatar_text(avatar: &str) -> Value {
 /// `avatar` text when non-empty, else null. `email` is nullable
 /// (`CharField(null=True)`).
 pub async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "first_name", "last_name", "email", "avatar", "avatar_asset_id", "display_name" FROM "users" WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-user"))?;
+    #[derive(FromQueryResult)]
+    struct UserLiteRow {
+        id: uuid::Uuid,
+        first_name: String,
+        last_name: String,
+        email: Option<String>,
+        avatar: String,
+        avatar_asset_id: Option<uuid::Uuid>,
+        display_name: String,
+    }
+    let row = users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Email,
+            users::Column::Avatar,
+            users::Column::AvatarAssetId,
+            users::Column::DisplayName,
+        ])
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model::<UserLiteRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-user"))?;
     let Some(row) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    let avatar_asset_id = row_uuid_opt(&row, "avatar_asset_id", "expand-user")?;
-    let avatar = row_string(&row, "avatar", "expand-user")?;
-    let avatar_url = match avatar_asset_id {
+    let avatar_url = match row.avatar_asset_id {
         Some(asset_id) => file_asset_url(pool, &asset_id)
             .await?
             .map(Value::String)
             .unwrap_or(Value::Null),
-        None => render_avatar_text(&avatar),
+        None => render_avatar_text(&row.avatar),
     };
     let mut map = serde_json::Map::with_capacity(7);
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(&row, "id", "expand-user")?),
-    );
-    map.insert(
-        "first_name".to_owned(),
-        Value::String(row_string(&row, "first_name", "expand-user")?),
-    );
-    map.insert(
-        "last_name".to_owned(),
-        Value::String(row_string(&row, "last_name", "expand-user")?),
-    );
-    map.insert(
-        "email".to_owned(),
-        render_string_opt(&row_string_opt(&row, "email", "expand-user")?),
-    );
-    map.insert(
-        "avatar".to_owned(),
-        Value::String(row_string(&row, "avatar", "expand-user")?),
-    );
+    map.insert("id".to_owned(), render_uuid(&row.id));
+    map.insert("first_name".to_owned(), Value::String(row.first_name));
+    map.insert("last_name".to_owned(), Value::String(row.last_name));
+    map.insert("email".to_owned(), render_string_opt(&row.email));
+    map.insert("avatar".to_owned(), Value::String(row.avatar));
     map.insert("avatar_url".to_owned(), avatar_url);
-    map.insert(
-        "display_name".to_owned(),
-        Value::String(row_string(&row, "display_name", "expand-user")?),
-    );
+    map.insert("display_name".to_owned(), Value::String(row.display_name));
     Ok(Value::Object(map))
 }
 
@@ -2237,88 +2249,84 @@ pub async fn expand_user_opt(pool: &PgPool, user_id: &Option<uuid::Uuid>) -> Res
 
 /// `WorkspaceLiteSerializer`: `name`, `slug`, `id`.
 pub async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT "name", "slug", "id" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-workspace"))?;
-    let Some(row) = row else {
+    let row: Option<(String, String, uuid::Uuid)> = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::Id,
+        ])
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-workspace"))?;
+    let Some((name, slug, id)) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
     let mut map = serde_json::Map::with_capacity(3);
-    map.insert(
-        "name".to_owned(),
-        Value::String(row_string(&row, "name", "expand-workspace")?),
-    );
-    map.insert(
-        "slug".to_owned(),
-        Value::String(row_string(&row, "slug", "expand-workspace")?),
-    );
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(&row, "id", "expand-workspace")?),
-    );
+    map.insert("name".to_owned(), Value::String(name));
+    map.insert("slug".to_owned(), Value::String(slug));
+    map.insert("id".to_owned(), render_uuid(&id));
     Ok(Value::Object(map))
 }
 
 /// `ProjectLiteSerializer`: `id`, `identifier`, `name`, `cover_image`,
 /// `icon_prop`, `emoji`, `description`, `is_default`, `cover_image_url`.
 pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "cover_image_asset_id", "icon_prop", "emoji", "description", "is_default" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-project"))?;
+    #[derive(FromQueryResult)]
+    struct ProjectLiteRow {
+        id: uuid::Uuid,
+        identifier: String,
+        name: String,
+        cover_image: Option<String>,
+        cover_image_asset_id: Option<uuid::Uuid>,
+        icon_prop: Option<Value>,
+        /// `CharField(null=True)`: a string on the wire, never JSON.
+        emoji: Option<String>,
+        description: String,
+        is_default: bool,
+    }
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::CoverImageAssetId,
+            projects::Column::IconProp,
+            projects::Column::Emoji,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_model::<ProjectLiteRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-project"))?;
     let Some(row) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    let asset_id = row_uuid_opt(&row, "cover_image_asset_id", "expand-project")?;
     let mut cover_image_url = Value::Null;
-    if let Some(asset_id) = asset_id {
+    if let Some(asset_id) = row.cover_image_asset_id {
         cover_image_url = file_asset_url(pool, &asset_id)
             .await?
             .map(Value::String)
             .unwrap_or(Value::Null);
     }
     let mut map = serde_json::Map::with_capacity(9);
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(&row, "id", "expand-project")?),
-    );
-    map.insert(
-        "identifier".to_owned(),
-        Value::String(row_string(&row, "identifier", "expand-project")?),
-    );
-    map.insert(
-        "name".to_owned(),
-        Value::String(row_string(&row, "name", "expand-project")?),
-    );
+    map.insert("id".to_owned(), render_uuid(&row.id));
+    map.insert("identifier".to_owned(), Value::String(row.identifier));
+    map.insert("name".to_owned(), Value::String(row.name));
     map.insert(
         "cover_image".to_owned(),
-        render_string_opt(&row_string_opt(&row, "cover_image", "expand-project")?),
+        render_string_opt(&row.cover_image),
     );
-    map.insert(
-        "icon_prop".to_owned(),
-        row_json_opt(&row, "icon_prop", "expand-project")?.unwrap_or(Value::Null),
-    );
-    map.insert(
-        "emoji".to_owned(),
-        row_json_opt(&row, "emoji", "expand-project")?.unwrap_or(Value::Null),
-    );
-    map.insert(
-        "description".to_owned(),
-        Value::String(row_string(&row, "description", "expand-project")?),
-    );
-    map.insert(
-        "is_default".to_owned(),
-        Value::Bool(
-            row.try_get::<bool, _>("is_default")
-                .map_err(|error| db_error(error, "expand-project"))?,
-        ),
-    );
+    map.insert("icon_prop".to_owned(), row.icon_prop.unwrap_or(Value::Null));
+    map.insert("emoji".to_owned(), render_string_opt(&row.emoji));
+    map.insert("description".to_owned(), Value::String(row.description));
+    map.insert("is_default".to_owned(), Value::Bool(row.is_default));
     map.insert("cover_image_url".to_owned(), cover_image_url);
     Ok(Value::Object(map))
 }
@@ -2336,113 +2344,76 @@ pub async fn expand_state_opt(
 
 /// `StateLiteSerializer`: `id`, `name`, `color`, `group`.
 pub async fn expand_state(pool: &PgPool, state_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT "id", "name", "color", "group" FROM "states" WHERE "id" = $1"#)
-            .bind(state_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-state"))?;
-    let Some(row) = row else {
+    let row: Option<(uuid::Uuid, String, String, Option<String>)> = states::Entity::find()
+        .select_only()
+        .columns([
+            states::Column::Id,
+            states::Column::Name,
+            states::Column::Color,
+            states::Column::Group,
+        ])
+        .filter(states::Column::Id.eq(*state_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-state"))?;
+    let Some((id, name, color, group)) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
     let mut map = serde_json::Map::with_capacity(4);
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(&row, "id", "expand-state")?),
-    );
-    map.insert(
-        "name".to_owned(),
-        Value::String(row_string(&row, "name", "expand-state")?),
-    );
-    map.insert(
-        "color".to_owned(),
-        Value::String(row_string(&row, "color", "expand-state")?),
-    );
-    map.insert(
-        "group".to_owned(),
-        render_string_opt(&row_string_opt(&row, "group", "expand-state")?),
-    );
+    map.insert("id".to_owned(), render_uuid(&id));
+    map.insert("name".to_owned(), Value::String(name));
+    map.insert("color".to_owned(), Value::String(color));
+    map.insert("group".to_owned(), render_string_opt(&group));
     Ok(Value::Object(map))
 }
 
 /// Render one `LabelSerializer` row (`__all__`, verified live): the full
 /// label row with `workspace` before `project` (the `WorkspaceBaseModel`
 /// field order), datetimes in the request time zone.
-pub fn render_label_row(row: &sqlx::postgres::PgRow, timezone: &Tz) -> Result<Value, Denial> {
+pub fn render_label_row(row: &labels::Model, timezone: &Tz) -> Value {
+    let utc = |value: &chrono::DateTime<chrono::FixedOffset>| value.with_timezone(&chrono::Utc);
     let mut map = serde_json::Map::with_capacity(15);
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(row, "id", "expand-label")?),
-    );
+    map.insert("id".to_owned(), render_uuid(&row.id));
     map.insert(
         "created_at".to_owned(),
         Value::String(crate::serializer::render_datetime_in(
-            &row_datetime(row, "created_at", "expand-label")?,
+            &utc(&row.created_at),
             timezone,
         )),
     );
     map.insert(
         "updated_at".to_owned(),
         Value::String(crate::serializer::render_datetime_in(
-            &row_datetime(row, "updated_at", "expand-label")?,
+            &utc(&row.updated_at),
             timezone,
         )),
     );
     map.insert(
         "deleted_at".to_owned(),
-        render_datetime_opt(
-            &row_datetime_opt(row, "deleted_at", "expand-label")?,
-            timezone,
-        ),
+        render_datetime_opt(&row.deleted_at.as_ref().map(utc), timezone),
     );
-    map.insert(
-        "name".to_owned(),
-        Value::String(row_string(row, "name", "expand-label")?),
-    );
+    map.insert("name".to_owned(), Value::String(row.name.clone()));
     map.insert(
         "description".to_owned(),
-        Value::String(row_string(row, "description", "expand-label")?),
+        Value::String(row.description.clone()),
     );
-    map.insert(
-        "color".to_owned(),
-        Value::String(row_string(row, "color", "expand-label")?),
-    );
-    map.insert(
-        "sort_order".to_owned(),
-        render_f64(
-            row.try_get::<f64, _>("sort_order")
-                .map_err(|error| db_error(error, "expand-label"))?,
-        ),
-    );
+    map.insert("color".to_owned(), Value::String(row.color.clone()));
+    map.insert("sort_order".to_owned(), render_f64(row.sort_order));
     map.insert(
         "external_source".to_owned(),
-        render_string_opt(&row_string_opt(row, "external_source", "expand-label")?),
+        render_string_opt(&row.external_source),
     );
     map.insert(
         "external_id".to_owned(),
-        render_string_opt(&row_string_opt(row, "external_id", "expand-label")?),
+        render_string_opt(&row.external_id),
     );
-    map.insert(
-        "created_by".to_owned(),
-        render_uuid_opt(&row_uuid_opt(row, "created_by_id", "expand-label")?),
-    );
-    map.insert(
-        "updated_by".to_owned(),
-        render_uuid_opt(&row_uuid_opt(row, "updated_by_id", "expand-label")?),
-    );
-    map.insert(
-        "workspace".to_owned(),
-        render_uuid(&row_uuid(row, "workspace_id", "expand-label")?),
-    );
-    map.insert(
-        "project".to_owned(),
-        render_uuid_opt(&row_uuid_opt(row, "project_id", "expand-label")?),
-    );
-    map.insert(
-        "parent".to_owned(),
-        render_uuid_opt(&row_uuid_opt(row, "parent_id", "expand-label")?),
-    );
-    Ok(Value::Object(map))
+    map.insert("created_by".to_owned(), render_uuid_opt(&row.created_by_id));
+    map.insert("updated_by".to_owned(), render_uuid_opt(&row.updated_by_id));
+    map.insert("workspace".to_owned(), render_uuid(&row.workspace_id));
+    map.insert("project".to_owned(), render_uuid_opt(&row.project_id));
+    map.insert("parent".to_owned(), render_uuid_opt(&row.parent_id));
+    Value::Object(map)
 }
 
 /// `IssueLiteSerializer`: `id`, `sequence_id`, `project_id` (the raw attname).
@@ -2453,28 +2424,25 @@ pub async fn expand_issue_lite_opt(
     let Some(issue_id) = issue_id else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT "id", "sequence_id", "project_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-issuelite"))?;
-    let Some(row) = row else {
+    let row: Option<(uuid::Uuid, i32, uuid::Uuid)> = issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::SequenceId,
+            issues::Column::ProjectId,
+        ])
+        .filter(issues::Column::Id.eq(*issue_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-issuelite"))?;
+    let Some((id, sequence_id, project_id)) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
     let mut map = serde_json::Map::with_capacity(3);
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(&row, "id", "expand-issuelite")?),
-    );
-    map.insert(
-        "sequence_id".to_owned(),
-        Value::from(row_i32(&row, "sequence_id", "expand-issuelite")?),
-    );
-    map.insert(
-        "project_id".to_owned(),
-        render_uuid(&row_uuid(&row, "project_id", "expand-issuelite")?),
-    );
+    map.insert("id".to_owned(), render_uuid(&id));
+    map.insert("sequence_id".to_owned(), Value::from(sequence_id));
+    map.insert("project_id".to_owned(), render_uuid(&project_id));
     Ok(Value::Object(map))
 }
 
@@ -2505,96 +2473,71 @@ pub async fn expand_estimate_point_opt(
         // (verified live, in this order).
         return Ok(estimate_point_none());
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "created_at", "updated_at", "deleted_at", "key", "description",
-                  "value", "created_by_id", "updated_by_id", "workspace_id", "project_id", "estimate_id"
-           FROM "estimate_points" WHERE "id" = $1"#,
-    )
-    .bind(estimate_point_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-estimate"))?;
+    let row = estimate_points::Entity::find_by_id(*estimate_point_id)
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-estimate"))?;
     let Some(row) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
+    let utc = |value: &chrono::DateTime<chrono::FixedOffset>| value.with_timezone(&chrono::Utc);
     let mut map = serde_json::Map::with_capacity(12);
-    map.insert(
-        "id".to_owned(),
-        render_uuid(&row_uuid(&row, "id", "expand-estimate")?),
-    );
+    map.insert("id".to_owned(), render_uuid(&row.id));
     map.insert(
         "created_at".to_owned(),
         Value::String(crate::serializer::render_datetime_in(
-            &row_datetime(&row, "created_at", "expand-estimate")?,
+            &utc(&row.created_at),
             timezone,
         )),
     );
     map.insert(
         "updated_at".to_owned(),
         Value::String(crate::serializer::render_datetime_in(
-            &row_datetime(&row, "updated_at", "expand-estimate")?,
+            &utc(&row.updated_at),
             timezone,
         )),
     );
     map.insert(
         "deleted_at".to_owned(),
-        render_datetime_opt(
-            &row_datetime_opt(&row, "deleted_at", "expand-estimate")?,
-            timezone,
-        ),
+        render_datetime_opt(&row.deleted_at.as_ref().map(utc), timezone),
     );
     // `key` is an `IntegerField` (`db/models/estimate.py:45`): a JSON
     // number, never null (no `null=True`).
-    map.insert(
-        "key".to_owned(),
-        Value::from(row_i32(&row, "key", "expand-estimate")?),
-    );
-    map.insert(
-        "description".to_owned(),
-        Value::String(row_string(&row, "description", "expand-estimate")?),
-    );
-    map.insert(
-        "value".to_owned(),
-        Value::String(row_string(&row, "value", "expand-estimate")?),
-    );
-    map.insert(
-        "created_by".to_owned(),
-        render_uuid_opt(&row_uuid_opt(&row, "created_by_id", "expand-estimate")?),
-    );
-    map.insert(
-        "updated_by".to_owned(),
-        render_uuid_opt(&row_uuid_opt(&row, "updated_by_id", "expand-estimate")?),
-    );
+    map.insert("key".to_owned(), Value::from(row.key));
+    map.insert("description".to_owned(), Value::String(row.description));
+    map.insert("value".to_owned(), Value::String(row.value));
+    map.insert("created_by".to_owned(), render_uuid_opt(&row.created_by_id));
+    map.insert("updated_by".to_owned(), render_uuid_opt(&row.updated_by_id));
     // Relation order follows the model: `ProjectBaseModel` declares
     // `project` before `workspace`, then the child's own `estimate` FK
     // (`__all__` serializer order, verified live).
-    map.insert(
-        "project".to_owned(),
-        render_uuid(&row_uuid(&row, "project_id", "expand-estimate")?),
-    );
-    map.insert(
-        "workspace".to_owned(),
-        render_uuid(&row_uuid(&row, "workspace_id", "expand-estimate")?),
-    );
-    map.insert(
-        "estimate".to_owned(),
-        render_uuid(&row_uuid(&row, "estimate_id", "expand-estimate")?),
-    );
+    map.insert("project".to_owned(), render_uuid(&row.project_id));
+    map.insert("workspace".to_owned(), render_uuid(&row.workspace_id));
+    map.insert("estimate".to_owned(), render_uuid(&row.estimate_id));
     Ok(Value::Object(map))
 }
 
 /// `?expand=assignees`: the issue's assignees as a UserLite list, in User
 /// `-created_at` order (the `pk__in` queryset's default ordering).
 pub async fn expand_assignees(pool: &PgPool, issue_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        r#"SELECT u."id" FROM "users" u
-           WHERE u."id" IN (SELECT "assignee_id" FROM "issue_assignees" WHERE "issue_id" = $1 AND "deleted_at" IS NULL)
-           ORDER BY u."created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-assignees"))?;
+    let ids: Vec<uuid::Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(
+            users::Column::Id.in_subquery(
+                issue_assignees::Entity::find()
+                    .select_only()
+                    .column(issue_assignees::Column::AssigneeId)
+                    .filter(issue_assignees::Column::IssueId.eq(*issue_id))
+                    .filter(issue_assignees::Column::DeletedAt.is_null())
+                    .into_query(),
+            ),
+        )
+        .order_by_desc(users::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-assignees"))?;
     let mut items = Vec::with_capacity(ids.len());
     for id in &ids {
         items.push(expand_user(pool, id).await?);
@@ -2614,24 +2557,27 @@ pub async fn expand_labels(
     // deleted labels are excluded (verified live; the id list in
     // `fetch_issue_labels` keeps them, matching `values_list` on the
     // bridge table alone).
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT l."id", l."created_at", l."updated_at", l."deleted_at", l."name", l."description", l."color",
-                  l."sort_order", l."external_source", l."external_id", l."created_by_id", l."updated_by_id",
-                  l."workspace_id", l."project_id", l."parent_id"
-           FROM "labels" l
-           WHERE l."id" IN (SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL)
-             AND l."deleted_at" IS NULL
-           ORDER BY l."created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-labels"))?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        items.push(render_label_row(row, timezone)?);
-    }
-    Ok(Value::Array(items))
+    let rows = labels::Entity::find()
+        .filter(
+            labels::Column::Id.in_subquery(
+                issue_labels::Entity::find()
+                    .select_only()
+                    .column(issue_labels::Column::LabelId)
+                    .filter(issue_labels::Column::IssueId.eq(*issue_id))
+                    .filter(issue_labels::Column::DeletedAt.is_null())
+                    .into_query(),
+            ),
+        )
+        .filter(labels::Column::DeletedAt.is_null())
+        .order_by_desc(labels::Column::CreatedAt)
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-labels"))?;
+    Ok(Value::Array(
+        rows.iter()
+            .map(|row| render_label_row(row, timezone))
+            .collect(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -2639,22 +2585,23 @@ pub async fn expand_labels(
 // ---------------------------------------------------------------------------
 
 /// Parse the request body into `request.data` through the shared
-/// CPython-envelope layer ([`super::json_cpython`]): an empty body is `{}`
-/// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
-/// with CPython's error text; past the depth cap is Django's JSON 500.
+/// JSON layer ([`super::json`]): an empty body is `{}` (DRF's
+/// empty-stream default); malformed JSON is the DRF `ParseError` with
+/// serde's error text (tier 3 since PIDASHCONV-1555); past serde's depth
+/// limit is a 400, never Django's JSON 500.
 pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
     parse_body_value_spans(raw, &[])
 }
 
 /// [`parse_body_value`] over charset-decoded text carrying lone-surrogate
-/// spans (exotic charsets, PIDASHCONV-693): placeholders become `Sur`
-/// units inside the parsed strings.
+/// spans (exotic charsets, PIDASHCONV-693): any non-empty span list is a
+/// 400 (tier 3 since PIDASHCONV-1555; spans were threaded into the
+/// parsed strings before). Spans are always empty since PIDASHCONV-1552.
 pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
-        JsonFail::Message(detail) => Denial::BadDetail(format!(
-            "{}{detail}",
-            super::json_cpython::JSON_PARSE_PREFIX
-        )),
+    super::json::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => {
+            Denial::BadDetail(format!("{}{detail}", super::json::JSON_PARSE_PREFIX))
+        }
         JsonFail::Recursion => Denial::ServerError,
     })
 }
@@ -2665,11 +2612,10 @@ pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal,
 /// the EOF `ParseError`, never `{}` — the module path (`parse_json_map`)
 /// already works this way; verified live against Django.
 pub fn parse_body_value_text_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
-        JsonFail::Message(detail) => Denial::BadDetail(format!(
-            "{}{detail}",
-            super::json_cpython::JSON_PARSE_PREFIX
-        )),
+    super::json::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => {
+            Denial::BadDetail(format!("{}{detail}", super::json::JSON_PARSE_PREFIX))
+        }
         JsonFail::Recursion => Denial::ServerError,
     })
 }
@@ -2839,21 +2785,14 @@ fn parse_object_or_500_ct(
     }
 }
 
-/// A single field-coercion failure: the pre-rendered message plus whether it
-/// is a per-field list (the usual shape) or an index-keyed object (list
-/// children, e.g. `members`).
-#[derive(Debug, Clone)]
-pub struct CoerceFail {
-    pub body: String,
-}
-
 /// Python `str(value)` for error echoes, over parsed values: the shared
-/// layer's [`super::json_cpython::py_str`] (strings verbatim with raw
-/// surrogates, true `repr()` quoting nested, depth-capped); a render past
-/// the depth cap is Django's JSON 500. (Callers divert top-level dirty
-/// echoes to [`Denial::RendererCrash`] before formatting.)
+/// layer's [`super::json::py_str`] (strings verbatim, true `repr()`
+/// quoting nested; values never nest past serde's recursion limit, so
+/// the render cannot fail). The [`Denial::RendererCrash`] arm is dead
+/// (tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at parse,
+/// so no dirty echo reaches the renderer).
 pub fn py_repr(value: &JVal) -> Result<JStr, Denial> {
-    super::json_cpython::py_str(value).map_err(|_| Denial::ServerError)
+    super::json::py_str(value).map_err(|_| Denial::ServerError)
 }
 
 /// DRF `CharField` over one JSON value (verified live): `null` fails unless
@@ -2906,18 +2845,6 @@ pub fn coerce_char(
             ))
         }
     }
-}
-
-fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
-    if let Some(max) = max_length {
-        // DRF counts Unicode scalar values (`len(str)`).
-        if text.chars().count() > max {
-            return Err(CoerceFail {
-                body: format!(r#"["Ensure this field has no more than {max} characters."]"#),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// DRF `CharField` validators in append order (`fields.py` `CharField` plus
@@ -3107,14 +3034,18 @@ pub async fn check_user_exists(
     raw_echo: &str,
     site: &str,
 ) -> Result<(), CoerceFail> {
-    let found: bool = sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "users" WHERE "id" = $1)"#)
-        .bind(id)
-        .fetch_optional(pool)
+    let hit: Option<uuid::Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(*id))
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| CoerceFail {
             body: String::new(),
-        })?
-        .unwrap_or(false);
+        })?;
+    let found = hit.is_some();
     if found {
         Ok(())
     } else {
@@ -3248,6 +3179,7 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "America/Chihuahua",
     "America/Ciudad_Juarez",
     "America/Costa_Rica",
+    "America/Coyhaique",
     "America/Creston",
     "America/Cuiaba",
     "America/Curacao",
@@ -3381,7 +3313,6 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "Asia/Bishkek",
     "Asia/Brunei",
     "Asia/Chita",
-    "Asia/Choibalsan",
     "Asia/Colombo",
     "Asia/Damascus",
     "Asia/Dhaka",
@@ -3592,636 +3523,14 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "UTC",
 ];
 
-/// One parsed datetime input: the wall time plus an optional fixed offset
-/// in microseconds east of UTC (`None` = naive → the request user's zone).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParsedDatetime {
-    pub naive: chrono::NaiveDateTime,
-    pub offset_micros: Option<i64>,
-}
-
-/// `django.utils.dateparse.parse_datetime` on the oracle (Django 4.2,
-/// Python 3.12, `dateparse.py:104-129`, probed): `fromisoformat` first,
-/// the `datetime_re` fallback second, then DRF's
-/// `strptime(value, 'iso-8601')` fallthrough (`to_internal_value` runs
-/// it when `parse_datetime` returns `None`). Both `None` and
-/// `ValueError` mean "invalid" to DRF (suppressed at `fields.py:1179`),
-/// so one `Option`.
-pub fn parse_iso_datetime(text: &str) -> Option<ParsedDatetime> {
-    parse_fromisoformat(text)
-        .or_else(|| parse_django_datetime_re(text))
-        .or_else(|| {
-            // `strptime` compiles the literal format with `re.IGNORECASE`,
-            // so the input `iso-8601` in any letter case yields naive
-            // 1900-01-01. Exact match: padding fails on both sides (probed).
-            // Python's fold also accepts İ/ı/ſ letter variants; the port is
-            // ASCII-only (same family as the 765 unicode gap).
-            text.eq_ignore_ascii_case("iso-8601").then(|| {
-                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-                    .and_then(|date| date.and_hms_opt(0, 0, 0))
-                    .expect("1900-01-01 valid");
-                ParsedDatetime {
-                    naive,
-                    offset_micros: None,
-                }
-            })
-        })
-}
-
-/// Python 3.12 `datetime.fromisoformat` (probed): extended/basic calendar
-/// and ISO week dates, any single char separator (digits included:
-/// `2026-10-01110:30:00` parses), `HH[MM[SS]]` times with `.`/`,`
-/// fractions of any length (truncated to micros), `Z` or numeric offsets
-/// (hours, hours+minutes, hours+minutes+seconds, each with an optional
-/// fraction on the last unit). Years 1-9999, offsets strictly inside ±24h.
-pub fn parse_fromisoformat(text: &str) -> Option<ParsedDatetime> {
-    if text.is_empty() {
-        return None;
-    }
-    let bytes = text.as_bytes();
-    // Date prefix: `YYYY-MM-DD` | `YYYYMMDD` | `YYYY-Www[-D]` | `YYYYWww[D]`.
-    // Only a `W` at 4/5 opens a week date; anywhere else it is an
-    // ordinary char (`2026-10-01W10:30:00` parses with `W` as separator).
-    if matches!(text.find('W'), Some(4) | Some(5)) {
-        return parse_fromiso_week_datetime(text);
-    }
-    let (date, rest) = parse_fromiso_date(bytes)?;
-    parse_fromiso_rest(date, rest, false).map(|(parsed, _)| parsed)
-}
-
-/// Everything after a `fromisoformat` date: bare (midnight naive) or one
-/// separator char plus time plus the tz tail, plus the basic time's digit
-/// count (`None` for extended times and bare dates). With `shape_only`
-/// the components are grammar-checked but range checks (hour ≤ 23,
-/// offset inside ±24h, ...) are skipped, so a well-formed but
-/// out-of-range rest still parses; the basic week fallback uses that to
-/// tell range failures (hard, unless the digit count is odd) from grammar
-/// failures (fall back).
-fn parse_fromiso_rest(
-    date: chrono::NaiveDate,
-    rest: &str,
-    shape_only: bool,
-) -> Option<(ParsedDatetime, Option<usize>)> {
-    if rest.is_empty() {
-        return Some((
-            ParsedDatetime {
-                naive: date.and_hms_opt(0, 0, 0)?,
-                offset_micros: None,
-            },
-            None,
-        ));
-    }
-    // Exactly one separator char, always (`20261001110:30:00` and
-    // `2026-10-01110:30:00` both parse, probed).
-    let sep_len = rest.chars().next()?.len_utf8();
-    let (naive_time, rest, frac_len, basic_digits) =
-        parse_fromiso_time(&rest[sep_len..], shape_only)?;
-    let naive = date.and_time(naive_time);
-    let offset_micros = parse_fromiso_tz_tail(rest, frac_len, shape_only)?;
-    Some((
-        ParsedDatetime {
-            naive,
-            offset_micros,
-        },
-        basic_digits,
-    ))
-}
-
-/// The tz remainder after a `fromisoformat` time (probed): empty (naive),
-/// `Z`, or a numeric offset — or skipped chars followed by `Z` or a
-/// numeric offset. The allowance depends on the fraction that was just
-/// consumed (`frac_len` digits, dotted or dotless, on any unit): none →
-/// one skip (`T10:30:00X+05:30` parses; even a bare `.` skips:
-/// `T10:30:00.+00:00` parses); 1-5 digits → no skip (`T10:30:00.5X+05:30`
-/// fails); 6+ digits → unlimited skips (`T10:30:00.000000ABCDEFG+05:30`
-/// parses — there is no second fraction, the middle is skipped). A
-/// marker-first remainder never skips, so `Z+00:00` fails, and a `Z`
-/// reached by skipping poisons the parse (`T10:30:00.000000XYZ+05:30`
-/// fails: after `XY` comes `Z+05:30`); a skip with no tz after it fails
-/// (`T1033404` fails); there is no skip inside the offset itself
-/// (`+05X+06:00` fails). Up to `allowance` trailing NULs are tolerated
-/// (`T10:30:00\0` parses naive, `T10:30:00\0\0` and `T10:30:00.5\0` fail,
-/// `T10:30:00.000000\0\0` parses naive).
-fn parse_fromiso_tz_tail(rest: &str, frac_len: usize, shape_only: bool) -> Option<Option<i64>> {
-    let allowance = tz_skip_allowance(frac_len);
-    let mut tail = rest;
-    let mut stripped: u32 = 0;
-    while allowance.is_none_or(|max| stripped < max) {
-        match tail.strip_suffix('\0') {
-            Some(shorter) => {
-                tail = shorter;
-                stripped += 1;
-            }
-            None => break,
-        }
-    }
-    match tail {
-        "" => Some(None),
-        "Z" => Some(Some(0)),
-        _ => {
-            let mut rest = tail;
-            let mut skips: u32 = 0;
-            loop {
-                if rest == "Z" {
-                    return Some(Some(0));
-                }
-                let first = rest.as_bytes().first()?;
-                if *first == b'+' || *first == b'-' {
-                    return Some(Some(parse_fromiso_offset(rest, shape_only)?));
-                }
-                if *first == b'Z' || allowance.is_some_and(|max| skips >= max) {
-                    return None;
-                }
-                let skip = rest.chars().next()?.len_utf8();
-                rest = &rest[skip..];
-                skips += 1;
-                if rest.is_empty() {
-                    return None;
-                }
-            }
-        }
-    }
-}
-
-/// Skip allowance from the consumed fraction's digit count (probed):
-/// `None` means unlimited.
-fn tz_skip_allowance(frac_len: usize) -> Option<u32> {
-    if frac_len == 0 {
-        Some(1)
-    } else if frac_len < 6 {
-        Some(0)
-    } else {
-        None
-    }
-}
-
-/// The `fromisoformat` calendar date prefix plus the unparsed remainder
-/// (week dates, which contain `W`, are handled before this is reached).
-fn parse_fromiso_date(bytes: &[u8]) -> Option<(chrono::NaiveDate, &str)> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
-        let year = digits_to_i32(&bytes[0..4])?;
-        if !(1..=9999).contains(&year) {
-            return None;
-        }
-        let month = digits_to_u32(&bytes[5..7])?;
-        let day = digits_to_u32(&bytes[8..10])?;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-        return Some((date, &text[10..]));
-    }
-    if bytes.len() >= 8 && bytes[0..8].iter().all(|b| b.is_ascii_digit()) {
-        let year = digits_to_i32(&bytes[0..4])?;
-        if !(1..=9999).contains(&year) {
-            return None;
-        }
-        let month = digits_to_u32(&bytes[4..6])?;
-        let day = digits_to_u32(&bytes[6..8])?;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-        return Some((date, &text[8..]));
-    }
-    None
-}
-
-/// A `fromisoformat` ISO week datetime. The weekday takes the date's
-/// own shape only — `-D` after `YYYY-Www`, a trailing `D` after `YYYYWww`
-/// — and it backtracks: the with-weekday parse is tried first, then the
-/// bare-week (Monday) parse (`2026W404110:30:00` is Thursday, `2026W40610:30`
-/// is Monday, `2026-W40-11:30:00` is Monday, all probed). The basic `D`
-/// wins outright only with an even basic digit count (or an extended
-/// time). On an odd count Monday wins when it parses (`2026W404103340Z`
-/// is Monday), a Monday grammar failure keeps a valid with-day parse
-/// (`2026W404Z103+05.5` is Thursday), and a Monday range failure fails
-/// hard. A with-day grammar failure falls back to Monday-or-None, and a
-/// with-day range failure does the same on odd counts but fails hard on
-/// even counts (`2026W401030:00` fails even though Monday 03:00 would
-/// parse). The extended `-D` additionally needs
-/// end-or-nondigit after D (`2026-W40-4110:30:00` fails the with-day
-/// attempt and falls back to Monday, probed). With no dash the bare week
-/// takes any separator, digits included (`2026-W40610:30:00` is Monday,
-/// probed).
-fn parse_fromiso_week_datetime(text: &str) -> Option<ParsedDatetime> {
-    let bytes = text.as_bytes();
-    let wpos = text.find('W')?;
-    if wpos != 4 && wpos != 5 {
-        return None;
-    }
-    let extended = wpos == 5;
-    if extended && bytes[4] != b'-' {
-        return None;
-    }
-    let year = digits_to_i32(&bytes[0..4])?;
-    if !(1..=9999).contains(&year) {
-        return None;
-    }
-    let rest = &text[wpos + 1..];
-    if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let week: u32 = rest[0..2].parse().ok()?;
-    let tail = &rest[2..];
-    let monday = chrono::NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::Mon)?;
-    if extended {
-        match tail.strip_prefix('-') {
-            Some(day) => {
-                // Try `-D` (D must be followed by end or a non-digit),
-                // fall back to Monday with the dash as separator.
-                let day_end = day.len() <= 1 || !day.as_bytes()[1].is_ascii_digit();
-                if day_end {
-                    if let Some((parsed, _)) = weekday_try_backtrack(year, week, day, false) {
-                        return Some(parsed);
-                    }
-                }
-                parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed)
-            }
-            None => parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed),
-        }
-    } else {
-        // Try `D`: it wins outright only with an even basic digit count
-        // (or an extended time). On an odd count Monday wins when it
-        // parses, a Monday grammar failure keeps a valid with-day parse,
-        // and a Monday range failure fails hard. A with-day grammar
-        // failure falls back to Monday-or-None, and a with-day range
-        // failure does the same on odd counts but fails hard on even
-        // counts — so check the shape when the full parse fails, and the
-        // parity in both cases.
-        let with_full = weekday_try_backtrack(year, week, tail, false);
-        let with_odd = match &with_full {
-            Some((_, basic_digits)) => basic_digits.is_some_and(|count| count % 2 == 1),
-            None => match weekday_try_backtrack(year, week, tail, true) {
-                None => {
-                    return parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed);
-                }
-                Some((_, basic_digits)) => basic_digits.is_some_and(|count| count % 2 == 1),
-            },
-        };
-        if !with_odd {
-            return with_full.map(|(parsed, _)| parsed);
-        }
-        let without_full = parse_fromiso_rest(monday, tail, false);
-        if without_full.is_some() {
-            return without_full.map(|(parsed, _)| parsed);
-        }
-        if parse_fromiso_rest(monday, tail, true).is_none() {
-            return with_full.map(|(parsed, _)| parsed);
-        }
-        None
-    }
-}
-
-/// The with-weekday attempt: a leading digit 1-7 names the day, and the
-/// whole rest (separator, time, tz) must parse after it.
-fn weekday_try_backtrack(
-    year: i32,
-    week: u32,
-    text: &str,
-    shape_only: bool,
-) -> Option<(ParsedDatetime, Option<usize>)> {
-    let digit = *text.as_bytes().first()?;
-    if !(b'1'..=b'7').contains(&digit) {
-        return None;
-    }
-    let weekday = chrono::Weekday::try_from(digit - b'0' - 1).ok()?;
-    let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday)?;
-    parse_fromiso_rest(date, &text[1..], shape_only)
-}
-
-/// The `fromisoformat` time plus the tz remainder plus the consumed
-/// fraction's digit count (which drives the tz skip allowance):
-/// `HH[[:]MM[[:]SS]][.,frac]` (a fraction after any unit means sub-second
-/// micros, probed: `T10:30.5` is 10:30:00.5), plus a basic-only dotless
-/// fraction: 2+ digits glued after SS (`T103340040` is .040s; a single
-/// glued digit ends the time instead, probed: `T1033404` fails). Mixed
-/// basic/extended forms never parse (`T10:3000`, `T1030:00` fail), and a
-/// colon is never backtracked (`T10:30:0+00:00` fails). With
-/// `shape_only` the units are grammar-checked (two digits each) but the
-/// clock ranges are not enforced (midnight stands in for the time). The
-/// digit count covers basic unit digits plus the dotless run (including a
-/// lone run-1 digit that stays in the tz tail) plus one lone tail digit
-/// after a short basic time; dotted fractions never count, and extended
-/// times report `None`.
-fn parse_fromiso_time(
-    text: &str,
-    shape_only: bool,
-) -> Option<(chrono::NaiveTime, &str, usize, Option<usize>)> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 2 || !bytes[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hour: u32 = text[0..2].parse().ok()?;
-    let mut rest = &text[2..];
-    let mut minute: u32 = 0;
-    let mut second: u32 = 0;
-    let mut digits: Option<usize> = Some(2);
-    // Optional `:MM` / `MM`.
-    if let Some(tail) = rest.strip_prefix(':') {
-        digits = None;
-        if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        minute = tail[0..2].parse().ok()?;
-        rest = &tail[2..];
-        // Optional `:SS`.
-        if let Some(tail) = rest.strip_prefix(':') {
-            if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            second = tail[0..2].parse().ok()?;
-            rest = &tail[2..];
-        }
-    } else if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        digits = Some(4);
-        minute = rest[0..2].parse().ok()?;
-        rest = &rest[2..];
-        if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            digits = Some(6);
-            second = rest[0..2].parse().ok()?;
-            rest = &rest[2..];
-            // Basic dotless fraction: a run of 2+ digits.
-            let run: usize = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-            if run >= 2 {
-                let mut micros: i64 = 0;
-                for (index, byte) in rest.bytes().take(6).enumerate() {
-                    if !byte.is_ascii_digit() {
-                        break;
-                    }
-                    micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
-                }
-                let time = time_or_shape_midnight(hour, minute, second, micros, shape_only)?;
-                return Some((time, &rest[run..], run, Some(6 + run)));
-            }
-        }
-    }
-    // A lone digit left in the tz tail still counts (a run-1 after SS or
-    // after a short basic time).
-    if digits.is_some() && rest.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
-        digits = digits.map(|count| count + 1);
-    }
-    let (micros, frac_len, rest) = parse_frac_micros_opt(rest)?;
-    let time = time_or_shape_midnight(hour, minute, second, micros, shape_only)?;
-    Some((time, rest, frac_len, digits))
-}
-
-/// Build the clock time, or midnight when only the shape is wanted.
-fn time_or_shape_midnight(
-    hour: u32,
-    minute: u32,
-    second: u32,
-    micros: i64,
-    shape_only: bool,
-) -> Option<chrono::NaiveTime> {
-    if shape_only {
-        return chrono::NaiveTime::from_hms_opt(0, 0, 0);
-    }
-    chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros as u32)
-}
-
-/// The optional dotted fraction after a time component: `.`/`,` plus ≥1
-/// digit (any length, truncated to micros), returning micros, digit count
-/// and remainder. No dot — or a dot with no digits — means `(0, 0, rest)`
-/// unconsumed: a bare dot ends the time and the tz tail skips it
-/// (`T10:30:00.+00:00` parses, probed).
-fn parse_frac_micros_opt(text: &str) -> Option<(i64, usize, &str)> {
-    let tail = match text.strip_prefix('.').or_else(|| text.strip_prefix(',')) {
-        Some(tail) => tail,
-        None => return Some((0, 0, text)),
-    };
-    let digits: usize = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if digits == 0 {
-        return Some((0, 0, text));
-    }
-    let mut micros: i64 = 0;
-    for (index, byte) in tail.bytes().take(6).enumerate() {
-        if !byte.is_ascii_digit() {
-            break;
-        }
-        micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
-    }
-    Some((micros, digits, &tail[digits..]))
-}
-
-/// The `fromisoformat` numeric offset in micros east of UTC:
-/// `±HH[MM[SS]]` basic or `±HH:MM[:SS]` extended (the mode locks on the
-/// first separator: `+0530:15` and `+05:3015` fail, probed), with an
-/// optional `.`/`,` fraction after any unit (always sub-second micros,
-/// probed: `+05.5` is 5h + 0.5s) — except a zero `HH:MM:SS` drops the
-/// fraction entirely (`+00:00:00.5` is UTC, probed). Components are never
-/// range-checked (`+05:99` normalises to +6:39); only the total must sit
-/// strictly inside ±24h (skipped with `shape_only`).
-fn parse_fromiso_offset(text: &str, shape_only: bool) -> Option<i64> {
-    let bytes = text.as_bytes();
-    let sign: i64 = match bytes.first()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let rest = &text[1..];
-    if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i64 = rest[0..2].parse().ok()?;
-    let mut rest = &rest[2..];
-    if rest.starts_with('.') || rest.starts_with(',') {
-        let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-        return finish_fromiso_offset(sign, hours, 0, 0, frac, tail, shape_only);
-    }
-    let mut minutes: i64 = 0;
-    let mut seconds: i64 = 0;
-    if rest.starts_with(':') {
-        // Extended: `HH:MM[:SS]`.
-        rest = &rest[1..];
-        if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        minutes = rest[0..2].parse().ok()?;
-        rest = &rest[2..];
-        if rest.starts_with('.') || rest.starts_with(',') {
-            let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-            return finish_fromiso_offset(sign, hours, minutes, 0, frac, tail, shape_only);
-        }
-        if let Some(tail) = rest.strip_prefix(':') {
-            if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            seconds = tail[0..2].parse().ok()?;
-            rest = &tail[2..];
-        }
-    } else {
-        // Basic: `HH[MM[SS]]`.
-        if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            minutes = rest[0..2].parse().ok()?;
-            rest = &rest[2..];
-            if rest.starts_with('.') || rest.starts_with(',') {
-                let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-                return finish_fromiso_offset(sign, hours, minutes, 0, frac, tail, shape_only);
-            }
-            if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                seconds = rest[0..2].parse().ok()?;
-                rest = &rest[2..];
-            }
-        }
-    }
-    let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-    finish_fromiso_offset(sign, hours, minutes, seconds, frac, tail, shape_only)
-}
-
-/// Total a `fromisoformat` offset: the sign applies to the whole-unit part
-/// and the fraction alike; a zero whole part drops the fraction; the total
-/// must sit strictly inside ±24h; nothing may remain.
-fn finish_fromiso_offset(
-    sign: i64,
-    hours: i64,
-    minutes: i64,
-    seconds: i64,
-    frac_micros: i64,
-    rest: &str,
-    shape_only: bool,
-) -> Option<i64> {
-    if !rest.is_empty() {
-        return None;
-    }
-    if hours == 0 && minutes == 0 && seconds == 0 {
-        return Some(0);
-    }
-    let micros = sign * (hours * 3_600_000_000 + minutes * 60_000_000 + seconds * 1_000_000)
-        + sign * frac_micros;
-    if !shape_only && micros.abs() >= 24 * 3_600_000_000 {
-        return None;
-    }
-    Some(micros)
-}
-
-/// Django's `datetime_re` fallback (`dateparse.py`, exact):
-/// padded-or-not `YYYY-M-D`, `T`/space, `H:M[:S[.,frac]]]`, optional
-/// whitespace, optional `Z|±HH[[:]MM]`. The frac is `\d{1,6}\d{0,6}`
-/// (micros come from the first 6, left-justified). Offsets are whole minutes
-/// strictly inside ±24h (`timezone()` raises past that).
-pub fn parse_django_datetime_re(text: &str) -> Option<ParsedDatetime> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 5 {
-        return None;
-    }
-    if !bytes[0..4].iter().all(|b| b.is_ascii_digit()) || bytes[4] != b'-' {
-        return None;
-    }
-    let year = digits_to_i32(&bytes[0..4])?;
-    // Django builds `datetime(...)` from the groups, which raises for year
-    // 0 (and DRF turns the raise into invalid, probed).
-    if !(1..=9999).contains(&year) {
-        return None;
-    }
-    let mut rest = &text[5..];
-    let (month, tail) = take_1_or_2_digits(rest)?;
-    rest = tail.strip_prefix('-')?;
-    let (day, tail) = take_1_or_2_digits(rest)?;
-    rest = tail;
-    let sep = rest.as_bytes().first()?;
-    if *sep != b'T' && *sep != b' ' {
-        return None;
-    }
-    rest = &rest[1..];
-    let (hour, tail) = take_1_or_2_digits(rest)?;
-    rest = tail.strip_prefix(':')?;
-    let (minute, tail) = take_1_or_2_digits(rest)?;
-    rest = tail;
-    let mut second: u32 = 0;
-    let mut micros: i64 = 0;
-    if let Some(tail) = rest.strip_prefix(':') {
-        let (value, tail) = take_1_or_2_digits(tail)?;
-        second = value;
-        rest = tail;
-        if let Some(tail) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(',')) {
-            let digits: usize = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
-            if digits == 0 || digits > 12 {
-                return None;
-            }
-            let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-            micros = frac;
-            rest = tail;
-        }
-    }
-    // `\s*` then the optional tzinfo, then end.
-    let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace());
-    let offset_micros = match trimmed {
-        "" => None,
-        "Z" => Some(0),
-        _ => Some(parse_django_offset(trimmed)?),
-    };
-    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-    let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros as u32)?;
-    let naive = date.and_time(time);
-    Some(ParsedDatetime {
-        naive,
-        offset_micros,
-    })
-}
-
-/// Django's tzinfo arm: `±HH[[:]MM]` whole minutes, strictly inside ±24h.
-fn parse_django_offset(text: &str) -> Option<i64> {
-    let bytes = text.as_bytes();
-    let sign: i64 = match bytes.first()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let rest = &text[1..];
-    if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i64 = rest[0..2].parse().ok()?;
-    let rest = &rest[2..];
-    let (colon, rest) = match rest.strip_prefix(':') {
-        Some(tail) => (true, tail),
-        None => (false, rest),
-    };
-    let minutes: i64 = if rest.is_empty() {
-        if colon {
-            return None;
-        }
-        0
-    } else {
-        if rest.len() != 2 || !rest.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        rest.parse().ok()?
-    };
-    let micros = (hours * 3_600 + minutes * 60) * 1_000_000;
-    if micros.abs() >= 24 * 3_600_000_000 {
-        return None;
-    }
-    Some(sign * micros)
-}
-
-/// 1-2 ASCII digits plus the remainder (`\d{1,2}`).
-fn take_1_or_2_digits(text: &str) -> Option<(u32, &str)> {
-    let bytes = text.as_bytes();
-    let first = *bytes.first()?;
-    if !first.is_ascii_digit() {
-        return None;
-    }
-    let mut value: u32 = (first - b'0') as u32;
-    let mut rest = &text[1..];
-    if let Some(second) = rest.as_bytes().first() {
-        if second.is_ascii_digit() {
-            value = value * 10 + (second - b'0') as u32;
-            rest = &rest[1..];
-        }
-    }
-    Some((value, rest))
-}
-
-fn digits_to_i32(digits: &[u8]) -> Option<i32> {
-    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    std::str::from_utf8(digits).ok()?.parse().ok()
-}
-
-fn digits_to_u32(digits: &[u8]) -> Option<u32> {
-    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    std::str::from_utf8(digits).ok()?.parse().ok()
-}
+/// Django `parse_datetime` + DRF `strptime` fallthrough — moved to its
+/// canonical home `pidash_compat::datetime` by OVL-14 (PIDASHCONV-1649);
+/// re-exported here so every existing path keeps working (the compat
+/// name is `parse_django_datetime`; this module keeps the old name).
+pub use pidash_compat::datetime::{
+    parse_django_datetime as parse_iso_datetime, parse_django_datetime_re, parse_fromisoformat,
+    ParsedDatetime,
+};
 
 /// DRF `DateTimeField.enforce_timezone` failure: an aware input whose
 /// user-zone shift leaves years 1-9999, or (unreachable in practice) a
@@ -4738,11 +4047,8 @@ pub fn resolve_cycle_issue_order(
 /// `LEFT JOIN`s, so they never multiply and keep `rows.len()`. The page
 /// window itself still slices the multiplied rows, exactly like Django's
 /// `queryset[offset:stop]`.
-fn envelope_total(
-    order: &pidash_db::v1_cycles_modules::cycle_queries::OrderBy,
-    rows: &[sqlx::postgres::PgRow],
-) -> Result<usize, Denial> {
-    use pidash_db::v1_cycles_modules::cycle_queries::OrderTarget;
+fn envelope_total(order: &queries::OrderBy, rows: &[Row]) -> Result<usize, Denial> {
+    use queries::OrderTarget;
     if !matches!(
         order.target,
         OrderTarget::M2M(_) | OrderTarget::M2MTraversal(_)
@@ -4769,7 +4075,7 @@ fn count_distinct(ids: Vec<uuid::Uuid>) -> usize {
 /// The `Project` columns the cycle views touch: `cycle_view` gates
 /// `validate()` (`serializers/cycle.py:83-84`), `timezone` drives the
 /// `convert_to_utc` rewrite, `identifier` renders issue URLs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct ProjectRow {
     pub id: uuid::Uuid,
     pub workspace_id: uuid::Uuid,
@@ -4778,18 +4084,34 @@ pub struct ProjectRow {
     pub identifier: String,
 }
 
-impl ProjectRow {
-    pub fn decode(row: &sqlx::postgres::PgRow, site: &str) -> Result<Self, Denial> {
-        Ok(ProjectRow {
-            id: row_uuid(row, "id", site)?,
-            workspace_id: row_uuid(row, "workspace_id", site)?,
-            cycle_view: row
-                .try_get::<bool, _>("cycle_view")
-                .map_err(|error| db_error(error, site))?,
-            timezone: row_string_opt(row, "timezone", site)?,
-            identifier: row_string(row, "identifier", site)?,
-        })
+/// The live project row by pk, optionally pinned to a workspace
+/// (`Project.objects.get(pk=..., workspace__slug=...)` /
+/// `Project.objects.filter(pk=...).first()`).
+async fn project_row(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+    workspace_id: Option<&uuid::Uuid>,
+    site: &str,
+) -> Result<Option<ProjectRow>, Denial> {
+    let mut query = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::WorkspaceId,
+            projects::Column::CycleView,
+            projects::Column::Timezone,
+            projects::Column::Identifier,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null());
+    if let Some(workspace_id) = workspace_id {
+        query = query.filter(projects::Column::WorkspaceId.eq(*workspace_id));
     }
+    query
+        .into_model::<ProjectRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, site))
 }
 
 /// `Project.objects.get(pk=..., workspace__slug=...)`: the live project row
@@ -4799,17 +4121,8 @@ pub async fn fetch_project(
     project_id: &uuid::Uuid,
     workspace_id: &uuid::Uuid,
 ) -> Result<ProjectRow, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "workspace_id", "cycle_view", "timezone", "identifier" FROM "projects"
-           WHERE "id" = $1 AND "workspace_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "project-get"))?;
-    row.map(|row| ProjectRow::decode(&row, "project-get"))
-        .transpose()?
+    project_row(pool, project_id, Some(workspace_id), "project-get")
+        .await?
         .ok_or(Denial::NotFound)
 }
 
@@ -4819,26 +4132,32 @@ pub async fn fetch_assignees(
     pool: &PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<Vec<uuid::Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT "assignee_id" FROM "issue_assignees" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "assignees-list"))
+    issue_assignees::Entity::find()
+        .select_only()
+        .column(issue_assignees::Column::AssigneeId)
+        .filter(issue_assignees::Column::IssueId.eq(*issue_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .order_by_desc(issue_assignees::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "assignees-list"))
 }
 
 pub async fn fetch_issue_labels(
     pool: &PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<Vec<uuid::Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "issue-labels-list"))
+    issue_labels::Entity::find()
+        .select_only()
+        .column(issue_labels::Column::LabelId)
+        .filter(issue_labels::Column::IssueId.eq(*issue_id))
+        .filter(issue_labels::Column::DeletedAt.is_null())
+        .order_by_desc(issue_labels::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "issue-labels-list"))
 }
 
 /// `IssueSerializer.get_url` (`serializers/issue.py:126-137`):
@@ -4857,70 +4176,12 @@ pub fn issue_url(
 // Reads: cycle list / detail / archived list
 // ---------------------------------------------------------------------------
 
-/// Renumber `$N` placeholders to `$1..$k` in order of first appearance
-/// (single-quoted literals untouched): the db layer's fixed slots (`$1`
-/// slug, `$2` project, `$3` cycle, `$4` actor, `$5` now) leave gaps on
-/// Q1/Q3, which Postgres rejects (`could not determine data type of
-/// parameter $3`, verified), so handlers compact before binding
-/// positionally in slot order.
-pub fn compact_binds(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut mapping: Vec<u32> = Vec::new();
-    let mut chars = sql.chars().peekable();
-    let mut in_string = false;
-    while let Some(ch) = chars.next() {
-        if in_string {
-            out.push(ch);
-            if ch == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    out.push(chars.next().expect("peeked quote"));
-                } else {
-                    in_string = false;
-                }
-            }
-            continue;
-        }
-        if ch == '\'' {
-            in_string = true;
-            out.push(ch);
-            continue;
-        }
-        if ch == '$' {
-            let mut digits = String::new();
-            while let Some(digit) = chars.peek() {
-                if !digit.is_ascii_digit() {
-                    break;
-                }
-                digits.push(*digit);
-                chars.next();
-            }
-            if digits.is_empty() {
-                out.push('$');
-                continue;
-            }
-            let slot: u32 = digits.parse().unwrap_or(u32::MAX);
-            let position = match mapping.iter().position(|seen| *seen == slot) {
-                Some(index) => index + 1,
-                None => {
-                    mapping.push(slot);
-                    mapping.len()
-                }
-            };
-            out.push('$');
-            out.push_str(&position.to_string());
-            continue;
-        }
-        out.push(ch);
-    }
-    out
-}
-
 /// `GET .../cycles/` (`views/cycle.py:190-281`): gate → project 404 →
 /// `cycle_view` filter → the `current` arm answers a bare list (ported
 /// bug) while every other arm paginates. `?order_by=` is ignored (the
 /// queryset hardcodes `-created_at` from kwargs). The `current` arm's two
-/// `timezone.now()` samples become one `$5` bind (the builder's single
-/// slot; the microsecond skew between Django's two samples is
+/// `timezone.now()` samples become one bound instant (the builder's
+/// single value; the microsecond skew between Django's two samples is
 /// unobservable outside a boundary microsecond).
 pub async fn list_cycles_inner(
     state: &AppState,
@@ -4929,7 +4190,6 @@ pub async fn list_cycles_inner(
     project_raw: &str,
     query: &QueryMap,
 ) -> Result<Response, Denial> {
-    use pidash_db::v1_cycles_modules::cycle_queries as queries;
     use pidash_services::v1_cycles_modules::cycle_queries as shapes;
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
@@ -4949,22 +4209,15 @@ pub async fn list_cycles_inner(
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     fetch_project(&pre.pool, &project_id, &workspace_id).await?;
     let view = shapes::parse_cycle_view(query_last(query, "cycle_view").as_deref());
-    let sql = compact_binds(&queries::cycle_list_filtered_sql(
+    let scope = TenantScope { slug, project_id };
+    let stmt = queries::cycle_list_filtered(
         &queries::OrderBy::default_cycle(),
         view,
-    ));
-    let now = micros_now();
-    let mut request = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(pre.actor.id);
-    if !matches!(view, queries::CycleView::All | queries::CycleView::Draft) {
-        request = request.bind(now);
-    }
-    let rows: Vec<sqlx::postgres::PgRow> = request
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycles-list"))?;
+        micros_now(),
+        &scope,
+        pre.actor.id,
+    );
+    let rows = fetch_rows(&pre.pool, &stmt, "cycles-list").await?;
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
     if !shapes::cycle_view_is_paginated(view) {
@@ -5016,7 +4269,6 @@ pub async fn retrieve_cycle_inner(
     pk: &uuid::Uuid,
     query: &QueryMap,
 ) -> Result<Response, Denial> {
-    use pidash_db::v1_cycles_modules::cycle_queries as queries;
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
@@ -5034,15 +4286,14 @@ pub async fn retrieve_cycle_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     fetch_project(&pre.pool, &project_id, &workspace_id).await?;
-    let sql = queries::cycle_detail_sql(&queries::OrderBy::default_cycle());
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(pk)
-        .bind(pre.actor.id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycle-detail"))?;
+    let scope = TenantScope { slug, project_id };
+    let stmt = queries::cycle_detail(
+        &queries::OrderBy::default_cycle(),
+        &scope,
+        *pk,
+        pre.actor.id,
+    );
+    let row = fetch_row(&pre.pool, &stmt, "cycle-detail").await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -5072,7 +4323,6 @@ pub async fn list_archived_cycles_inner(
     project_raw: &str,
     query: &QueryMap,
 ) -> Result<Response, Denial> {
-    use pidash_db::v1_cycles_modules::cycle_queries as queries;
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
@@ -5089,16 +4339,10 @@ pub async fn list_archived_cycles_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
-    let sql = compact_binds(&queries::archived_cycle_list_sql(
-        &queries::OrderBy::default_cycle(),
-    ));
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(pre.actor.id)
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycles-archived"))?;
+    let scope = TenantScope { slug, project_id };
+    let stmt =
+        queries::archived_cycle_list(&queries::OrderBy::default_cycle(), &scope, pre.actor.id);
+    let rows = fetch_rows(&pre.pool, &stmt, "cycles-archived").await?;
     let window = page_window(query, rows.len())?;
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
@@ -5333,16 +4577,7 @@ pub async fn create_cycle_inner(
     // `validate()` (`serializers/cycle.py:61-106`): the project row comes
     // from `filter().first()` (missing → the 400 arm, unreachable past the
     // gate but ported), the legacy body id from the raw `project_id` key.
-    let project: Option<ProjectRow> = sqlx::query(
-        r#"SELECT "id", "workspace_id", "cycle_view", "timezone", "identifier" FROM "projects"
-           WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-create-project"))?
-    .map(|row| ProjectRow::decode(&row, "cycle-create-project"))
-    .transpose()?;
+    let project = project_row(&pre.pool, &project_id, None, "cycle-create-project").await?;
     // A dirty body id falls through the `or` chain exactly like a missing
     // one (the legacy path is dead past the gate anyway — context wins).
     let body_project_id_owned = raw.get("project_id").and_then(|v| match v {
@@ -5371,19 +4606,20 @@ pub async fn create_cycle_inner(
             if let (Some(external_id), Some(external_source)) =
                 (prep_text(raw_id), prep_text(raw_source))
             {
-                let clash: Option<uuid::Uuid> = sqlx::query_scalar(
-                    r#"SELECT c."id" FROM "cycles" c
-                       INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-                       WHERE w."slug" = $1 AND c."project_id" = $2 AND c."external_source" = $3 AND c."external_id" = $4 AND c."deleted_at" IS NULL
-                       ORDER BY c."created_at" DESC LIMIT 1"#,
-                )
-                .bind(slug)
-                .bind(project_id)
-                .bind(external_source)
-                .bind(external_id)
-                .fetch_optional(&pre.pool)
-                .await
-                .map_err(|error| db_error(error, "cycle-create-extdup"))?;
+                let clash: Option<uuid::Uuid> = cycles::Entity::find()
+                    .select_only()
+                    .column(cycles::Column::Id)
+                    .join(JoinType::InnerJoin, cycles::Relation::Workspaces.def())
+                    .filter(workspaces::Column::Slug.eq(slug))
+                    .filter(cycles::Column::ProjectId.eq(project_id))
+                    .filter(cycles::Column::ExternalSource.eq(external_source))
+                    .filter(cycles::Column::ExternalId.eq(external_id))
+                    .filter(cycles::Column::DeletedAt.is_null())
+                    .order_by_desc(cycles::Column::CreatedAt)
+                    .into_tuple()
+                    .one(&orm(&pre.pool))
+                    .await
+                    .map_err(|error| db_error(error, "cycle-create-extdup"))?;
                 if let Some(clash) = clash {
                     let body = format!(
                         "{{\"error\":{},\"id\":{}}}",
@@ -5400,14 +4636,16 @@ pub async fn create_cycle_inner(
     // `Cycle.save`: `sort_order = min - 10000`, or the 65535 default for
     // the first cycle (`db/models/cycle.py:88-97`).
     let cycle_id = uuid::Uuid::new_v4();
-    let min_sort: Option<f64> = sqlx::query_scalar(
-        r#"SELECT MIN("sort_order") FROM "cycles" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-create-sort"))?
-    .flatten();
+    let min_sort: Option<Option<f64>> = cycles::Entity::find()
+        .select_only()
+        .column_as(cycles::Column::SortOrder.min(), "min")
+        .filter(cycles::Column::ProjectId.eq(project_id))
+        .filter(cycles::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "cycle-create-sort"))?;
+    let min_sort = min_sort.flatten();
     let sort_order = min_sort.map_or(65535.0, |min| min - 10000.0);
     // `serializer.save(project_id=...)`: model defaults fill the absent
     // fields (`description` "", `timezone` "UTC", dates/externals NULL);
@@ -5418,31 +4656,34 @@ pub async fn create_cycle_inner(
     let created_at = micros_now();
     let updated_at = micros_now();
     let timezone = write.timezone.clone().unwrap_or_else(|| "UTC".to_owned());
-    sqlx::query(
-        r#"INSERT INTO "cycles" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-               "project_id", "workspace_id", "name", "description", "start_date", "end_date", "owned_by_id",
-               "view_props", "sort_order", "external_source", "external_id", "progress_snapshot",
-               "archived_at", "logo_props", "timezone", "version")
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, '{}', $12, $13, $14, '{}', NULL, '{}', $15, 1)"#,
-    )
-    .bind(cycle_id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .bind(project.workspace_id)
-    .bind(&name)
-    .bind(write.description.clone().unwrap_or_default())
-    .bind(validated.start)
-    .bind(validated.end)
-    .bind(validated.owned_by)
-    .bind(sort_order)
-    .bind(write.external_source.clone().flatten())
-    .bind(write.external_id.clone().flatten())
-    .bind(&timezone)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-create-insert"))?;
+    let model = cycles::ActiveModel {
+        id: Set(cycle_id),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+        created_by_id: Set(Some(pre.actor.id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(project_id),
+        workspace_id: Set(project.workspace_id),
+        name: Set(name),
+        description: Set(write.description.clone().unwrap_or_default()),
+        start_date: Set(validated.start.map(Into::into)),
+        end_date: Set(validated.end.map(Into::into)),
+        owned_by_id: Set(validated.owned_by),
+        view_props: Set(serde_json::json!({})),
+        sort_order: Set(sort_order),
+        external_source: Set(write.external_source.clone().flatten()),
+        external_id: Set(write.external_id.clone().flatten()),
+        progress_snapshot: Set(serde_json::json!({})),
+        archived_at: Set(None),
+        logo_props: Set(serde_json::json!({})),
+        timezone: Set(timezone),
+        version: Set(1),
+    };
+    cycles::Entity::insert(model)
+        .exec_without_returning(&orm(&pre.pool))
+        .await
+        .map_err(|error| orm_write_error(error, "cycle-create-insert"))?;
     // Uploads that survive validation (unknown keys) fail `.delay()`
     // argument serialization *after* the insert, so the row persists and
     // no activity is captured (PIDASHCONV-627, `P2` probe).
@@ -5460,17 +4701,8 @@ pub async fn create_cycle_inner(
     enqueue_best_effort(&pre.pool, &job).await;
     // `Cycle.objects.get(pk=...)` + bare `CycleSerializer` (no annotations:
     // all 9 metric keys are absent).
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                  "project_id", "workspace_id", "name", "description", "start_date", "end_date", "owned_by_id",
-                  "view_props", "sort_order", "external_source", "external_id", "progress_snapshot",
-                  "archived_at", "logo_props", "timezone", "version"
-           FROM "cycles" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(cycle_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-create-reread"))?;
+    let row =
+        fetch_entity_row(&pre.pool, live_cycle_by_pk(cycle_id), "cycle-create-reread").await?;
     let Some(row) = row else {
         return Err(Denial::ServerError);
     };
@@ -5563,20 +4795,12 @@ pub async fn patch_cycle_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id", c."created_at", c."updated_at", c."created_by_id", c."updated_by_id", c."deleted_at",
-                  c."project_id", c."workspace_id", c."name", c."description", c."start_date", c."end_date", c."owned_by_id",
-                  c."view_props", c."sort_order", c."external_source", c."external_id", c."progress_snapshot",
-                  c."archived_at", c."logo_props", c."timezone", c."version"
-           FROM "cycles" c INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
+    let row = fetch_entity_row(
+        &pre.pool,
+        live_cycle_in_tenant(slug, &project_id, pk),
+        "cycle-patch-get",
     )
-    .bind(slug)
-    .bind(project_id)
-    .bind(pk)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-patch-get"))?;
+    .await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -5605,16 +4829,7 @@ pub async fn patch_cycle_inner(
     let write = coerce_write(&pre.pool, &raw, true, &timezone, &files, html).await?;
     // `validate()`: the project row comes from `filter().first()`; the
     // instance arm carries the cycle's own project id (same value here).
-    let project: Option<ProjectRow> = sqlx::query(
-        r#"SELECT "id", "workspace_id", "cycle_view", "timezone", "identifier" FROM "projects"
-           WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-patch-project"))?
-    .map(|row| ProjectRow::decode(&row, "cycle-patch-project"))
-    .transpose()?;
+    let project = project_row(&pre.pool, &project_id, None, "cycle-patch-project").await?;
     let body_project_id_owned = raw.get("project_id").and_then(|v| match v {
         JVal::Str(raw) => raw.to_clean_string(),
         _ => None,
@@ -5647,31 +4862,30 @@ pub async fn patch_cycle_inner(
                 Some(JVal::Null) => None,
                 Some(value) => prep_text(value),
             };
-            let clash: bool = match (prep_text(raw_id), source) {
-                (Some(external_id), Some(external_source)) => sqlx::query_scalar(
-                    r#"SELECT EXISTS(SELECT 1 FROM "cycles" c
-                       INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-                       WHERE w."slug" = $1 AND c."project_id" = $2 AND c."external_source" = $3 AND c."external_id" = $4 AND c."deleted_at" IS NULL)"#,
-                )
-                .bind(slug)
-                .bind(project_id)
-                .bind(external_source)
-                .bind(external_id)
-                .fetch_one(&pre.pool)
-                .await
-                .map_err(|error| db_error(error, "cycle-patch-extdup"))?,
-                (Some(external_id), None) => sqlx::query_scalar(
-                    r#"SELECT EXISTS(SELECT 1 FROM "cycles" c
-                       INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-                       WHERE w."slug" = $1 AND c."project_id" = $2 AND c."external_source" IS NULL AND c."external_id" = $3 AND c."deleted_at" IS NULL)"#,
-                )
-                .bind(slug)
-                .bind(project_id)
-                .bind(external_id)
-                .fetch_one(&pre.pool)
-                .await
-                .map_err(|error| db_error(error, "cycle-patch-extdup"))?,
-                _ => false,
+            let clash: bool = match prep_text(raw_id) {
+                Some(external_id) => {
+                    // An explicit-null source filters `IS NULL`.
+                    let source_filter = match source {
+                        Some(external_source) => cycles::Column::ExternalSource.eq(external_source),
+                        None => cycles::Column::ExternalSource.is_null(),
+                    };
+                    let hit: Option<uuid::Uuid> = cycles::Entity::find()
+                        .select_only()
+                        .column(cycles::Column::Id)
+                        .join(JoinType::InnerJoin, cycles::Relation::Workspaces.def())
+                        .filter(workspaces::Column::Slug.eq(slug))
+                        .filter(cycles::Column::ProjectId.eq(project_id))
+                        .filter(source_filter)
+                        .filter(cycles::Column::ExternalId.eq(external_id))
+                        .filter(cycles::Column::DeletedAt.is_null())
+                        .limit(1)
+                        .into_tuple()
+                        .one(&orm(&pre.pool))
+                        .await
+                        .map_err(|error| db_error(error, "cycle-patch-extdup"))?;
+                    hit.is_some()
+                }
+                None => false,
             };
             if clash {
                 let body = format!(
@@ -5716,17 +4930,7 @@ pub async fn patch_cycle_inner(
     );
     enqueue_best_effort(&pre.pool, &job).await;
     // `Cycle.objects.get(pk=...)` + bare `CycleSerializer` (no annotations).
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                  "project_id", "workspace_id", "name", "description", "start_date", "end_date", "owned_by_id",
-                  "view_props", "sort_order", "external_source", "external_id", "progress_snapshot",
-                  "archived_at", "logo_props", "timezone", "version"
-           FROM "cycles" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(pk)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-patch-reread"))?;
+    let row = fetch_entity_row(&pre.pool, live_cycle_by_pk(*pk), "cycle-patch-reread").await?;
     let Some(row) = row else {
         return Err(Denial::ServerError);
     };
@@ -5762,75 +4966,183 @@ pub async fn update_cycle_fields(
 ) -> Result<(), Denial> {
     // One statement per field keeps the partial-update semantics obvious;
     // Django issues a single `UPDATE` with the same assignments.
+    let db = orm(pool);
+    let set = |column: cycles::Column, value: sea_orm::Value| {
+        cycles::Entity::update_many()
+            .col_expr(column, Expr::value(value))
+            .filter(cycles::Column::Id.eq(*pk))
+    };
     if let Some(ref name) = write.name {
-        sqlx::query(r#"UPDATE "cycles" SET "name" = $1 WHERE "id" = $2"#)
-            .bind(name)
-            .bind(pk)
-            .execute(pool)
+        set(cycles::Column::Name, name.clone().into())
+            .exec(&db)
             .await
-            .map_err(|error| db_write_error(error, site))?;
+            .map_err(|error| orm_write_error(error, site))?;
     }
     if let Some(ref description) = write.description {
-        sqlx::query(r#"UPDATE "cycles" SET "description" = $1 WHERE "id" = $2"#)
-            .bind(description)
-            .bind(pk)
-            .execute(pool)
+        set(cycles::Column::Description, description.clone().into())
+            .exec(&db)
             .await
-            .map_err(|error| db_write_error(error, site))?;
+            .map_err(|error| orm_write_error(error, site))?;
     }
     if write.start_date.is_some() {
-        sqlx::query(r#"UPDATE "cycles" SET "start_date" = $1 WHERE "id" = $2"#)
-            .bind(validated.start)
-            .bind(pk)
-            .execute(pool)
+        set(cycles::Column::StartDate, validated.start.into())
+            .exec(&db)
             .await
-            .map_err(|error| db_write_error(error, site))?;
+            .map_err(|error| orm_write_error(error, site))?;
     }
     if write.end_date.is_some() {
-        sqlx::query(r#"UPDATE "cycles" SET "end_date" = $1 WHERE "id" = $2"#)
-            .bind(validated.end)
-            .bind(pk)
-            .execute(pool)
+        set(cycles::Column::EndDate, validated.end.into())
+            .exec(&db)
             .await
-            .map_err(|error| db_write_error(error, site))?;
+            .map_err(|error| orm_write_error(error, site))?;
     }
     if let Some(ref external_source) = write.external_source {
-        sqlx::query(r#"UPDATE "cycles" SET "external_source" = $1 WHERE "id" = $2"#)
-            .bind(external_source)
-            .bind(pk)
-            .execute(pool)
-            .await
-            .map_err(|error| db_write_error(error, site))?;
+        set(
+            cycles::Column::ExternalSource,
+            external_source.clone().into(),
+        )
+        .exec(&db)
+        .await
+        .map_err(|error| orm_write_error(error, site))?;
     }
     if let Some(ref external_id) = write.external_id {
-        sqlx::query(r#"UPDATE "cycles" SET "external_id" = $1 WHERE "id" = $2"#)
-            .bind(external_id)
-            .bind(pk)
-            .execute(pool)
+        set(cycles::Column::ExternalId, external_id.clone().into())
+            .exec(&db)
             .await
-            .map_err(|error| db_write_error(error, site))?;
+            .map_err(|error| orm_write_error(error, site))?;
     }
     if let Some(ref timezone) = write.timezone {
-        sqlx::query(r#"UPDATE "cycles" SET "timezone" = $1 WHERE "id" = $2"#)
-            .bind(timezone)
-            .bind(pk)
-            .execute(pool)
+        set(cycles::Column::Timezone, timezone.clone().into())
+            .exec(&db)
             .await
-            .map_err(|error| db_write_error(error, site))?;
+            .map_err(|error| orm_write_error(error, site))?;
     }
     // `validate()` always sets `owned_by` (submitted or the requester), so
     // every PATCH re-stamps the owner (`serializers/cycle.py:103-104`).
-    sqlx::query(
-        r#"UPDATE "cycles" SET "owned_by_id" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
-    )
-    .bind(validated.owned_by)
-    .bind(now)
-    .bind(actor)
-    .bind(pk)
-    .execute(pool)
-    .await
-    .map_err(|error| db_write_error(error, site))?;
+    cycles::Entity::update_many()
+        .col_expr(cycles::Column::OwnedById, Expr::value(validated.owned_by))
+        .col_expr(cycles::Column::UpdatedAt, Expr::value(*now))
+        .col_expr(cycles::Column::UpdatedById, Expr::value(*actor))
+        .filter(cycles::Column::Id.eq(*pk))
+        .exec(&db)
+        .await
+        .map_err(|error| orm_write_error(error, site))?;
     Ok(())
+}
+
+/// `Cycle.objects.get(pk=...)`: the live cycle row by pk, every column.
+fn live_cycle_by_pk(pk: uuid::Uuid) -> sea_orm::Select<cycles::Entity> {
+    cycles::Entity::find()
+        .filter(cycles::Column::Id.eq(pk))
+        .filter(cycles::Column::DeletedAt.is_null())
+}
+
+/// `Cycle.objects.get(workspace__slug=..., project_id=..., pk=...)`: the
+/// live cycle row in this tenant, every cycle column (the `workspaces`
+/// join adds none).
+fn live_cycle_in_tenant(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    pk: &uuid::Uuid,
+) -> sea_orm::Select<cycles::Entity> {
+    cycles::Entity::find()
+        .join(JoinType::InnerJoin, cycles::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(cycles::Column::ProjectId.eq(*project_id))
+        .filter(cycles::Column::Id.eq(*pk))
+        .filter(cycles::Column::DeletedAt.is_null())
+}
+
+/// The `cycles` columns the plain `.get` paths read before a write
+/// (`end_date` for the completed gates, `name`/`owned_by_id` for the
+/// delete).
+#[derive(Debug, Clone, FromQueryResult)]
+struct CycleGetRow {
+    workspace_id: uuid::Uuid,
+    name: String,
+    owned_by_id: uuid::Uuid,
+    end_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `Cycle.objects.get(workspace__slug=..., project_id=..., pk=...)` for the
+/// write paths: the live row's gate columns, else `None` (the 404).
+async fn cycle_get(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    pk: &uuid::Uuid,
+    site: &str,
+) -> Result<Option<CycleGetRow>, Denial> {
+    live_cycle_in_tenant(slug, project_id, pk)
+        .select_only()
+        .columns([
+            cycles::Column::WorkspaceId,
+            cycles::Column::Name,
+            cycles::Column::OwnedById,
+            cycles::Column::EndDate,
+        ])
+        .into_model::<CycleGetRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, site))
+}
+
+/// Soft-delete / archive stamps on one `cycles` row: the instance
+/// `save()` columns (`updated_at` + the CRUM `updated_by`) plus the
+/// stamped column.
+async fn stamp_cycle(
+    pool: &PgPool,
+    pk: &uuid::Uuid,
+    column: cycles::Column,
+    value: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    actor: &uuid::Uuid,
+    site: &str,
+) -> Result<(), Denial> {
+    cycles::Entity::update_many()
+        .col_expr(column, Expr::value(value))
+        .col_expr(cycles::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(cycles::Column::UpdatedById, Expr::value(*actor))
+        .filter(cycles::Column::Id.eq(*pk))
+        .exec(&orm(pool))
+        .await
+        .map(|_| ())
+        .map_err(|error| orm_write_error(error, site))
+}
+
+/// The `UserFavorite` queryset soft-delete of a cycle's favorites
+/// (`views/cycle.py:612,:790`): `entity_type='cycle'`, this pk, this
+/// project, live rows; `workspace_slug` adds the archive path's
+/// `workspace__slug` traversal.
+async fn soft_delete_cycle_favorites(
+    pool: &PgPool,
+    pk: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    workspace_slug: Option<&str>,
+    site: &str,
+) -> Result<(), Denial> {
+    let mut update = user_favorites::Entity::update_many()
+        .col_expr(user_favorites::Column::DeletedAt, Expr::value(micros_now()))
+        .filter(user_favorites::Column::EntityType.eq("cycle"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(*pk))
+        .filter(user_favorites::Column::ProjectId.eq(*project_id))
+        .filter(user_favorites::Column::DeletedAt.is_null());
+    if let Some(slug) = workspace_slug {
+        update = update.filter(
+            user_favorites::Column::WorkspaceId.in_subquery(
+                Query::select()
+                    .column(workspaces::Column::Id)
+                    .from(workspaces::Entity)
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        );
+    }
+    update
+        .exec(&orm(pool))
+        .await
+        .map(|_| ())
+        .map_err(|error| orm_write_error(error, site))
 }
 
 /// `DELETE .../cycles/<pk>/` (`views/cycle.py:571-613`): plain `.get` →
@@ -5860,36 +5172,31 @@ pub async fn delete_cycle_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id", c."name", c."owned_by_id" FROM "cycles" c
-           INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(pk)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-delete-get"))?;
+    let row = cycle_get(&pre.pool, slug, &project_id, pk, "cycle-delete-get").await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
-    let name = row_string(&row, "name", "cycle-delete-get")?;
-    let owned_by = row_uuid(&row, "owned_by_id", "cycle-delete-get")?;
+    let name = row.name;
+    let owned_by = row.owned_by_id;
     // Owner or project admin (role 20), else the view's own inline
     // 403 (`views/cycle.py:578-584` — a `Response`, not `PermissionDenied`,
     // so the `{"error": ...}` key, not the class body).
     if owned_by != pre.actor.id {
-        let admin: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "role" = 20 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL)"#,
-        )
-        .bind(workspace_id)
-        .bind(pre.actor.id)
-        .bind(project_id)
-        .fetch_one(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycle-delete-admin"))?;
-        if !admin {
+        let admin: Option<uuid::Uuid> = project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Id)
+            .filter(project_members::Column::WorkspaceId.eq(workspace_id))
+            .filter(project_members::Column::MemberId.eq(pre.actor.id))
+            .filter(project_members::Column::Role.eq(20i16))
+            .filter(project_members::Column::ProjectId.eq(project_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&orm(&pre.pool))
+            .await
+            .map_err(|error| db_error(error, "cycle-delete-admin"))?;
+        if admin.is_none() {
             return Err(Denial::ForbiddenError(
                 "Only admin or creator can delete the cycle".to_owned(),
             ));
@@ -5897,13 +5204,16 @@ pub async fn delete_cycle_inner(
     }
     // The payload reads the LIVE bridge issue ids before the delete
     // (`views/cycle.py:586-590`, default `-created_at` order).
-    let issues: Vec<uuid::Uuid> = sqlx::query_scalar(
-        r#"SELECT "issue_id" FROM "cycle_issues" WHERE "cycle_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(pk)
-    .fetch_all(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-delete-issues"))?;
+    let issues: Vec<uuid::Uuid> = cycle_issues::Entity::find()
+        .select_only()
+        .column(cycle_issues::Column::IssueId)
+        .filter(cycle_issues::Column::CycleId.eq(*pk))
+        .filter(cycle_issues::Column::DeletedAt.is_null())
+        .order_by_desc(cycle_issues::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "cycle-delete-issues"))?;
     let now = micros_now();
     let issue_texts: Vec<String> = issues.iter().map(|id| id.to_string()).collect();
     let issue_refs: Vec<&str> = issue_texts.iter().map(String::as_str).collect();
@@ -5920,16 +5230,16 @@ pub async fn delete_cycle_inner(
     // `auto_now` samples again) plus the CRUM `updated_by`.
     let deleted_at = micros_now();
     let updated_at = micros_now();
-    sqlx::query(
-        r#"UPDATE "cycles" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
+    stamp_cycle(
+        &pre.pool,
+        pk,
+        cycles::Column::DeletedAt,
+        Some(deleted_at),
+        updated_at,
+        &pre.actor.id,
+        "cycle-delete-soft",
     )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-delete-soft"))?;
+    .await?;
     enqueue_soft_delete(&pre.pool, "cycle", pk).await;
     // The eager `soft_delete_related_objects` cascade (`cycle.delete()`
     // at `views/cycle.py:610` → `bgtasks/deletion_task.py:18-97`): the
@@ -5939,23 +5249,14 @@ pub async fn delete_cycle_inner(
     // soft-deleted bridge (all filter `deleted_at IS NULL`), so a
     // `deleted_at`-only stamp is equivalent. (The `UserFavorite` cleanup
     // below IS project-scoped, per `views/cycle.py:612`.)
-    sqlx::query(
-        r#"UPDATE "cycle_issues" SET "deleted_at" = $1 WHERE "cycle_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(micros_now())
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-delete-bridges"))?;
-    sqlx::query(
-        r#"UPDATE "user_favorites" SET "deleted_at" = $1 WHERE "entity_type" = 'cycle' AND "entity_identifier" = $2 AND "project_id" = $3 AND "deleted_at" IS NULL"#,
-    )
-    .bind(micros_now())
-    .bind(pk)
-    .bind(project_id)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-delete-favorites"))?;
+    cycle_issues::Entity::update_many()
+        .col_expr(cycle_issues::Column::DeletedAt, Expr::value(micros_now()))
+        .filter(cycle_issues::Column::CycleId.eq(*pk))
+        .filter(cycle_issues::Column::DeletedAt.is_null())
+        .exec(&orm(&pre.pool))
+        .await
+        .map_err(|error| orm_write_error(error, "cycle-delete-bridges"))?;
+    soft_delete_cycle_favorites(&pre.pool, pk, &project_id, None, "cycle-delete-favorites").await?;
     Ok(no_content())
 }
 
@@ -5996,25 +5297,14 @@ pub async fn list_cycle_issues_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let order = resolve_cycle_issue_order(query_last(query, "order_by").as_deref());
-    let sql = pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_list_get_sql(&order);
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycle-issues-list"))?;
+    let scope = TenantScope { slug, project_id };
+    let stmt = queries::cycle_issue_list_get(&order, &scope, *cycle_id);
+    let rows = fetch_rows(&pre.pool, &stmt, "cycle-issues-list").await?;
     // The `url` needs the project identifier (plain fetch, deliberately
     // unfiltered: the list queryset `select_related("project")` caches the
     // row, so a soft-deleted project still renders its url — verified live
     // 200 against Django).
-    let identifier: Option<String> =
-        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|error| db_error(error, "cycle-issues-identifier"))?
-            .flatten();
+    let identifier = project_identifier(&pre.pool, &project_id, "cycle-issues-identifier").await?;
     let total = envelope_total(&order, &rows)?;
     let window = page_window(query, rows.len())?;
     let fields = fields_param(query, "fields");
@@ -6181,7 +5471,7 @@ pub struct CreatedBridge {
 }
 
 /// One live bridge fetched for the move path (`views/cycle.py:946`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct ExistingBridge {
     pub id: uuid::Uuid,
     pub issue_id: uuid::Uuid,
@@ -6254,22 +5544,19 @@ pub async fn add_cycle_issues_inner(
     // Order matters: Python runs `Cycle.objects.get` (404) and the
     // completed gate BEFORE the `issue_id__in` filter validates UUIDs
     // (400), so the coercion runs after both (`views/cycle.py:934-946`).
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id", c."workspace_id", c."end_date" FROM "cycles" c
-           INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
+    let row = cycle_get(
+        &pre.pool,
+        slug,
+        &project_id,
+        cycle_id,
+        "cycle-issues-add-cycle",
     )
-    .bind(slug)
-    .bind(project_id)
-    .bind(cycle_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-issues-add-cycle"))?;
+    .await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
-    let cycle_workspace_id = row_uuid(&row, "workspace_id", "cycle-issues-add-cycle")?;
-    if let Some(end_date) = row_datetime_opt(&row, "end_date", "cycle-issues-add-cycle")? {
+    let cycle_workspace_id = row.workspace_id;
+    if let Some(end_date) = row.end_date {
         if end_date < micros_now() {
             let body = format!(
                 "{{\"code\":{},\"message\":{}}}",
@@ -6297,25 +5584,21 @@ pub async fn add_cycle_issues_inner(
     let existing: Vec<ExistingBridge> = if wanted.is_empty() {
         Vec::new()
     } else {
-        sqlx::query(
-            r#"SELECT "id", "issue_id", "cycle_id" FROM "cycle_issues"
-               WHERE "cycle_id" <> $1 AND "issue_id" = ANY($2) AND "deleted_at" IS NULL
-               ORDER BY "created_at" DESC"#,
-        )
-        .bind(cycle_id)
-        .bind(&wanted)
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycle-issues-add-existing"))?
-        .iter()
-        .map(|row| {
-            Ok(ExistingBridge {
-                id: row_uuid(row, "id", "cycle-issues-add-existing")?,
-                issue_id: row_uuid(row, "issue_id", "cycle-issues-add-existing")?,
-                cycle_id: row_uuid(row, "cycle_id", "cycle-issues-add-existing")?,
-            })
-        })
-        .collect::<Result<Vec<_>, Denial>>()?
+        cycle_issues::Entity::find()
+            .select_only()
+            .columns([
+                cycle_issues::Column::Id,
+                cycle_issues::Column::IssueId,
+                cycle_issues::Column::CycleId,
+            ])
+            .filter(cycle_issues::Column::CycleId.ne(*cycle_id))
+            .filter(cycle_issues::Column::IssueId.is_in(wanted.iter().copied()))
+            .filter(cycle_issues::Column::DeletedAt.is_null())
+            .order_by_desc(cycle_issues::Column::CreatedAt)
+            .into_model::<ExistingBridge>()
+            .all(&orm(&pre.pool))
+            .await
+            .map_err(|error| db_error(error, "cycle-issues-add-existing"))?
     };
     // `existing_issues`: the bridge issue ids whose `str()` is `in` the raw
     // `issues` (Python `==`: strings only — a raw `5` never matches).
@@ -6376,39 +5659,11 @@ pub async fn add_cycle_issues_inner(
         });
     }
     for batch in bridges.chunks(10) {
-        let ids: Vec<uuid::Uuid> = batch.iter().map(|b| b.id).collect();
-        let created: Vec<chrono::DateTime<chrono::Utc>> =
-            batch.iter().map(|b| b.created_at).collect();
-        let updated: Vec<chrono::DateTime<chrono::Utc>> =
-            batch.iter().map(|b| b.updated_at).collect();
-        // The ORM compiles `issue_id=<raw>` through
-        // `UUIDField.get_db_prep_value` → `to_python` at INSERT as well as
-        // at the filter, so ints/bools arrive folded (`UUID(int=...)`): a
-        // folded miss is an FK 400, a live clash is ignored — never a
-        // `uuid_in` 500. NULL binds NULL (not-null → the same 400).
-        let issue_ids: Vec<Option<uuid::Uuid>> = batch
-            .iter()
-            .map(|b| match &b.issue_raw {
-                JVal::Null => None,
-                _ => Some(b.issue_id),
-            })
-            .collect();
-        sqlx::query(
-            r#"INSERT INTO "cycle_issues" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                     "project_id", "workspace_id", "cycle_id", "issue_id")
-               SELECT unnest($1::uuid[]), unnest($2::timestamptz[]), unnest($3::timestamptz[]), NULL, NULL, NULL, $4, $5, $6, unnest($7::uuid[])
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&ids)
-        .bind(&created)
-        .bind(&updated)
-        .bind(project_id)
-        .bind(cycle_workspace_id)
-        .bind(cycle_id)
-        .bind(&issue_ids)
-        .execute(&pre.pool)
-        .await
-        .map_err(|error| db_write_error(error, "cycle-issues-add-insert"))?;
+        let insert = bridge_insert_batch(batch, &project_id, &cycle_workspace_id, cycle_id);
+        orm(&pre.pool)
+            .execute(DbBackend::Postgres.build(&insert))
+            .await
+            .map_err(|error| orm_write_error(error, "cycle-issues-add-insert"))?;
     }
     // The move: EVERY fetched bridge re-points at this cycle
     // (`bulk_update(["cycle_id"])` touches only `cycle_id`, not
@@ -6416,12 +5671,7 @@ pub async fn add_cycle_issues_inner(
     let mut activity: Vec<String> = Vec::with_capacity(existing.len());
     if !existing.is_empty() {
         let move_ids: Vec<uuid::Uuid> = existing.iter().map(|b| b.id).collect();
-        sqlx::query(r#"UPDATE "cycle_issues" SET "cycle_id" = $1 WHERE "id" = ANY($2)"#)
-            .bind(cycle_id)
-            .bind(&move_ids)
-            .execute(&pre.pool)
-            .await
-            .map_err(|error| db_write_error(error, "cycle-issues-add-move"))?;
+        move_bridges(&pre.pool, &move_ids, cycle_id, "cycle-issues-add-move").await?;
         for bridge in &existing {
             activity.push(format!(
                 "{{\"old_cycle_id\": {}, \"new_cycle_id\": {}, \"issue_id\": {}}}",
@@ -6464,17 +5714,14 @@ pub async fn add_cycle_issues_inner(
     enqueue_best_effort(&pre.pool, &job).await;
     // The FULL bridge list (`self.get_queryset()`, including pre-existing
     // rows), 200.
-    let sql = pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_queryset_sql(
-        &pidash_db::v1_cycles_modules::cycle_queries::OrderBy::default_cycle(),
+    let scope = TenantScope { slug, project_id };
+    let stmt = queries::cycle_issue_queryset(
+        &queries::OrderBy::default_cycle(),
+        &scope,
+        *cycle_id,
+        pre.actor.id,
     );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .bind(pre.actor.id)
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "cycle-issues-add-reread"))?;
+    let rows = fetch_rows(&pre.pool, &stmt, "cycle-issues-add-reread").await?;
     let mut results = Vec::with_capacity(rows.len());
     for row in &rows {
         let detail = BridgeDetail::decode(row, "cycle-issues-add-reread")?
@@ -6484,6 +5731,77 @@ pub async fn add_cycle_issues_inner(
     serde_json::to_string(&Value::Array(results))
         .map(json_ok)
         .map_err(|error| db_error(error, "cycle-issues-add-render"))
+}
+
+/// One `bulk_create(..., ignore_conflicts=True)` batch as a multi-row
+/// `INSERT ... ON CONFLICT DO NOTHING`: per-row `pre_save` stamps, NULL
+/// audit (no `save()`/CRUM), the URL project id, the CYCLE's workspace.
+///
+/// The ORM compiles `issue_id=<raw>` through
+/// `UUIDField.get_db_prep_value` → `to_python` at INSERT as well as at
+/// the filter, so ints/bools arrive folded (`UUID(int=...)`): a folded
+/// miss is an FK 400, a live clash is ignored — never a `uuid_in` 500.
+/// A JSON null binds NULL (not-null → the same 400), which is why this is
+/// a sea-query insert and not an `ActiveModel` (whose `issue_id` cannot be
+/// null).
+fn bridge_insert_batch(
+    batch: &[CreatedBridge],
+    project_id: &uuid::Uuid,
+    workspace_id: &uuid::Uuid,
+    cycle_id: &uuid::Uuid,
+) -> sea_orm::sea_query::InsertStatement {
+    let mut insert = Query::insert();
+    insert
+        .into_table(cycle_issues::Entity)
+        .columns([
+            cycle_issues::Column::Id,
+            cycle_issues::Column::CreatedAt,
+            cycle_issues::Column::UpdatedAt,
+            cycle_issues::Column::CreatedById,
+            cycle_issues::Column::UpdatedById,
+            cycle_issues::Column::DeletedAt,
+            cycle_issues::Column::ProjectId,
+            cycle_issues::Column::WorkspaceId,
+            cycle_issues::Column::CycleId,
+            cycle_issues::Column::IssueId,
+        ])
+        .on_conflict(OnConflict::new().do_nothing().to_owned());
+    for bridge in batch {
+        let issue_id: Option<uuid::Uuid> = match &bridge.issue_raw {
+            JVal::Null => None,
+            _ => Some(bridge.issue_id),
+        };
+        insert.values_panic([
+            bridge.id.into(),
+            bridge.created_at.into(),
+            bridge.updated_at.into(),
+            Option::<uuid::Uuid>::None.into(),
+            Option::<uuid::Uuid>::None.into(),
+            Option::<chrono::DateTime<chrono::Utc>>::None.into(),
+            (*project_id).into(),
+            (*workspace_id).into(),
+            (*cycle_id).into(),
+            issue_id.into(),
+        ]);
+    }
+    insert
+}
+
+/// `bulk_update(["cycle_id"])`: re-point the given bridges at `cycle_id`,
+/// touching only that column (no `updated_at`/audit).
+async fn move_bridges(
+    pool: &PgPool,
+    bridge_ids: &[uuid::Uuid],
+    cycle_id: &uuid::Uuid,
+    site: &str,
+) -> Result<(), Denial> {
+    cycle_issues::Entity::update_many()
+        .col_expr(cycle_issues::Column::CycleId, Expr::value(*cycle_id))
+        .filter(cycle_issues::Column::Id.is_in(bridge_ids.iter().copied()))
+        .exec(&orm(pool))
+        .await
+        .map(|_| ())
+        .map_err(|error| orm_write_error(error, site))
 }
 
 /// Python `in` of a `str()` bridge id against the raw `issues` value:
@@ -6617,19 +5935,9 @@ pub async fn get_cycle_issue_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT ci."id", ci."created_at", ci."updated_at", ci."deleted_at", ci."created_by_id", ci."updated_by_id",
-                  ci."project_id", ci."workspace_id", ci."cycle_id", ci."issue_id" FROM "cycle_issues" ci
-           INNER JOIN "workspaces" w ON ci."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND ci."project_id" = $2 AND ci."cycle_id" = $3 AND ci."issue_id" = $4 AND ci."deleted_at" IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(cycle_id)
-    .bind(issue_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-issue-detail-get"))?;
+    let scope = TenantScope { slug, project_id };
+    let stmt = queries::cycle_issue_detail_lookup(&scope, *cycle_id, *issue_id);
+    let row = fetch_row(&pre.pool, &stmt, "cycle-issue-detail-get").await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -6679,18 +5987,9 @@ pub async fn remove_cycle_issue_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT ci."id", ci."cycle_id", ci."issue_id" FROM "cycle_issues" ci
-           INNER JOIN "workspaces" w ON ci."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND ci."project_id" = $2 AND ci."cycle_id" = $3 AND ci."issue_id" = $4 AND ci."deleted_at" IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(cycle_id)
-    .bind(issue_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-issue-remove-get"))?;
+    let scope = TenantScope { slug, project_id };
+    let stmt = queries::cycle_issue_detail_lookup(&scope, *cycle_id, *issue_id);
+    let row = fetch_row(&pre.pool, &stmt, "cycle-issue-remove-get").await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -6702,16 +6001,14 @@ pub async fn remove_cycle_issue_inner(
     // `auto_now` samples again) plus the CRUM `updated_by`.
     let deleted_at = micros_now();
     let updated_at = micros_now();
-    sqlx::query(
-        r#"UPDATE "cycle_issues" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
-    )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(bridge_id)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-issue-remove-soft"))?;
+    cycle_issues::Entity::update_many()
+        .col_expr(cycle_issues::Column::DeletedAt, Expr::value(deleted_at))
+        .col_expr(cycle_issues::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(cycle_issues::Column::UpdatedById, Expr::value(pre.actor.id))
+        .filter(cycle_issues::Column::Id.eq(bridge_id))
+        .exec(&orm(&pre.pool))
+        .await
+        .map_err(|error| orm_write_error(error, "cycle-issue-remove-soft"))?;
     enqueue_soft_delete(&pre.pool, "cycleissue", &bridge_id).await;
     let job = pidash_jobs::v1_cycles_modules::publish::cycle_issue_removed_job(
         &cycle_id.to_string(),
@@ -6755,25 +6052,14 @@ pub async fn archive_cycle_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id", c."end_date" FROM "cycles" c
-           INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(pk)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-archive-get"))?;
+    let row = cycle_get(&pre.pool, slug, &project_id, pk, "cycle-archive-get").await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
     // `if cycle.end_date >= timezone.now():` — a null `end_date` raises
     // `TypeError` (None >= datetime), which `handle_exception` does not
     // catch → the generic 500 (`views/cycle.py:770`).
-    let end_date = row_datetime_opt(&row, "end_date", "cycle-archive-get")?;
-    let Some(end_date) = end_date else {
+    let Some(end_date) = row.end_date else {
         return Err(Denial::ServerError);
     };
     if end_date >= micros_now() {
@@ -6785,29 +6071,24 @@ pub async fn archive_cycle_inner(
     // plus the CRUM `updated_by`.
     let archived_at = micros_now();
     let updated_at = micros_now();
-    sqlx::query(
-        r#"UPDATE "cycles" SET "archived_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
+    stamp_cycle(
+        &pre.pool,
+        pk,
+        cycles::Column::ArchivedAt,
+        Some(archived_at),
+        updated_at,
+        &pre.actor.id,
+        "cycle-archive-stamp",
     )
-    .bind(archived_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-archive-stamp"))?;
-    sqlx::query(
-        r#"UPDATE "user_favorites" SET "deleted_at" = $1
-           WHERE "entity_type" = 'cycle' AND "entity_identifier" = $2 AND "project_id" = $3
-             AND "workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $4)
-             AND "deleted_at" IS NULL"#,
+    .await?;
+    soft_delete_cycle_favorites(
+        &pre.pool,
+        pk,
+        &project_id,
+        Some(slug),
+        "cycle-archive-favorites",
     )
-    .bind(micros_now())
-    .bind(pk)
-    .bind(project_id)
-    .bind(slug)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-archive-favorites"))?;
+    .await?;
     Ok(no_content())
 }
 
@@ -6838,30 +6119,21 @@ pub async fn unarchive_cycle_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id" FROM "cycles" c
-           INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(pk)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-unarchive-get"))?;
+    let row = cycle_get(&pre.pool, slug, &project_id, pk, "cycle-unarchive-get").await?;
     if row.is_none() {
         return Err(Denial::NotFound);
     }
     let now = micros_now();
-    sqlx::query(
-        r#"UPDATE "cycles" SET "archived_at" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+    stamp_cycle(
+        &pre.pool,
+        pk,
+        cycles::Column::ArchivedAt,
+        None,
+        now,
+        &pre.actor.id,
+        "cycle-unarchive-stamp",
     )
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_write_error(error, "cycle-unarchive-stamp"))?;
+    .await?;
     Ok(no_content())
 }
 
@@ -6916,7 +6188,7 @@ pub fn chart_number_value(number: ChartNumber) -> Value {
 /// missing). `completed` carries one entry per completion in distribution
 /// order (date-ascending, physical ties); `None` dates are uncompleted
 /// rows, skipped like Python's `is not None` guard. Future dates (past
-/// `today`, the actor-zone day — see the caller) render `null`.
+/// `today`, the UTC day — see the caller) render `null`.
 pub fn burndown_chart(
     total: ChartNumber,
     completed: &[(Option<chrono::NaiveDate>, ChartNumber)],
@@ -6957,15 +6229,92 @@ pub fn burndown_chart(
 /// The burndown scope: `Issue.issue_objects` (live, non-triage,
 /// non-archived, project-live, non-draft) bridged live to this cycle in
 /// this project/workspace (`analytics_plot.py:171-196`).
-pub const BURNDOWN_SCOPE_FROM: &str = r#"FROM "issues" i
-     INNER JOIN "cycle_issues" ci ON ci."issue_id" = i."id" AND ci."cycle_id" = $3 AND ci."deleted_at" IS NULL
-     INNER JOIN "workspaces" w ON w."id" = i."workspace_id"
-     INNER JOIN "projects" p ON p."id" = i."project_id"
-     LEFT JOIN "states" st ON st."id" = i."state_id""#;
-pub const BURNDOWN_SCOPE_WHERE: &str = r#"i."deleted_at" IS NULL
-     AND NOT (st."group" = 'triage' AND st."group" IS NOT NULL)
-     AND i."archived_at" IS NULL AND p."archived_at" IS NULL AND NOT i."is_draft"
-     AND i."project_id" = $2 AND w."slug" = $1"#;
+fn burndown_col(table: &str, column: &str) -> Expr {
+    Expr::col((Alias::new(table), Alias::new(column)))
+}
+
+/// Actor-zone truncating date of `completed_at`:
+/// `timezone(CAST(<tz> AS text), "i"."completed_at")::date`.
+fn burndown_day_expr(actor_tz: &str) -> SimpleExpr {
+    let timezone: SimpleExpr = Func::cust(Alias::new("timezone"))
+        .args([
+            Expr::val(actor_tz).cast_as(Alias::new("text")),
+            burndown_col("i", "completed_at").into(),
+        ])
+        .into();
+    timezone.cast_as(Alias::new("date"))
+}
+
+/// `estimate_points."value"` cast to double (the estimate math casts the
+/// `value` CharField to float; `::double precision` is the same type).
+fn burndown_value_expr() -> SimpleExpr {
+    burndown_col("ep", "value").cast_as(Alias::new("double precision"))
+}
+
+/// Shared `FROM`/`WHERE` of the three burndown reads: outer scope
+/// (`"issues" AS "i"`, live bridge in this cycle) plus the tenant
+/// scope. The `cycle_id`/`deleted_at` bridge predicates ride in the
+/// `WHERE` (the `FROM` they came from was an inner join, so the
+/// placement is equivalent).
+fn burndown_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    cycle_id: &uuid::Uuid,
+    with_estimate: bool,
+) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.from_as(Alias::new("issues"), Alias::new("i"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        Alias::new("cycle_issues"),
+        Alias::new("ci"),
+        burndown_col("ci", "issue_id").equals((Alias::new("i"), Alias::new("id"))),
+    );
+    sel.join_as(
+        JoinType::InnerJoin,
+        Alias::new("workspaces"),
+        Alias::new("w"),
+        burndown_col("w", "id").equals((Alias::new("i"), Alias::new("workspace_id"))),
+    );
+    sel.join_as(
+        JoinType::InnerJoin,
+        Alias::new("projects"),
+        Alias::new("p"),
+        burndown_col("p", "id").equals((Alias::new("i"), Alias::new("project_id"))),
+    );
+    sel.join_as(
+        JoinType::LeftJoin,
+        Alias::new("states"),
+        Alias::new("st"),
+        burndown_col("st", "id").equals((Alias::new("i"), Alias::new("state_id"))),
+    );
+    if with_estimate {
+        sel.join_as(
+            JoinType::InnerJoin,
+            Alias::new("estimate_points"),
+            Alias::new("ep"),
+            burndown_col("ep", "id").equals((Alias::new("i"), Alias::new("estimate_point_id"))),
+        );
+    }
+    sel.cond_where(
+        Condition::all()
+            .add(burndown_col("i", "deleted_at").is_null())
+            .add(
+                Condition::all()
+                    .add(burndown_col("st", "group").eq("triage"))
+                    .add(burndown_col("st", "group").is_not_null())
+                    .not(),
+            )
+            .add(burndown_col("i", "archived_at").is_null())
+            .add(burndown_col("p", "archived_at").is_null())
+            .add(burndown_col("i", "is_draft").not())
+            .add(burndown_col("i", "project_id").eq(*project_id))
+            .add(burndown_col("w", "slug").eq(slug))
+            .add(burndown_col("ci", "cycle_id").eq(*cycle_id))
+            .add(burndown_col("ci", "deleted_at").is_null()),
+    );
+    sel
+}
 
 /// Points distribution: one `(date, value)` per estimated issue, date
 /// ascending with physical ties (Django's `.order_by("date")` over the
@@ -6979,30 +6328,17 @@ pub async fn fetch_burndown_points(
     cycle_id: &uuid::Uuid,
     actor_tz: &Tz,
 ) -> Result<Vec<(Option<chrono::NaiveDate>, ChartNumber)>, Denial> {
-    let sql = format!(
-        "SELECT (i.\"completed_at\" AT TIME ZONE $4)::date AS d, CAST(ep.\"value\" AS FLOAT) AS v \
-         {from} \
-         INNER JOIN \"estimate_points\" ep ON ep.\"id\" = i.\"estimate_point_id\" \
-         WHERE {scope} ORDER BY d, i.\"ctid\"",
-        from = BURNDOWN_SCOPE_FROM,
-        scope = BURNDOWN_SCOPE_WHERE,
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .bind(actor_tz.name())
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "burndown-points"))?;
+    let day = burndown_day_expr(actor_tz.name());
+    let mut sel = burndown_select(slug, project_id, cycle_id, true);
+    sel.expr_as(day.clone(), Alias::new("d"));
+    sel.expr_as(burndown_value_expr(), Alias::new("v"));
+    sel.order_by_expr(day, Order::Asc);
+    sel.order_by((Alias::new("i"), Alias::new("ctid")), Order::Asc);
+    let rows = fetch_rows(pool, &sel, "burndown-points").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let day: Option<chrono::NaiveDate> = row
-            .try_get("d")
-            .map_err(|error| db_error(error, "burndown-points"))?;
-        let value: Option<f64> = row
-            .try_get("v")
-            .map_err(|error| db_error(error, "burndown-points"))?;
+        let day = row_date_opt(row, "d", "burndown-points")?;
+        let value = row_f64_opt(row, "v", "burndown-points")?;
         if let Some(number) = value {
             out.push((day, ChartNumber::Float(number)));
         }
@@ -7020,26 +6356,14 @@ pub async fn fetch_burndown_points_total(
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
 ) -> Result<ChartNumber, Denial> {
-    let sql = format!(
-        "SELECT CAST(ep.\"value\" AS FLOAT) AS v {from} \
-         INNER JOIN \"estimate_points\" ep ON ep.\"id\" = i.\"estimate_point_id\" \
-         WHERE {scope} ORDER BY i.\"created_at\" DESC",
-        from = BURNDOWN_SCOPE_FROM,
-        scope = BURNDOWN_SCOPE_WHERE,
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "burndown-points-total"))?;
+    let mut sel = burndown_select(slug, project_id, cycle_id, true);
+    sel.expr_as(burndown_value_expr(), Alias::new("v"));
+    sel.order_by((Alias::new("i"), Alias::new("created_at")), Order::Desc);
+    let rows = fetch_rows(pool, &sel, "burndown-points-total").await?;
     let mut total = ChartNumber::Int(0);
     let mut seen = false;
     for row in &rows {
-        let value: Option<f64> = row
-            .try_get("v")
-            .map_err(|error| db_error(error, "burndown-points-total"))?;
+        let value = row_f64_opt(row, "v", "burndown-points-total")?;
         if let Some(number) = value {
             total = chart_add(total, ChartNumber::Float(number));
             seen = true;
@@ -7062,25 +6386,23 @@ pub async fn fetch_burndown_issues(
     cycle_id: &uuid::Uuid,
     actor_tz: &Tz,
 ) -> Result<Vec<(Option<chrono::NaiveDate>, ChartNumber)>, Denial> {
-    let sql = format!(
-        "SELECT (i.\"completed_at\" AT TIME ZONE $4)::date AS d, COUNT(*) AS n {from} \
-         WHERE {scope} AND i.\"completed_at\" IS NOT NULL GROUP BY d ORDER BY d",
-        from = BURNDOWN_SCOPE_FROM,
-        scope = BURNDOWN_SCOPE_WHERE,
+    let day = burndown_day_expr(actor_tz.name());
+    let mut sel = burndown_select(slug, project_id, cycle_id, false);
+    sel.expr_as(day.clone(), Alias::new("d"));
+    sel.expr_as(
+        SimpleExpr::from(Func::count(Expr::col(Asterisk))),
+        Alias::new("n"),
     );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .bind(actor_tz.name())
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "burndown-issues"))?;
+    sel.cond_where(burndown_col("i", "completed_at").is_not_null());
+    // `GROUP BY "d"` (the output alias), not the day expression: the
+    // bound zone repeats per appearance as a distinct parameter, so
+    // grouping by the expression copy fails expression matching.
+    sel.add_group_by([SimpleExpr::from(Expr::col(Alias::new("d")))]);
+    sel.order_by_expr(SimpleExpr::from(Expr::col(Alias::new("d"))), Order::Asc);
+    let rows = fetch_rows(pool, &sel, "burndown-issues").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let day: Option<chrono::NaiveDate> = row
-            .try_get("d")
-            .map_err(|error| db_error(error, "burndown-issues"))?;
+        let day = row_date_opt(row, "d", "burndown-issues")?;
         let count: i64 = row_i64(row, "n", "burndown-issues")?;
         out.push((day, ChartNumber::Int(count)));
     }
@@ -7132,17 +6454,14 @@ pub async fn transfer_cycle_issues_inner(
     }
     let file_truthy = JVal::Bool(true);
     let new_raw = new_raw.unwrap_or(&file_truthy);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id", c."end_date" FROM "cycles" c
-           INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
+    let row = fetch_entity_row(
+        &pre.pool,
+        live_cycle_in_tenant(slug, &project_id, cycle_id)
+            .select_only()
+            .columns([cycles::Column::Id, cycles::Column::EndDate]),
+        "transfer-old-get",
     )
-    .bind(slug)
-    .bind(project_id)
-    .bind(cycle_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "transfer-old-get"))?;
+    .await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -7171,13 +6490,13 @@ pub async fn transfer_cycle_issues_inner(
     let new_cycle_text = raw_id_text(new_raw)?;
     // Target lookup + guard (`:59-66`): missing → 500 (ported bug T1),
     // ended → 400, dateless → proceeds.
-    let target: Option<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_CYCLE_LOOKUP_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(new_cycle_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-target"))?;
+    let scope = TenantScope { slug, project_id };
+    let target = fetch_row(
+        &pre.pool,
+        &queries::transfer_cycle_lookup(&scope, new_cycle_id),
+        "transfer-target",
+    )
+    .await?;
     let facts = shapes::NewCycleFacts {
         exists: target.is_some(),
         end_epoch_micros: match target {
@@ -7194,13 +6513,12 @@ pub async fn transfer_cycle_issues_inner(
     }
     // Source recount (`:68-143`): missing → the 400 (unreachable past the
     // view's `.get`, but ported).
-    let recount: Option<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_OLD_CYCLE_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-recount"))?;
+    let recount = fetch_row(
+        &pre.pool,
+        &queries::transfer_old_cycle(&scope, *cycle_id),
+        "transfer-recount",
+    )
+    .await?;
     let Some(recount) = recount else {
         return Err(Denial::BadError(
             shapes::TRANSFER_SOURCE_CYCLE_NOT_FOUND_ERROR.to_owned(),
@@ -7217,24 +6535,30 @@ pub async fn transfer_cycle_issues_inner(
     let start_date = row_datetime_opt(&recount, "start_date", "transfer-recount")?;
     let end_date = row_datetime_opt(&recount, "end_date", "transfer-recount")?;
     // `burndown_plot` compares each chart day against
-    // `timezone.now().date()` with the ACTOR zone active
-    // (`TimezoneMixin`, `analytics_plot.py:247-257`) — not the UTC day.
-    let today = micros_now().with_timezone(&timezone).date_naive();
+    // `timezone.now().date()`, which is always the UTC day under
+    // `USE_TZ=True` — `TimezoneMixin` activation has no effect on it
+    // (`analytics_plot.py:246,260`).
+    let today = micros_now().date_naive();
     // Estimate gate (`:153-159`): the EXISTS the snapshot branch reads.
-    let estimate_type: bool = sqlx::query_scalar::<_, i32>(queries::TRANSFER_ESTIMATE_TYPE_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-estimate-gate"))?
-        .is_some();
+    let estimate_type: bool = fetch_row(
+        &pre.pool,
+        &queries::transfer_estimate_type(&scope),
+        "transfer-estimate-gate",
+    )
+    .await?
+    .is_some();
     // Issue distributions (`:338-410`, always loaded).
     let label_issues = fetch_label_issue_rows(
         &pre.pool,
         slug,
         &project_id,
         cycle_id,
-        queries::TRANSFER_LABEL_ISSUE_SQL,
+        queries::transfer_distribution(
+            &scope,
+            *cycle_id,
+            queries::Distribution::Label,
+            queries::Measure::Issues,
+        ),
     )
     .await?;
     let assignee_issues = fetch_assignee_issue_rows(
@@ -7242,7 +6566,12 @@ pub async fn transfer_cycle_issues_inner(
         slug,
         &project_id,
         cycle_id,
-        queries::TRANSFER_ASSIGNEE_ISSUE_SQL,
+        queries::transfer_distribution(
+            &scope,
+            *cycle_id,
+            queries::Distribution::Assignee,
+            queries::Measure::Issues,
+        ),
     )
     .await?;
     let issues_burndown =
@@ -7262,7 +6591,12 @@ pub async fn transfer_cycle_issues_inner(
             slug,
             &project_id,
             cycle_id,
-            queries::TRANSFER_LABEL_ESTIMATE_SQL,
+            queries::transfer_distribution(
+                &scope,
+                *cycle_id,
+                queries::Distribution::Label,
+                queries::Measure::Estimates,
+            ),
         )
         .await?
     } else {
@@ -7274,7 +6608,12 @@ pub async fn transfer_cycle_issues_inner(
             slug,
             &project_id,
             cycle_id,
-            queries::TRANSFER_ASSIGNEE_ESTIMATE_SQL,
+            queries::transfer_distribution(
+                &scope,
+                *cycle_id,
+                queries::Distribution::Assignee,
+                queries::Measure::Estimates,
+            ),
         )
         .await?
     } else {
@@ -7307,22 +6646,21 @@ pub async fn transfer_cycle_issues_inner(
     });
     // `current_cycle.save(update_fields=["progress_snapshot"])`: the column
     // alone — `updated_at`/`updated_by` do NOT move.
-    sqlx::query(r#"UPDATE "cycles" SET "progress_snapshot" = $1 WHERE "id" = $2"#)
-        .bind(&snapshot)
-        .bind(cycle_id)
-        .execute(&pre.pool)
+    cycles::Entity::update_many()
+        .col_expr(cycles::Column::ProgressSnapshot, Expr::value(snapshot))
+        .filter(cycles::Column::Id.eq(*cycle_id))
+        .exec(&orm(&pre.pool))
         .await
-        .map_err(|error| db_write_error(error, "transfer-snapshot"))?;
+        .map_err(|error| orm_write_error(error, "transfer-snapshot"))?;
     // The move (`:437-456`): open-state bridges re-point at the target in
     // `-created_at` select order; `bulk_update(["cycle_id"])` touches only
     // `cycle_id`.
-    let moves: Vec<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_MOVE_SELECT_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-moves"))?;
+    let moves = fetch_rows(
+        &pre.pool,
+        &queries::transfer_move_select(&scope, *cycle_id),
+        "transfer-moves",
+    )
+    .await?;
     let mut move_ids: Vec<uuid::Uuid> = Vec::with_capacity(moves.len());
     let mut activity: Vec<pidash_jobs::v1_cycles_modules::publish::CycleMove> =
         Vec::with_capacity(moves.len());
@@ -7337,12 +6675,7 @@ pub async fn transfer_cycle_issues_inner(
         ));
     }
     if !move_ids.is_empty() {
-        sqlx::query(r#"UPDATE "cycle_issues" SET "cycle_id" = $1 WHERE "id" = ANY($2)"#)
-            .bind(new_cycle_id)
-            .bind(&move_ids)
-            .execute(&pre.pool)
-            .await
-            .map_err(|error| db_write_error(error, "transfer-move-update"))?;
+        move_bridges(&pre.pool, &move_ids, &new_cycle_id, "transfer-move-update").await?;
     }
     let job = pidash_jobs::v1_cycles_modules::publish::cycle_issues_transferred_job(
         &pre.actor.id.to_string(),
@@ -7370,19 +6703,13 @@ pub fn coerce_transfer_target(value: &JVal) -> Result<Option<uuid::Uuid>, Denial
 /// One transfer distribution fetch: label issue rows.
 pub async fn fetch_label_issue_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::LabelIssueRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::LabelIssueRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(LabelIssueRow {
@@ -7400,19 +6727,13 @@ pub async fn fetch_label_issue_rows(
 /// One transfer distribution fetch: assignee issue rows.
 pub async fn fetch_assignee_issue_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::AssigneeIssueRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::AssigneeIssueRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(AssigneeIssueRow {
@@ -7431,19 +6752,13 @@ pub async fn fetch_assignee_issue_rows(
 /// One transfer distribution fetch: label estimate rows.
 pub async fn fetch_label_estimate_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::LabelEstimateRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::LabelEstimateRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(LabelEstimateRow {
@@ -7461,19 +6776,13 @@ pub async fn fetch_label_estimate_rows(
 /// One transfer distribution fetch: assignee estimate rows.
 pub async fn fetch_assignee_estimate_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::AssigneeEstimateRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::AssigneeEstimateRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(AssigneeEstimateRow {
@@ -7551,7 +6860,7 @@ pub async fn list_cycles(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((slug, project_id)): Path<(String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     match list_cycles_inner(&state, &headers, &slug, &project_id, &query).await {
         Ok(response) => response,
@@ -7579,7 +6888,7 @@ pub async fn retrieve_cycle(
     uri: Uri,
     headers: HeaderMap,
     Path((slug, project_id, pk)): Path<(String, String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     let Ok(pk) = path_uuid(&pk) else {
         return proxy_through(state, method, uri, headers, Bytes::new()).await;
@@ -7632,7 +6941,7 @@ pub async fn list_cycle_issues(
     uri: Uri,
     headers: HeaderMap,
     Path((slug, project_id, cycle_id)): Path<(String, String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     let Ok(cycle_id) = path_uuid(&cycle_id) else {
         return proxy_through(state, method, uri, headers, Bytes::new()).await;
@@ -7668,7 +6977,7 @@ pub async fn get_cycle_issue(
     uri: Uri,
     headers: HeaderMap,
     Path((slug, project_id, cycle_id, issue_id)): Path<(String, String, String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     let (Ok(cycle_id), Ok(issue_id)) = (path_uuid(&cycle_id), path_uuid(&issue_id)) else {
         return proxy_through(state, method, uri, headers, Bytes::new()).await;
@@ -7751,7 +7060,7 @@ pub async fn list_archived_cycles(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((slug, project_id)): Path<(String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     match list_archived_cycles_inner(&state, &headers, &slug, &project_id, &query).await {
         Ok(response) => response,
@@ -7820,7 +7129,30 @@ pub fn routes() -> axum::Router<AppState> {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use std::collections::HashMap;
     use tower::ServiceExt;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
 
     #[test]
     fn activate_timezone_empty_zone_500s() {
@@ -8117,7 +7449,7 @@ mod tests {
     /// `"`), so this pins the final SQL, not the resolver string.
     #[test]
     fn order_by_injection_escaped() {
-        use pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_list_get_sql;
+        use sea_query::PostgresQueryBuilder;
         for (raw, term) in [
             ("created_at", r#""issues"."created_at" ASC"#),
             ("-created_at", r#""issues"."created_at" DESC"#),
@@ -8135,7 +7467,15 @@ mod tests {
             ),
         ] {
             let order = resolve_cycle_issue_order(Some(raw));
-            let sql = cycle_issue_list_get_sql(&order);
+            let sql = pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_list_get(
+                &order,
+                &TenantScope {
+                    slug: "acme",
+                    project_id: uuid::Uuid::nil(),
+                },
+                uuid::Uuid::nil(),
+            )
+            .to_string(PostgresQueryBuilder);
             assert!(sql.contains(term), "{raw}: {sql}");
         }
     }
@@ -8152,9 +7492,10 @@ mod tests {
             }
         }
         match parse_object_or_500(b"{bad").expect_err("malformed") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            // Tier 3 since PIDASHCONV-1555: serde's text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8166,9 +7507,10 @@ mod tests {
     #[test]
     fn negotiated_json_text_empty_is_eof() {
         match parse_body_value_text_spans(b"", &[]).expect_err("decoded-empty 400s") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 1 (char 0)"
+            // Tier 3 since PIDASHCONV-1555: serde's EOF text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8223,9 +7565,9 @@ mod tests {
     /// pre-transition offset, pytz never raises. Oracle pytz 2026.4 over
     /// every fold/gap midnight 1990-2035 across `common_timezones` (1126
     /// rows, 0 mismatches); this table pins the review cases plus a
-    /// stratified sample (the scratch-oracle pytz 2024.1 disagrees on 20
-    /// rows where its tzdata predates IANA revisions — Asuncion permanent
-    /// -03, Mongolia 1990s — current pytz agrees with the port on all).
+    /// stratified sample (the old pytz 2024.1 disagreed on 20 rows where
+    /// its tzdata predates IANA revisions — Asuncion permanent -03,
+    /// Mongolia 1990s; Django now pins pytz 2025.2, PDASHOSS01-331).
     #[test]
     fn project_midnight_pytz_parity() {
         for (zone, day, expected) in [
@@ -8313,266 +7655,6 @@ mod tests {
         }
     }
 
-    /// F-N7: malformed bodies answer CPython's `json` error texts, not
-    /// serde's (fuzzed: 3674 structured/random/UTF-8 cases, 0 mismatches,
-    /// 0 reverse-divergences; serde_json 1.0.151 texts — this battery pins
-    /// them, so a serde upgrade that rewords errors fails loudly).
-    #[test]
-    fn json_parse_cpython_parity() {
-        for (raw, want) in [
-            (b"{bad" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{]" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{{}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{'a':1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\"a\" 1}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 6 (char 5)"),
-            (b"{\"a\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"{\"a\":1} trailing" as &[u8], "JSON parse error - Extra data: line 1 column 9 (char 8)"),
-            (b"truex" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"\"a\"b" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
-            (b"\"\"x" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"1 2" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"{\"a\":1}{\"b\":2}" as &[u8], "JSON parse error - Extra data: line 1 column 8 (char 7)"),
-            (b"[1][2]" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
-            (b"01 2" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"[01]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"{\"a\":01}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"01" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"0x1" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"{\"a\":0x1}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"-x" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"[1e]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"12e" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"12e+" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"1e" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"{\"a\": 1e}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"[12e+]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[-12e" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[0.5." as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[0.5.5]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[-.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":-.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"." as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\":.}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"+" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": +}" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[--1]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"nul" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"tru" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nulx" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nullx" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"[nulx]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":nulx}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[truex]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
-            (b"falsey" as &[u8], "JSON parse error - Extra data: line 1 column 6 (char 5)"),
-            (b"[falsey]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"nulL" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"True" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"None" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nulll" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"true2" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"[true2]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
-            (b"{" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\"a\"" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 5 (char 4)"),
-            (b"{\"a\":" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[1" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"{\"a\": \"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 7 (char 6)"),
-            (b"{\"a\": tru" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"-" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": 12" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\": -" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[ 2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[-2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[1,2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"{\"a\":1," as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
-            (b"{\"a\" :" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[1," as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"[1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"{\"a\":\"b\"" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":true" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"{\"a\":1.5" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":[1]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":1,\"b\":2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 13 (char 12)"),
-            (b"[tru" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":1 :" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"{\"a\":\"b\" " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"[[[" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":{\"b\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 11 (char 10)"),
-            (b"{\"a\": 1e5x}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"\"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\u" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\u12" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\ud800" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\u0041" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\ud800\\u12\"" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
-            (b"{\"a\": \"\\q\"}" as &[u8], "JSON parse error - Invalid \\escape: line 1 column 8 (char 7)"),
-            (b"{\"a\": \"\\u12\"}" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
-            (b"\"a" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"ab" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\u12345" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"{\"a\": \"x\x01y\"}" as &[u8], "JSON parse error - Invalid control character at: line 1 column 9 (char 8)"),
-            (b"\"a\nb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
-            (b"\"a\tb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
-            (b"[{\"a\":1},]" as &[u8], "JSON parse error - Expecting value: line 1 column 10 (char 9)"),
-            (b"{\"a\":1,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
-            (b"{\"a\":[1,}" as &[u8], "JSON parse error - Expecting value: line 1 column 9 (char 8)"),
-            (b"[[1,]]" as &[u8], "JSON parse error - Expecting value: line 1 column 5 (char 4)"),
-            (b"{\"a\":{\"b\":1,}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 13 (char 12)"),
-            (b"[1,]" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":,}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"{,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\n\"a\"\n1\n}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 3 column 1 (char 6)"),
-            (b"[\n1\n2\n]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 3 column 1 (char 4)"),
-            (b"{\"\xc3\xa9\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"\"\xc3\xa9" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\xef\xbb\xbf{\"a\":1}" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
-            (b"\xef\xbb\xbf" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
-            (b"[\xef\xbb\xbf]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\xef\xbb\xbf\"a\":1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"1\xef\xbb\xbf" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"\xff\xfe" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
-            (b"\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xc3(" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
-            (b"\xe2(\xa1" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe2 in position 0: invalid continuation byte"),
-            (b"\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 0: invalid start byte"),
-            (b"\xed\xa0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf0\x9f\x98" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xe2\x82(" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: invalid continuation byte"),
-            (b"\xe2\x82" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xc0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
-            (b"\xed\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf4\x90\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xdf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xef\xbf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": \"\xed\xa0\x80\"}" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 7: invalid continuation byte"),
-            (b"\xe0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
-            (b"a\x80b" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 1: invalid start byte"),
-            (b"\xc2\xc2" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc2 in position 0: invalid continuation byte"),
-            // The codecs tail-drop: a trailing incomplete sequence parses
-            // as the truncated text (even when the tail could never be
-            // valid, like `\xed\xa0`); impossible bytes still fail.
-            (b"\xed\xa0" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"[\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"\"\xc3" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\xc0" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
-            (b"\xf5" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf5 in position 0: invalid start byte"),
-            (b"\xe0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
-            (b"\xf0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf0 in position 0: invalid continuation byte"),
-            (b"\xf4\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xc3\xc3" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
-            (b"\xed\xa0X" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-        ] {
-            let raw: &[u8] = raw;
-            match parse_body_value(raw).expect_err("battery is errors-only") {
-                Denial::BadDetail(message) => assert_eq!(message, want, "{raw:?}"),
-                denial => panic!("{raw:?}: expected BadDetail, got {denial:?}"),
-            }
-        }
-        // Strict constants reject under DRF's STRICT_JSON with the fixed
-        // text (no position), exactly when first in scan order.
-        for (raw, token) in [
-            (b"NaN".as_slice(), "NaN"),
-            (b"[Infinity]", "Infinity"),
-            (b"{\"a\": -Infinity}", "-Infinity"),
-            (b"{\"a\": NaNx}", "NaN"),
-        ] {
-            match parse_body_value(raw).expect_err("strict rejects") {
-                Denial::BadDetail(message) => assert_eq!(
-                    message,
-                    format!("JSON parse error - Out of range float values are not JSON compliant: '{token}'"),
-                    "{raw:?}"
-                ),
-                denial => panic!("{raw:?}: expected strict 400, got {denial:?}"),
-            }
-        }
-        // The digit limit rejects long int tokens with the fixed text.
-        let over = format!("{{\"a\": {}}}", "1".repeat(4301));
-        match parse_body_value(over.as_bytes()).expect_err("int limit") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Exceeds the limit (4300 digits) for integer string conversion: \
-                 value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
-            ),
-            denial => panic!("expected int-limit 400, got {denial:?}"),
-        }
-        // A truncated deep input recovers its plain EOF error; balanced
-        // deep input parses to the measured cap, then takes the generic
-        // 500 exactly where Django's RecursionError does.
-        let deep_open = "[".repeat(129);
-        match parse_body_value(deep_open.as_bytes()).expect_err("truncated deep") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 130 (char 129)"
-            ),
-            denial => panic!("expected EOF recovery, got {denial:?}"),
-        }
-        let deep_shut = format!("{{\"a\": {}1{}}}", "[".repeat(9938), "]".repeat(9938));
-        assert!(
-            parse_body_value(deep_shut.as_bytes()).is_ok(),
-            "9939-deep parses"
-        );
-        let too_deep = format!("{{\"a\": {}1{}}}", "[".repeat(9939), "]".repeat(9939));
-        assert!(
-            matches!(
-                parse_body_value(too_deep.as_bytes()).expect_err("past the cap"),
-                Denial::ServerError
-            ),
-            "9940-deep is Django's JSON 500"
-        );
-        // A mismatched closer past the old 128 cap keeps byte-exact text.
-        let mismatch = format!("{{\"a\": {}}}", "[".repeat(200).as_str());
-        match parse_body_value(mismatch.as_bytes()).expect_err("deep mismatch") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 207 (char 206)"
-            ),
-            denial => panic!("expected deep mismatch text, got {denial:?}"),
-        }
-        // The tail-drop can leave a VALID document: `{"a":1}\xc3`
-        // parses as `{"a":1}` (verified live through the oracle).
-        match &parse_body_value(b"{\"a\":1}\xc3").expect("tail-drop valid") {
-            JVal::Object(object) => assert!(object.get("a").is_some()),
-            value => panic!("expected object, got {value:?}"),
-        }
-        // An empty body is `{}`, never a parse error (DRF's
-        // content-length short-circuit, verified live).
-        match &parse_body_value(b"").expect("empty body") {
-            JVal::Object(object) => assert!(object.is_empty()),
-            value => panic!("expected empty object, got {value:?}"),
-        }
-        // Error margins at the cap (every flip verified live through
-        // Django): the value family surfaces to depth 9938, the
-        // string/object/delimiter/strict family to 9935.
-        let at_margin = |depth: usize, inner: &str| {
-            let mut raw = vec![b'['; depth];
-            raw.extend_from_slice(inner.as_bytes());
-            parse_body_value(&raw)
-        };
-        assert!(matches!(at_margin(9938, ","), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9939, ","), Err(Denial::ServerError)));
-        assert!(matches!(at_margin(9935, "NaN"), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9936, "NaN"), Err(Denial::ServerError)));
-        assert!(matches!(at_margin(9935, "1}"), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9936, "1}"), Err(Denial::ServerError)));
-        // Terminated lone surrogates parse (CPython accepts them): the
-        // field holds the exact surrogate units.
-        match &parse_body_value(br#"{"a": "\ud800"}"#).expect("lone surrogate") {
-            JVal::Object(object) => match object.get("a") {
-                Some(JVal::Str(text)) => {
-                    assert!(text.has_surrogate());
-                    assert_eq!(text.first_surrogate(), Some(0xD800));
-                    assert_eq!(text.len_chars(), 1);
-                }
-                other => panic!("expected dirty string, got {other:?}"),
-            },
-            value => panic!("expected object, got {value:?}"),
-        }
-    }
-
     #[test]
     fn python_repr_echoes() {
         fn rendered(raw: &[u8]) -> String {
@@ -8599,18 +7681,19 @@ mod tests {
         assert_eq!(rendered(br#"["a'b\"c"]"#), "['a\\'b\"c']");
         assert_eq!(rendered(b"[\"\\u0001\"]"), "['\\x01']");
         assert_eq!(rendered(r#"["é"]"#.as_bytes()), "['é']");
-        // Nested surrogates repr-escape (clean output); top-level ones
-        // stay raw for the renderer-crash rule.
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested surrogate");
-        assert_eq!(
-            py_repr(&nested)
-                .expect("shallow")
-                .to_clean_string()
-                .expect("nested escapes clean"),
-            "['\\ud800']"
-        );
-        let top = parse_body_value(b"\"\\ud800\"").expect("top surrogate");
-        assert!(py_repr(&top).expect("shallow").to_clean_string().is_none());
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were accepted, with repr-escape / renderer-crash
+        // arms downstream).
+        for raw in [b"[\"\\ud800\"]".as_slice(), b"\"\\ud800\""] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8695,23 +7778,19 @@ mod tests {
                 .body,
             r#"["Null characters are not allowed."]"#
         );
-        // Lone surrogates fail the surrogate validator with the code point.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert_eq!(
-            coerce_char(Some(&dirty), false, false, Some(255))
-                .expect_err("surrogate")
-                .body,
-            r#"["Surrogate characters are not allowed: U+D800."]"#
-        );
-        // Validators collect: a long dirty name answers both messages.
-        let both = format!("\"{}\\ud800\"", "n".repeat(300));
-        let both = parse_body_value(both.as_bytes()).expect("long dirty");
-        assert_eq!(
-            coerce_char(Some(&both), false, false, Some(255))
-                .expect_err("collect")
-                .body,
-            r#"["Ensure this field has no more than 255 characters.","Surrogate characters are not allowed: U+D800."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were validator 400s after an accepting parse).
+        let long_dirty = format!("\"{}\\ud800\"", "n".repeat(300));
+        for raw in [b"\"\\ud800\"".as_slice(), long_dirty.as_bytes()] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8747,22 +7826,19 @@ mod tests {
                 .expect("ok"),
             Some("planned".to_owned())
         );
-        // A top-level dirty string echoes raw into the choice message,
-        // which crashes the renderer (the oracle's plain 500); only nested
-        // members repr-escape into a clean 400.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert!(matches!(
-            coerce_choice(Some(&dirty), &choices),
-            Err(Denial::RendererCrash)
-        ));
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested dirty");
-        assert_eq!(
-            coerce_choice(Some(&nested), &choices)
-                .expect("shallow")
-                .expect_err("nested")
-                .body,
-            r#"["\"['\\ud800']\" is not a valid choice."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were renderer-crash 500s top-level and repr-escaped
+        // 400s nested).
+        for raw in [b"\"\\ud800\"".as_slice(), b"[\"\\ud800\"]"] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -9521,18 +8597,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_binds_edges() {
-        // Gaps close in order of first appearance; literals untouched.
-        assert_eq!(
-            compact_binds("SELECT $1, $2, $4, $5, $4"),
-            "SELECT $1, $2, $3, $4, $3"
-        );
-        assert_eq!(compact_binds("SELECT '$4', $2, $1"), "SELECT '$4', $1, $2");
-        assert_eq!(compact_binds("SELECT 1"), "SELECT 1");
-        assert_eq!(compact_binds("SELECT $10, $2"), "SELECT $1, $2");
-    }
-
-    #[test]
     fn bridge_dump_rendering() {
         assert_eq!(render_bridge_dump(&[]), "[]");
         let id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("uuid");
@@ -9702,16 +8766,37 @@ mod tests {
 
     #[test]
     fn json_value_eq_deep_survives_small_stack() {
-        // The add-path dedupe runs on RAW values, which may nest to the
-        // 9939 cap: the comparison must not recurse (a recursive walk
-        // aborts the 2MB worker).
+        // The add-path dedupe comparison must not recurse (a recursive
+        // walk aborts the 2MB worker). Values are built programmatically:
+        // serde 400s 9938-deep parses since PIDASHCONV-1555 (tier 3).
         let deep = format!("{}1{}", "[".repeat(9938), "]".repeat(9938));
-        let left = parse_body_value(deep.as_bytes()).expect("left");
-        let right = parse_body_value(deep.as_bytes()).expect("right");
+        assert!(
+            matches!(
+                parse_body_value(deep.as_bytes()),
+                Err(Denial::BadDetail(message))
+                    if message.starts_with("JSON parse error - ")
+            ),
+            "9938-deep JSON 400s"
+        );
+        fn nest(depth: usize) -> JVal {
+            let mut value = JVal::Num(JNum::int("1".to_owned()));
+            for _ in 0..depth {
+                value = JVal::Array(vec![value]);
+            }
+            value
+        }
+        let left = nest(5000);
+        let right = nest(5000);
         let shallow = parse_body_value(b"[1]").expect("shallow");
-        let (equal, unequal) = std::thread::Builder::new()
+        // Values move back out so the deep drops land on the main test
+        // stack, not the 2MB probe stack.
+        let (equal, unequal, _left, _right, _shallow) = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
-            .spawn(move || (json_value_eq(&left, &right), json_value_eq(&left, &shallow)))
+            .spawn(move || {
+                let equal = json_value_eq(&left, &right);
+                let unequal = json_value_eq(&left, &shallow);
+                (equal, unequal, left, right, shallow)
+            })
             .expect("spawn")
             .join()
             .expect("no stack overflow");
@@ -9801,20 +8886,25 @@ mod tests {
 
     #[test]
     fn burndown_today_actor_zone_split() {
-        // F-C: the transfer caller derives `today` in the ACTOR zone, not
-        // UTC (`timezone.now().date()` under `TimezoneMixin`,
-        // `analytics_plot.py:247-257`). At 2026-10-02T00:30:00Z the UTC
-        // day is 10-02 while America/New_York still sits on 10-01, and
-        // the 10-02 chart entry flips between a number and `null`.
+        // The transfer caller derives `today` as the UTC day
+        // (`timezone.now().date()`, `analytics_plot.py:246,260`), not the
+        // actor-zone day: `timezone.now()` is always UTC under
+        // `USE_TZ=True`, whatever zone `TimezoneMixin` activated. At
+        // 2026-10-02T00:30:00Z the UTC day is 10-02 while
+        // America/New_York still sits on 10-01, and the 10-02 chart
+        // entry must stay a number (pending), not flip to `null`.
         use chrono_tz::Tz;
         let ny: Tz = "America/New_York".parse().expect("tz");
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:30:00Z")
             .expect("dt")
             .to_utc();
-        let utc_today = now.date_naive();
-        let actor_today = now.with_timezone(&ny).date_naive();
-        assert_eq!(utc_today.to_string(), "2026-10-02");
-        assert_eq!(actor_today.to_string(), "2026-10-01");
+        let today = now.date_naive();
+        assert_eq!(today.to_string(), "2026-10-02");
+        // The split-window scenario still holds: the actor sits a day behind.
+        assert_eq!(
+            now.with_timezone(&ny).date_naive().to_string(),
+            "2026-10-01"
+        );
         let start = Some(
             chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
                 .expect("dt")
@@ -9825,14 +8915,9 @@ mod tests {
                 .expect("dt")
                 .to_utc(),
         );
-        let actor_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, actor_today);
+        let chart = burndown_chart(ChartNumber::Int(3), &[], start, end, today);
         assert_eq!(
-            serde_json::to_string(&actor_chart).expect("json"),
-            r#"{"2026-10-01":3,"2026-10-02":null}"#
-        );
-        let utc_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, utc_today);
-        assert_eq!(
-            serde_json::to_string(&utc_chart).expect("json"),
+            serde_json::to_string(&chart).expect("json"),
             r#"{"2026-10-01":3,"2026-10-02":3}"#
         );
     }
@@ -9981,6 +9066,106 @@ mod tests {
         )
         .expect("owner");
         assert_eq!(validated.owned_by, owner);
+    }
+
+    /// Live burndown reads over seeded temp tables: one completed
+    /// estimated issue counts; a draft and a triage issue never count.
+    #[tokio::test]
+    async fn live_burndown_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "states",
+            "workspaces",
+            "projects",
+            "cycle_issues",
+            "estimate_points",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, project, cycle, done, started, backlog, triage, point) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let (i_done, i_started, i_draft, i_triage) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let issue = |id: uuid::Uuid,
+                     state: uuid::Uuid,
+                     draft: bool,
+                     with_point: bool,
+                     completed: bool,
+                     age: i32| {
+            format!(
+                "INSERT INTO issues (id, name, workspace_id, project_id, state_id, sort_order, priority, complexity_score, sequence_id, created_at, updated_at, is_draft, archived_at, completed_at, estimate_point_id, description_html, description_json, git_work_branch, workpad) VALUES ('{id}', 'n', '{ws}', '{project}', '{state}', 1, 'none', 0, 1, now() - interval '{age} min', now(), {draft}, NULL, {}, {}, '', '{{}}', '', '')",
+                if completed { "now()" } else { "NULL" },
+                if with_point {
+                    format!("'{point}'")
+                } else {
+                    "NULL".to_owned()
+                },
+            )
+        };
+        let bridge = |issue: uuid::Uuid| {
+            format!(
+                "INSERT INTO cycle_issues (id, created_at, updated_at, project_id, workspace_id, cycle_id, issue_id) VALUES ('{}', now(), now(), '{project}', '{ws}', '{cycle}', '{issue}')",
+                uuid::Uuid::new_v4()
+            )
+        };
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!("INSERT INTO projects (id, archived_at) VALUES ('{project}', NULL)"),
+            format!("INSERT INTO states (id, name, \"group\", created_at, updated_at, description, color, slug, project_id, workspace_id, sequence, \"default\", is_triage) VALUES ('{done}', 'Done', 'completed', now(), now(), '', '', 'done', '{project}', '{ws}', 1, false, false), ('{started}', 'Doing', 'started', now(), now(), '', '', 'doing', '{project}', '{ws}', 2, false, false), ('{backlog}', 'Backlog', 'backlog', now(), now(), '', '', 'backlog', '{project}', '{ws}', 3, true, false), ('{triage}', 'Triage', 'triage', now(), now(), '', '', 'triage', '{project}', '{ws}', 4, false, true)"),
+            format!("INSERT INTO estimate_points (id, value) VALUES ('{point}', '3')"),
+            issue(i_done, done, false, true, true, 5),
+            issue(i_started, started, false, false, false, 4),
+            issue(i_draft, backlog, true, true, false, 3),
+            issue(i_triage, triage, false, true, false, 2),
+            bridge(i_done),
+            bridge(i_started),
+            bridge(i_draft),
+            bridge(i_triage),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let utc = chrono_tz::Tz::UTC;
+        let points = fetch_burndown_points(&pool, "acme", &project, &cycle, &utc)
+            .await
+            .expect("points");
+        assert_eq!(points.len(), 1);
+        assert!(points[0].0.is_some());
+        assert_eq!(points[0].1, ChartNumber::Float(3.0));
+        let total = fetch_burndown_points_total(&pool, "acme", &project, &cycle)
+            .await
+            .expect("total");
+        assert_eq!(total, ChartNumber::Float(3.0));
+        let issues = fetch_burndown_issues(&pool, "acme", &project, &cycle, &utc)
+            .await
+            .expect("issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].1, ChartNumber::Int(1));
     }
 }
 

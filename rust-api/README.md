@@ -43,6 +43,38 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Local checks
+
+GitHub CI is advisory -- including the `rust-api` and `rust-api-write-guard`
+checks that run on pull requests into `rust-dev`. It does not gate merge, per
+the rulebook; but a red PR check must be explained in the PR body before merge.
+Run these locally before pushing:
+
+```sh
+cd rust-api
+python3 scripts/write_guard.py --check
+python3 scripts/raw_sql_guard.py --check
+python3 scripts/test_raw_sql_guard.py
+```
+
+The write guard (ORM-09, design D7) fails when raw SQL or sea-query writes
+to the ORM-covered tables appear outside `pidash_services::domain`. New
+sites must move into `domain/`; the allowlist only shrinks.
+
+The raw-SQL guard enforces SeaORM for reads and writes. It counts each
+production file's raw SQL (sqlx `query*` calls and macros, `raw_sql`,
+`QueryBuilder`, SeaORM raw-SQL escape hatches such as `Statement::from_string`
+and `Expr::cust`, and positional `try_get(<index>)` and `.get::<T, _>(<index>)` reads; a bare `.get(0)` is
+not counted, being indistinguishable from slice indexing)
+against `scripts/raw_sql_allowlist.txt`, and fails
+on any increase. A file below its entry fails too: lower the entry in the PR
+that migrates the sites. A query SeaORM cannot express stays raw only with a
+`// raw-sql: <reason>` comment on the call line, or alone on the line
+above it. The
+guard also fails on a new hand-written `SELECT` with two output columns of
+one name; sqlx resolves a duplicated name to the last column.
+`--report` prints the totals.
+
 ## Run the contract suite
 
 Contract suites run unmodified against live Django today and against Rust
@@ -88,16 +120,16 @@ the same `SECRET_KEY` the sessions were forged with.
 prefix is flipped to Rust. The routing table in `crates/api/src/edge.rs`
 encodes the inventory §0 prefix map; each row has a flag, all default off:
 
-| Env var | Prefix | Django module |
-|---|---|---|
-| `PIDASH_RUST_WEB` | site root (`/`, `/robots.txt`) | `web.urls` |
-| `PIDASH_RUST_APP` / `ASSISTANT` / `LOOP` / `PROMPTING` | `api/` | `app`/`assistant`/`loop`/`prompting.urls` |
-| `PIDASH_RUST_SPACE` | `api/public/` | `space.urls` |
-| `PIDASH_RUST_LICENSE` | `api/instances/` | `license.urls` |
-| `PIDASH_RUST_RUNNER_WEB` | `api/runners/` | `runner.web_urls` |
-| `PIDASH_RUST_API_V1` | `api/v1/` | `api.urls` |
-| `PIDASH_RUST_RUNNER` | `api/v1/runner/` | `runner.urls` |
-| `PIDASH_RUST_AUTH` | `auth/` | `authentication.urls` |
+| Env var                                                | Prefix                         | Django module                             |
+| ------------------------------------------------------ | ------------------------------ | ----------------------------------------- |
+| `PIDASH_RUST_WEB`                                      | site root (`/`, `/robots.txt`) | `web.urls`                                |
+| `PIDASH_RUST_APP` / `ASSISTANT` / `LOOP` / `PROMPTING` | `api/`                         | `app`/`assistant`/`loop`/`prompting.urls` |
+| `PIDASH_RUST_SPACE`                                    | `api/public/`                  | `space.urls`                              |
+| `PIDASH_RUST_LICENSE`                                  | `api/instances/`               | `license.urls`                            |
+| `PIDASH_RUST_RUNNER_WEB`                               | `api/runners/`                 | `runner.web_urls`                         |
+| `PIDASH_RUST_API_V1`                                   | `api/v1/`                      | `api.urls`                                |
+| `PIDASH_RUST_RUNNER`                                   | `api/v1/runner/`               | `runner.urls`                             |
+| `PIDASH_RUST_AUTH`                                     | `auth/`                        | `authentication.urls`                     |
 
 Values `1/true/yes/on` flip a prefix; anything else (or absent) proxies.
 Longest prefix wins (`api/v1/runner/` beats `api/v1/`). Today only `WEB`
@@ -127,11 +159,11 @@ response for the same request in the background and compares the two. The
 client never waits on the shadow call. Code:
 `crates/api/src/edge.rs` (proxy hook) and `crates/api/src/edge_shadow.rs`.
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `PIDASH_RUST_SHADOW` | off | `1/true/yes/on` enables shadow reads |
-| `PIDASH_RUST_SHADOW_MAX_INFLIGHT` | `8` | concurrent shadow cap; over it, skip and count |
-| `PIDASH_RUST_SHADOW_SAMPLE` | `1.0` | sampling rate, clamped to `0.0`–`1.0` |
+| Env var                            | Default | Meaning                                                                         |
+| ---------------------------------- | ------- | ------------------------------------------------------------------------------- |
+| `PIDASH_RUST_SHADOW`               | off     | `1/true/yes/on` enables shadow reads                                            |
+| `PIDASH_RUST_SHADOW_MAX_INFLIGHT`  | `8`     | concurrent shadow cap; over it, skip and count                                  |
+| `PIDASH_RUST_SHADOW_SAMPLE`        | `1.0`   | sampling rate, clamped to `0.0`–`1.0`                                           |
 | `PIDASH_RUST_SHADOW_METRICS_TOKEN` | (unset) | shared secret unlocking `/internal/shadow-metrics`; unset locks it for everyone |
 
 Eligibility: safe reads only. Writes (`POST`/`PUT`/`PATCH`/`DELETE`)
@@ -214,19 +246,35 @@ env, `apply` to mutate the resolved `Settings`), pre-install the registry
 with `try_init_global` when reclassification must be process-wide, and pass
 `Settings::from_map_with(&vars, Profile::Production, &overlay)`.
 
+## Overlay surface (OVL-02)
+
+The cloud overlay depends only on `pidash-sdk` (`crates/sdk`): a logic-free
+facade of `pub use` re-exports grouped into `startup`, `state`, `domain`,
+`read`, `ops`, `compat`, `assistant`, `jobs`, `db` and `testkit`. Every other
+OSS path is internal and may change without notice — including paths that are
+technically `pub` in their home crate.
+
+Seeded with every OSS path the overlay imports (OVL-02, PIDASHCONV-1540);
+OVL-03 (PIDASHCONV-1541)..OVL-07 (PIDASHCONV-1545) add their new public items
+here as they land. The surface is snapshotted in `crates/sdk/SURFACE.txt` and
+enforced by `crates/sdk/tests/surface.rs`: removing or renaming an export
+fails the test, so the change shows up as a reviewed diff instead of a
+surprise overlay breakage. Add an export by editing `src/lib.rs`,
+`tests/surface.rs` and `SURFACE.txt` together (see the crate docs).
+
 ## Extension seams (F-10)
 
 The six `ee/` stubs are traits with CE defaults; the private crate
 replaces the implementation, never the callers:
 
-| Trait | Module | CE default | Python source |
-|---|---|---|---|
-| `AssistantModelSeam` | `pidash-services::extensions` | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py` |
-| `SttSeam` | `pidash-services::extensions` | `ByoSttSeam` | `ee/assistant/stt_provider.py` |
-| `CloudAgentModelSeam` | `pidash-services::extensions` | `CreatorModelSeam` | `ee/cloud_agent/model_provider.py` |
-| `CloudAgentToolsetsSeam` | `pidash-services::extensions` | `NoExtraToolsets` | `ee/cloud_agent/toolsets.py` |
-| `DesktopGate` | `pidash-auth::permissions::desktop` | `SessionDesktopGate` | `ee/authentication/desktop.py` |
-| `UserSettingsSchema` | `pidash-services::user_settings` | `CeUserSettings` | `ee/settings/user_settings.py` |
+| Trait                    | Module                              | CE default                                                                                                                      | Python source                      |
+| ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `AssistantModelSeam`     | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py`   |
+| `SttSeam`                | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`     |
+| `CloudAgentModelSeam`    | `pidash-services::extensions`       | `CreatorModelSeam`                                                                                                              | `ee/cloud_agent/model_provider.py` |
+| `CloudAgentToolsetsSeam` | `pidash-services::extensions`       | `NoExtraToolsets`                                                                                                               | `ee/cloud_agent/toolsets.py`       |
+| `DesktopGate`            | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`     |
+| `UserSettingsSchema`     | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`     |
 
 Named route-group replacement (`crates/api/src/overlay.rs`, one group per
 §0 prefix): `Overlay::new().replace(RouteGroup::Auth, cloud_auth())` swaps
@@ -234,7 +282,7 @@ a whole group (the cloud auth replacement), `.drop(RouteGroup::Auth)`
 removes every OSS mount in the group (`_strip_oss_auth`), and
 `.add_routes(router)` shadows individual OSS paths — additive routes sit in
 front of the OSS groups via fallback dispatch, the cloud pattern of placing
-paths ahead of the OSS include. Model/toolset *construction* extends the
+paths ahead of the OSS include. Model/toolset _construction_ extends the
 same traits when the assistant/cloud-agent runtimes are ported (D-06/D-11).
 
 Private migrations live in the private crate at
@@ -243,6 +291,161 @@ after the OSS baseline; tables prefixed `private_`; see
 `crates/db/src/migrations.rs`). Private migrations never touch
 Django-owned or OSS `rust_*` tables — the same rule Django's own
 `pi_dash_cloud/*/migrations/` directories follow.
+
+### Startup builders (OVL-03)
+
+`pidash-api::startup` owns the serve and worker boot sequences, so the
+overlay composes them instead of re-doing each step by hand (the hand
+copies drifted three ways before OVL-03: a double-registered sweep, a
+`sleep` where OSS drains under `timeout`, and a differently-opened
+Redis). The OSS binary's `serve` and `worker` are thin callers of the
+same builders:
+
+```rust
+// serve: resolve, pool, schema, Redis, ORM, state, app, bind, graceful stop.
+pidash_api::startup::ServeBuilder::from_env()?
+    .with_bind(addr)
+    .run()
+    .await?;
+// worker: pools, schema, registry, turn handler, loops, bounded drain.
+pidash_api::startup::WorkerBuilder::from_env()
+    .await?
+    .with_concurrency(4)
+    .run()
+    .await?;
+```
+
+`ServeBuilder` extension points: `with_settings`, the four seams above
+(`with_toolsets`, `with_desktop_gate`, `with_assistant_seam`,
+`with_user_settings_schema`), `with_state` for other state tweaks,
+`merge_routes` (rides the overlay `add_routes` fallback path, so an
+extra route shadows rather than colliding), `wrap` (outside the OSS
+middleware stack), `wrap_inside` (inside the stack, after
+`SessionLayer`, before the route handler — the overlay's JWT,
+federation-guard and quota layers sit here; repeated calls apply in
+call order, tower outside-in, so the JWT → federation → quota request
+order reads quota, federation, JWT), `with_bind`/`with_version`, and
+`run`. `build` returns the pool-less state-plus-router pair for tests
+and embedding.
+
+`WorkerBuilder` extension points: `with_settings` (mirrors serve's;
+the final settings feed `ctx.settings`, the turn soft limit, and the
+still-default seams, which rebuild — call before `with_turn_seam`),
+`with_assistant_seam`, `with_turn_seam` (the builder is generic over
+the non-object-safe `TurnSeam`; the default is the live OSS seam),
+`pools` (reads back the connected pools so prebuilt seams construct
+from `pools().primary()` between `with_settings` and `with_turn_seam`;
+PIDASHCONV-1586),
+`register` for extra jobs (the closure gets the registry plus the
+built `OssWorkerCtx`), `schedule` (appends after `default_schedule`),
+`with_concurrency`, and `run`. `build` returns the registry plus
+context without driving the loops. An extra registration over an
+already-owned task name — OSS or an earlier extra — fails the build
+instead of silently replacing the handler.
+
+Both builders run the queue-schema DDL on an optional schema-owner
+pool (`with_queue_schema_owner`, PIDASHCONV-1558): split-role cloud
+deploys pass the migrator's pool — the app role is DML-only and
+Postgres checks `CREATE` on the schema even for
+`CREATE TABLE IF NOT EXISTS`. Unset, both run on the app pool exactly
+as before (this closes the OVL-03 known gap the overlay port waited
+on; no `pidash-sdk` surface change — the three hooks add methods, no
+new public item types).
+
+Both builders re-export through `pidash-sdk` as `startup` (OVL-02).
+
+## Domain write services (ORM-02)
+
+`pidash_services::domain` is the one public surface for writes to the
+covered tables (design `.ai_design/rust_orm/design.md` D3, §4). Overlays
+call it; they never execute OSS SQL text themselves:
+
+```rust
+pidash_services::domain::run(&ctx, &db, |txn| {
+    Box::pin(async move {
+        txn.advisory_xact_lock(key).await?;
+        txn.on_commit(|| async move { /* post-commit effects */ });
+        Ok::<(), pidash_services::domain::DomainError>(())
+    })
+})
+.await?;
+```
+
+- `WriteCtx` — actor (the `crum`-user equivalent), request origin/host,
+  workspace/project scope, and a per-caller options struct for the
+  view-to-view deltas (D6).
+- `WriteTxn` — the SeaORM transaction plus the after-commit queue and the
+  hook registry. Entity calls run on it directly; existing sea-query
+  builders go through `exec_builder`, raw SQL (advisory locks,
+  `SELECT … FOR UPDATE`) through `exec_raw`. A SeaORM transaction cannot
+  adopt an `sqlx::Transaction`, so domain writes never mix in sqlx
+  transactions (D5). Reads stay on sqlx.
+- After-commit queue — the `pidash_db::tx::AfterCommit` semantics
+  (in order, exactly once, after a successful commit; errors roll back
+  and drop the queue) with async steps, awaited by `run()` after the
+  commit. Django timing correspondence: pi-dash sets no
+  `ATOMIC_REQUESTS` (autocommit default), so its activity enqueues are
+  plain inline `.delay()` calls and its `on_commit` callbacks run
+  immediately outside `atomic()`; `domain::run` always opens a
+  transaction instead, and no migrated path queues work yet, so moving a
+  future enqueue into the queue changes neither the side effects nor
+  their client-visible timing — each migration re-confirms this for its
+  own paths. Failure modes, order and the outermost-only scope are
+  documented with Django file citations on `CommitQueue`/`WriteTxn`.
+- Hook registry — trait objects implemented wherever their dependencies
+  live, so entity-adjacent logic can trigger services/jobs effects
+  (scheduler seeding, the issue transition) without a crate cycle.
+- `domain::activity` — the single copy of the `issue_activity`,
+  `model_activity` and version task names; every previous copy is a
+  re-export.
+- Issue post-save orchestration — the pre-save snapshot lives in
+  `domain::transition`, the completion comment and the transition fire
+  core in `pidash_jobs::issue_transition`; the api module keeps
+  same-path wrappers over its own drains.
+
+## SeaORM entities (ORM-01)
+
+SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) has an
+entity for every OSS table (all but `django_*`, `auth_*` and the overlay's
+`cloud_*`); reads and writes migrate onto them
+(`.ai_design/rust_orm/reads.md`). The entities live at `crates/db/src/entity/`; Django
+stays the schema owner — there are no SeaORM migrations.
+
+One pool, two handles (D5): the `DatabaseConnection` wraps the existing
+primary sqlx pool and opens no connections of its own. The binary builds
+it once per process:
+
+```rust
+let orm = pidash_db::sea_orm_connection(pools.primary());
+```
+
+It travels on the request and worker contexts next to the pools:
+
+- HTTP: `AppState::with_orm(orm)` at serve boot, read with
+  `state.orm()` (`Option<&DatabaseConnection>`, `None` until the binary
+  connects, like `pools()`). The shadow clone shares the handle.
+- Worker: the `orm` field of `pidash_jobs::OssWorkerCtx`, read with
+  `ctx.orm()`. The overlay binary sets it the same way when it builds
+  its context for `register_oss_handlers`.
+
+Regenerating after a Django sync: the `entity` module doc
+(`crates/db/src/entity/mod.rs`) holds the one command, which tables to copy,
+and every cleanup to re-apply; it is the single source, so this section does
+not repeat it. Finish with `cargo fmt`, the parity test below, and clippy.
+
+Schema parity: `crates/db/src/entity/parity.rs` compares every entity's
+table name, column names, column types and nullability with
+`information_schema.columns`; checks `unique` flags both ways against full
+(non-partial) single-column unique indexes in `pg_index`, and every
+`has_one` edge's child column likewise; and fails when an OSS base table has
+no entity. It reads the catalog once and lists all drift in one failure.
+Like every live-db test it skips when `DATABASE_URL` is unset and runs
+for real otherwise:
+
+```sh
+export DATABASE_URL=postgresql://<user>@127.0.0.1:<port>/<migrated-db>
+cargo test -p pidash-db entity::parity::entities_match_information_schema
+```
 
 ## Serializer + paginator kernel (F-07)
 
@@ -299,15 +502,15 @@ Python fleet). Every `python manage.py <cmd>` became
 `pidash-api ops <cmd>` (`ops instance <cmd>` for the nested group);
 `gunicorn`/`celery` exec lines became `serve` / `worker`:
 
-| Entrypoint | Boot steps |
-|---|---|
-| `docker-entrypoint-api.sh` | wait_for_db → wait_for_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
-| `docker-entrypoint-api-local.sh` | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000` |
-| `docker-entrypoint-worker.sh` | waits → min(nproc,8) concurrency → `worker --concurrency` |
-| `docker-entrypoint-worker-local.sh` | waits → `worker` |
-| `docker-entrypoint-beat.sh` | waits → `worker` (no `exec`, like Python) |
-| `docker-entrypoint-beat-local.sh` | waits → `worker` |
-| `docker-entrypoint-migrator.sh` | wait_for_db → `python manage.py migrate $1` (stays Django) |
+| Entrypoint                          | Boot steps                                                                                                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-entrypoint-api.sh`          | wait_for_db → wait_for_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
+| `docker-entrypoint-api-local.sh`    | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000`                                                                                          |
+| `docker-entrypoint-worker.sh`       | waits → min(nproc,8) concurrency → `worker --concurrency`                                                                                                           |
+| `docker-entrypoint-worker-local.sh` | waits → `worker`                                                                                                                                                    |
+| `docker-entrypoint-beat.sh`         | waits → `worker` (no `exec`, like Python)                                                                                                                           |
+| `docker-entrypoint-beat-local.sh`   | waits → `worker`                                                                                                                                                    |
+| `docker-entrypoint-migrator.sh`     | wait_for_db → `python manage.py migrate $1` (stays Django)                                                                                                          |
 
 Deltas from the Python boot (each documented at the script line):
 collectstatic dropped (API-only container; the Django upstream serves
@@ -324,28 +527,28 @@ ignores it, clap rejects it).
 
 Every variable the image sets or the scripts and boot path consume:
 
-| Variable | Default | Consumed by | Notes |
-|---|---|---|---|
-| `PORT` | `8000` | api entrypoint | `--bind 0.0.0.0:${PORT:-8000}`; serve alone defaults to 8080 |
-| `CELERY_WORKER_CONCURRENCY` | min(nproc, 8) | worker entrypoint | job budget; Rust multiplexes over a shared 10-conn pool |
-| `DJANGO_SETTINGS_MODULE` | `pi_dash.settings.local` | api-local entrypoint | no Rust effect; kept for shape parity |
-| `MACHINE_SIGNATURE` | (set by api entrypoints) | register-instance | sha256 of hostname, mac, cpu, mem, disk |
-| `DATABASE_URL` | (required) | serve, worker, ops | TCP postgres URL; replica: see below |
-| `DATABASE_READ_REPLICA_URL` | (unset) | settings key only | read by Settings; pool wiring not yet connected |
-| `SECRET_KEY` | (ephemeral if unset) | serve, ops | session validation plus Fernet; keep stable across restarts |
-| `REDIS_URL` | (unset) | serve (degraded), clear_cache | throttle and signal cache; clear_cache full-clears |
-| `AWS_REGION` | `AWS_DEFAULT_REGION`, then `us-east-1` | create and update bucket | region chain; set-wins even when empty |
-| `AWS_DEFAULT_REGION` | (unset) | create and update bucket | second in the region chain |
-| `AWS_ACCESS_KEY_ID` | (unset) | create and update bucket | S3 credentials |
-| `AWS_SECRET_ACCESS_KEY` | (unset) | create and update bucket | S3 credentials |
-| `AWS_S3_ENDPOINT_URL` | (unset) | create and update bucket | S3-compatible endpoint (MinIO, LocalStack) |
-| `AWS_S3_BUCKET_NAME` | (unset) | create and update bucket | default bucket |
-| `SEED_DIR` | (unset) | worker seed path, 811 loader | unset: worker reads ./seeds, loader serves embedded data |
-| `PIDASH_RELEASES_URL` | GitHub releases API | register-instance | override for the latest-release probe (tests) |
-| `INSTANCE_CHANGELOG_URL` | (Dockerfile default) | settings | preserved from the Python image |
-| `PYTHONDONTWRITEBYTECODE` | `1` | (none) | preserved key; no interpreter in this image |
-| `PYTHONUNBUFFERED` | `1` | (none) | preserved key; no interpreter in this image |
-| `PIP_DISABLE_PIP_VERSION_CHECK` | `1` | (none) | preserved key; no interpreter in this image |
+| Variable                        | Default                                | Consumed by                   | Notes                                                        |
+| ------------------------------- | -------------------------------------- | ----------------------------- | ------------------------------------------------------------ |
+| `PORT`                          | `8000`                                 | api entrypoint                | `--bind 0.0.0.0:${PORT:-8000}`; serve alone defaults to 8080 |
+| `CELERY_WORKER_CONCURRENCY`     | min(nproc, 8)                          | worker entrypoint             | job budget; Rust multiplexes over a shared 10-conn pool      |
+| `DJANGO_SETTINGS_MODULE`        | `pi_dash.settings.local`               | api-local entrypoint          | no Rust effect; kept for shape parity                        |
+| `MACHINE_SIGNATURE`             | (set by api entrypoints)               | register-instance             | sha256 of hostname, mac, cpu, mem, disk                      |
+| `DATABASE_URL`                  | (required)                             | serve, worker, ops            | TCP postgres URL; replica: see below                         |
+| `DATABASE_READ_REPLICA_URL`     | (unset)                                | settings key only             | read by Settings; pool wiring not yet connected              |
+| `SECRET_KEY`                    | (ephemeral if unset)                   | serve, ops                    | session validation plus Fernet; keep stable across restarts  |
+| `REDIS_URL`                     | (unset)                                | serve (degraded), clear_cache | throttle and signal cache; clear_cache full-clears           |
+| `AWS_REGION`                    | `AWS_DEFAULT_REGION`, then `us-east-1` | create and update bucket      | region chain; set-wins even when empty                       |
+| `AWS_DEFAULT_REGION`            | (unset)                                | create and update bucket      | second in the region chain                                   |
+| `AWS_ACCESS_KEY_ID`             | (unset)                                | create and update bucket      | S3 credentials                                               |
+| `AWS_SECRET_ACCESS_KEY`         | (unset)                                | create and update bucket      | S3 credentials                                               |
+| `AWS_S3_ENDPOINT_URL`           | (unset)                                | create and update bucket      | S3-compatible endpoint (MinIO, LocalStack)                   |
+| `AWS_S3_BUCKET_NAME`            | (unset)                                | create and update bucket      | default bucket                                               |
+| `SEED_DIR`                      | (unset)                                | worker seed path, 811 loader  | unset: worker reads ./seeds, loader serves embedded data     |
+| `PIDASH_RELEASES_URL`           | GitHub releases API                    | register-instance             | override for the latest-release probe (tests)                |
+| `INSTANCE_CHANGELOG_URL`        | (Dockerfile default)                   | settings                      | preserved from the Python image                              |
+| `PYTHONDONTWRITEBYTECODE`       | `1`                                    | (none)                        | preserved key; no interpreter in this image                  |
+| `PYTHONUNBUFFERED`              | `1`                                    | (none)                        | preserved key; no interpreter in this image                  |
+| `PIP_DISABLE_PIP_VERSION_CHECK` | `1`                                    | (none)                        | preserved key; no interpreter in this image                  |
 
 Cutover flags (`PIDASH_DJANGO_UPSTREAM`, `PIDASH_RUST_*`) live in
 [Cutover edge](#cutover-edge-f-02); Django-side deploy vars

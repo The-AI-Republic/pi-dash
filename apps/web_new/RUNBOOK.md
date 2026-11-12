@@ -1,0 +1,208 @@
+<!-- Copyright (c) Pi Dash contributors | SPDX-License-Identifier: AGPL-3.0-only | See the LICENSE file for details. -->
+
+# web_new runbook — feature patterns (NEWFRONT-17)
+
+The first vertical slice (shell, sign-in, read-only issue list) sets the
+patterns every epic copies. This file is the canonical description; the
+area spec lives at
+`.ai_design/new_frontend_implementation/parity/specs/f06-vertical-slice.md`.
+
+## Where a feature's code goes
+
+```
+src/features/<name>/
+  api/
+    keys.ts        key factory; every key starts with ["ws", ws] (Data layer)
+    queries.ts     queryOptions(client, ws, …) — loaders prefetch, hooks read
+    mutations.ts   optimistic mutations via core/query helpers (when needed)
+  components/      one file per component, presentational where possible
+  filters/
+    search.ts      zod-mini schema for the route's search params + parse fallback
+  store.ts         Zustand, UI state only, registered in core/session reset
+  index.ts         the feature's public API — other features import only this
+```
+
+`src/shared/` holds cross-feature UI: `shell/` (AppShell, Sidebar,
+TitleBar, CommandPalette, toaster) and `commands/` (registry + palette
+store). `src/core/` holds `api` (the singleton HTTP client), `query`,
+`session`, `platform`, `edition`. `src/routes/` holds file routes only.
+
+## Layer rules (enforced by `pnpm check:boundaries`)
+
+- routes → features → shared → core, strictly downwards.
+- A feature imports another feature only through its `index.ts`.
+- Only `core/api` performs network I/O (transport is `platform.fetch`).
+- Components never call `fetch`; they use feature hooks or suspense queries.
+- Shell components are presentational: the route loads data and passes
+  props, because `shared/` cannot import `features/`.
+
+## Routes
+
+- Thin: params, search schema, gates, prefetch, layout, component.
+- `validateSearch` is a zod-mini schema (or a function using one); invalid
+  params fall back to defaults, never throw.
+- `beforeLoad` enforces session and membership (redirects, `notFound()`).
+- `loader` prefetches with `queryClient.ensureQueryData(…)` so code and
+  data load in parallel; the component reads back with `useSuspenseQuery`.
+- `errorComponent` (retry) and `notFoundComponent` (access notice) per area.
+- Unknown paths render the root `notFoundComponent`: not-yet-migrated areas.
+
+## Coexistence (F-09)
+
+- `apps/web_new/migrated-routes.json` is the one list of routes the proxy
+  serves from web_new; everything else goes to the old app on the same
+  origin (session cookie shared, no origin/cookie change).
+- `entries` is a list of segment patterns:
+  - `/sign-in`, `/auth/device` — a literal path. Serves that path and its
+    whole subtree (the original behavior).
+  - `/{ws}` — one variable segment, **exactly that depth**. A workspace
+    home; not a subtree, or it would claim every workspace page.
+  - `/{ws}/projects`, `/{ws}/browse/{workItem}` — variable plus literal
+    segments at their exact depth.
+  - `/{ws}/projects/*` — the same, plus every path below it. Use a
+    trailing `*` only when the area owns the whole subtree; otherwise
+    unbuilt pages would move to web_new early.
+  - `/` — the catch-all; only when everything has moved.
+- A variable first segment never matches `reservedTopLevel` (reserved
+  workspace slugs, the app's own top-level routes such as `profile` and
+  `settings`, backend paths such as `api`, `auth`, `static`, `live` and
+  `ws`, admin `/god-mode`, and public boards `/spaces`), never matches a
+  name that has a literal entry, and never matches a segment containing a
+  dot (workspace slugs cannot contain one). The exclusion is
+  case-insensitive, which matches Caddy's `path` matcher.
+- After editing the list, run `pnpm --filter web_new coexistence:generate`
+  to rewrite the marked blocks in `apps/proxy/Caddyfile.ce` and
+  `Caddyfile.aio.ce`; never edit those blocks by hand. CI enforces
+  freshness with `pnpm --filter web_new check:coexistence`. Literal
+  entries render as an exact-path redirect plus a subtree proxy; workspace
+  entries render as a named Caddy matcher (`path_regexp` plus
+  `not path`). The AIO build serves those with `handle`, not
+  `handle_path`, so the workspace segment is not stripped before the SPA
+  sees it.
+- Links to not-yet-migrated screens use
+  `src/shared/coexistence/CrossAppLink.tsx`: unmigrated paths render as
+  plain `<a href>` (full-page load into the old app), migrated paths as
+  router links. Both read the same list, so a link flips the moment its
+  route lands — no call site changes. `isMigratedPath` applies the same
+  rules as the generator; `migrated-routes.test.ts` runs both over one
+  path matrix so they cannot drift.
+
+## Queries and session
+
+- Key shape: `["ws", workspaceSlug, "<feature>", …]`.
+- Lists: `staleTime` 30s; reference data (workspaces, projects): 5min.
+- `core/session` owns `useMe`, `useWorkspace(slug)`, `usePermissions(slug)`,
+  the sign-out reset registry, and the 401 → expired rule.
+- Sign-in completion navigates through the server landing URL
+  (`window.location.assign(result.location)`): the server already computed
+  onboarding / last-workspace / invitation targets the slice does not own.
+
+## Auth card
+
+- Email first; `POST /auth/email-check/` decides password vs code step.
+- Code step generates via `POST /auth/magic-generate/` with a 30s resend
+  cooldown; both form POSTs follow the redirect convention
+  (`error_code` / `error_message` query params on failure).
+- Every server code maps to our own banner copy plus the step that can fix
+  it (`features/auth/authErrors.ts`); unknown codes get a generic banner.
+- Sign-out: `POST /auth/sign-out/` best-effort, then clear every store and
+  the whole query cache, then go to sign-in.
+
+## Shell and commands
+
+- `AppShell` is layout + three global wirings: command registration, the
+  `mod+k` listener, and the session-expired toast + redirect.
+- Screens register their commands while mounted (`registerCommands` in an
+  effect; the cleanup unregisters). Global entries (sign-out, go home) are
+  registered by the workspace layout.
+- Toasts: one kit manager (`shared/shell/toaster.ts`); features call
+  `notifySuccess` / `notifyError`.
+
+## Testing
+
+- Unit (`vitest run`): pure logic and components with stub transports.
+  Node env by default; DOM suites add `// @vitest-environment jsdom`.
+- Per-test budget: 30 s globally (`testTimeout`/`hookTimeout` in
+  `vitest.config.ts`, constants in `src/testing/testBudget.ts`). A full run
+  is ~7 000 tests; on a loaded host the slow tail is queueing time, not test
+  work. The budget is a load allowance, not a hang allowance — it stays under
+  a minute, and it relaxes no assertion. A suite may ask for a _shorter_
+  budget with its per-test or per-describe `timeout` option. A longer one also
+  works and wins over the global ceiling (`vi.setConfig({ testTimeout })` does
+  the same for a whole file), but it outlives this measured budget, so do not
+  add one without a measurement that justifies it.
+- Async-query budget: Testing Library's `findBy*`/`waitFor` poll ceiling is
+  the same 30 s (`ASYNC_QUERY_TIMEOUT_MS`, installed in `src/test-setup.ts`).
+  The stock 1 s wait is tighter than the per-test budget, so a suite awaiting
+  a lazy chunk or a stubbed read failed with `Unable to find ...` under load
+  even though the element arrived (NEWFRONT-789). This changes polling time
+  only, never an assertion, and the owning test still ends it at 30 s. A
+  suite that wants a tighter wait may still pass `{ timeout }` explicitly.
+- Full-suite evidence: run on the branch with the machine's load noted, and
+  stream rather than truncate the output:
+  `pnpm --filter web_new test 2>&1 | tee "$TMPDIR/.web_new-full.log"`.
+  Two consecutive green full runs are the bar for a shared change; a run that
+  fails only with `Test timed out` under load is presumed a budget/queueing
+  failure and must be re-run, not patched by skipping tests.
+- Scheduled full suite (`checks/full-suite.mjs`): the scheduler has 45 minutes
+  for the whole checker, web_new included. That suite is ~19 000 tests and
+  needs roughly 72 CPU-minutes, so the result depends on how many cores the
+  shared host actually grants it. Measured on 2026-10-24, the shared 4-vCPU
+  host was running other worktrees at load 15-18 and granted it ~1.2 cores.
+  The runner sizes vitest's fork pool from the host's sustained load. A quiet
+  host runs one worker per CPU: the suite is CPU-bound, so a 120-file batch on
+  4 pinned CPUs takes the same wall time at 16 workers as at 4 (60 s vs 58 s)
+  while every test's wall time grows with the runqueue (p99 1.4 s vs 0.4 s,
+  slowest file 35 s vs 9 s), and the extra workers only invite `Test timed out`
+  flakes when a transient spike lands (NEWFRONT-985). A contended host
+  oversubscribes up to 16 workers to hold CPU share: 16 workers on a 4-vCPU
+  host with 30 GiB completed 1 672 files and 19 072 tests in 38 min at load
+  ~29. The pool is capped at 1.5 GiB per worker and at 16 workers, and memory
+  only ever shrinks it: on an 8-core / 8 GiB host it drops to 5 instead of
+  spending 2.5 GiB and turning green files into `Test timed out`.
+- The runner works in batches and keeps evidence as it goes. web_new runs 120
+  files per batch (200 for kit and api-client); a fast batch grows, a slow one
+  halves. Every batch starts a fresh fork pool, so worker heaps do not grow
+  across the whole suite — on the 8-core / 8 GiB host 240 files took 233 s as
+  one run and 190 s as two 120-file runs. Each batch also gets its own
+  deadline (12 min for the first, then 3x the previous batch, clipped to 3-20
+  min) and every suite shares a 42-minute budget that starts before `pnpm
+install`, so the summary is written before the scheduler's 45-minute stop.
+  A custom reporter (`checks/full-suite-progress.mjs`) appends one line per
+  finished file to a JSONL file as the batch runs; the stock JSON report is
+  only written at the end, which is why the timeout at NEWFRONT-908's
+  `226b49807` produced `files=0` and no file names. A batch that stalls keeps
+  the files it finished, and the rest are split in halves (three rounds at
+  most) so the file that never settles is named `(file did not finish)`
+  instead of the whole run being a bare timeout. A suite the budget stopped
+  reports the files it never reached under `crash`. The summary file is also
+  rewritten (with `complete: false`, `green: false`) before each suite and
+  after the last one, so a run stopped early still says how far it got.
+- Contract (`PIDASH_CONTRACT_BASE_URL=…`): api-client suites against a
+  scratch Django seeded with `packages/api-client/contract/seed-contracts.py`.
+- E2E smoke (`pnpm --filter web_new test:e2e`, env-gated): Playwright,
+  sign-in → issue list against a scratch Django + `vite dev`. Skips without
+  `PIDASH_E2E_BASE_URL`. The parity harness (NEWFRONT-19) owns CI wiring.
+
+## Dev against local Django
+
+```sh
+export PIDASH_API_ORIGIN="http://127.0.0.1:8123"   # on its own line
+pnpm --filter web_new dev                            # :3010, /auth + /api proxied
+```
+
+The scratch Django must serve the dev origin as its app host, otherwise the
+native auth redirects land outside the SPA:
+
+```sh
+export WEB_URL="http://localhost:3010" APP_BASE_URL="http://localhost:3010"
+```
+
+Two proxy rules earned the hard way: `changeOrigin` stays `false` so the
+Host Django sees matches the page Origin (native form views reject
+otherwise), and the client drops its cached CSRF token after every
+session-changing POST (Django rotates the secret on login, and the stale
+token answers a bespoke 200 failure page instead of a 403).
+
+Never point a run at a shared database; the contracts runbook shows how to
+create and seed a scratch one.

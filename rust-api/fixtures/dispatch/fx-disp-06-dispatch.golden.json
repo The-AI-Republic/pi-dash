@@ -46,7 +46,8 @@
     "llm_config_missing": "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
     "gateway_scopes_missing": "Sign in to Pi Dash again to refresh your AI access.",
     "byok_not_supported_on_desktop": "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; Pi Dash AI and the Cloud Agent keep using your own key.",
-    "no_managed_runner_for_project": "This project has no Pi Dash Agent on your desktop yet."
+    "no_managed_runner_for_project": "This project has no Pi Dash Agent on your desktop yet.",
+    "managed_runner_paused": "Your Pi Dash Agent for this project is paused. Resume it to run here."
   },
   "dispatch_after_commit": "transaction.on_commit(lambda: dispatch_agent_run(run_id))",
   "lock_cloud_creation_capacity": {

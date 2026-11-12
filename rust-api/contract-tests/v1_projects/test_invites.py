@@ -61,6 +61,18 @@ def test_create_validation(seed, conn):
     assert "role" in r.json()
 
 
+def test_create_duplicate_email_bad_role_only_role_error(seed, conn):
+    # PIDASHCONV-1392: DRF runs field validation (to_internal_value) before
+    # object-level validate(), so when role already fails the duplicate-email
+    # check in invite.py validate() never runs — Django 400s with only the
+    # role error, never non_field_errors.
+    tag = db.new_tag()
+    inv = db.create_invite(conn, seed["ws_a"]["id"], tag, created_by_id=seed["owner"]["id"])
+    r = http.post(seed["keys"][KEY], base(seed) + "/",
+                  json={"email": inv["email"], "role": 99}, expect=400)
+    assert r.json() == {"role": ['"99" is not a valid choice.']}
+
+
 def test_retrieve(seed, conn):
     tag = db.new_tag()
     inv = db.create_invite(conn, seed["ws_a"]["id"], tag, created_by_id=seed["owner"]["id"])

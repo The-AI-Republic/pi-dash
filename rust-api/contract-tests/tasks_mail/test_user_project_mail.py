@@ -285,3 +285,115 @@ def test_project_invitation_stores_message_and_mails(db_conn, broker_url, smtp_s
         f"project_id={project['id']}",
     ):
         assert needle in _html_part(delivered["raw"])
+
+
+# PIDASHCONV-1286: non-ASCII header wire bytes. The invitation subject
+# carries the inviter's name + workspace name; with accented names Django
+# RFC 2047-encodes Subject/From and punycodes IDN domains in To and the
+# envelope. The Rust replay twin mirrors these pins case-for-case.
+NONASCII_FROM = "Équipe Pi Dash <team@x.com>"
+
+
+def _override_email_from(conn, value):
+    """Point EMAIL_FROM at ``value`` via its InstanceConfiguration row.
+
+    EMAIL_* resolve from ``instance_configurations`` with env fallback on
+    both backends; returns the previous live value (None when no row is
+    set) so the caller can restore it.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM instance_configurations "
+            "WHERE key = 'EMAIL_FROM' AND deleted_at IS NULL"
+        )
+        row = cur.fetchone()
+        if row is None:
+            seed_helpers.insert_row(
+                conn,
+                "instance_configurations",
+                {
+                    "key": "EMAIL_FROM",
+                    "value": value,
+                    "category": "EMAIL",
+                    "is_encrypted": False,
+                },
+            )
+        else:
+            cur.execute(
+                "UPDATE instance_configurations SET value = %s, updated_at = now() "
+                "WHERE key = 'EMAIL_FROM' AND deleted_at IS NULL",
+                (value,),
+            )
+    return row[0] if row else None
+
+
+def _restore_email_from(conn, prev):
+    with conn.cursor() as cur:
+        if prev is None:
+            cur.execute("DELETE FROM instance_configurations WHERE key = 'EMAIL_FROM'")
+        else:
+            cur.execute(
+                "UPDATE instance_configurations SET value = %s, updated_at = now() "
+                "WHERE key = 'EMAIL_FROM' AND deleted_at IS NULL",
+                (prev,),
+            )
+
+
+def _only_delivery_matching(sink, needle, what):
+    """_only_delivery_to for an address whose wire form is asserted later.
+
+    The recipient pin must not assume the punycoded form: pre-fix, RCPT
+    TO carries the raw IDN domain, and the test should fail on the byte
+    asserts below (showing both forms) instead of timing out this wait.
+    """
+    from _harness.db import wait_for_condition as wait_for
+
+    def _mine():
+        mine = [m for m in sink.snapshot() if any(needle in r for r in m["rcpt_tos"])]
+        return mine or None
+
+    wait_for(_mine, what=what)
+    broker_probe.wait_for_queue_drain(what=f"broker drained after {what}")
+    mine = [m for m in sink.snapshot() if any(needle in r for r in m["rcpt_tos"])]
+    assert len(mine) == 1, f"expected exactly one mail matching {needle}, got {len(mine)}"
+    return mine[0]
+
+
+def test_workspace_invitation_non_ascii_headers_encoded(db_conn, broker_url, smtp_sink):
+    """workspace_invitation: RFC 2047 Subject/From + punycoded IDN To on the wire."""
+    tag = uuid.uuid4().hex[:8]
+    inviter = seed_helpers.user(db_conn, f"contract-ws-hdr-{tag}", first_name="José")
+    workspace = seed_helpers.workspace(db_conn, f"wshdr{tag}", inviter["id"], name="Café")
+    rcpt = f"invite-{tag}@münchen.de"
+    puny_rcpt = f"invite-{tag}@xn--mnchen-3ya.de"
+    invite = seed_helpers.workspace_invite(db_conn, workspace["id"], email=rcpt)
+    smtp_sink.clear()
+    prev_from = _override_email_from(db_conn, NONASCII_FROM)
+    try:
+        celery_wire.publish(
+            WORKSPACE_INVITATION,
+            args=[rcpt, str(workspace["id"]), invite["token"], SITE, inviter["email"]],
+        )
+        delivered = _only_delivery_matching(
+            smtp_sink, f"invite-{tag}@", "non-ascii invitation mail"
+        )
+    finally:
+        _restore_email_from(db_conn, prev_from)
+
+    head = delivered["raw"].split("\r\n\r\n")[0]
+    # The encoded Subject word is one 74-char line Django folds after
+    # "Subject: " (the generator refold, not the Header value).
+    assert (
+        "Subject: \r\n =?utf-8?q?Jos=C3=A9_has_invited_you_to_join_them_in_Caf=C3=A9_on_Pi_Dash?="
+        in head
+    ), f"Subject not RFC 2047-encoded on the wire:\n{head}"
+    assert (
+        "From: =?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>" in head
+    ), f"From display name not RFC 2047-encoded on the wire:\n{head}"
+    assert f"To: {puny_rcpt}" in head, f"To domain not punycoded on the wire:\n{head}"
+    assert delivered["rcpt_tos"] == [puny_rcpt], (
+        f"envelope RCPT TO not punycoded: {delivered['rcpt_tos']!r}"
+    )
+    assert delivered["mail_from"] == "team@x.com", (
+        f"envelope MAIL FROM wrong: {delivered['mail_from']!r}"
+    )
