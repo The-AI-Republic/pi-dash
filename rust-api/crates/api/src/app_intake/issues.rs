@@ -3102,10 +3102,16 @@ pub async fn render_agent_status(
         .await
         .map_err(|_| Denial::ServerError)?;
     let run_count = runs.count;
+    let total_tokens = runs.total_tokens;
     let latest_row = runs.latest.as_ref().map(RenderedAgentRun::detail_row);
     let active_row = runs.active.as_ref().map(RenderedAgentRun::detail_row);
-    let status =
-        agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
+    let status = agent_status_to_representation(
+        ticker,
+        active_row.as_ref(),
+        latest_row.as_ref(),
+        run_count,
+        total_tokens,
+    );
     match status {
         None => Ok(serde_json::Value::Null),
         Some(view) => serde_json::to_value(&view).map_err(|_| Denial::ServerError),
