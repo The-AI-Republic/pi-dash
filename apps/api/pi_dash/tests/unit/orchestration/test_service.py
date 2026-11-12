@@ -932,6 +932,12 @@ def test_review_to_in_progress_with_no_resume_target_uses_fresh_session(
 # ---------------------------------------------------------------------------
 
 
+def _locality_pin(parent):
+    return service._pinned_runner_for(
+        parent, creator=parent.owner, trigger=parent.trigger, issue=parent.work_item
+    )
+
+
 def _make_failed_run(issue, runner, *, started=True, error_code=""):
     return AgentRun.objects.create(
         workspace=issue.workspace,
@@ -940,7 +946,7 @@ def _make_failed_run(issue, runner, *, started=True, error_code=""):
         work_item=issue,
         runner=runner,
         status=AgentRunStatus.FAILED,
-        error_code=error_code,
+        error_details=({"code": error_code} if error_code else {}),
         prompt="prior work",
         started_at=(timezone.now() - timezone.timedelta(minutes=5) if started else None),
         ended_at=timezone.now(),
@@ -953,7 +959,7 @@ def test_no_pin_when_the_parent_never_started_on_its_runner(
 ):
     """The PIDASHCONV-491 shape: assigned, agent never came up, run failed."""
     parent = _make_failed_run(issue, runner_for_workspace, started=False)
-    assert service._pinned_runner_for(parent) is None
+    assert _locality_pin(parent) is None
 
 
 @pytest.mark.unit
@@ -961,7 +967,7 @@ def test_no_pin_when_the_parent_never_started_on_its_runner(
 def test_no_pin_after_an_infra_failure_code(db, issue, runner_for_workspace, code):
     """The runner went dark or never got the Assign — do not go back to it."""
     parent = _make_failed_run(issue, runner_for_workspace, error_code=code)
-    assert service._pinned_runner_for(parent) is None
+    assert _locality_pin(parent) is None
 
 
 @pytest.mark.unit
@@ -971,7 +977,7 @@ def test_pin_survives_a_failure_the_agent_actually_reached(
     """The agent got its session and then failed: that is about the work, not
     the machine, so repo locality still wins."""
     parent = _make_failed_run(issue, runner_for_workspace, error_code="run_timeout")
-    assert service._pinned_runner_for(parent) == runner_for_workspace
+    assert _locality_pin(parent) == runner_for_workspace
 
 
 @pytest.mark.unit
@@ -981,7 +987,7 @@ def test_pin_survives_a_completed_or_cancelled_parent(db, issue, runner_for_work
         parent = _make_failed_run(issue, runner_for_workspace, started=False)
         AgentRun.objects.filter(pk=parent.pk).update(status=status)
         parent.refresh_from_db()
-        assert service._pinned_runner_for(parent) == runner_for_workspace
+        assert _locality_pin(parent) == runner_for_workspace
 
 
 @pytest.mark.unit

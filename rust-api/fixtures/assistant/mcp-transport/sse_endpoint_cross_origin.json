@@ -1,0 +1,51 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "sse_endpoint_cross_origin",
+  "deviation": "Python HANGS here: the SDK raises ValueError inside the SSE reader task, which the reader's own try/except forwards to the read stream instead of failing tg.start(); the endpoint wait has no timeout so the connect never resolves (observed: probe stuck >7min with init/read timeouts 10/5s; bounded in production only by the 300/330s turn limits). Rust fails the server open immediately. The class follows FastMCP _connect: everything but HTTPStatusError and McpError wraps in RuntimeError('Client failed to connect: ...'), which is what a non-hanging Python would record.",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 5.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/sse"
+  },
+  "flow": [
+    "enter",
+    "list"
+  ],
+  "call": null,
+  "stub": {
+    "sse_endpoint": "http://127.0.0.1:9/messages?sessionId=x"
+  },
+  "wire": "Python sends GET /sse then hangs; no Python wire beyond it.",
+  "rust_wire": [
+    {
+      "method": "GET",
+      "path": "/sse",
+      "headers": {
+        "accept": "text/event-stream",
+        "cache-control": "no-store"
+      },
+      "body": ""
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "failures": {
+      "after_enter": "RuntimeError",
+      "after_list": "RuntimeError",
+      "after_call": null,
+      "at_exit": "RuntimeError"
+    },
+    "close_message": "Client failed to connect: Endpoint origin does not match connection origin: http://127.0.0.1:9/messages?sessionId=x",
+    "delete_seen": false
+  }
+}

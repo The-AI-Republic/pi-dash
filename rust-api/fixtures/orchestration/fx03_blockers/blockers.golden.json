@@ -1,0 +1,107 @@
+{
+  "_trace": "orchestration/blockers.py:47-48 (BLOCKED_BY/BLOCKING), :50-51 (CLOSED_STATE_GROUPS), :109-110 (_open), :133-149 (row form), :129-130 (order by project identifier, sequence_id)",
+  "_method": "live row-form calls on pidash_524_scratch",
+  "constants": {
+    "BLOCKED_BY": "blocked_by",
+    "BLOCKING": "blocking",
+    "CLOSED_STATE_GROUPS": [
+      "cancelled",
+      "completed"
+    ],
+    "SUMMARY_LIMIT": 100
+  },
+  "blockers_D": [
+    {
+      "identifier": "FX3A-2",
+      "state": "Todo",
+      "state_group": "unstarted"
+    },
+    {
+      "identifier": "FX3A-3",
+      "state": "Done",
+      "state_group": "completed"
+    },
+    {
+      "identifier": "FX3A-4",
+      "state": "In Review",
+      "state_group": "review"
+    },
+    {
+      "identifier": "FX3A-5",
+      "state": "Cancelled",
+      "state_group": "cancelled"
+    },
+    {
+      "identifier": "FX3A-11",
+      "state": null,
+      "state_group": null
+    },
+    {
+      "identifier": "FX3B-1",
+      "state": "Todo",
+      "state_group": "unstarted"
+    },
+    {
+      "identifier": "FX3B-2",
+      "state": "In Test",
+      "state_group": "test"
+    }
+  ],
+  "open_blockers_D": [
+    {
+      "identifier": "FX3A-2",
+      "state": "Todo",
+      "state_group": "unstarted"
+    },
+    {
+      "identifier": "FX3A-4",
+      "state": "In Review",
+      "state_group": "review"
+    },
+    {
+      "identifier": "FX3A-11",
+      "state": null,
+      "state_group": null
+    },
+    {
+      "identifier": "FX3B-1",
+      "state": "Todo",
+      "state_group": "unstarted"
+    },
+    {
+      "identifier": "FX3B-2",
+      "state": "In Test",
+      "state_group": "test"
+    }
+  ],
+  "has_open_blockers_D": true,
+  "dependents_D": [
+    {
+      "identifier": "FX3A-12",
+      "state": "Todo",
+      "state_group": "unstarted"
+    },
+    {
+      "identifier": "FX3B-3",
+      "state": "Done",
+      "state_group": "completed"
+    }
+  ],
+  "has_open_blockers_D2_all_resolved": false,
+  "open_blockers_D2": [],
+  "blockers_D2": [
+    {
+      "identifier": "FX3A-14",
+      "state": "Done",
+      "state_group": "completed"
+    }
+  ],
+  "has_open_blockers_D3_no_relations": false,
+  "open_rule": {
+    "review_is_open": true,
+    "test_is_open": true,
+    "no_state_is_open": true,
+    "completed_is_closed": true,
+    "cancelled_is_closed": true
+  }
+}

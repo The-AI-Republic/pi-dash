@@ -1,0 +1,209 @@
+{
+  "bugs": [
+    "Local build_first_turn stamps run.prompt_manifest as a BARE LIST of manifest dicts while the cloud path stamps a {'v':2,'executor_kind','kind','tool_catalog_version','sections'} dict (composer.py:398-414); port both shapes as-is."
+  ],
+  "data": {
+    "compose": {
+      "assemble_body": "line1\nline2\n\nsolo\n",
+      "assemble_manifest": [
+        {
+          "line_end": 2,
+          "line_start": 1,
+          "section_key": "a",
+          "source": "default",
+          "version": 0
+        },
+        {
+          "line_end": 4,
+          "line_start": 4,
+          "section_key": "b",
+          "source": "workspace",
+          "version": 4
+        }
+      ],
+      "cloud_direct_all_default": true,
+      "cloud_direct_len": 2411,
+      "cloud_direct_text_sha256": "ef43bf73dd56570e2f51bc4acbfbb52ebd8265abb0c4650bba1e6916be527a70",
+      "compile_has_jinja_markers": true,
+      "compile_text_equals_template_body": true,
+      "compose_defaults_no_jinja_left": true,
+      "compose_defaults_text_len": 80400,
+      "compose_defaults_text_sha256": "ef2f4096cb4327c94297784dd5618c812f55ff1915ec8f18d04508bec7d374f6",
+      "compose_first_manifest_entry": {
+        "line_end": 25,
+        "line_start": 1,
+        "section_key": "intro",
+        "source": "default",
+        "version": 0
+      },
+      "compose_manifest_all_default": true,
+      "compose_manifest_entry_count": 16,
+      "compose_resolved_count": 16,
+      "draft_bad_attr_error": "PromptRenderError: section 'intro' (source=draft, v0) failed to render: 'nope_xyz' is undefined",
+      "draft_renders_value": true,
+      "draft_source_label": ["draft"],
+      "effective_customizability_is_registry_flag": true,
+      "resolve_locked_skips_chain": "default",
+      "resolve_no_workspace_defaults_only": "default",
+      "source_consts": {
+        "default": "default",
+        "draft": "draft",
+        "workspace": "workspace"
+      },
+      "trace": "prompting/composer.py:84-92 (effective_customizability), 100-122 (load_override_index), 125-147 (_lookup_override), 150-201 (resolve_section), 204-230 (_assemble), 233-283 (culprit attribution), 286-321 (compose), 324-344 (compose_cloud), 347-364 (compile_template), 372-380 (_user_for_run)",
+      "user_scope_label_format": "user:<id> (f-string at composer.py:192)"
+    },
+    "precedence": {
+      "automatic_runs_workspace_only": {
+        "body": "WORKSPACE autonomy",
+        "key": "autonomy",
+        "source": "workspace",
+        "version": 2
+      },
+      "index_keys": ["user:autonomy", "user:intro", "workspace:autonomy"],
+      "index_vs_fallback_same": true,
+      "locked_ignores_stale_personal": {
+        "body": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human interaction. You are an autonomous agent working on Pi Dash issue `{{ issue.identifier }}`. Issues vary in nature: some require code changes (the \"coding-task\" path with git, branches, and PRs), others do not (investigations, status checks, CLI invocations, comment-only responses). Step 0.5 below asks you to classify the task and Steps 1 and 2 fork accordingly.\n\nIssue context:\n- Identifier: {{ issue.identifier }}\n- Title: {{ issue.title }}\n- Current state: {{ issue.state }} (group: {{ issue.state_group }})\n- Priority: {{ issue.priority }}\n- Labels: {{ issue.labels | join(\", \") if issue.labels else \"(none)\" }}\n- Assignees: {{ issue.assignees | join(\", \") if issue.assignees else \"(none)\" }}\n- URL: {{ issue.url }}\n{% if issue.target_date %}- Target date: {{ issue.target_date }}{% endif %}\n\nThis issue belongs to the Project: {{ project.name }} ({{ project.identifier }})\n{% if project.description %}\n{{ project.description }}\n{% endif %}\nIssue Description:\n{% if issue.description %}\n{{ issue.description }}\n{% else %}\nNo description provided.\n{% endif %}\n\nComments to date (chronological \u2014 humans and the agent's own prior runs):\n{{ comments_section }}\n",
+        "key": "intro",
+        "source": "default",
+        "version": 0
+      },
+      "no_workspace_defaults_only": {
+        "body": "## Autonomy / escalation model\n\nMaintain an explicit autonomy assessment in the workpad throughout the run.\n\nFields:\n\n- `score` \u2014 integer `0..10` used for prioritization and UI only\n- `type` \u2014 `none | assumption | decision | blocker`\n- `reason` \u2014 concise explanation of why the score/type applies\n- `question_for_human` \u2014 a specific question, or `null`\n- `safe_to_continue` \u2014 `true | false`\n\nScoring guide:\n\n- `0-2` \u2014 clear local choice strongly implied by existing codebase patterns\n- `3-4` \u2014 minor ambiguity; decision is reversible and low risk\n- `5-6` \u2014 meaningful ambiguity, but a safe default exists and can be documented\n- `7-8` \u2014 product, UX, or architecture choice with material downstream impact\n- `9-10` \u2014 cannot complete responsibly without human input, missing access, or missing requirements\n\nType semantics:\n\n- `none` \u2014 no meaningful ambiguity; continue\n- `assumption` \u2014 proceed autonomously, but record the assumption clearly\n- `decision` \u2014 a human-visible decision is needed; if `safe_to_continue` is `false`, stop and follow \"Blocking the run\"\n- `blocker` \u2014 task cannot proceed because of an external dependency, access issue, or missing requirement\n\nThe score is not the source of truth for run outcome. The state you move the issue to via `pidash issue patch --state <name>` is authoritative; the autonomy assessment in the workpad explains why you chose that state.\n\nNever emit a score without also emitting the type, reason, and `safe_to_continue`.\n",
+        "key": "autonomy",
+        "source": "default",
+        "version": 0
+      },
+      "personal_beats_workspace": {
+        "body": "PERSONAL autonomy",
+        "key": "autonomy",
+        "source": "user:19a3bb94-30b3-4e62-8116-edea68ffe7eb",
+        "version": 1
+      },
+      "trace": "composer.py:150-201 (resolve_section); tier gate 186-189 (personal only when overridable); locked short-circuit 180-181; no-workspace 182-184",
+      "workspace_when_no_personal": {
+        "body": "WORKSPACE autonomy",
+        "key": "autonomy",
+        "source": "workspace",
+        "version": 2
+      }
+    },
+    "sql": {
+      "executed_scoped_index_on_empty": {
+        "row_count": 0,
+        "sql": "SELECT \"prompt_section_override\".\"id\", \"prompt_section_override\".\"workspace_id\", \"prompt_section_override\".\"user_id\", \"prompt_section_override\".\"section_key\", \"prompt_section_override\".\"body\", \"prompt_section_override\".\"is_active\", \"prompt_section_override\".\"version\", \"prompt_section_override\".\"needs_attention\", \"prompt_section_override\".\"updated_by_id\", \"prompt_section_override\".\"created_at\", \"prompt_section_override\".\"updated_at\" FROM \"prompt_section_override\" WHERE (\"prompt_section_override\".\"is_active\" AND \"prompt_section_override\".\"workspace_id\" = '204fd67f648547a098e2079bd6b34202'::uuid AND (\"prompt_section_override\".\"user_id\" IS NULL OR \"prompt_section_override\".\"user_id\" = '19a3bb9430b34e628116edea68ffe7eb'::uuid))"
+      },
+      "load_override_index_all_active": "SELECT \"prompt_section_override\".\"id\", \"prompt_section_override\".\"workspace_id\", \"prompt_section_override\".\"user_id\", \"prompt_section_override\".\"section_key\", \"prompt_section_override\".\"body\", \"prompt_section_override\".\"is_active\", \"prompt_section_override\".\"version\", \"prompt_section_override\".\"needs_attention\", \"prompt_section_override\".\"updated_by_id\", \"prompt_section_override\".\"created_at\", \"prompt_section_override\".\"updated_at\" FROM \"prompt_section_override\" WHERE (\"prompt_section_override\".\"is_active\" AND \"prompt_section_override\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202)",
+      "load_override_index_scoped": "SELECT \"prompt_section_override\".\"id\", \"prompt_section_override\".\"workspace_id\", \"prompt_section_override\".\"user_id\", \"prompt_section_override\".\"section_key\", \"prompt_section_override\".\"body\", \"prompt_section_override\".\"is_active\", \"prompt_section_override\".\"version\", \"prompt_section_override\".\"needs_attention\", \"prompt_section_override\".\"updated_by_id\", \"prompt_section_override\".\"created_at\", \"prompt_section_override\".\"updated_at\" FROM \"prompt_section_override\" WHERE (\"prompt_section_override\".\"is_active\" AND \"prompt_section_override\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202 AND (\"prompt_section_override\".\"user_id\" IS NULL OR \"prompt_section_override\".\"user_id\" = 19a3bb94-30b3-4e62-8116-edea68ffe7eb))",
+      "lookup_single_user_scope": "SELECT \"prompt_section_override\".\"id\", \"prompt_section_override\".\"workspace_id\", \"prompt_section_override\".\"user_id\", \"prompt_section_override\".\"section_key\", \"prompt_section_override\".\"body\", \"prompt_section_override\".\"is_active\", \"prompt_section_override\".\"version\", \"prompt_section_override\".\"needs_attention\", \"prompt_section_override\".\"updated_by_id\", \"prompt_section_override\".\"created_at\", \"prompt_section_override\".\"updated_at\" FROM \"prompt_section_override\" WHERE (\"prompt_section_override\".\"is_active\" AND \"prompt_section_override\".\"section_key\" = autonomy AND \"prompt_section_override\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202 AND \"prompt_section_override\".\"user_id\" = 19a3bb94-30b3-4e62-8116-edea68ffe7eb)",
+      "lookup_single_workspace_scope": "SELECT \"prompt_section_override\".\"id\", \"prompt_section_override\".\"workspace_id\", \"prompt_section_override\".\"user_id\", \"prompt_section_override\".\"section_key\", \"prompt_section_override\".\"body\", \"prompt_section_override\".\"is_active\", \"prompt_section_override\".\"version\", \"prompt_section_override\".\"needs_attention\", \"prompt_section_override\".\"updated_by_id\", \"prompt_section_override\".\"created_at\", \"prompt_section_override\".\"updated_at\" FROM \"prompt_section_override\" WHERE (\"prompt_section_override\".\"is_active\" AND \"prompt_section_override\".\"section_key\" = autonomy AND \"prompt_section_override\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202 AND \"prompt_section_override\".\"user_id\" IS NULL)"
+    },
+    "validation": {
+      "issue_sample_keys_minimal": [
+        "available_tools",
+        "blocked_by",
+        "blocking",
+        "children",
+        "code_reviews",
+        "comments_section",
+        "extra_toolsets",
+        "extra_toolsets_schema_tool",
+        "has_open_blockers",
+        "issue",
+        "limits",
+        "lineage",
+        "open_blockers",
+        "other_relations",
+        "parent",
+        "parent_done_payload",
+        "project",
+        "related",
+        "repo",
+        "run",
+        "tick",
+        "unavailable_capabilities",
+        "workpad_body",
+        "workspace"
+      ],
+      "issue_sample_keys_populated": [
+        "available_tools",
+        "blocked_by",
+        "blocking",
+        "children",
+        "code_reviews",
+        "comments_section",
+        "extra_toolsets",
+        "extra_toolsets_schema_tool",
+        "has_open_blockers",
+        "issue",
+        "limits",
+        "lineage",
+        "open_blockers",
+        "other_relations",
+        "parent",
+        "parent_done_payload",
+        "project",
+        "related",
+        "repo",
+        "run",
+        "tick",
+        "unavailable_capabilities",
+        "workpad_body",
+        "workspace"
+      ],
+      "kinds_for_cloud_intro": ["coding-task", "direct"],
+      "kinds_for_intro": ["coding-task"],
+      "kinds_for_unknown_key": [],
+      "max_body_length": 100000,
+      "sample_contexts_counts": {
+        "coding-task": 2,
+        "direct": 2,
+        "review": 2,
+        "scheduler": 2
+      },
+      "scheduler_sample_keys_minimal": [
+        "available_tools",
+        "extra_toolsets",
+        "extra_toolsets_schema_tool",
+        "limits",
+        "project",
+        "run",
+        "scheduler",
+        "scheduler_task_body",
+        "unavailable_capabilities",
+        "workspace"
+      ],
+      "scheduler_sample_keys_populated": [
+        "available_tools",
+        "extra_toolsets",
+        "extra_toolsets_schema_tool",
+        "limits",
+        "project",
+        "run",
+        "scheduler",
+        "scheduler_task_body",
+        "unavailable_capabilities",
+        "workspace"
+      ],
+      "trace": "prompting/validation.py:42-164 (_issue_sample), 223-275 (_scheduler_sample), 278-282 (sample_contexts), 285-294 (kinds_for_section), 323-363 (validate_override steps), 297-320 (_compose_with_candidate)",
+      "validate_accept": "None (returned cleanly) for default body of 'autonomy'",
+      "validate_rejects": {
+        "bad_syntax": "OverrideValidationError: invalid Jinja syntax: unexpected char '!' at 16",
+        "locked_section": "OverrideValidationError: section 'guardrails' is locked and cannot be overridden",
+        "not_in_any_recipe": "PromptRegistryError (before validation): unknown section key: 'definitely-not-a-section'",
+        "too_long": "OverrideValidationError: override body exceeds 100000-character limit (got 100001 characters)",
+        "unknown_var": "OverrideValidationError: override for section 'autonomy' fails to render as part of the 'coding-task' prompt: 'nosuchvar_xyz' is undefined"
+      }
+    }
+  },
+  "fixture_id": "FIX-compose",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "compile_template takes no executor_kind and never renders (text == template_body). kinds_for_section merges cloud kinds but _compose_with_candidate only resolves local recipes; unreachable today (all 14 cloud-* sections are locked, all 7 overridable sections are local-only)."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/composer.py:31-36 (source consts), 38-82 (ResolvedSection/ManifestEntry/ComposedPrompt), 84-92 (effective_customizability), 100-147 (load_override_index/_lookup_override), 150-201 (resolve_section), 204-230 (_assemble), 233-283 (culprit attribution), 286-321 (compose), 324-344 (compose_cloud), 347-364 (compile_template), 372-380 (_user_for_run)",
+    "prompting/validation.py:42-282 (sample contexts), 285-294 (kinds_for_section), 297-320 (_compose_with_candidate), 323-363 (validate_override)"
+  ]
+}

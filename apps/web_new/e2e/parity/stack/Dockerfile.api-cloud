@@ -1,0 +1,43 @@
+# Cloud-edition API image (NEWFRONT-436).
+#
+# OSS apps/api plus the private overlay, following the production layering in
+# private-pi-dash's docker/Dockerfile: ee-overlay/apps/api copied on top of
+# the matching OSS paths, plus the cloud-only pi_dash_cloud package.
+#
+# FROM is the parity stack's own OSS api image (built first by parity-up.sh;
+# BASE_API_IMAGE names the namespace's tag), so this Dockerfile adds exactly
+# one overlay layer on top of the image the OSS stack already proved. The
+# overlay inputs arrive via the stack's .cloud-staging/ directory (copied
+# there from the runner-local overlay checkout at bring-up; never committed),
+# so this layer — and only this layer — invalidates when the overlay changes.
+#
+# pi_dash_cloud lands at /code/pi_dash_cloud (importable next to pi_dash,
+# the same placement the overlay's own local-dev compose mount uses), so no
+# editable install is needed. Its extra third-party deps are boto3, PyJWT and
+# requests: the OSS image already carries boto3, PyJWT and cryptography (see
+# apps/api/requirements/base.txt), leaving only requests to install here.
+#
+# Build context is the repo root (unlike the OSS api service, whose context
+# is apps/api), because the staging directory lives under the parity stack.
+# The default tag below is the un-namespaced stack's api image; namespaced
+# stacks pass their own tag through BASE_API_IMAGE (NEWFRONT-435).
+ARG BASE_API_IMAGE=parity19-api:local
+FROM $BASE_API_IMAGE
+
+WORKDIR /code
+
+# The overlay layer. The api subtree lands on the matching OSS paths (the
+# live /code tree IS apps/api); the cloud package lands beside pi_dash.
+COPY apps/web_new/e2e/parity/stack/.cloud-staging/ee-overlay/apps/api/ /code/
+COPY apps/web_new/e2e/parity/stack/.cloud-staging/pi_dash_cloud /code/pi_dash_cloud
+
+# The one cloud dep the OSS image lacks, then fail the build unless the
+# overlay actually took: the private settings seam must answer with the
+# cloud default, and the cloud settings module must import. (The URL conf
+# is not imported here: it pulls Django models, which need the app
+# registry; container boot exercises it instead.)
+RUN pip install --no-cache-dir "requests>=2.32" \
+  && python -c 'from pi_dash.ee.settings.user_settings import known_settings_schema; assert "openhub" in known_settings_schema(), "ee overlay did not apply"' \
+  && python -c 'import requests, pi_dash_cloud.settings.local'
+
+EXPOSE 8000

@@ -163,6 +163,17 @@ def test_release_pin_is_409_when_the_run_is_not_pinned(api_key_client, workspace
 
 
 @pytest.mark.unit
+def test_release_pin_is_409_for_a_dedicated_pin(api_key_client, workspace, pinned_run):
+    """A dedicated pin belongs to the issue: same refusal as the web hatch."""
+    AgentRun.objects.filter(pk=pinned_run.pk).update(pin_kind="dedicated")
+    response = api_key_client.post(_url(workspace, pinned_run.id))
+    assert response.status_code == 409
+    assert response.json()["code"] == "dedicated_pin_not_releasable"
+    pinned_run.refresh_from_db()
+    assert pinned_run.pinned_runner_id is not None
+
+
+@pytest.mark.unit
 def test_release_pin_is_409_for_a_cloud_agent_run(api_key_client, workspace, pinned_run):
     # ``agent_run_cloud_has_no_local_assignment`` forbids a cloud run holding
     # a pin at all, which is exactly why the endpoint answers before it looks

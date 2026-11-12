@@ -128,43 +128,23 @@ def test_select_runner_in_pod_skips_stale_heartbeat(db, create_user, workspace, 
         assert matcher.select_runner_in_pod(pod) is None
 
 
-# ---------- worktree capacity hint retired (PDASHOSS01-137) ----------
-# ``free_worktrees`` is no longer written or read; the matcher ranks eligible
-# idle runners by freshest heartbeat only. A leftover column value on a
-# historical row must not influence selection.
+# ---------- worktree capacity hint retired (PDASHOSS01-137/156) ----------
+# The per-runner capacity hint is gone; the matcher ranks eligible idle runners
+# by freshest heartbeat alone.
 
 
 @pytest.mark.unit
-def test_select_runner_in_pod_ranks_by_heartbeat_ignoring_free_worktrees(db, create_user, workspace, pod):
-    """The freshest-heartbeat runner wins even when an older runner carries a
-    non-zero ``free_worktrees`` value — the retired hint no longer ranks."""
+def test_select_runner_in_pod_ranks_by_heartbeat_alone(db, create_user, workspace, pod):
+    """Among equally-eligible idle runners the freshest heartbeat wins — the
+    only ranking left now that the worktree capacity hint is retired."""
     from django.db import transaction
 
     fresh = _make_runner(create_user, workspace, pod, "fresh", heartbeat_ago_s=1)
-    fresh.free_worktrees = 0
-    fresh.save(update_fields=["free_worktrees"])
-
-    older_with_stale_hint = _make_runner(create_user, workspace, pod, "older", heartbeat_ago_s=20)
-    older_with_stale_hint.free_worktrees = 2
-    older_with_stale_hint.save(update_fields=["free_worktrees"])
+    _make_runner(create_user, workspace, pod, "older", heartbeat_ago_s=20)
 
     with transaction.atomic():
         picked = matcher.select_runner_in_pod(pod)
     assert picked.pk == fresh.pk
-
-
-@pytest.mark.unit
-def test_select_runner_in_pod_selects_runner_with_zero_free_worktrees(db, create_user, workspace, pod):
-    """A stale ``free_worktrees == 0`` is not a gate — the sole eligible idle
-    runner is still selected."""
-    from django.db import transaction
-
-    full = _make_runner(create_user, workspace, pod, "full")
-    full.free_worktrees = 0
-    full.save(update_fields=["free_worktrees"])
-    with transaction.atomic():
-        picked = matcher.select_runner_in_pod(pod)
-    assert picked.pk == full.pk
 
 
 # ---------------- next_queued_run_for_pod ----------------
@@ -304,7 +284,7 @@ def test_drain_pod_by_id_returns_zero_when_missing(db):
 # ---------------------------------------------------------------------------
 
 
-def _make_run(user, workspace, pod, *, prompt="x", pinned_runner=None, status=AgentRunStatus.QUEUED):
+def _make_run(user, workspace, pod, *, prompt="x", pinned_runner=None, status=AgentRunStatus.QUEUED, **extra):
     return AgentRun.objects.create(
         owner=user,
         created_by=user,
@@ -313,6 +293,7 @@ def _make_run(user, workspace, pod, *, prompt="x", pinned_runner=None, status=Ag
         prompt=prompt,
         status=status,
         pinned_runner=pinned_runner,
+        **extra,
     )
 
 
@@ -710,14 +691,19 @@ def test_managed_run_pin_is_never_auto_released(db, create_user, workspace, pod)
 
 
 @pytest.mark.unit
-def test_desktop_bundled_runner_does_not_claim_released_pin(db, create_user, workspace, pod):
-    """A user's laptop must not become the pod's overflow build server."""
-    from pi_dash.runner.models import RunnerProvisioning
+@pytest.mark.parametrize("engine", [False, True])
+def test_pinned_only_runner_does_not_claim_released_pin(db, create_user, workspace, pod, engine):
+    """A released pin is shared pod work: a runner with pod work off (an
+    own-agent ``pinned_only`` runner, or an engine on a user's laptop that
+    is not a pod member) must not become the pod's overflow build server."""
+    from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning
 
     rA = _make_runner(create_user, workspace, pod, "agentA")
-    desktop = _make_runner(create_user, workspace, pod, "desktop")
-    desktop.provisioning = RunnerProvisioning.DESKTOP_BUNDLED
-    desktop.save(update_fields=["provisioning"])
+    solo = _make_runner(create_user, workspace, pod, "solo")
+    solo.pod_dispatch = RunnerPodDispatch.PINNED_ONLY
+    if engine:
+        solo.provisioning = RunnerProvisioning.DESKTOP_BUNDLED
+    solo.save(update_fields=["pod_dispatch", "provisioning"])
     _make_busy(create_user, workspace, pod, rA)
     pinned = _backdate(
         _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
@@ -727,6 +713,33 @@ def test_desktop_bundled_runner_does_not_claim_released_pin(db, create_user, wor
     assert matcher.drain_pod(pod) == 0
     pinned.refresh_from_db()
     assert pinned.pinned_runner_id == rA.id
+
+
+@pytest.mark.unit
+def test_dedicated_pin_is_never_released_by_the_budget(db, create_user, workspace, pod):
+    """A dedicated pin belongs to the issue, not the queue: however long it
+    waits behind its busy runner, an idle runner never takes it over."""
+    from pi_dash.runner.models import PinKind
+
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(
+            create_user,
+            workspace,
+            pod,
+            prompt="dedicated to A",
+            pinned_runner=rA,
+            pin_kind=PinKind.DEDICATED,
+        ),
+        3600,
+    )
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.pinned_runner_id == rA.id
+    assert pinned.status == AgentRunStatus.QUEUED
 
 
 @pytest.mark.unit
