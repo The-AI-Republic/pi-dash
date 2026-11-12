@@ -1,0 +1,154 @@
+{
+  "_about": "D-09 workspace seed behaviour. Ported from 01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_method": "Values produced by executing the named Python code under pi_dash.settings.test with no DB/S3 (venv /tmp/ct100-django-venv). Generators: /tmp/fx_d09b.py, /tmp/fx_d09c.py (throwaway). Seed-file reads executed against apps/api/pi_dash/seeds/data (read-only).",
+  "_trace": [
+    "workspace_seed_task.py:49-68 read_seed_file golden (SEED_DIR/data)",
+    "workspace_seed_task.py:71-173 create_project_and_member protocol",
+    "workspace_seed_task.py:176-208 create_project_states protocol",
+    "workspace_seed_task.py:211-242 create_project_labels protocol",
+    "workspace_seed_task.py:245-342 create_project_issues protocol",
+    "workspace_seed_task.py:345-388 create_pages protocol",
+    "workspace_seed_task.py:391-439 create_cycles protocol",
+    "workspace_seed_task.py:442-474 create_modules protocol",
+    "workspace_seed_task.py:477-500 create_views protocol",
+    "workspace_seed_task.py:504-570 workspace_seed orchestration protocol"
+  ],
+  "read_seed_file": {
+    "projects_first_keys": ["cover_image", "description", "id", "identifier", "logo_props", "name", "network"],
+    "missing_file_returns_none": true,
+    "bad_json_returns_none": "json.JSONDecodeError -> error log + None (code path).",
+    "path": "os.path.join(settings.SEED_DIR, 'data', filename)."
+  },
+  "seed_inventory": {
+    "projects.json": {
+      "count": 1,
+      "first_keys": ["cover_image", "description", "id", "identifier", "logo_props", "name", "network"]
+    },
+    "states.json": {
+      "count": 8,
+      "first_keys": ["color", "default", "group", "id", "name", "project_id", "sequence"]
+    },
+    "labels.json": {
+      "count": 2,
+      "first_keys": ["color", "id", "name", "project_id", "sort_order"]
+    },
+    "issues.json": {
+      "count": 7,
+      "first_keys": [
+        "cycle_id",
+        "description_html",
+        "id",
+        "labels",
+        "module_ids",
+        "name",
+        "priority",
+        "project_id",
+        "sequence_id",
+        "sort_order",
+        "state_id"
+      ]
+    },
+    "pages.json": {
+      "count": 2,
+      "first_keys": ["access", "description_html", "id", "name", "project_id", "type"]
+    },
+    "cycles.json": {
+      "count": 2,
+      "first_keys": ["id", "name", "project_id", "sort_order", "timezone", "type"]
+    },
+    "modules.json": {
+      "count": 3,
+      "first_keys": ["description", "id", "name", "project_id", "sort_order", "status"]
+    },
+    "views.json": {
+      "count": 1,
+      "first_keys": [
+        "access",
+        "description",
+        "display_filters",
+        "display_properties",
+        "filters",
+        "id",
+        "name",
+        "project_id",
+        "rich_filters",
+        "sort_order"
+      ]
+    }
+  },
+  "seed_issue_sample": {
+    "id": 1,
+    "labels": [],
+    "project_id": 1,
+    "state_id": 2,
+    "cycle_id": 1,
+    "module_ids": [1],
+    "name": "Welcome to Pi Dash \ud83d\udc4b"
+  },
+  "create_project_and_member": {
+    "identifier": "alnum-only chars of workspace.name, truncated to 5.",
+    "row": "Project(**seed minus id/name/identifier, workspace, name=workspace.name, identifier, created_by=bot, cycle_view=module_view=issue_views_view=True); save(created_by_id, disable_auto_set_user=True).",
+    "members": "ProjectMember per workspace member (member_id, role copied, workspace_id, created_by bot) via bulk_create.",
+    "user_properties": "ProjectUserProperty per member with FIXED display_filters + display_properties literals (recorded verbatim below).",
+    "returns": "projects_map {seed_int_id: new_uuid}. Empty seeds -> {} + warning.",
+    "display_filters": {
+      "layout": "list",
+      "calendar": {
+        "layout": "month",
+        "show_weekends": false
+      },
+      "group_by": "state",
+      "order_by": "sort_order",
+      "sub_issue": true,
+      "sub_group_by": null,
+      "show_empty_groups": true
+    },
+    "display_properties": {
+      "key": true,
+      "link": true,
+      "cycle": false,
+      "state": true,
+      "labels": false,
+      "modules": false,
+      "assignee": true,
+      "due_date": false,
+      "estimate": true,
+      "priority": true,
+      "created_on": true,
+      "issue_type": true,
+      "start_date": false,
+      "updated_on": true,
+      "customer_count": true,
+      "sub_issue_count": false,
+      "attachment_count": false,
+      "customer_request_count": true
+    }
+  },
+  "create_project_states": "pop id/project_id; State(**seed, project_id=map[pid], workspace, created_by bot); save(...); returns {seed_id: uuid}.",
+  "create_project_labels": "Same shape as states for Label.",
+  "create_project_issues": "Requires id/labels/project_id/state_id keys (missing -> error log + continue); pops id/labels/project_id/state_id/cycle_id/module_ids (cycle_id/module_ids KeyError if absent \u2014 unguarded .pop, port as-is); Issue(**rest, state/map, project/map, workspace, created_by bot); IssueSequence + IssueActivity(verb/created, comment 'created the issue', epoch=time.time()) per issue; IssueLabel per label; CycleIssue iff cycle_id truthy; ModuleIssue per module_id iff truthy.",
+  "create_pages": "Page(workspace, is_global=False, access or PUBLIC, name, description_json or {}, description_html or '<p></p>', binary/stripped as-is, created/updated/owned by bot); PROJECT type with project_id -> ProjectPage row.",
+  "create_cycles": "pop id/project_id/type (KeyError if type absent); CURRENT: now..now+14d; UPCOMING: last cycle end+1d..+14d else now+14d..+28d; any other type -> start_date/end_date UNBOUND -> NameError on Cycle(...) (port as-is). owned_by bot.",
+  "create_modules": "start=now+index*2d, target=start+14d (index = seed order).",
+  "create_views": "pop project_id + id (id DISCARDED); IssueView(**rest, project/map, workspace, created/owned by bot).",
+  "workspace_seed": {
+    "order": [
+      "bot User",
+      "WorkspaceMember(role 20)",
+      "projects",
+      "states",
+      "labels",
+      "cycles",
+      "modules",
+      "issues",
+      "views",
+      "pages"
+    ],
+    "bot_user": "username/email bot_user_<workspace.id>(+@example.com), display/first 'Pi Dash', is_bot, bot_type WORKSPACE_SEED, password=make_password(uuid4hex), is_password_autoset.",
+    "failure": "broad except -> error log + RAISE (unlike most tasks which swallow)."
+  },
+  "db_before_after": {
+    "before": "Workspace + its WorkspaceMembers; no project rows.",
+    "after": "1 bot user + membership; 1 project named = workspace name; len(states) states, len(labels) labels, len(cycles) cycles, len(modules) modules, len(issues) issues (+sequences, activities, label/cycle/module links), len(views) views, len(pages) pages (+ProjectPage rows for PROJECT ones). Seed-int ids threaded via maps."
+  }
+}

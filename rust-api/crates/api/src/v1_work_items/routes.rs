@@ -1,0 +1,949 @@
+//! D-18 work-item route registration: core by-identifier / list / detail
+//! routes (handlers A, PIDASHCONV-673), action routes (handlers F,
+//! PIDASHCONV-678), link + comment routes (handlers B, PIDASHCONV-674),
+//! PR / code-review link routes (handlers H, PIDASHCONV-680), plus
+//! activity + attachment routes (handlers C, PIDASHCONV-675), relation +
+//! workpad routes (handlers D, PIDASHCONV-676), label + page routes
+//! (handlers G, PIDASHCONV-679), and the search and move routes
+//! (handlers E, PIDASHCONV-677).
+//!
+//! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
+//! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
+//! four `work-items/` routes plus their deprecated `issues/` twins, which
+//! share the view classes and therefore the handlers),
+//! `urls/work_item.py:218-236` (the four PR/review-link paths),
+//! `urls/work_item.py:79-98,173-192` (the eight activity/attachment paths
+//! plus their deprecated twins), `urls/work_item.py:194-216` (the five
+//! relation/workpad paths, which have no deprecated twins),
+//! `urls/label.py` (the two label paths), `urls/page.py` (the three page
+//! paths), `urls/work_item.py:39-42,103-111` (the three search paths: the
+//! legacy route plus its deprecated twin, which share the view class,
+//! and the advanced route) and `urls/work_item.py:128-132` (the move
+//! path, no deprecated twin) onto the merged D-18 foundation. Cutover
+//! granularity is the route + method (the pilot `owned()` pattern): the
+//! owned methods serve from Rust, every other method on these paths
+//! proxies to Django so its 405-after-auth and
+//! metadata responses are preserved byte for byte.
+//!
+//! Sibling D-18 handler issues register their own routes here; on rebase
+//! keep both sides, never fork this file.
+//!
+//! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
+
+use axum::Router;
+
+use crate::state::AppState;
+
+use super::handlers_actions::{owned_action, post_retick, post_run_ai, post_wait, post_yield};
+use super::handlers_activity::{
+    delete_attachment, get_activity_detail, get_activity_list, get_attachment, get_attachment_list,
+    owned_activity, owned_attachment_detail, owned_attachment_list, patch_attachment,
+    post_attachment,
+};
+use super::handlers_core::{
+    delete_issue_detail, get_by_identifier, get_issue_detail, get_issue_list, owned_by_identifier,
+    owned_issue_detail, owned_issue_list, patch_issue_detail, post_issue_list,
+};
+
+use super::handlers_labels_pages::{
+    delete_label, delete_page_archive, get_label_detail, get_label_list, get_page_detail,
+    get_page_list, owned_label_detail, owned_label_list, owned_page_archive, owned_page_detail,
+    owned_page_list, patch_label, patch_page, post_label, post_page, post_page_archive,
+};
+
+use super::handlers_pr_links::{
+    pr_create, pr_destroy, pr_list, review_create, review_destroy, review_list,
+};
+
+use super::handlers_relations::{
+    get_relation_grouped, get_relation_list, get_workpad, owned_relation_grouped,
+    owned_relation_list, owned_relation_relate, owned_relation_unrelate, owned_workpad,
+    patch_workpad, post_relate, post_relation, post_unrelate,
+};
+
+use super::handlers_move_search::{
+    get_search, get_search_advanced, owned_move, owned_search, owned_search_advanced, post_move,
+};
+
+use super::handlers_social::{
+    delete_comment, delete_link, get_comment_detail, get_comment_list, get_link_detail,
+    get_link_list, owned_comment_detail, owned_comment_list, owned_link_detail, owned_link_list,
+    patch_comment, patch_link, post_comment, post_link,
+};
+
+/// Register the four action paths (`urls/work_item.py:133-151`,
+/// PIDASHCONV-678), the D-18 link/comment paths
+/// (`urls/work_item.py:60-77,154-171`, PIDASHCONV-674), the
+/// PR/review-link paths (`urls/work_item.py:218-236`, PIDASHCONV-680),
+/// the activity/attachment paths (`urls/work_item.py:79-98,173-192`,
+/// PIDASHCONV-675), the relation/workpad paths
+/// (`urls/work_item.py:194-216`, PIDASHCONV-676), the label/page paths
+/// (`urls/label.py`, `urls/page.py`, PIDASHCONV-679), the three search
+/// paths (`urls/work_item.py:39-42,103-111`, PIDASHCONV-677) and the move
+/// path (`urls/work_item.py:128-132`, PIDASHCONV-677).
+///
+/// Sibling `v1_work_items` paths have no Rust route yet and keep proxying
+/// to Django through the fallback; on rebase keep both sides.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        // `work_item.py:194-196` — relation list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/",
+            owned_relation_list(axum::routing::get(get_relation_list).post(post_relation)),
+        )
+        // `work_item.py:199-201` — grouped relations (get).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/grouped/",
+            owned_relation_grouped(axum::routing::get(get_relation_grouped)),
+        )
+        // `work_item.py:204-206` — relate (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/relate/",
+            owned_relation_relate(axum::routing::post(post_relate)),
+        )
+        // `work_item.py:209-211` — unrelate (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/unrelate/",
+            owned_relation_unrelate(axum::routing::post(post_unrelate)),
+        )
+        // `work_item.py:214-216` — workpad (get + patch).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/workpad/",
+            owned_workpad(axum::routing::get(get_workpad).patch(patch_workpad)),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/",
+            super::handlers_pr_links::owned_list(
+                axum::routing::get(pr_list).post(pr_create),
+            ),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/{pk}/",
+            super::handlers_pr_links::owned_detail(axum::routing::delete(pr_destroy)),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/",
+            super::handlers_pr_links::owned_list(
+                axum::routing::get(review_list).post(review_create),
+            ),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/{pk}/",
+            super::handlers_pr_links::owned_detail(axum::routing::delete(review_destroy)),
+        )
+        // `work_item.py:60-63` — link list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/",
+            owned_link_list(axum::routing::get(get_link_list).post(post_link)),
+        )
+        // `work_item.py:154-157` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/",
+            owned_link_list(axum::routing::get(get_link_list).post(post_link)),
+        )
+        // `work_item.py:64-67` — link detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/",
+            owned_link_detail(
+                axum::routing::get(get_link_detail)
+                    .patch(patch_link)
+                    .delete(delete_link),
+            ),
+        )
+        // `work_item.py:158-162` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/{pk}/",
+            owned_link_detail(
+                axum::routing::get(get_link_detail)
+                    .patch(patch_link)
+                    .delete(delete_link),
+            ),
+        )
+        // `work_item.py:68-72` — comment list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/",
+            owned_comment_list(axum::routing::get(get_comment_list).post(post_comment)),
+        )
+        // `work_item.py:163-167` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/",
+            owned_comment_list(axum::routing::get(get_comment_list).post(post_comment)),
+        )
+        // `work_item.py:73-77` — comment detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/",
+            owned_comment_detail(
+                axum::routing::get(get_comment_detail)
+                    .patch(patch_comment)
+                    .delete(delete_comment),
+            ),
+        )
+        // `work_item.py:168-172` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/{pk}/",
+            owned_comment_detail(
+                axum::routing::get(get_comment_detail)
+                    .patch(patch_comment)
+                    .delete(delete_comment),
+            ),
+        )
+        // `work_item.py:133-136` — re-tick (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/re-tick/",
+            owned_action(axum::routing::post(post_retick)),
+        )
+        // `work_item.py:137-140` — wait (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/",
+            owned_action(axum::routing::post(post_wait)),
+        )
+        // `work_item.py:141-144` — run-ai (post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/run-ai/",
+            owned_action(axum::routing::post(post_run_ai)),
+        )
+        // `work_item.py:145-151` — agent-run yield (post).
+        .route(
+            "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/",
+            owned_action(axum::routing::post(post_yield)),
+        )
+        // Activities (IssueActivityListAPIEndpoint `views/issue.py:2124-2175`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/",
+            owned_activity(axum::routing::get(get_activity_list)),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/",
+            owned_activity(axum::routing::get(get_activity_list)),
+        )
+        // Activity detail (IssueActivityDetailAPIEndpoint `views/issue.py:2176-2234`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/{pk}/",
+            owned_activity(axum::routing::get(get_activity_detail)),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/{pk}/",
+            owned_activity(axum::routing::get(get_activity_detail)),
+        )
+        // Attachment list + upload (IssueAttachmentListCreateAPIEndpoint
+        // `views/issue.py:2235-2449`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/",
+            owned_attachment_list(
+                axum::routing::get(get_attachment_list).post(post_attachment),
+            ),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/",
+            owned_attachment_list(
+                axum::routing::get(get_attachment_list).post(post_attachment),
+            ),
+        )
+        // Attachment detail (IssueAttachmentDetailAPIEndpoint
+        // `views/issue.py:2450-2653`).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/",
+            owned_attachment_detail(
+                axum::routing::get(get_attachment)
+                    .patch(patch_attachment)
+                    .delete(delete_attachment),
+            ),
+        )
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/{pk}/",
+            owned_attachment_detail(
+                axum::routing::get(get_attachment)
+                    .patch(patch_attachment)
+                    .delete(delete_attachment),
+            ),
+        )
+        // `label.py:11-15` — label list (get + post, PIDASHCONV-679).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/labels/",
+            owned_label_list(axum::routing::get(get_label_list).post(post_label)),
+        )
+        // `label.py:16-21` — label detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/labels/{pk}/",
+            owned_label_detail(
+                axum::routing::get(get_label_detail)
+                    .patch(patch_label)
+                    .delete(delete_label),
+            ),
+        )
+        // `page.py:14-18` — page list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/",
+            owned_page_list(axum::routing::get(get_page_list).post(post_page)),
+        )
+        // `page.py:19-23` — page detail (get + patch).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/",
+            owned_page_detail(axum::routing::get(get_page_detail).patch(patch_page)),
+        )
+        // `page.py:24-29` — page archive (post + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/",
+            owned_page_archive(
+                axum::routing::post(post_page_archive).delete(delete_page_archive),
+            ),
+        )
+        // `work_item.py:113-117` — by-identifier (get, PIDASHCONV-673).
+        .route(
+            "/api/v1/workspaces/{slug}/work-items/{segment}/",
+            owned_by_identifier(axum::routing::get(get_by_identifier)),
+        )
+        // `work_item.py:44-48` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/issues/{segment}/",
+            owned_by_identifier(axum::routing::get(get_by_identifier)),
+        )
+        // `work_item.py:118-122` — issue list (get + post).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/",
+            owned_issue_list(axum::routing::get(get_issue_list).post(post_issue_list)),
+        )
+        // `work_item.py:49-53` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/",
+            owned_issue_list(axum::routing::get(get_issue_list).post(post_issue_list)),
+        )
+        // `work_item.py:123-127` — issue detail (get + patch + delete).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/",
+            owned_issue_detail(
+                axum::routing::get(get_issue_detail)
+                    .patch(patch_issue_detail)
+                    .delete(delete_issue_detail),
+            ),
+        )
+        // `work_item.py:54-58` — deprecated twin.
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
+            owned_issue_detail(
+                axum::routing::get(get_issue_detail)
+                    .patch(patch_issue_detail)
+                    .delete(delete_issue_detail),
+            ),
+        )
+        // `work_item.py:103-106` — legacy search (get).
+        .route(
+            "/api/v1/workspaces/{slug}/work-items/search/",
+            owned_search(axum::routing::get(get_search)),
+        )
+        // `work_item.py:39-42` — deprecated twin (shares the view class).
+        .route(
+            "/api/v1/workspaces/{slug}/issues/search/",
+            owned_search(axum::routing::get(get_search)),
+        )
+        // `work_item.py:108-111` — advanced search (get).
+        .route(
+            "/api/v1/workspaces/{slug}/work-items/search/advanced/",
+            owned_search_advanced(axum::routing::get(get_search_advanced)),
+        )
+        // `work_item.py:128-132` — move (post; no deprecated twin).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/move/",
+            owned_move(axum::routing::post(post_move)),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    fn app() -> axum::Router {
+        // Port 1 is never bound, so proxied (unowned) methods fail closed
+        // with 502 instead of reaching a dev server.
+        crate::routes::with_routes(
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
+            routes(),
+        )
+    }
+
+    async fn status(method: &str, uri: &str) -> StatusCode {
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .expect("request");
+        app().oneshot(request).await.expect("serve").status()
+    }
+
+    /// Owned methods serve from Rust: anonymous callers 401 at the auth
+    /// layer (never a proxy 502).
+    #[tokio::test]
+    async fn owned_methods_answer_401_anonymous() {
+        let issue = "11111111-1111-1111-1111-111111111111";
+        let pk = "22222222-2222-2222-2222-222222222222";
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let iid = "22222222-2222-2222-2222-222222222222";
+        let rid = "33333333-3333-3333-3333-333333333333";
+        for (method, uri) in [
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/grouped/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/relate/"),
+            ),
+            (
+                "POST",
+                format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/unrelate/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/workpad/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/workpad/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/github/pull-requests/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/github/pull-requests/"),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/github/pull-requests/{pk}/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/"),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/{pk}/"
+                ),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/re-tick/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/wait/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/run-ai/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/agent-runs/{rid}/yield/"),
+            ),
+            (
+                "GET",
+                "/api/v1/workspaces/acme/projects/p1/labels/".to_string(),
+            ),
+            (
+                "POST",
+                "/api/v1/workspaces/acme/projects/p1/labels/".to_string(),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/{pk}/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/p1/labels/{pk}/"),
+            ),
+            (
+                "GET",
+                "/api/v1/workspaces/acme/projects/p1/pages/".to_string(),
+            ),
+            (
+                "POST",
+                "/api/v1/workspaces/acme/projects/p1/pages/".to_string(),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/archive/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/archive/"),
+            ),
+            // PIDASHCONV-677: the three search paths + the move path.
+            (
+                "GET",
+                "/api/v1/workspaces/acme/work-items/search/".to_owned(),
+            ),
+            ("GET", "/api/v1/workspaces/acme/issues/search/".to_owned()),
+            (
+                "GET",
+                "/api/v1/workspaces/acme/work-items/search/advanced/".to_owned(),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/move/"),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+        // PIDASHCONV-675: all eight activity/attachment paths.
+        let pid = "44444444-4444-4444-4444-444444444444";
+        let iid = "55555555-5555-5555-5555-555555555555";
+        let aid = "66666666-6666-6666-6666-666666666666";
+        for (method, uri) in [
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/activities/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/activities/"),
+            ),
+            (
+                "GET",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/activities/{aid}/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/activities/{aid}/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/"),
+            ),
+            (
+                "GET",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            ),
+            (
+                "PATCH",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            ),
+            (
+                "GET",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/{aid}/"
+                ),
+            ),
+            (
+                "PATCH",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/{aid}/"
+                ),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/issues/{iid}/issue-attachments/{aid}/"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+    }
+
+    /// PIDASHCONV-673: the six core paths own their methods.
+    #[tokio::test]
+    async fn core_methods_answer_401_anonymous() {
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let pk = "22222222-2222-2222-2222-222222222222";
+        for (method, uri) in [
+            (
+                "GET",
+                "/api/v1/workspaces/acme/work-items/CT-1/".to_string(),
+            ),
+            ("GET", "/api/v1/workspaces/acme/issues/CT-1/".to_string()),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+    }
+
+    /// Unowned methods proxy to Django (502 fail-closed with the test
+    /// edge), preserving its 405-after-auth and metadata responses.
+    #[tokio::test]
+    async fn unowned_methods_proxy() {
+        let issue = "11111111-1111-1111-1111-111111111111";
+        let pk = "22222222-2222-2222-2222-222222222222";
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let iid = "22222222-2222-2222-2222-222222222222";
+        for (method, uri) in [
+            (
+                "PUT",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/"),
+            ),
+            (
+                "POST",
+                format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/grouped/"
+                ),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/relations/relate/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/workpad/"),
+            ),
+        ] {
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::BAD_GATEWAY,
+                "{method} {uri}"
+            );
+        }
+        assert_eq!(
+            status(
+                "PUT",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/github/pull-requests/"
+                )
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/github/pull-requests/{pk}/"
+                )
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PATCH",
+                &format!("/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/")
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "POST",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/p1/work-items/{issue}/code-reviews/{pk}/"
+                )
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/re-tick/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/wait/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-675: unowned verbs on the activity/attachment paths.
+        let pid = "44444444-4444-4444-4444-444444444444";
+        let iid = "55555555-5555-5555-5555-555555555555";
+        let aid = "66666666-6666-6666-6666-666666666666";
+        assert_eq!(
+            status(
+                "POST",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/activities/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-679: unowned verbs on the label/page paths.
+        assert_eq!(
+            status("PUT", "/api/v1/workspaces/acme/projects/p1/labels/",).await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/{aid}/"
+                ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-677: unowned verbs on the search/move paths.
+        assert_eq!(
+            status("POST", "/api/v1/workspaces/acme/work-items/search/",).await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                &format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-677: unowned verbs on the search/move paths.
+        assert_eq!(
+            status(
+                "DELETE",
+                "/api/v1/workspaces/acme/work-items/search/advanced/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/move/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-673: PUT on the detail paths stays Django-owned (the
+        // pinned `put_405` body), as do POST on by-identifier and
+        // PATCH/DELETE on the list paths.
+        let pid = "11111111-1111-1111-1111-111111111111";
+        let pk = "22222222-2222-2222-2222-222222222222";
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/{pk}/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "PUT",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/issues/{pk}/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status("POST", "/api/v1/workspaces/acme/work-items/CT-1/",).await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    /// Non-UUID path segments proxy to Django (its `<uuid:>` converter
+    /// would not match), before auth runs.
+    #[tokio::test]
+    async fn non_uuid_segments_proxy() {
+        let pid = "11111111-1111-1111-1111-111111111111";
+        assert_eq!(
+            status(
+                "POST",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/re-tick/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "POST",
+                "/api/v1/workspaces/acme/agent-runs/not-a-uuid/yield/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-675: activity/attachment paths.
+        let pid = "44444444-4444-4444-4444-444444444444";
+        let iid = "55555555-5555-5555-5555-555555555555";
+        assert_eq!(
+            status(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/activities/"
+                ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-679: label/page paths.
+        assert_eq!(
+            status(
+                "GET",
+                "/api/v1/workspaces/acme/projects/p1/labels/not-a-uuid/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/acme/projects/{pid}/work-items/{iid}/attachments/not-a-uuid/"
+                ),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "GET",
+                "/api/v1/workspaces/acme/projects/p1/pages/not-a-uuid/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-673: non-UUID detail pks proxy (Django's `<uuid:pk>`
+        // converter would not match).
+        assert_eq!(
+            status(
+                "PATCH",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/issues/not-a-uuid/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        // PIDASHCONV-677: move path.
+        assert_eq!(
+            status(
+                "POST",
+                &format!("/api/v1/workspaces/acme/projects/{pid}/work-items/not-a-uuid/move/"),
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+}

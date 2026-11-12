@@ -1,0 +1,64 @@
+{
+ "_method": "ast walk of app/permissions/project.py (ProjectEntityPermission) and api/views/base.py (handle_exception/dispatch): branch conditions and Response literals extracted; run: python3 /tmp/gen_cycmod_fixtures.py",
+ "error_envelopes": {
+  "400": [
+   "serializer.errors dict",
+   "{error: Both start date and end date are either required or are to be null} (cycle post :353-356)",
+   "{error: Work items are required, code: MISSING_WORK_ITEMS} (cycle-issue post :927-932)",
+   "{code: CYCLE_COMPLETED, message: ...} (cycle-issue post :936-943)",
+   "{error: New Cycle Id is required} (transfer :1172-1177)",
+   "{error: The old cycle is not completed yet} (transfer :1182-1187)",
+   "{error: <transfer util error>} (transfer :1204-1209)",
+   "{error: Issues are required} (module-issue post :669-670)",
+   "{error: Only completed cycles can be archived} (cycle archive :770-774)",
+   "{error: Only completed or cancelled modules can be archived} (module archive :1039-1043)",
+   "{error: Archived cycle cannot be edited} (cycle patch :504-508)",
+   "{error: Archived module cannot be edited} (module patch :412-416)",
+   "{error: The Cycle has already been completed so it cannot be edited} (cycle patch :516-520)",
+   "{error: The payload is not valid} IntegrityError (base.py:142)",
+   "{error: Please provide valid detail} ValidationError (base)",
+   "{error: The required key does not exist.} KeyError (base)"
+  ],
+  "403": [
+   "DRF permission denial (perm False)",
+   "{error: Only admin or creator can delete the cycle/module} (view-level)"
+  ],
+  "404": [
+   "{error: The requested resource does not exist.} ObjectDoesNotExist (base)",
+   "{error: The required object does not exist.} (BaseViewSet variant; cycle/module views use BaseAPIView)"
+  ],
+  "405": [
+   "module-issue detail GET unrouted -> 405 (urls/module.py:31-35 routes DELETE only; view defines get at views/module.py:800)"
+  ],
+  "409": [
+   "{error: Cycle with the same external id and external source already exists, id} (cycle post :329-335, patch :539-545)",
+   "{error: Module with the same external id and external source already exists, id} (module post :220-226, patch :429-435)",
+   "module duplicate name on create is 400 not 409: {id, code MODULE_NAME_ALREADY_EXISTS, error, message} (serializers/module.py:93-101)"
+  ],
+  "500": [
+   "{error: Something went wrong please try again later} (base); reached e.g. archiving null-end_date cycle: None >= now TypeError (views/cycle.py:770); BUG-PORT dispatch returns exc not the response (base.py:182)"
+  ]
+ },
+ "fixture": "FX-CYCMOD-06",
+ "matrix": {
+  "POST_PATCH_DELETE": "ProjectMember role in [20 admin, 15 member] + is_active (perm :108-114); GUEST(5) reads but gets 403 on write (contract guest 403)",
+  "SAFE_METHODS": "ProjectMember row (workspace slug, user, project_id, is_active) must exist (perm :99-105); queryset additionally filters member+active so outsiders see 403 via permission before queryset (contract outsider 403)",
+  "anonymous": "False for every route (perm :87-88); unauthenticated GET -> 401 (contract test_unauthenticated_is_rejected)",
+  "delete_cycle_extra": "view-level: owned_by == user OR project admin role=20 else 403 {error: Only admin or creator can delete the cycle} (views/cycle.py:578-590)",
+  "delete_module_extra": "view-level: created_by == user OR project admin role=20 else 403 {error: Only admin or creator can delete the module} (views/module.py:497-509)"
+ },
+ "permission_spans": [
+  {
+   "name": "has_permission",
+   "span": [
+    86,
+    116
+   ]
+  }
+ ],
+ "trace": [
+  "app/permissions/project.py:85-116 ProjectEntityPermission.has_permission (:86-116)",
+  "api/views/base.py:133-182 (handle_exception :133-170: IntegrityError :142, ValidationError :148, ObjectDoesNotExist :154, KeyError :160, 500 :168; dispatch :172-182 returns exc :182 BUG)",
+  "cycle routes api/urls/cycle.py:16-57; module routes api/urls/module.py:15-51"
+ ]
+}

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""The data step of ``db/0169_project_context``.
+"""The data step of ``db/0178_project_context``.
 
 Built-in prompts stopped reading ``Project.description``; the backfill is what
 keeps an existing project's prompt text unchanged across the upgrade.
@@ -17,7 +17,7 @@ from django.apps import apps
 
 from pi_dash.db.models import Project
 
-migration = importlib.import_module("pi_dash.db.migrations.0169_project_context")
+migration = importlib.import_module("pi_dash.db.migrations.0178_project_context")
 
 
 def _project(workspace, identifier, **fields):

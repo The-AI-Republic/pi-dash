@@ -1,0 +1,211 @@
+{
+  "VALID_STATUSES": [
+    "blocked",
+    "completed",
+    "noop",
+    "paused"
+  ],
+  "ok": [
+    {
+      "case": "completed",
+      "input_payload": {
+        "status": "completed",
+        "summary": "did the thing"
+      },
+      "status": "completed",
+      "payload": {
+        "status": "completed",
+        "summary": "did the thing",
+        "state_transition": {
+          "requested_group": null,
+          "reason": null
+        },
+        "changes": {
+          "branch": null,
+          "commits": [],
+          "files_touched": [],
+          "pr_url": null
+        },
+        "validation": {
+          "acceptance_all_met": null,
+          "ran": [],
+          "notes": null
+        },
+        "progress": {
+          "phase": null,
+          "checkpoints": {}
+        },
+        "autonomy": {
+          "score": 0,
+          "type": "none",
+          "reason": "",
+          "question_for_human": null,
+          "safe_to_continue": true
+        },
+        "blockers": []
+      }
+    },
+    {
+      "case": "blocked",
+      "input_payload": {
+        "status": "blocked",
+        "summary": "stuck"
+      },
+      "status": "blocked",
+      "payload": {
+        "status": "blocked",
+        "summary": "stuck",
+        "state_transition": {
+          "requested_group": null,
+          "reason": null
+        },
+        "changes": {
+          "branch": null,
+          "commits": [],
+          "files_touched": [],
+          "pr_url": null
+        },
+        "validation": {
+          "acceptance_all_met": null,
+          "ran": [],
+          "notes": null
+        },
+        "progress": {
+          "phase": null,
+          "checkpoints": {}
+        },
+        "autonomy": {
+          "score": 0,
+          "type": "none",
+          "reason": "",
+          "question_for_human": null,
+          "safe_to_continue": true
+        },
+        "blockers": []
+      }
+    },
+    {
+      "case": "noop",
+      "input_payload": {
+        "status": "noop"
+      },
+      "status": "noop",
+      "payload": {
+        "status": "noop",
+        "summary": "",
+        "state_transition": {
+          "requested_group": null,
+          "reason": null
+        },
+        "changes": {
+          "branch": null,
+          "commits": [],
+          "files_touched": [],
+          "pr_url": null
+        },
+        "validation": {
+          "acceptance_all_met": null,
+          "ran": [],
+          "notes": null
+        },
+        "progress": {
+          "phase": null,
+          "checkpoints": {}
+        },
+        "autonomy": {
+          "score": 0,
+          "type": "none",
+          "reason": "",
+          "question_for_human": null,
+          "safe_to_continue": true
+        },
+        "blockers": []
+      }
+    },
+    {
+      "case": "paused",
+      "input_payload": {
+        "status": "paused",
+        "autonomy": {
+          "question_for_human": "which approach?"
+        }
+      },
+      "status": "paused",
+      "payload": {
+        "status": "paused",
+        "summary": "",
+        "state_transition": {
+          "requested_group": null,
+          "reason": null
+        },
+        "changes": {
+          "branch": null,
+          "commits": [],
+          "files_touched": [],
+          "pr_url": null
+        },
+        "validation": {
+          "acceptance_all_met": null,
+          "ran": [],
+          "notes": null
+        },
+        "progress": {
+          "phase": null,
+          "checkpoints": {}
+        },
+        "autonomy": {
+          "score": 0,
+          "type": "none",
+          "reason": "",
+          "question_for_human": "which approach?",
+          "safe_to_continue": true
+        },
+        "blockers": []
+      }
+    }
+  ],
+  "errors": [
+    {
+      "case": "missing-fence",
+      "input": "no fence here",
+      "error_type": "DoneSignalError",
+      "error": "no pi-dash-done fenced block found"
+    },
+    {
+      "case": "invalid-json",
+      "input": "```pi-dash-done\n{\"status\": \"noop\",,}\n```",
+      "error_type": "DoneSignalError",
+      "error": "pi-dash-done JSON invalid: Expecting property name enclosed in double quotes"
+    },
+    {
+      "case": "non-object-payload",
+      "input": "```pi-dash-done\n[\"noop\"]\n```",
+      "error_type": "DoneSignalError",
+      "error": "pi-dash-done payload must be a JSON object"
+    },
+    {
+      "case": "bad-status",
+      "input": "```pi-dash-done\n{\"status\": \"done\"}\n```",
+      "error_type": "DoneSignalError",
+      "error": "pi-dash-done.status must be one of ['blocked', 'completed', 'noop', 'paused']; got 'done'"
+    },
+    {
+      "case": "missing-status",
+      "input": "```pi-dash-done\n{\"summary\": \"x\"}\n```",
+      "error_type": "DoneSignalError",
+      "error": "pi-dash-done.status must be one of ['blocked', 'completed', 'noop', 'paused']; got None"
+    },
+    {
+      "case": "paused-without-question",
+      "input": "```pi-dash-done\n{\"status\": \"paused\"}\n```",
+      "error_type": "DoneSignalError",
+      "error": "pi-dash-done.status='paused' requires autonomy.question_for_human to be set"
+    },
+    {
+      "case": "paused-empty-question",
+      "input": "```pi-dash-done\n{\"status\": \"paused\", \"autonomy\": {\"question_for_human\": \"\"}}\n```",
+      "error_type": "DoneSignalError",
+      "error": "pi-dash-done.status='paused' requires autonomy.question_for_human to be set"
+    }
+  ]
+}

@@ -86,11 +86,14 @@ from .sticky import StickyViewSet
 
 from .page import PageListAPIEndpoint, PageDetailAPIEndpoint, PageArchiveAPIEndpoint
 
-from .runner import RunnerDeleteEndpoint
+from .runner import RunnerDeleteEndpoint, RunnerListAPIEndpoint
 
 from .scheduler import (
+    WorkspaceSchedulerDetailAPIEndpoint,
     WorkspaceSchedulerListAPIEndpoint,
     ProjectSchedulerListAPIEndpoint,
+    ProjectSchedulerBindingAPIEndpoint,
     ProjectSchedulerDetailAPIEndpoint,
+    ProjectSchedulerRunNowAPIEndpoint,
     ProjectSchedulerRunsAPIEndpoint,
 )

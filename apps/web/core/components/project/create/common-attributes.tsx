@@ -140,7 +140,7 @@ function ProjectCommonAttributes(props: Props) {
               id="description"
               name="description"
               value={value}
-              placeholder={t("Description")}
+              placeholder={t("Project Context (Will be shown to AI agents)")}
               onChange={(e) => {
                 onChange(e);
                 handleFormOnChange?.();

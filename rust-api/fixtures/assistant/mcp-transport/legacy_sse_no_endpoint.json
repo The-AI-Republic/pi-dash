@@ -1,0 +1,50 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "legacy_sse_no_endpoint",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 5.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/sse"
+  },
+  "flow": [
+    "enter",
+    "list"
+  ],
+  "call": null,
+  "stub": {
+    "framing": "json",
+    "sse_no_endpoint": true
+  },
+  "wire": [
+    {
+      "method": "GET",
+      "path": "/sse",
+      "headers": {
+        "accept": "text/event-stream",
+        "cache-control": "no-store"
+      },
+      "body": ""
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "call": null,
+    "failures": {
+      "after_enter": "RuntimeError",
+      "after_list": "RuntimeError",
+      "after_call": null,
+      "at_exit": "RuntimeError"
+    },
+    "delete_seen": false
+  }
+}
