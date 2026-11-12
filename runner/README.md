@@ -139,9 +139,94 @@ Useful follow-ups:
 
 ```bash
 pidash auth status               # who am I logged in as; runner list
-pidash auth logout               # revoke the CLI token server-side
-pidash runner add --project X    # add another runner
+pidash auth logout               # revoke every workspace token server-side
+pidash runner add --project X    # add another runner (no daemon restart)
 pidash runner list / remove      # manage runners
+pidash runner set-working-dir <runner> <path>   # move one runner, no restart
+```
+
+### Several workspaces on one computer
+
+One daemon serves every workspace you sign in to on the computer. Each
+workspace has its own dev-machine token; each runner authenticates with the
+token of its block's `workspace_slug`, and the machine's control session is
+opened with any signed-in workspace's token.
+
+```bash
+pidash auth login                    # signs in (or refreshes) the default workspace
+pidash auth login --workspace beta   # adds workspace `beta`; the others stay signed in
+pidash runner add --workspace beta --project API
+pidash auth logout --workspace beta  # signs out only `beta`
+```
+
+The tokens live in `config.toml` (mode 0600):
+
+```toml
+[cli]
+token = "mt_…"            # the default workspace's token
+workspace_slug = "acme"   # the default workspace
+
+[[cli.workspaces]]        # one table per further workspace
+slug = "beta"
+token = "mt_…"
+```
+
+A config written by an older `pidash` (just `[cli] token` + `workspace_slug`)
+loads unchanged and is one workspace. When a workspace's token is revoked or
+signed out, only that workspace's runners stop, and `pidash status` shows them
+as `workspace_signed_out`; the other workspaces keep running. `pidash auth
+login --workspace <slug>` signs it back in without a daemon restart.
+
+### Runner changes without a restart
+
+`pidash runner add` (and the TUI's add-runner form) writes the new
+`[[runner]]` block and asks the running daemon to start that runner
+in-process; the service is only (re)started when no daemon is running.
+`pidash runner remove` tears the runner down in the daemon and waits until it
+is gone, so it disappears from `pidash status` at once and the same id can be
+added again. `pidash runner set-working-dir <runner> <path>` stops just that
+runner, rewrites its block under the config lock, validates it and starts it
+again; it is refused while the runner is mid-run. No other runner is touched.
+
+### Agent CLI auto-install
+
+`--agent` selects which coding agent the runner drives (`codex` by default;
+also `claude-code`, `cursor-agent`, `open-claw`, `grok`, `muse-code`). If the
+selected agent's CLI isn't present on the machine, `pidash runner add` installs
+it for you by invoking **the vendor's own official install script** — Pi Dash
+never bundles, mirrors, or ships an agent binary, so you always get the vendor's
+latest supported build:
+
+```bash
+pidash runner add --project WEB --agent claude-code
+```
+
+What happens when the agent is missing:
+
+1. Pi Dash prints which agent is missing and the exact official command it's
+   about to run, then runs it with output streamed to your terminal
+   (`curl … | bash` on macOS/Linux/WSL, PowerShell on Windows).
+2. After the installer finishes, Pi Dash re-detects the binary, resolves its
+   **absolute path** (installers often drop it in `~/.local/bin`, which may not
+   be on the current `PATH` yet), and records that path in the runner's config.
+3. Installers don't authenticate the agent, so Pi Dash prints the one login step
+   still needed (e.g. run `claude` and follow `/login`, or `codex login`) before
+   the runner can pick up work.
+
+`runner add` never hard-fails on an install error: if the installer can't run
+(no network, no scriptable installer for that agent), Pi Dash prints the error,
+falls back to opening the vendor's install page in your browser, and leaves
+`pidash doctor` reporting the agent as missing. Agents that are already
+installed are left untouched.
+
+Verified official installers exist for `claude-code`, `codex`, and
+`cursor-agent`; `open-claw`, `grok`, and `muse-code` currently use the
+open-install-page fallback until a vendor script is confirmed.
+
+Pass `--skip-agent-install` if you manage agent installs yourself:
+
+```bash
+pidash runner add --project WEB --agent claude-code --skip-agent-install
 ```
 
 ## Task folders and Git
@@ -172,6 +257,112 @@ that _contains_ clones (rather than at a clone) is supported — it runs there
 and the agent drives Git itself. Files are always preserved, and the runner
 never initializes Git for you. Branch checkout is the agent's job, not the
 platform's (PDASHOSS01-136).
+
+## Built-in engine
+
+Each release ships the built-in agent engine — the open-source
+[OpenAI Codex](https://github.com/openai/codex) (Apache-2.0), unmodified and
+renamed `pidash-agent-engine` — pinned in `runner/ENGINE_VERSION`. It is
+installed next to `pidash` in a directory per engine version and is **never
+on `PATH`**:
+
+| Installed with                         | Engine directory                                |
+| -------------------------------------- | ----------------------------------------------- |
+| `install.sh` / `pidash-installer.sh`   | `~/.local/lib/pidash/engine/<version>/`         |
+| `install.ps1` / `pidash-installer.ps1` | `%USERPROFILE%\.local\bin\engine\<version>\`    |
+| MSI                                    | `C:\Program Files\pidash\bin\engine\<version>\` |
+| extracted archive                      | `engine/<version>/` beside `pidash`             |
+
+The cargo-dist installers only install executables, so `install.sh` and
+`install.ps1` run `pidash engine install` right after them; it downloads the
+same release's archive, checks its `.sha256`, and places the engine directory.
+After a bare `pidash-installer.sh` / `.ps1` install, run it yourself. The MSI
+installs the engine itself. `pidash engine path` prints the engine the daemon
+would use.
+
+The daemon resolves the engine once at start and keeps that path.
+`pidash update` installs the new release's engine version directory beside the
+old one before replacing `pidash`, so runs in flight keep their binary. It
+skips the download when the new release pins an engine version already
+installed. If an installer-managed daemon starts without an engine, it
+installs it in the background, retrying with backoff until it succeeds.
+The daemon removes older engine versions once no run or chat turn is in
+flight (and, on Linux, no process still executes a binary from them),
+retrying cleanup every 10 minutes.
+
+For development, point the daemon at another build in `config.toml`:
+
+```toml
+[engine]
+binary = "~/src/codex/codex-rs/target/debug/codex"
+```
+
+### Using the engine
+
+```bash
+pidash auth login                      # signs in the daemon and the engine
+pidash runner add --agent engine --project WEB [--working-dir <dir>]
+pidash engine status                   # available / signed out / expiring / unavailable (reason)
+pidash engine pause                    # this computer's engine takes no new work …
+pidash engine resume                   # … until resumed
+pidash login --engine                  # renew the engine's 14-day credential alone
+pidash auth logout --engine            # sign the engine out; the daemon stays signed in
+pidash auth status                     # both credentials, expiry, engine sign-in state
+pidash config set engine-task-root ~/pidash-tasks   # or `default`
+```
+
+- **Two credentials.** `pidash auth login` stores the daemon credential
+  (one `mt_` token per workspace) and, when the server can serve the engine,
+  the engine credential (`ec_`, 14 days from issue, one per computer). The
+  engine credential can only fetch short-lived model tokens; the daemon holds
+  those **in memory only**, refreshes them when under 60 s remain, and hands
+  them to the engine through its auth helper `pidash __engine model-token`
+  (over the local socket). Nothing short-lived is written to disk.
+- **An engine runner** is `[runner.agent] kind = "engine"` with no paths: the
+  daemon supplies the engine binary, a private `CODEX_HOME` at
+  `<data dir>/engine/<account>/codex-home` (never `~/.codex`) and the Codex
+  config it writes there from the server's model profile (fetched at start,
+  on every sign-in and every 15 minutes). The server names engine runners.
+- **Folders.** Each project gets `<task root>/<workspace>/<project>/`, with a
+  numeric suffix when that folder is taken or not empty — whether the engine
+  is turned on from the CLI, the app (`EngineRunnerAdd`) or the web ("Add
+  runner", machine control's `create_runner`). The task root defaults to
+  `<data dir>/engine/workdirs`; changing it moves nothing.
+- **Reconcile.** At start and every 10 minutes the daemon reads its dev
+  machine from the server: engine blocks whose runner row was revoked
+  ("Remove from project") are removed (their folders are kept), and live
+  engine runner rows of this machine with no block are re-added with a newly
+  allocated folder.
+- **`pidash status`** and the IPC `Hello` / `EngineStatus` report the
+  machine-level engine state, including whether the owner paused it and the
+  server's automatic pause reason (cached from the machine session's welcome,
+  the reconcile and `pidash engine pause` / `resume`, which go through the
+  daemon when it runs). The daemon also reports its state to the server in the
+  machine session's heartbeat (`engine_state`).
+- **Local chat** (the app's "This computer" contact) runs on the daemon's own
+  engine profile: a `Chat*` IPC request with no `runner` selector and an
+  absolute `cwd` uses the engine binary, the account's `CODEX_HOME` and the
+  engine credential, with no project runner and no busy flag shared with runs.
+  It works with zero or many runners, and a folder inside any runner's working
+  dir is refused. With a `runner` selector, chat runs on that runner as before.
+
+### Where credentials are stored
+
+```toml
+[auth]
+credentials_store = "auto"   # "auto" (default) | "keyring" | "file"
+```
+
+- `auto`: the OS keychain (macOS Keychain, Windows Credential Manager, the
+  Secret Service on Linux) when it answers, else `config.toml` (0600).
+  Plaintext tokens move into the keychain at the next `pidash auth login`.
+- `keyring`: the keychain only; a write fails rather than falling back.
+- `file`: `config.toml` (0600), as before.
+
+This covers the daemon and engine credentials, not the per-runner refresh
+tokens. `pidash doctor` reports which store is in use. `PIDASH_KEYRING=off`
+makes the keychain count as unavailable (containers, CI). On a headless Linux
+server with no Secret Service, `auto` keeps the 0600 file.
 
 ## Auto-update
 
@@ -209,6 +400,25 @@ The Pi Dash backend reads two optional environment variables and folds them into
 | `MIN_RUNNER_VERSION`    | Drives the red "update required" advisory.                                                |
 
 Stable runner releases set `LATEST_RUNNER_VERSION` in Cloud SSM automatically (`RELEASING.md` walks through tagging). Set `MIN_RUNNER_VERSION` manually only when you need to force a floor. Leave both unset to skip the announcement in non-Cloud environments.
+
+## Reconnecting and deleted runners
+
+When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, … up to a 6-hour cap, with ±20% jitter on every wait so runners don't all reconnect at once. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
+
+```
+  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 1h 52m; last connected 3h ago; 9 failed attempts)
+```
+
+These retry immediately and start the backoff over:
+
+- waking the machine from sleep
+- a network change (an interface comes up, a new IP)
+- `pidash reconnect [<runner>]` (all runners when no name is given)
+- `pidash restart`
+
+If a runner was deleted in Pi Dash while the daemon was offline, the server answers `runner_gone`. The daemon removes the runner locally once it gets 10 of those answers in a row over at least 5 minutes: it stops the runner, deletes the runner's data directory and removes its `[[runner]]` block from `config.toml`. The runner's working directory (your checkout) is never touched. While it is confirming, `pidash status` shows `laptop — DELETED in cloud (removing: 4/10)`. Any other answer, including any error, resets the count.
+
+`pidash runner remove` (with or without `--local-only`) stops all of that runner's network activity at once; no restart is needed.
 
 ## Design docs
 

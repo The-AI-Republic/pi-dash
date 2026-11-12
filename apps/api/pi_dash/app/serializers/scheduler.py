@@ -19,9 +19,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from rest_framework import serializers
 
 from pi_dash.app.serializers.base import BaseSerializer
-from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
+from pi_dash.bgtasks._rrule import (
+    RRuleValidationError,
+    next_fire_with_error,
+    validate_rrule_string,
+)
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 from pi_dash.runner.models import Pod
+from pi_dash.utils.iso_datetime import coerce_iso_datetimes
 
 
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
@@ -110,6 +115,29 @@ class SchedulerSerializer(BaseSerializer):
     def validate_color(self, value: str) -> str:
         return _validate_color(value)
 
+    def validate_slug(self, value: str) -> str:
+        # Mirror the conditional DB constraint
+        # ``scheduler_unique_workspace_slug_when_active`` so a duplicate slug
+        # comes back as a field error ({"slug": [...]}) instead of an
+        # IntegrityError that BaseAPIView flattens to a generic 400. DRF does
+        # not auto-validate conditional UniqueConstraints. ``objects`` is the
+        # soft-delete manager, so tombstoned slugs stay reusable, matching
+        # the constraint's ``deleted_at__isnull`` condition.
+        workspace = (
+            self.instance.workspace
+            if self.instance is not None
+            else self.context.get("workspace")
+        )
+        if workspace is not None:
+            existing = Scheduler.objects.filter(workspace=workspace, slug=value)
+            if self.instance is not None:
+                existing = existing.exclude(pk=self.instance.pk)
+            if existing.exists():
+                raise serializers.ValidationError(
+                    "This slug is already in use in this workspace."
+                )
+        return value
+
 
 class SchedulerBindingSerializer(BaseSerializer):
     scheduler_slug = serializers.CharField(source="scheduler.slug", read_only=True)
@@ -117,6 +145,11 @@ class SchedulerBindingSerializer(BaseSerializer):
     scheduler_color = serializers.CharField(source="scheduler.color", read_only=True)
     last_run_status = serializers.SerializerMethodField()
     last_run_ended_at = serializers.SerializerMethodField()
+    # True when the RRULE bundle is valid but has no occurrence left after
+    # now — a finite COUNT/UNTIL series that finished, or a single-shot whose
+    # dtstart passed. The UI badges these "Completed" instead of treating the
+    # disabled binding as misconfigured.
+    series_exhausted = serializers.SerializerMethodField()
     # Optional pod override. Scoped to active pods; the cross-project check
     # lives in `validate()` (the project is known there via instance/context).
     # NULL = use the project's default pod at fire time.
@@ -154,6 +187,7 @@ class SchedulerBindingSerializer(BaseSerializer):
             "last_run_status",
             "last_run_ended_at",
             "last_error",
+            "series_exhausted",
             "actor",
             "created_at",
             "updated_at",
@@ -167,6 +201,7 @@ class SchedulerBindingSerializer(BaseSerializer):
             "last_run_status",
             "last_run_ended_at",
             "last_error",
+            "series_exhausted",
             "actor",
             "created_at",
             "updated_at",
@@ -177,6 +212,21 @@ class SchedulerBindingSerializer(BaseSerializer):
 
     def get_last_run_ended_at(self, obj: SchedulerBinding):
         return obj.last_run.ended_at if obj.last_run_id else None
+
+    def get_series_exhausted(self, obj: SchedulerBinding) -> bool:
+        # A binding with a scheduled next fire is trivially not exhausted —
+        # this guard also keeps list serialization from paying for RRULE
+        # expansion on every healthy row.
+        if obj.next_run_at is not None:
+            return False
+        nxt, err = next_fire_with_error(
+            dtstart=obj.dtstart,
+            rrule_str=obj.rrule or "",
+            tzid=obj.tzid or "UTC",
+            rdates=coerce_iso_datetimes(obj.rdates),
+            exdates=coerce_iso_datetimes(obj.exdates),
+        )
+        return err is None and nxt is None
 
     def validate_rrule(self, value: str) -> str:
         value = (value or "").strip()
@@ -266,3 +316,43 @@ class SchedulerBindingSerializer(BaseSerializer):
                     {"pod": "pod must belong to the same project as this scheduler install"}
                 )
         return super().validate(attrs)
+
+
+class SchedulerBindingDetailSerializer(SchedulerBindingSerializer):
+    """Single-binding payload for the scheduler detail page.
+
+    Adds fields the bindings *list* must not pay for per row: the resolved
+    prompt (composed exactly as the dispatched agent receives it, via
+    ``build_scheduler_task_body`` — not re-implemented client-side), the
+    total run count, and the joined workspace-level ``source`` /
+    ``is_enabled`` of the parent scheduler definition.
+    """
+
+    resolved_prompt = serializers.SerializerMethodField()
+    run_count = serializers.SerializerMethodField()
+    scheduler_source = serializers.CharField(source="scheduler.source", read_only=True)
+    scheduler_is_enabled = serializers.BooleanField(
+        source="scheduler.is_enabled", read_only=True
+    )
+
+    class Meta(SchedulerBindingSerializer.Meta):
+        fields = SchedulerBindingSerializer.Meta.fields + [
+            "resolved_prompt",
+            "run_count",
+            "scheduler_source",
+            "scheduler_is_enabled",
+        ]
+        read_only_fields = SchedulerBindingSerializer.Meta.read_only_fields + [
+            "resolved_prompt",
+            "run_count",
+            "scheduler_source",
+            "scheduler_is_enabled",
+        ]
+
+    def get_resolved_prompt(self, obj: SchedulerBinding) -> str:
+        from pi_dash.prompting.context import build_scheduler_task_body
+
+        return build_scheduler_task_body(obj)
+
+    def get_run_count(self, obj: SchedulerBinding) -> int:
+        return obj.agent_runs.count()

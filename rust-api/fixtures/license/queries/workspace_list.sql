@@ -1,0 +1,15 @@
+-- queries/workspace_list.sql
+-- InstanceWorkSpaceEndpoint.get (api/views/workspace.py:40-69).
+-- (1) project_count subquery (workspace.py:41-46): .order_by() clears default
+-- ordering; Func(F("id"), function="Count") renders Count("id").
+-- (SELECT Count(U0."id") AS "count" FROM "projects" U0 WHERE (U0."deleted_at" IS NULL AND U0."workspace_id" = ("workspaces"."id"))) AS "total_projects"
+-- (2) member_count subquery (workspace.py:48-54): filters member__is_bot=False,
+-- is_active=True; .select_related("owner") is a no-op here (no owner column
+-- selected) but forces the INNER JOIN to users in the emitted SQL.
+-- (SELECT Count(U0."id") AS "count" FROM "workspace_members" U0 INNER JOIN "users" U1 ON (U0."member_id" = U1."id") WHERE (U0."deleted_at" IS NULL AND U0."is_active" AND NOT U1."is_bot" AND U0."workspace_id" = ("workspaces"."id"))) AS "total_members"
+-- (3) Full list query with icontains search (workspace.py:56-61), emitted shape:
+SELECT "workspaces"."created_at", "workspaces"."updated_at", "workspaces"."created_by_id", "workspaces"."updated_by_id", "workspaces"."deleted_at", "workspaces"."id", "workspaces"."name", "workspaces"."logo", "workspaces"."logo_asset_id", "workspaces"."owner_id", "workspaces"."slug", "workspaces"."organization_size", "workspaces"."timezone", "workspaces"."background_color", (SELECT Count(U0."id") AS "count" FROM "projects" U0 WHERE (U0."deleted_at" IS NULL AND U0."workspace_id" = ("workspaces"."id"))) AS "total_projects", (SELECT Count(U0."id") AS "count" FROM "workspace_members" U0 INNER JOIN "users" U1 ON (U0."member_id" = U1."id") WHERE (U0."deleted_at" IS NULL AND U0."is_active" AND NOT U1."is_bot" AND U0."workspace_id" = ("workspaces"."id"))) AS "total_members" FROM "workspaces" WHERE ("workspaces"."deleted_at" IS NULL AND UPPER("workspaces"."name"::text) LIKE UPPER(%s)) ORDER BY "workspaces"."created_at" DESC;
+-- icontains renders UPPER(name::text) LIKE UPPER(%acme%); without ?search= the LIKE clause is absent.
+-- (4) Pagination (workspace.py:63-69): paginate(..., max_per_page=10, default_per_page=10);
+-- cursor protocol "per_page:page:index" (utils/paginator.py:678 default "10:0:0" when ?cursor absent).
+-- Page 1 of 10/per_page over 25 rows -> next_cursor "10:1:10".

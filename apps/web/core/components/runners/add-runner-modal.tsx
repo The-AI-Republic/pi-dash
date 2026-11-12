@@ -24,6 +24,7 @@ import {
   resolveRunnerModel,
   runnerModelLabel,
 } from "@/components/runners/runner-models";
+import { useThisComputer } from "@/components/runners/this-computer";
 import { ProjectService } from "@/services/project";
 
 type Props = {
@@ -31,6 +32,13 @@ type Props = {
   onClose: () => void;
   workspaceId: string;
   workspaceSlug: string;
+  /**
+   * Route project UUID when the modal is opened from the project-scoped
+   * AI Workers page (/<workspace>/projects/<projectId>/runners). When set,
+   * the Project field is prefilled with the matching project and locked;
+   * left undefined on the workspace-wide page for today's pick-a-project flow.
+   */
+  projectId?: string;
 };
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
@@ -57,6 +65,11 @@ interface FormValues {
   agent: TAgent;
   /** Selected model-catalog option id (``"default"`` = agent's own default). */
   model: string;
+  /**
+   * Desktop, this computer only: turn the built-in engine on for the project
+   * instead of adding an own-agent runner (design §12.2).
+   */
+  builtinEngine: boolean;
 }
 
 type RunnerCommandValues = Pick<FormValues, "projectIdentifier" | "podName" | "name" | "workingDir" | "agent"> & {
@@ -82,6 +95,7 @@ const DEFAULT_VALUES: FormValues = {
   workingDir: "",
   agent: DEFAULT_AGENT,
   model: DEFAULT_MODEL_BY_AGENT[DEFAULT_AGENT],
+  builtinEngine: false,
 };
 
 const podService = new PodService();
@@ -93,8 +107,16 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const machineDisplayLabel = (machine: IDevMachine): string => machine.label || machine.host_label || machine.id;
 
 export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
-  const { isOpen, onClose, workspaceId, workspaceSlug } = props;
+  const { isOpen, onClose, workspaceId, workspaceSlug, projectId } = props;
+  // Lock the Project picker when the modal is scoped to a route project —
+  // creating a runner for a different project from inside a project page is
+  // confusing; the workspace-wide page covers the cross-project case.
+  const projectLocked = Boolean(projectId);
   const { t } = useTranslation();
+  // The desktop app's own computer (empty in the web app): preselected, with
+  // a folder picker and the built-in engine on offer.
+  const thisComputer = useThisComputer();
+  const [settingUp, setSettingUp] = useState(false);
   const [origin, setOrigin] = useState(() => (typeof window !== "undefined" ? window.location.origin : ""));
 
   useEffect(() => {
@@ -124,6 +146,9 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // One-shot per open: auto-select the first connected machine once the
   // machine list arrives, unless the user already touched the picker.
   const autoSelectedMachine = useRef(false);
+  // One-shot per open: prefill the project field from the route projectId
+  // once the projects list arrives (project-scoped page only).
+  const prefilledProject = useRef(false);
 
   // Reset everything on close→open. State persists between consecutive
   // opens otherwise (RHF + local command state would carry the stale
@@ -135,6 +160,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     }
     pollCancelled.current = false;
     autoSelectedMachine.current = false;
+    prefilledProject.current = false;
     setRunnerCommand(null);
     setRemoteCreate(null);
     setLastSubmitted(null);
@@ -162,9 +188,29 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     if (!connectedMachines.length) return;
     autoSelectedMachine.current = true;
     if (!selectedDevMachineId) {
-      setValue("devMachineId", connectedMachines[0].id);
+      // In the desktop app, this computer first (design §12.2).
+      const here = connectedMachines.find((m) => m.id === thisComputer.machineId);
+      setValue("devMachineId", (here ?? connectedMachines[0]).id);
     }
-  }, [connectedMachines, isOpen, selectedDevMachineId, setValue]);
+  }, [connectedMachines, isOpen, selectedDevMachineId, setValue, thisComputer.machineId]);
+  const onThisComputer = Boolean(thisComputer.machineId) && selectedDevMachineId === thisComputer.machineId;
+  const builtinEngine = watch("builtinEngine") && onThisComputer && Boolean(thisComputer.addEngineRunner);
+
+  const browseWorkingDir = async () => {
+    if (!thisComputer.pickFolder) return;
+    const picked = await thisComputer.pickFolder(watch("workingDir") || undefined).catch(() => null);
+    if (picked) setValue("workingDir", picked);
+  };
+
+  const setUpThisComputer = async () => {
+    if (!thisComputer.setUp) return;
+    setSettingUp(true);
+    try {
+      await thisComputer.setUp(workspaceSlug);
+    } finally {
+      setSettingUp(false);
+    }
+  };
 
   // A machine can drop offline between selection and submit; snap the
   // picker back to manual so the button's promise stays honest.
@@ -182,6 +228,19 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   );
   const selectedProject = watch("projectIdentifier");
   const selectedPodName = watch("podName");
+
+  // Prefill the project field from the route projectId once the projects
+  // list arrives (project-scoped page). One-shot per open — the reset effect
+  // clears the ref so the prefill re-applies each time the modal reopens.
+  // The form stores the project *identifier* (e.g. PDASHOSS01), resolved from
+  // the projects-lite list by matching on the route UUID.
+  useEffect(() => {
+    if (prefilledProject.current || !isOpen || !projectId) return;
+    const match = projects?.find((p) => p.id === projectId);
+    if (!match) return;
+    prefilledProject.current = true;
+    setValue("projectIdentifier", match.identifier, { shouldValidate: true });
+  }, [isOpen, projectId, projects, setValue]);
   const { data: pods, error: podsError } = useSWR<IPod[]>(isOpen && workspaceId ? ["pods", workspaceId] : null, () =>
     podService.list(workspaceId)
   );
@@ -294,7 +353,31 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     if (!pollCancelled.current) setRemoteCreate({ phase: "timeout", machineLabel });
   };
 
+  // Turn the built-in engine on for the project on this computer, through
+  // the daemon's local socket rather than the cloud.
+  const runEngineAdd = async (projectIdentifier: string, workingDir: string) => {
+    const addEngineRunner = thisComputer.addEngineRunner;
+    if (!addEngineRunner) return;
+    const machineLabel = selectedMachine ? machineDisplayLabel(selectedMachine) : t("This computer");
+    setRemoteCreate({ phase: "creating", machineLabel });
+    try {
+      const runnerName = await addEngineRunner({
+        workspaceSlug,
+        project: projectIdentifier,
+        workingDir: workingDir || undefined,
+      });
+      if (!pollCancelled.current) setRemoteCreate({ phase: "ok", machineLabel, runnerName });
+    } catch (e: unknown) {
+      if (!pollCancelled.current)
+        setRemoteCreate({ phase: "error", machineLabel, error: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
   const onSubmit: SubmitHandler<FormValues> = (values) => {
+    if (builtinEngine) {
+      void runEngineAdd(values.projectIdentifier, values.workingDir);
+      return;
+    }
     const { model, reasoningEffort } = resolveRunnerModel(values.agent, values.model);
     const cmd: RunnerCommandValues = {
       projectIdentifier: values.projectIdentifier,
@@ -434,7 +517,39 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             {devMachinesError && (
               <span className="text-12 text-danger-primary">{t("Could not load dev machines.")}</span>
             )}
+            {thisComputer.setUp && !thisComputer.machineId && (
+              <div className="mt-1 flex items-center justify-between gap-2 rounded border border-subtle px-3 py-2 text-12 text-secondary">
+                <span>{t("Pi Dash is not set up on this computer yet.")}</span>
+                <Button variant="secondary" size="sm" onClick={() => void setUpThisComputer()} loading={settingUp}>
+                  {t("Set up this computer")}
+                </Button>
+              </div>
+            )}
           </div>
+
+          {onThisComputer && thisComputer.addEngineRunner && (
+            <div className="flex items-start gap-2 text-13 text-primary">
+              <Controller
+                control={control}
+                name="builtinEngine"
+                render={({ field }) => (
+                  <input
+                    id="add-runner-builtin-engine"
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={field.value}
+                    onChange={(event) => field.onChange(event.target.checked)}
+                  />
+                )}
+              />
+              <label htmlFor="add-runner-builtin-engine" className="cursor-pointer">
+                <span className="block font-medium">{t("Use the built-in engine")}</span>
+                <span className="block text-12 text-secondary">
+                  {t("Turns the built-in engine on for this project on this computer. No agent to install.")}
+                </span>
+              </label>
+            </div>
+          )}
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-project" className="text-13 font-medium text-primary">
@@ -453,7 +568,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                   input
                   maxHeight="lg"
                   placement="bottom-start"
-                  disabled={!projects || projects.length === 0}
+                  disabled={projectLocked || !projects || projects.length === 0}
                 >
                   <>
                     {(projects ?? []).map((p) => (
@@ -472,71 +587,75 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             {projectsError && <span className="text-12 text-danger-primary">{t("Could not load projects.")}</span>}
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label htmlFor="add-runner-pod" className="text-13 font-medium text-primary">
-              {t("Pod (optional)")}
-            </label>
-            <Controller
-              control={control}
-              name="podName"
-              render={({ field }) => (
-                <CustomSelect
-                  value={field.value}
-                  label={field.value || t("(default pod)")}
-                  onChange={field.onChange}
-                  buttonClassName="border border-subtle"
-                  input
-                  maxHeight="lg"
-                  placement="bottom-start"
-                >
-                  <>
-                    <CustomSelect.Option value="">{t("(default pod)")}</CustomSelect.Option>
-                    {podsForPicker.map((pod) => (
-                      <CustomSelect.Option key={pod.id} value={pod.name}>
-                        {pod.name}
-                        {pod.project_identifier ? ` (${pod.project_identifier})` : ""}
-                      </CustomSelect.Option>
-                    ))}
-                  </>
-                </CustomSelect>
-              )}
-            />
-            <p className="text-12 text-secondary">{t("Defaults to the project's default pod.")}</p>
-            {podsError && <span className="text-12 text-danger-primary">{t("Could not load pods.")}</span>}
-          </div>
+          {!builtinEngine && (
+            <div className="flex flex-col gap-1">
+              <label htmlFor="add-runner-pod" className="text-13 font-medium text-primary">
+                {t("Pod (optional)")}
+              </label>
+              <Controller
+                control={control}
+                name="podName"
+                render={({ field }) => (
+                  <CustomSelect
+                    value={field.value}
+                    label={field.value || t("(default pod)")}
+                    onChange={field.onChange}
+                    buttonClassName="border border-subtle"
+                    input
+                    maxHeight="lg"
+                    placement="bottom-start"
+                  >
+                    <>
+                      <CustomSelect.Option value="">{t("(default pod)")}</CustomSelect.Option>
+                      {podsForPicker.map((pod) => (
+                        <CustomSelect.Option key={pod.id} value={pod.name}>
+                          {pod.name}
+                          {pod.project_identifier ? ` (${pod.project_identifier})` : ""}
+                        </CustomSelect.Option>
+                      ))}
+                    </>
+                  </CustomSelect>
+                )}
+              />
+              <p className="text-12 text-secondary">{t("Defaults to the project's default pod.")}</p>
+              {podsError && <span className="text-12 text-danger-primary">{t("Could not load pods.")}</span>}
+            </div>
+          )}
 
-          <div className="flex flex-col gap-1">
-            <label htmlFor="add-runner-name" className="text-13 font-medium text-primary">
-              {t("Name (optional)")}
-            </label>
-            <Controller
-              control={control}
-              name="name"
-              rules={{
-                validate: (value) => {
-                  const trimmed = value.trim();
-                  if (!trimmed) return true;
-                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed))
-                    return t(
-                      "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash."
+          {!builtinEngine && (
+            <div className="flex flex-col gap-1">
+              <label htmlFor="add-runner-name" className="text-13 font-medium text-primary">
+                {t("Name (optional)")}
+              </label>
+              <Controller
+                control={control}
+                name="name"
+                rules={{
+                  validate: (value) => {
+                    const trimmed = value.trim();
+                    if (!trimmed) return true;
+                    if (RUNNER_NAME_WHITESPACE_RE.test(trimmed))
+                      return t(
+                        "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash."
+                      );
+                    return (
+                      RUNNER_NAME_RE.test(trimmed) ||
+                      t(
+                        "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash."
+                      )
                     );
-                  return (
-                    RUNNER_NAME_RE.test(trimmed) ||
-                    t(
-                      "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash."
-                    )
-                  );
-                },
-              }}
-              render={({ field }) => <Input {...field} id="add-runner-name" placeholder={t("my-laptop-runner")} />}
-            />
-            <p className="text-12 text-secondary">
-              {t(
-                "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore."
-              )}
-            </p>
-            {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
-          </div>
+                  },
+                }}
+                render={({ field }) => <Input {...field} id="add-runner-name" placeholder={t("my-laptop-runner")} />}
+              />
+              <p className="text-12 text-secondary">
+                {t(
+                  "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore."
+                )}
+              </p>
+              {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
+            </div>
+          )}
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-working-dir" className="text-13 font-medium text-primary">
@@ -546,11 +665,19 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               control={control}
               name="workingDir"
               render={({ field }) => (
-                <Input
-                  {...field}
-                  id="add-runner-working-dir"
-                  placeholder={t("local dev machine project working dir")}
-                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    {...field}
+                    id="add-runner-working-dir"
+                    className="flex-1"
+                    placeholder={t("local dev machine project working dir")}
+                  />
+                  {onThisComputer && thisComputer.pickFolder && (
+                    <Button variant="secondary" onClick={() => void browseWorkingDir()}>
+                      {t("Browse…")}
+                    </Button>
+                  )}
+                </div>
               )}
             />
             <p className="text-12 text-secondary">
@@ -560,77 +687,83 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             </p>
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label htmlFor="add-runner-agent" className="text-13 font-medium text-primary">
-              {t("Agent")}
-            </label>
-            <Controller
-              control={control}
-              name="agent"
-              render={({ field }) => (
-                <CustomSelect
-                  value={field.value}
-                  label={agentOptionLabel(field.value)}
-                  onChange={(v: TAgent) => field.onChange(v)}
-                  buttonClassName="border border-subtle"
-                  input
-                  maxHeight="lg"
-                  placement="bottom-start"
-                >
-                  <>
-                    {AGENT_OPTIONS.map((opt) => (
-                      <CustomSelect.Option key={opt} value={opt}>
-                        {agentOptionLabel(opt)}
-                      </CustomSelect.Option>
-                    ))}
-                  </>
-                </CustomSelect>
-              )}
-            />
-            <p className="text-12 text-secondary">
-              {t("Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.")}
-            </p>
-          </div>
+          {!builtinEngine && (
+            <>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="add-runner-agent" className="text-13 font-medium text-primary">
+                  {t("Agent")}
+                </label>
+                <Controller
+                  control={control}
+                  name="agent"
+                  render={({ field }) => (
+                    <CustomSelect
+                      value={field.value}
+                      label={agentOptionLabel(field.value)}
+                      onChange={(v: TAgent) => field.onChange(v)}
+                      buttonClassName="border border-subtle"
+                      input
+                      maxHeight="lg"
+                      placement="bottom-start"
+                    >
+                      <>
+                        {AGENT_OPTIONS.map((opt) => (
+                          <CustomSelect.Option key={opt} value={opt}>
+                            {agentOptionLabel(opt)}
+                          </CustomSelect.Option>
+                        ))}
+                      </>
+                    </CustomSelect>
+                  )}
+                />
+                <p className="text-12 text-secondary">
+                  {t(
+                    "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command."
+                  )}
+                </p>
+              </div>
 
-          <div className="flex flex-col gap-1">
-            <label htmlFor="add-runner-model" className="text-13 font-medium text-primary">
-              {t("Model (optional)")}
-            </label>
-            <Controller
-              control={control}
-              name="model"
-              render={({ field }) => (
-                <CustomSelect
-                  value={field.value}
-                  label={runnerModelLabel(selectedAgent, field.value)}
-                  onChange={field.onChange}
-                  buttonClassName="border border-subtle"
-                  input
-                  maxHeight="lg"
-                  placement="bottom-start"
-                >
-                  <>
-                    {RUNNER_MODEL_OPTIONS[selectedAgent].map((opt) => (
-                      <CustomSelect.Option key={opt.id} value={opt.id}>
-                        {opt.label}
-                      </CustomSelect.Option>
-                    ))}
-                  </>
-                </CustomSelect>
-              )}
-            />
-            <p className="text-12 text-secondary">
-              {t(
-                "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command."
-              )}
-            </p>
-          </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="add-runner-model" className="text-13 font-medium text-primary">
+                  {t("Model (optional)")}
+                </label>
+                <Controller
+                  control={control}
+                  name="model"
+                  render={({ field }) => (
+                    <CustomSelect
+                      value={field.value}
+                      label={runnerModelLabel(selectedAgent, field.value)}
+                      onChange={field.onChange}
+                      buttonClassName="border border-subtle"
+                      input
+                      maxHeight="lg"
+                      placement="bottom-start"
+                    >
+                      <>
+                        {RUNNER_MODEL_OPTIONS[selectedAgent].map((opt) => (
+                          <CustomSelect.Option key={opt.id} value={opt.id}>
+                            {opt.label}
+                          </CustomSelect.Option>
+                        ))}
+                      </>
+                    </CustomSelect>
+                  )}
+                />
+                <p className="text-12 text-secondary">
+                  {t(
+                    "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command."
+                  )}
+                </p>
+              </div>
+            </>
+          )}
 
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose}>
               {t("Cancel")}
             </Button>
-            <Button type="submit">{t("Generate Runner")}</Button>
+            <Button type="submit">{builtinEngine ? t("Turn on the built-in engine") : t("Generate Runner")}</Button>
           </div>
         </form>
       ) : (

@@ -1,0 +1,8 @@
+-- queries/disable_email.sql
+-- DisableEmailFeatureEndpoint.delete (api/views/configuration.py:68-81):
+-- InstanceConfiguration.objects.filter(Q(key__in=[...6 keys...])).update(
+--     value=Case(When(key="ENABLE_SMTP", then=Value("0")), default=Value("")))
+-- Single UPDATE; ENABLE_SMTP row becomes "0", the other five become "".
+-- Rows for keys with no DB row are NOT created (update only, no get_or_create).
+-- UPDATE "instance_configurations" SET "value" = CASE WHEN ("instance_configurations"."key" = 'ENABLE_SMTP') THEN '0' ELSE '' END WHERE ("instance_configurations"."deleted_at" IS NULL AND "instance_configurations"."key" IN ('EMAIL_HOST', 'EMAIL_HOST_USER', 'EMAIL_HOST_PASSWORD', 'ENABLE_SMTP', 'EMAIL_PORT', 'EMAIL_FROM'));
+-- Any exception -> 400 {"error": "Failed to disable email configuration"} (configuration.py:82-86).

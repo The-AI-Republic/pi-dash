@@ -39,6 +39,11 @@ interface ApprovalCapableTransport {
   setApprovalMode?: (sessionId: string, mode: TApprovalMode) => void;
   getApprovalMode?: (sessionId: string) => TApprovalMode;
   decideChatApproval?: (sessionId: string, localApprovalId: string, decision: TApprovalDecision) => Promise<void>;
+  /**
+   * A transport that serves only some runners locally (the desktop's routing
+   * transport) says which. Absent means every chat it serves has the verbs.
+   */
+  supportsLocalApprovals?: (runnerId?: string | null) => boolean;
 }
 
 const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
@@ -46,6 +51,16 @@ const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
 /** Persisted per-runner so the chosen mode survives a reload. */
 function approvalModeStorageKey(runnerId: string | undefined): string {
   return `pidash:chat-approval-mode:${runnerId ?? "unknown"}`;
+}
+
+function readStoredApprovalMode(runnerId: string | undefined): TApprovalMode {
+  let stored: string | null = null;
+  try {
+    stored = window.localStorage.getItem(approvalModeStorageKey(runnerId));
+  } catch {
+    stored = null;
+  }
+  return stored === "ask" || stored === "workspace" || stored === "full_access" ? stored : DEFAULT_APPROVAL_MODE;
 }
 
 /** Project a `chat_approval_request` event onto the prompt's shape. */
@@ -125,6 +140,7 @@ function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): s
   if (!runner) return "Loading";
   if (runner.status === "offline") return "Runner offline";
   if (runner.status === "revoked") return "Runner revoked";
+  if (runner.paused_at) return "Runner paused";
   // "busy" no longer blocks chat: the runner serves chat concurrently with an
   // issue run, and "busy" is also reported while a chat turn is in flight. The
   // mid-turn case is covered by the active_message check below.
@@ -146,6 +162,22 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
 }
 
 /**
+ * Shown when a runner refuses a chat because an issue run holds its working
+ * folder. Server-routed chat shares that folder with the runner's runs, so a
+ * busy runner answers `runner_busy` instead of chatting (design
+ * built_engine_as_runner §12.1).
+ */
+export const RUNNER_BUSY_MESSAGE =
+  "This runner is busy with an issue run, which uses the same folder. Chat again when the run finishes.";
+
+/** The busy message when `event` is a runner refusing chat during a run, else `null`. */
+export function runnerBusyMessage(event: IAgentChatEvent): string | null {
+  if (event.kind !== "chat_failed") return null;
+  const code = (event.payload as { code?: unknown } | undefined)?.code;
+  return code === "runner_busy" ? RUNNER_BUSY_MESSAGE : null;
+}
+
+/**
  * What the agent is *doing*, for the activity strip — or `null` to show
  * nothing.
  *
@@ -160,6 +192,7 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
  * than the kind.
  */
 export function engineActivityLabel(event: IAgentChatEvent): string | null {
+  if (runnerBusyMessage(event)) return "Runner busy with an issue run";
   if (event.kind !== "raw") {
     const named: Record<string, string | null> = {
       chat_approval_request: "Waiting for your approval",
@@ -232,15 +265,23 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const transport = useMemo(() => getChatTransport(), []);
   // Approvals + mode are a built-in-engine (local transport) capability; the
   // cloud transport lacks these verbs and keeps its separate /approvals page.
-  const approvalsSupported = useMemo(
-    () => typeof (transport as ApprovalCapableTransport).decideChatApproval === "function",
-    [transport]
+  const approvalsSupported = useMemo(() => {
+    const capable = transport as ApprovalCapableTransport;
+    if (typeof capable.decideChatApproval !== "function") return false;
+    return capable.supportsLocalApprovals ? capable.supportsLocalApprovals(runnerId) : true;
+  }, [transport, runnerId]);
+  const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(() =>
+    approvalsSupported ? readStoredApprovalMode(runnerId) : DEFAULT_APPROVAL_MODE
   );
-  const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(DEFAULT_APPROVAL_MODE);
+  // Mirrors the state for `applyApprovalMode`, and is written in the same
+  // place the state is set rather than in a follow-up effect: the warm effect
+  // can run in the very commit that loads the saved mode (a remount on a warm
+  // SWR cache), and must not read the mode that commit just superseded.
   const approvalModeRef = useRef(approvalMode);
-  useEffect(() => {
-    approvalModeRef.current = approvalMode;
-  }, [approvalMode]);
+  const setApprovalMode = useCallback((mode: TApprovalMode) => {
+    approvalModeRef.current = mode;
+    setApprovalModeState(mode);
+  }, []);
   // Push the currently-selected mode into the transport's slot for a session
   // right before it is warmed or sent to, so the runner captures it when it
   // spawns the thread. A no-op on the cloud transport.
@@ -335,20 +376,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   // supports approvals; the cloud transport ignores the mode entirely.
   useEffect(() => {
     if (!approvalsSupported) return;
-    let stored: string | null = null;
-    try {
-      stored = window.localStorage.getItem(approvalModeStorageKey(runnerId));
-    } catch {
-      stored = null;
-    }
-    setApprovalModeState(
-      stored === "ask" || stored === "workspace" || stored === "full_access" ? stored : DEFAULT_APPROVAL_MODE
-    );
-  }, [runnerId, approvalsSupported]);
+    setApprovalMode(readStoredApprovalMode(runnerId));
+  }, [runnerId, approvalsSupported, setApprovalMode]);
 
   const changeApprovalMode = useCallback(
     (mode: TApprovalMode) => {
-      setApprovalModeState(mode);
+      setApprovalMode(mode);
       try {
         window.localStorage.setItem(approvalModeStorageKey(runnerId), mode);
       } catch {
@@ -358,7 +391,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       // the next thread, so a turn already running keeps the mode it started.
       if (session?.id) (transport as ApprovalCapableTransport).setApprovalMode?.(session.id, mode);
     },
-    [runnerId, session?.id, transport]
+    [runnerId, session?.id, setApprovalMode, transport]
   );
 
   const decideApproval = useCallback(
@@ -504,6 +537,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       if (["turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
         setPendingApproval(null);
       }
+      // A busy runner turned the message down; say why rather than "Failed".
+      // Only for live frames: the stream replays the session's history from
+      // the start, and an old refusal must not reappear after the run ended.
+      const busy = runnerBusyMessage(event);
+      if (busy && isRealtimeEvent(event, streamStartedAtRef.current)) setStreamError(busy);
       if (["turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(event.kind)) {
         mutateSessions();
         mutateMessages();

@@ -1,0 +1,152 @@
+{
+  "TickerEventKind": {
+    "ENTERED_BUCKET": "entered_bucket",
+    "MOVED_STAGE": "moved_stage",
+    "LEFT_BUCKET": "left_bucket",
+    "RUN_ENDED": "run_ended",
+    "HUMAN_RUN_REQUESTED": "human_run_requested",
+    "RETICK": "retick"
+  },
+  "constructors": {
+    "entered_bucket.defaults": {
+      "kind": "entered_bucket",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": "state_transition"
+    },
+    "entered_bucket.no_want_run": {
+      "kind": "entered_bucket",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": false,
+      "actor": null,
+      "trigger": "state_transition"
+    },
+    "moved_stage.defaults": {
+      "kind": "moved_stage",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": "state_transition"
+    },
+    "moved_stage.no_want_run": {
+      "kind": "moved_stage",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": false,
+      "actor": null,
+      "trigger": "state_transition"
+    },
+    "left_bucket": {
+      "kind": "left_bucket",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": ""
+    },
+    "run_ended.with_outcome": {
+      "kind": "run_ended",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": "progressed",
+      "want_run": true,
+      "actor": null,
+      "trigger": ""
+    },
+    "run_ended.no_outcome": {
+      "kind": "run_ended",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": ""
+    },
+    "human_run_requested.defaults": {
+      "kind": "human_run_requested",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": "run_ai"
+    },
+    "human_run_requested.custom_trigger": {
+      "kind": "human_run_requested",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": "custom-trigger"
+    },
+    "human_run_requested.no_want_run": {
+      "kind": "human_run_requested",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": false,
+      "actor": null,
+      "trigger": "run_ai"
+    },
+    "retick.defaults": {
+      "kind": "retick",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": true,
+      "actor": null,
+      "trigger": "run_ai"
+    },
+    "retick.no_want_run": {
+      "kind": "retick",
+      "moved_by_run": null,
+      "resume_parent": null,
+      "run": null,
+      "outcome": null,
+      "want_run": false,
+      "actor": null,
+      "trigger": "run_ai"
+    }
+  },
+  "TickerDecision.defaults": {
+    "ticker": null,
+    "dispatch_now": false,
+    "queued": false,
+    "parked": false,
+    "granted": false,
+    "reason": ""
+  },
+  "PAUSED_STATE_NAME": "Paused",
+  "scheduling.DELEGATION_STATE_NAME": "In Progress",
+  "service.DELEGATION_STATE_NAME": "In Progress",
+  "TransitionOutcome.defaults": {
+    "created_run": null,
+    "reason": ""
+  },
+  "ContinuationOutcome.defaults": {
+    "created_run": null,
+    "coalesced_into": null,
+    "reason": ""
+  }
+}

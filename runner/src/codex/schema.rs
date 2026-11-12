@@ -75,6 +75,17 @@ pub struct ThreadStartParams {
     pub approval_policy: String,
 }
 
+/// Resume an existing thread on a fresh app-server process. The minimal
+/// `{threadId}` shape is what the pinned engine (rust-v0.153.4) accepts and
+/// what the pre-ticking runner used; newer engines expose optional
+/// `cwd`/`sandbox`/`approvalPolicy` overrides on `thread/resume`, but
+/// sending only the id keeps the thread's original posture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadResumeParams {
+    pub thread_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {
@@ -84,6 +95,13 @@ pub struct TurnStartParams {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnInterruptParams {
+    pub thread_id: String,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

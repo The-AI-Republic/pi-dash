@@ -70,6 +70,8 @@ export interface IIssueSubIssuesStore extends IIssueSubIssuesStoreActions {
   // actions
   fetchOtherProjectProperties: (workspaceSlug: string, projectIds: string[]) => Promise<void>;
   setSubIssueHelpers: (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => void;
+  markSubIssueHelper: (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => void;
+  unmarkSubIssueHelper: (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => void;
 }
 
 // A generous first page so the common (small) parent loads in one request;
@@ -101,6 +103,8 @@ export class IssueSubIssuesStore implements IIssueSubIssuesStore {
       loader: observable.ref,
       // actions
       setSubIssueHelpers: action,
+      markSubIssueHelper: action,
+      unmarkSubIssueHelper: action,
       fetchSubIssues: action,
       fetchNextSubIssues: action,
       createSubIssues: action,
@@ -153,6 +157,26 @@ export class IssueSubIssuesStore implements IIssueSubIssuesStore {
       if (_subIssueHelpers.includes(value)) return pull(_subIssueHelpers, value);
       return concat(_subIssueHelpers, value);
     });
+  };
+
+  // idempotent variants of setSubIssueHelpers, for callers that may run more than
+  // once for the same value (e.g. StrictMode double-invoked mount effects) and
+  // must not flip the flag back off
+  markSubIssueHelper = (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => {
+    if (!parentIssueId || !key || !value) return;
+
+    update(this.subIssueHelpers, [parentIssueId, key], (_subIssueHelpers: string[] = []) => {
+      if (_subIssueHelpers.includes(value)) return _subIssueHelpers;
+      return concat(_subIssueHelpers, value);
+    });
+  };
+
+  unmarkSubIssueHelper = (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => {
+    if (!parentIssueId || !key || !value) return;
+
+    update(this.subIssueHelpers, [parentIssueId, key], (_subIssueHelpers: string[] = []) =>
+      pull(_subIssueHelpers, value)
+    );
   };
 
   fetchSubIssues = async (workspaceSlug: string, projectId: string, parentIssueId: string) => {

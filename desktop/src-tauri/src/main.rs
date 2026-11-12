@@ -4,12 +4,20 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
+mod account_settings;
+mod app_paths;
 mod chat;
 mod chat_history;
+mod daemon;
 mod desktop_http;
-mod ipc;
-mod managed_runner;
+// build.rs owns this module; it is compiled here only so its tests run.
+#[cfg(test)]
+#[path = "../dist_guard.rs"]
+mod dist_guard;
+mod migration;
 mod pidash_cli;
+mod setup;
 mod updates;
 
 use std::sync::Mutex;
@@ -18,6 +26,7 @@ use tauri::{
     Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    webview::NewWindowResponse,
 };
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
@@ -26,7 +35,62 @@ const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.3;
 const ZOOM_MAX: f64 = 3.0;
 
+/// Linux (WebKitGTK) undo/redo for plain text fields (PIDESKAPP-52).
+/// WebKitGTK leaves undo/redo to the embedder — Ctrl+Z / Ctrl+Shift+Z /
+/// Ctrl+Y reach the page but do nothing in an `<input>`/`<textarea>`,
+/// while cut/copy/paste/select-all, which WebKit implements itself, work.
+/// Tauri neither supplies the editing commands nor an Edit menu on any
+/// platform, so the script drives the browser's own edit commands for
+/// those fields. A `keydown` handler (never native menu accelerators) so
+/// Tiptap editors — which keep their own ProseMirror history and Mod+Z
+/// keymap — are never intercepted; Windows/macOS handle undo natively in
+/// their webviews and never load it.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux.
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_EDIT_FIX: &str = include_str!("linux_edit_fix.js");
+
 struct ZoomState(Mutex<f64>);
+
+/// Ctrl+NumpadPlus zoom-in on Linux and Windows (PIDESKAPP-51). The
+/// `CmdOrCtrl+NumpadPlus` menu accelerator can never fire: muda parses it
+/// to `Code::NumpadAdd` and then immediately collapses that to
+/// `Key::Character("+")`, which the GTK backend turns into the main-row
+/// `+` keyval (0x2B) and the Windows backend into `VK_OEM_PLUS`. The
+/// physical numpad key matches neither, so the stroke falls through to
+/// the page as a plain `+` keydown and nothing zooms. The script catches
+/// the stroke in the page (`NumpadAdd` is exactly that physical key) and
+/// routes it to the `zoom_in` command below, which steps the same
+/// `ZoomState` as the View menu — one zoom level, two triggers. Loaded
+/// on Linux and Windows only (see the setup block); macOS keeps `Cmd+=`.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux/Windows.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+const ZOOM_FIX: &str = include_str!("zoom_fix.js");
+
+/// Step the shared zoom level up and apply it to the main window. The
+/// View-menu handler and the `zoom_in` command (the numpad fix) both go
+/// through here so they can never desync.
+fn step_zoom_up(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let state = app.state::<ZoomState>();
+    // Recover from a poisoned mutex rather than crashing every future
+    // menu click — the inner f64 is independently valid.
+    let mut zoom = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    *zoom = (*zoom + ZOOM_STEP).min(ZOOM_MAX);
+    window.set_zoom(*zoom)
+}
+
+/// Zoom in one step; invoked by `zoom_fix.js` when Ctrl+NumpadPlus
+/// reaches the page (the menu accelerator cannot express the numpad key).
+#[tauri::command]
+fn zoom_in(app: tauri::AppHandle) -> Result<(), String> {
+    step_zoom_up(&app).map_err(|e| e.to_string())
+}
 
 /// Compile-time target URL. Lives in app state so the deep-link handler
 /// can derive the `/api/auth/desktop-exchange/` URL on the same origin.
@@ -36,6 +100,9 @@ struct AppConfig {
     /// hot-reload mode, where the webview *is* the server host and there is
     /// no bundle to bounce back to.
     bundle_root: Option<Url>,
+    /// Public origin of the hosted web app — what an in-app path becomes
+    /// when it has to leave the window (see `browser_url_for_new_window`).
+    web_base: Url,
 }
 
 /// Where Tauri serves `WebviewUrl::App` from. Windows is plain `http`
@@ -46,6 +113,46 @@ struct AppConfig {
 const BUNDLE_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(windows))]
 const BUNDLE_ORIGIN: &str = "tauri://localhost";
+
+/// API base `dev-prep.sh` bakes into the SPA when `VITE_API_BASE_URL` is
+/// unset. Must stay equal to the script's `API_BASE` default.
+const DEV_API_BASE: &str = "http://localhost:8000";
+
+/// API origin the native transport allowlists and advertises to the SPA as
+/// `__PIDASH_NATIVE_HTTP__`. It has to be the origin the SPA was built
+/// against: a request to any other origin leaves the native transport for
+/// the webview's own, which sends no API cookies.
+///
+/// `vite_api_base` is the build-time `VITE_API_BASE_URL`. Unset, a
+/// bundled-dev build follows `dev-prep.sh` and assumes a local API whatever
+/// `PI_DASH_URL` (the sign-in target) says; hot-reload has no baked SPA and
+/// keeps following the target. Release builds always have it set (build.rs
+/// refuses otherwise).
+fn api_base_for<'a>(vite_api_base: Option<&'a str>, target: &'a str, bundled_dev: bool) -> &'a str {
+    match vite_api_base {
+        Some(v) if !v.is_empty() => v,
+        _ if bundled_dev => DEV_API_BASE,
+        _ => target,
+    }
+}
+
+/// The API base recorded in `dist/bake-info.txt`, when the binary resolved a
+/// different origin than the bundled SPA was built against.
+fn baked_api_base_mismatch<'a>(baked: Option<&'a str>, api_url: &Url) -> Option<&'a str> {
+    let baked = baked?;
+    let baked_url = Url::parse(baked).ok()?;
+    (baked_url.origin() != api_url.origin()).then_some(baked)
+}
+
+/// Origin the bundled SPA is actually served from. `cargo tauri dev` has no
+/// `tauri://` bundle: the CLI serves `dist/` from its own dev server and
+/// bakes that address in as `build.devUrl`, which Tauri then resolves
+/// `WebviewUrl::App` against. Everywhere else it is `BUNDLE_ORIGIN`.
+fn bundle_root_for(dev_url: Option<&Url>) -> Url {
+    dev_url
+        .cloned()
+        .unwrap_or_else(|| Url::parse(BUNDLE_ORIGIN).expect("BUNDLE_ORIGIN is a valid URL"))
+}
 
 /// Bundle URL for an in-app path: same path and query, bundle origin.
 /// Tauri's asset resolver falls back to `index.html` for any path that
@@ -79,8 +186,38 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
     Some(bundle_url(bundle_root, &path_and_query))
 }
 
+/// Where a new-window request (`window.open(…, "_blank")`, a
+/// `target="_blank"` link) goes in the user's default browser.
+///
+/// The desktop app is a single window: the webview has no tab or popup
+/// surface, and without a handler wry drops these requests on every
+/// platform, so "Open in new tab" silently did nothing. An in-app path
+/// resolves against the bundle origin, which nothing outside the app can
+/// load — map it to the same path on the hosted web app, as
+/// `desktop-overlay`'s `desktopWebUrl` does for copied links. Any other
+/// http(s) URL opens unchanged. `None` means refuse: the same http/https
+/// restriction as `open_in_browser`.
+fn browser_url_for_new_window(url: &Url, bundle_root: Option<&Url>, web_base: &Url) -> Option<Url> {
+    // Checked first: on Windows the bundle origin is itself an http URL.
+    let on_bundle = bundle_root.is_some_and(|root| {
+        url.scheme() == root.scheme()
+            && url.host_str() == root.host_str()
+            && url.port_or_known_default() == root.port_or_known_default()
+    });
+    let target = if on_bundle {
+        let mut target = web_base.join(url.path()).ok()?;
+        target.set_query(url.query());
+        target.set_fragment(url.fragment());
+        target
+    } else {
+        url.clone()
+    };
+    matches!(target.scheme(), "http" | "https").then_some(target)
+}
+
 /// Whether this executable runs from an installed MSIX package; Windows
 /// installs package files under `...\WindowsApps\<package>\`.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn is_msix_install(exe: &std::path::Path) -> bool {
     exe.components()
         .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
@@ -279,18 +416,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = if hot_reload { "hot-reload" } else { "bundled" };
     eprintln!("Pi Dash: mode={mode} server target {target_url_str} (oss-sha {oss_sha})");
     let target_url = Url::parse(target_url_str)?;
-    let api_url = Url::parse(option_env!("VITE_API_BASE_URL").unwrap_or(target_url_str))?;
+    let api_url = Url::parse(api_base_for(
+        option_env!("VITE_API_BASE_URL"),
+        target_url_str,
+        cfg!(debug_assertions) && !hot_reload,
+    ))?;
+    // PIDASH_BAKED_API_BASE is emitted by build.rs from dist/bake-info.txt.
+    // A mismatch (a reused dist/, or VITE_API_BASE_URL changed after the SPA
+    // was built) otherwise shows up only as unexplained 401s.
+    if !hot_reload
+        && let Some(baked) = baked_api_base_mismatch(option_env!("PIDASH_BAKED_API_BASE"), &api_url)
+    {
+        eprintln!(
+            "Pi Dash: WARNING the bundled SPA was built against API base {baked} but this \
+             binary's native transport serves {} — API requests will bypass it and go out \
+             without session cookies (401s). Rebuild both with the same VITE_API_BASE_URL \
+             (PI_DASH_URL only sets the sign-in target).",
+            api_url.origin().ascii_serialization()
+        );
+    }
     let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
         WebviewUrl::App("index.html".into())
     };
-    let bundle_root: Option<Url> = if hot_reload {
-        None
-    } else {
-        Some(Url::parse(BUNDLE_ORIGIN)?)
-    };
+    // Same fallback as `dev-prep.sh` and build.rs's `validate_baked_web_base`:
+    // the web app lives on the sign-in origin unless the build says otherwise.
+    let web_base = option_env!("VITE_WEB_BASE_URL")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| Url::parse(v).ok())
+        .unwrap_or_else(|| target_url.clone());
 
     // Loud-warning safety net for the cargo-not-tauri-cli debug path. A
     // dev who runs `cargo build` / `cargo run` / IDE Run-binary on a fresh
@@ -298,7 +455,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // panics in release profile (rust-analyzer would crash otherwise);
     // without this warning, the window would just hang on the 118-byte
     // placeholder with no signal. PIDASH_DIST_VALID is emitted by build.rs
-    // from the same size/assets check dev-prep.sh and the release guard use.
+    // from dist_guard::check_dist_bundle, the check the release guard uses.
     if !hot_reload && option_env!("PIDASH_DIST_VALID") == Some("0") {
         eprintln!(
             "Pi Dash: WARNING dist/ looks like the 118-byte placeholder — the window will \
@@ -309,6 +466,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let context = tauri::generate_context!();
+    let bundle_root: Option<Url> = if hot_reload {
+        None
+    } else {
+        // Same condition Tauri uses to pick the dev server over `tauri://`.
+        let dev_url = context
+            .config()
+            .build
+            .dev_url
+            .as_ref()
+            .filter(|_| tauri::is_dev());
+        Some(bundle_root_for(dev_url))
+    };
     // Auto-update is opt-in per build: a distributor that publishes signed
     // updates supplies `plugins.updater` (pubkey + endpoints) through a
     // `--config` overlay. Without that section the plugin cannot initialise
@@ -345,12 +514,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(desktop_http)
-        .manage(AppConfig { target_url, bundle_root })
-        .manage(managed_runner::DaemonState::default())
+        .manage(AppConfig {
+            target_url,
+            bundle_root,
+            web_base,
+        })
         .manage(chat::ChatState::default())
-        .manage(updates::UpdateState::default())
+        .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
+            zoom_in,
             desktop_http::desktop_api_request,
             desktop_http::desktop_api_stream,
             desktop_http::desktop_api_cancel,
@@ -366,21 +539,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chat::chat_cancel,
             chat::chat_close,
             chat::chat_decide,
-            // Built-in agent engine: the overlay JS holds the session and
-            // makes the authenticated calls, then hands the results to these
-            // commands, which own the local files and the daemon process.
-            managed_runner::managed_paths,
-            managed_runner::managed_bootstrap,
-            managed_runner::managed_enroll,
-            managed_runner::managed_write_engine_config,
-            managed_runner::managed_write_model_token,
-            managed_runner::managed_start_daemon,
-            managed_runner::managed_stop_daemon,
-            managed_runner::managed_sign_out,
+            // The computer's Pi Dash daemon (design §4.4–§4.8, §10, §12):
+            // the app is a client over its standard control socket and never
+            // starts, stops or re-roots it.
+            daemon::daemon_discover,
+            daemon::daemon_status,
+            daemon::daemon_engine_status,
+            daemon::daemon_engine_set_paused,
+            daemon::daemon_engine_settings_get,
+            daemon::daemon_engine_settings_set,
+            daemon::daemon_engine_runner_add,
+            daemon::daemon_engine_runner_remove,
+            daemon::daemon_engine_runner_rebind,
+            daemon::daemon_runners,
+            daemon::daemon_credentials_reload,
+            // Set-up, update and sign-in, each through the installed CLI and
+            // only on the user's say-so.
+            setup::daemon_install_service,
+            setup::daemon_ensure_engine,
+            setup::daemon_update_cli,
+            setup::pidash_cli_engine_login,
+            setup::pidash_cli_logout,
+            // Moving older builds' private daemon trees to the shared daemon.
+            migration::legacy_scan,
+            migration::legacy_finish,
+            migration::legacy_restore_folder,
             desktop_clear_web_data,
             updates::desktop_pending_update,
             updates::desktop_install_update,
-            managed_runner::managed_doctor,
+            about::desktop_about,
             // Direct local chat history: stored on this machine only, per
             // account, never relayed to or stored by the Pi Dash server.
             chat_history::chat_create_session,
@@ -393,26 +580,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chat_history::chat_delete_session,
             chat_history::chat_clear_history,
             chat_history::chat_working_dir,
+            // Per-account settings kept outside the webview's storage, which
+            // sign-out wipes.
+            account_settings::chat_approval_modes_save,
+            account_settings::chat_approval_modes_load,
+            // One-time notices (migration, PO-11) and declined "Replace it"
+            // prompts, kept with the per-account settings.
+            account_settings::desktop_notices_load,
+            account_settings::desktop_notices_record,
+            account_settings::desktop_notices_dismiss,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),
         // bounce as soon as it finishes loading.
         .on_page_load(move |webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                // A new page is loading (reload, 401 bounce, theme-switch
+                // reload, sign-in exchange, …): the page that asked for
+                // the in-flight native requests is going away and cannot
+                // receive their responses, and its JS never gets to run
+                // its cleanup (e.g. NativeEventSource::close). Cancel
+                // them all here, so a reloaded stream is not orphaned
+                // until sign-out. SPA route changes load no new page and
+                // never reach this branch.
+                if webview.label() == "main" {
+                    webview.state::<desktop_http::DesktopHttp>().cancel_all();
+                }
+                return;
+            }
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
             let config = webview.state::<AppConfig>();
-            let Some(root) = &config.bundle_root else { return };
+            let Some(root) = &config.bundle_root else {
+                return;
+            };
             if let Some(target) = bundle_redirect_for(payload.url(), &config.target_url, root) {
-                eprintln!("nav: server host page loaded ({}), bouncing to bundle", payload.url());
+                eprintln!(
+                    "nav: server host page loaded ({}), bouncing to bundle",
+                    payload.url()
+                );
                 if let Err(e) = webview.navigate(target) {
                     eprintln!("nav: bounce failed: {e}");
                 }
             }
         })
         .setup(move |app| {
-            let api_origin = app.state::<desktop_http::DesktopHttp>()
-                .api_url.origin().ascii_serialization();
+            let api_origin = app
+                .state::<desktop_http::DesktopHttp>()
+                .api_url
+                .origin()
+                .ascii_serialization();
             let mut window = WebviewWindowBuilder::new(app, "main", initial_webview)
                 .initialization_script(format!(
                     "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});",
@@ -421,12 +639,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
-                .resizable(true);
+                .resizable(true)
+                // PIDESKAPP-87: Tauri's native handler replaces the webview
+                // drop target on Windows, so the shared UI's HTML5 drag and
+                // drop (board cards, reorder, file drops) never reaches the
+                // page. Nothing consumes Tauri's own drag events.
+                .disable_drag_drop_handler();
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                // PIDESKAPP-51: the numpad-plus accelerator can never fire
+                // (muda collapses NumpadAdd onto the main-row `+`), so the
+                // script asks Rust to zoom in when the physical numpad
+                // key arrives. See the const.
+                window = window.initialization_script(ZOOM_FIX);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // PIDESKAPP-52: WebKitGTK leaves undo/redo to the embedder;
+                // the script drives them for plain fields. See the const.
+                window = window.initialization_script(LINUX_EDIT_FIX);
+            }
+            let open_app = app.handle().clone();
+            window = window.on_new_window(move |url, _features| {
+                let config = open_app.state::<AppConfig>();
+                match browser_url_for_new_window(
+                    &url,
+                    config.bundle_root.as_ref(),
+                    &config.web_base,
+                ) {
+                    Some(target) => {
+                        if let Err(e) = open_app.opener().open_url(target.as_str(), None::<&str>) {
+                            eprintln!("new-window: opening {target} in the browser failed: {e}");
+                        }
+                    }
+                    None => eprintln!("new-window: refused {url}"),
+                }
+                // Never a second in-app window: the request is either handed
+                // to the browser or dropped.
+                NewWindowResponse::Deny
+            });
             if !hot_reload {
                 let bounce_app = app.handle().clone();
                 window = window.on_navigation(move |url| {
                     let config = bounce_app.state::<AppConfig>();
-                    let Some(root) = &config.bundle_root else { return true };
+                    let Some(root) = &config.bundle_root else {
+                        return true;
+                    };
                     let Some(target) = bundle_redirect_for(url, &config.target_url, root) else {
                         return true;
                     };
@@ -435,10 +693,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Deferred: navigating from inside the policy callback
                     // would re-enter the webview mid-decision.
                     tauri::async_runtime::spawn(async move {
-                        if let Some(w) = app.get_webview_window("main") {
-                            if let Err(e) = w.navigate(target) {
-                                eprintln!("nav: bounce failed: {e}");
-                            }
+                        if let Some(w) = app.get_webview_window("main")
+                            && let Err(e) = w.navigate(target)
+                        {
+                            eprintln!("nav: bounce failed: {e}");
                         }
                     });
                     false
@@ -449,11 +707,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // View menu: browser-style zoom shortcuts. The Tauri webview
             // doesn't bind these by default, so we register them as menu
             // accelerators. muda's accelerator parser has no `Plus` token
-            // (it would silently bind the `P` key); the numpad `+` is
-            // spelled `NumpadPlus`. We register three variants routed to
-            // the same `zoom_in` id; alternates are Linux/Windows only —
-            // on macOS, `Cmd+=` is the conventional shortcut and the
-            // duplicates would visibly clutter the menubar.
+            // (it would silently bind the `P` key); the numpad `+` would
+            // be spelled `NumpadPlus` — but no accelerator can express it:
+            // muda collapses `NumpadAdd` onto the main-row `+` key, so the
+            // physical numpad stroke never matches (PIDESKAPP-51).
+            // Numpad-plus zoom is handled by the `zoom_fix.js`
+            // initialization script (see ZOOM_FIX) instead. The
+            // main-row alternates are Linux/Windows only — on macOS,
+            // `Cmd+=` is the conventional shortcut and the duplicate
+            // would visibly clutter the menubar.
             let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In")
                 .accelerator("CmdOrCtrl+=")
                 .build(app)?;
@@ -467,16 +729,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let zoom_in_shift = MenuItemBuilder::with_id("zoom_in", "Zoom In")
                 .accelerator("CmdOrCtrl+Shift+=")
                 .build(app)?;
-            #[cfg(not(target_os = "macos"))]
-            let zoom_in_numpad = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-                .accelerator("CmdOrCtrl+NumpadPlus")
-                .build(app)?;
 
             let view = {
-                let b = SubmenuBuilder::new(app, "View")
-                    .items(&[&zoom_in, &zoom_out, &zoom_reset]);
+                let b = SubmenuBuilder::new(app, "View").items(&[&zoom_in, &zoom_out, &zoom_reset]);
                 #[cfg(not(target_os = "macos"))]
-                let b = b.items(&[&zoom_in_shift, &zoom_in_numpad]);
+                let b = b.items(&[&zoom_in_shift]);
                 b.build()?
             };
             let menu = MenuBuilder::new(app).items(&[&view]).build()?;
@@ -513,6 +770,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tray_builder.build(app)?;
 
             app.on_menu_event(|app, event| {
+                // Zoom-in goes through step_zoom_up (shared with the zoom_in
+                // command) so the menu and the numpad fix can't desync.
+                if event.id().as_ref() == "zoom_in" {
+                    if let Err(e) = step_zoom_up(app) {
+                        eprintln!("set_zoom failed: {e}");
+                    }
+                    return;
+                }
                 let Some(window) = app.get_webview_window("main") else {
                     return;
                 };
@@ -521,7 +786,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // future menu click — the inner f64 is independently valid.
                 let mut zoom = state.0.lock().unwrap_or_else(|e| e.into_inner());
                 *zoom = match event.id().as_ref() {
-                    "zoom_in" => (*zoom + ZOOM_STEP).min(ZOOM_MAX),
                     "zoom_out" => (*zoom - ZOOM_STEP).max(ZOOM_MIN),
                     "zoom_reset" => 1.0,
                     _ => return,
@@ -553,6 +817,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     handle_deep_link(&handle, url.as_str());
                 }
             });
+            // On Linux/Windows a first-launch URL arrives on argv and is
+            // stored by the deep-link plugin during plugin init, before the
+            // `on_open_url` listener above is registered, so the emitted
+            // event is missed. Read the stored launch URL here; the main
+            // window exists by this point. macOS delivers via
+            // `RunEvent::Opened` after setup, so skip there to avoid
+            // handling the same link twice.
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            match app.deep_link().get_current() {
+                Ok(Some(urls)) => {
+                    let launch_handle = app.handle().clone();
+                    for url in urls {
+                        handle_deep_link(&launch_handle, url.as_str());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("deep-link: get_current failed: {e}"),
+            }
 
             // Background updater checks. Spawned (not awaited) so launch isn't
             // blocked by network — if a new version is available the dialog
@@ -563,20 +845,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::async_runtime::spawn(updates::run_daily_checks(app.handle().clone()));
             }
 
-            // The agent uses the bundled CLI. Launching the desktop must not
-            // install a second CLI into the user's PATH or personal config.
+            // Launching the app installs and starts nothing: the CLI and its
+            // service are set up only from the consent screen (design §4.7).
 
             Ok(())
         })
+        // The daemon is the computer's, not the app's: closing the app
+        // leaves it and its runners running (design §4.1).
         .build(context)?
-        .run(|app, event| {
-            // Stop the bundled daemon when the app exits. Without this it
-            // outlives the window: the server would keep the runner ONLINE and
-            // dispatch work to a machine whose user has closed Pi Dash.
-            if let tauri::RunEvent::Exit = event {
-                managed_runner::shutdown(app);
-            }
-        });
+        .run(|_app, _event| {});
 
     Ok(())
 }
@@ -604,6 +881,57 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn bundled_dev_api_base_matches_the_origin_dev_prep_bakes() {
+        // dev-prep.sh bakes this default into the SPA when VITE_API_BASE_URL
+        // is unset, whatever PI_DASH_URL says; the two must not drift apart.
+        assert!(
+            include_str!("../../scripts/dev-prep.sh").contains(&format!(
+                "API_BASE=\"${{VITE_API_BASE_URL:-{DEV_API_BASE}}}\""
+            )),
+            "dev-prep.sh no longer defaults API_BASE to {DEV_API_BASE}"
+        );
+        let target = "https://pidash.example.com";
+        assert_eq!(api_base_for(None, target, true), DEV_API_BASE);
+        assert_eq!(api_base_for(Some(""), target, true), DEV_API_BASE);
+        assert_eq!(
+            api_base_for(Some("https://api.example.com"), target, true),
+            "https://api.example.com"
+        );
+        // Hot-reload and release keep following the server target.
+        assert_eq!(api_base_for(None, target, false), target);
+    }
+
+    #[test]
+    fn main_window_disables_tauri_drag_drop_handler() {
+        // PIDESKAPP-87: Tauri's native handler replaces the WebView2 drop
+        // target on Windows, so HTML5 drag and drop never reaches the page.
+        // The window is built only in `setup`, so the builder call is the
+        // fix. The needle is concatenated so this test's own source does
+        // not satisfy the assertion.
+        let needle = concat!(".disable_drag_drop", "_handler()");
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains(needle),
+            "main window builder must call {needle}: the shared web UI drags \
+             board cards and drops files through HTML5 drag and drop"
+        );
+    }
+
+    #[test]
+    fn baked_api_base_mismatch_compares_origins() {
+        let api = Url::parse("http://localhost:8000").unwrap();
+        assert_eq!(baked_api_base_mismatch(None, &api), None);
+        assert_eq!(
+            baked_api_base_mismatch(Some("http://localhost:8000/"), &api),
+            None
+        );
+        assert_eq!(
+            baked_api_base_mismatch(Some("https://pidash.example.com"), &api),
+            Some("https://pidash.example.com")
+        );
+    }
+
     fn server() -> Url {
         Url::parse("https://pidash.example.com").unwrap()
     }
@@ -611,18 +939,135 @@ mod tests {
         Url::parse("tauri://localhost").unwrap()
     }
 
+    fn web() -> Url {
+        Url::parse("https://pidash.airepublic.com").unwrap()
+    }
+    fn new_window(url: &str, bundle_root: &str) -> Option<String> {
+        let root = Url::parse(bundle_root).unwrap();
+        browser_url_for_new_window(&Url::parse(url).unwrap(), Some(&root), &web()).map(String::from)
+    }
+
+    #[test]
+    fn open_in_new_tab_on_an_in_app_path_goes_to_the_hosted_web_app() {
+        // `window.open("/acme/browse/PROJ-12/", "_blank")` as the webview
+        // resolves it on macOS/Linux and on Windows.
+        for (url, bundle_root) in [
+            (
+                "tauri://localhost/acme/browse/PROJ-12/",
+                "tauri://localhost",
+            ),
+            (
+                "http://tauri.localhost/acme/browse/PROJ-12/",
+                "http://tauri.localhost",
+            ),
+        ] {
+            assert_eq!(
+                new_window(url, bundle_root).as_deref(),
+                Some("https://pidash.airepublic.com/acme/browse/PROJ-12/"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_window_in_app_path_keeps_query_and_fragment() {
+        assert_eq!(
+            new_window(
+                "tauri://localhost/acme/projects/p1/cycles/c1?peek=1#comment",
+                "tauri://localhost"
+            )
+            .as_deref(),
+            Some("https://pidash.airepublic.com/acme/projects/p1/cycles/c1?peek=1#comment")
+        );
+    }
+
+    #[test]
+    fn new_window_external_links_open_unchanged() {
+        for u in [
+            "https://example.com/docs?a=1#b",
+            "http://intranet.example/wiki",
+        ] {
+            assert_eq!(
+                new_window(u, "tauri://localhost").as_deref(),
+                Some(u),
+                "{u}"
+            );
+            assert_eq!(
+                new_window(u, "http://tauri.localhost").as_deref(),
+                Some(u),
+                "{u}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_window_refuses_non_web_schemes() {
+        for u in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "mailto:sales@example.com",
+            "tauri://elsewhere/x",
+            // The web flows reserve `about:blank` / "" synchronously, then
+            // steer the tab after an await. The shell never creates a second
+            // window, so a blank reservation is always refused (PIDESKAPP-186).
+            "about:blank",
+        ] {
+            assert_eq!(new_window(u, "tauri://localhost"), None, "{u}");
+        }
+    }
+
+    #[test]
+    fn new_window_in_hot_reload_mode_opens_the_server_url_as_is() {
+        // No bundle: the webview is already on the server host.
+        let url = Url::parse("http://localhost:3000/acme/browse/PROJ-12/").unwrap();
+        assert_eq!(browser_url_for_new_window(&url, None, &web()), Some(url));
+    }
+
+    #[test]
+    fn new_window_in_app_path_is_refused_when_the_web_base_is_not_http() {
+        let root = Url::parse("tauri://localhost").unwrap();
+        let url = Url::parse("tauri://localhost/acme/").unwrap();
+        assert_eq!(browser_url_for_new_window(&url, Some(&root), &root), None);
+    }
+
     #[test]
     fn api_paths_on_server_host_pass_through() {
-        let url = Url::parse("https://pidash.example.com/api/auth/desktop-exchange/?code=x&state=y").unwrap();
+        let url =
+            Url::parse("https://pidash.example.com/api/auth/desktop-exchange/?code=x&state=y")
+                .unwrap();
         assert_eq!(bundle_redirect_for(&url, &server(), &root()), None);
+    }
+
+    // The session sign-out view lives outside `/api/`, so a form POST to it
+    // is bounced like any other server-host page and never reaches the
+    // server. The web layer signs out over the native API transport instead.
+    #[test]
+    fn sign_out_form_navigation_bounces_to_bundle() {
+        let url = Url::parse("https://pidash.example.com/auth/sign-out/").unwrap();
+        let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
+        assert_eq!(target.as_str(), "tauri://localhost/auth/sign-out/");
     }
 
     #[test]
     fn bundle_and_foreign_origins_pass_through() {
-        for u in ["tauri://localhost/", "https://login.example.com/x", "http://pidash.example.com/"] {
+        for u in [
+            "tauri://localhost/",
+            "https://login.example.com/x",
+            "http://pidash.example.com/",
+        ] {
             let url = Url::parse(u).unwrap();
             assert_eq!(bundle_redirect_for(&url, &server(), &root()), None, "{u}");
         }
+    }
+
+    #[test]
+    fn bundle_root_is_the_dev_server_only_when_tauri_serves_from_one() {
+        let dev_url = Url::parse("http://127.0.0.1:1430/").unwrap();
+        assert_eq!(bundle_root_for(Some(&dev_url)), dev_url);
+        assert_eq!(
+            bundle_root_for(None).as_str().trim_end_matches('/'),
+            BUNDLE_ORIGIN
+        );
     }
 
     #[test]
@@ -641,9 +1086,13 @@ mod tests {
 
     #[test]
     fn exchange_failure_redirect_lands_on_bundle_sign_in() {
-        let url = Url::parse("https://pidash.example.com/sign-in?error=state_flow_mismatch").unwrap();
+        let url =
+            Url::parse("https://pidash.example.com/sign-in?error=state_flow_mismatch").unwrap();
         let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
-        assert_eq!(target.as_str(), "tauri://localhost/sign-in?error=state_flow_mismatch");
+        assert_eq!(
+            target.as_str(),
+            "tauri://localhost/sign-in?error=state_flow_mismatch"
+        );
     }
 
     #[test]
@@ -655,14 +1104,133 @@ mod tests {
 
     #[test]
     fn deep_link_error_url_is_bundle_sign_in() {
-        assert_eq!(bundle_url(&root(), "/sign-in").as_str(), "tauri://localhost/sign-in");
+        assert_eq!(
+            bundle_url(&root(), "/sign-in").as_str(),
+            "tauri://localhost/sign-in"
+        );
+    }
+
+    #[test]
+    fn zoom_fix_catches_numpad_plus_and_routes_to_the_command() {
+        // PIDESKAPP-51: the CmdOrCtrl+NumpadPlus menu accelerator can never
+        // fire (muda collapses NumpadAdd onto the main-row `+`), so the
+        // script catches the physical numpad key in the page and routes it
+        // to the zoom_in command, which steps the shared ZoomState. The
+        // script content is behaviorally covered by
+        // desktop/tests/test_zoom_numpad_fix.py; these assert the
+        // invariants it is built on.
+        let script = ZOOM_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("NumpadAdd"),
+            "physical numpad key, not the main-row plus"
+        );
+        assert!(
+            script.contains("zoom_in") && script.contains("__TAURI__"),
+            "routes to the Rust command"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_ZOOM_FIX__"),
+            "idempotency guard against double registration"
+        );
+        assert!(
+            !script.contains("NumpadSubtract"),
+            "zoom-out stays out of scope"
+        );
+    }
+
+    #[test]
+    fn linux_edit_fix_drives_undo_redo_for_plain_fields_only() {
+        // PIDESKAPP-52: the script runs on every UI navigation, drives
+        // the browser's own edit commands for plain fields, and must
+        // never touch other elements — Tiptap editors keep their own
+        // ProseMirror history (and their own Mod+Z keymap), so anything
+        // not INPUT/TEXTAREA must be ignored. The script content is
+        // behaviorally covered by desktop/tests/test_linux_undo_fix.py;
+        // these assert the invariants it is built on.
+        let script = LINUX_EDIT_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("TEXTAREA") && script.contains("INPUT"),
+            "plain-field targets"
+        );
+        assert!(
+            script.contains("\"undo\"") && script.contains("\"redo\""),
+            "both directions"
+        );
+        assert!(
+            script.contains("KeyZ") && script.contains("KeyY"),
+            "Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_LINUX_EDIT_FIX__"),
+            "idempotency guard against double registration"
+        );
     }
 
     #[test]
     fn marketing_routes_bounce_too() {
         for p in ["/home", "/docs", "/pricing"] {
             let url = Url::parse(&format!("https://pidash.example.com{p}")).unwrap();
-            assert!(bundle_redirect_for(&url, &server(), &root()).is_some(), "{p}");
+            assert!(
+                bundle_redirect_for(&url, &server(), &root()).is_some(),
+                "{p}"
+            );
         }
+    }
+
+    #[test]
+    fn launch_deep_link_is_read_via_get_current_on_setup() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("read main.rs");
+        let production = src.split("\nmod tests {").next().unwrap_or(&src);
+        assert!(
+            production.contains("get_current"),
+            "setup never reads the launch URL via get_current"
+        );
+        let on_open = production
+            .find("on_open_url")
+            .expect("on_open_url registration missing");
+        let get_cur = production
+            .find("get_current")
+            .expect("get_current read missing");
+        assert!(
+            get_cur > on_open,
+            "launch URL must be read after on_open_url is registered"
+        );
+        let build = production
+            .find("window.build()")
+            .expect("main window build missing");
+        assert!(
+            build < get_cur,
+            "launch URL must be handled after the main window exists"
+        );
+        let window = get_cur.saturating_sub(600);
+        let gate = &production[window..get_cur];
+        assert!(
+            gate.contains("target_os") && gate.contains("linux") && gate.contains("windows"),
+            "launch URL read must be gated to Linux/Windows, got: {gate:?}"
+        );
+        let tail = &production[get_cur..(get_cur + 800).min(production.len())];
+        assert!(
+            tail.contains("handle_deep_link"),
+            "launch URLs must be passed to handle_deep_link"
+        );
     }
 }

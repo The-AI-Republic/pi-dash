@@ -72,22 +72,52 @@ desktop/src-tauri/dist/
   desktop bundle. Desktop-only routes go here.
 - `apps/web/react-router.config.ts` — `ssr: false`, no prerendering.
 - `apps/web/core/services/agent-runtime.ts`, `core/components/agent-runtime.tsx`
-  — the real implementations of the `apps/web` agent-runtime stubs: enroll
-  this machine, write the engine config and model credential, supervise the
-  bundled daemon.
+  — the real implementations of the `apps/web` agent-runtime stubs, as a
+  client of this computer's Pi Dash daemon: find it, turn the built-in engine
+  on for a project when it is used, keep the engine signed in (silently only
+  when `expiring` / `expired`), and sign out only the app.
+- `apps/web/core/services/desktop-daemon.ts` — what the app knows about the
+  daemon (`Hello`, classified by the host) and the engine sign-in rules;
+  `pidash-cli.ts` — "Set up Pi Dash on this computer" and its consent prompt;
+  `desktop-migration.ts` — moving older builds' private daemon trees to the
+  shared daemon.
+- `apps/web/core/services/local-chat-transport.ts` — the routing chat
+  transport: "This computer" to the daemon, every other runner to the cloud.
+- `apps/web/core/components/runners/this-computer.ts`,
+  `local-chat-contacts.ts` — the desktop sides of the runner seams: this
+  computer preselected in Add runner (folder picker, built-in engine), its
+  engine runners shown once, as the "This computer" contact.
+- `apps/web/core/components/desktop-computer-button.tsx`,
+  `desktop-engine-settings.tsx`, `desktop-daemon-setup-dialog.tsx` — the
+  "This computer" corner button and the Built-in engine settings (task root
+  with a folder picker, per-project folders, engine state, pause, sign in and
+  out), and the set-up consent screen.
 - `apps/web/core/components/desktop-update-button.tsx` — the corner button
   beside the sidebar's user menu while an app update is waiting (found by
   the daily check, or deferred at launch); clicking it installs and restarts.
+- `apps/web/core/components/desktop-about-button.tsx` — the About button in
+  that same corner; its dialog shows the app version and the licence texts
+  bundled under `desktop/src-tauri/licenses/`.
 - `apps/web/core/utils/desktop-web-url.ts` — resolves an in-app path against
   `VITE_WEB_BASE_URL` (baked by `dev-prep.sh`, defaulting to `PI_DASH_URL`).
   Bundled pages run on a Tauri-owned origin, so anything that builds a
   shareable link from `window.location.origin` would hand the user a
   `tauri://localhost` URL.
+- `apps/web/core/utils/share-url.ts` — `copyShareUrl()`, the desktop version
+  of the helper every other "Copy link" in `apps/web` calls (cycles, modules,
+  views, pages, projects, comments, …): it copies `desktopWebUrl(path)`. New
+  copy-link code in `apps/web` must call `copyShareUrl()` from
+  `@/utils/share-url`, never `copyUrlToClipboard()` from `@pi-dash/utils`;
+  `tests/desktop/desktop-share-url.test.ts` fails the build otherwise.
 - `apps/web/core/components/issues/issue-detail/issue-detail-quick-actions.tsx`,
   `issue-layouts/quick-action-dropdowns/helper.tsx` and
   `peek-overview/header.tsx` — the three copy-link paths, routed through
   `desktopWebUrl()` instead of the bundle origin. Each is otherwise identical
   to its `apps/web` original; keep them in step when that original changes.
+- `apps/web/core/services/desktop-session.ts` and
+  `desktop-approval-modes.ts` — sign-out clears the webview's own cookie jar,
+  which takes `localStorage` with it; the local-chat approval mode is handed
+  to the host first (kept per account) and restored at the next sign-in.
 - `apps/web/tests/desktop/` — tests for the above; run them with
   `bash desktop/scripts/test-overlay.sh`.
 

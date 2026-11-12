@@ -222,6 +222,8 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             cfg
         }
         None => Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: args.url.clone(),
@@ -229,6 +231,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![new_runner_block],
@@ -635,8 +638,8 @@ fn read_line() -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, RunnerConfig,
-        WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
+        RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
 

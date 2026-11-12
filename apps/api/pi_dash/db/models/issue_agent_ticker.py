@@ -42,9 +42,9 @@ class TickerDisarmReason(models.TextChoices):
     """Why the ticker is currently disarmed.
 
     ``maybe_apply_deferred_pause`` only auto-Pauses the issue when
-    ``disarm_reason == CAP_HIT``. Terminal-signal disarms (``done`` /
-    ``blocked`` / ``waiting_on_human``) leave the issue in place for the
-    human to act. See ``.ai_design/ticking_relevance/design.md`` §5.2 / §7.
+    ``disarm_reason == CAP_HIT``. A stop-signal disarm (the run's explicit
+    ``stop_ticking`` on its yield) leaves the issue in place for the human
+    to act. See ``.ai_design/ticking_relevance/design.md`` §5.2 / §7.
     """
 
     NONE = "", "None"
@@ -57,7 +57,15 @@ class TickerDisarmReason(models.TextChoices):
     #: Never auto-pauses — the human is expected to Re-tick from here, and
     #: Re-tick needs the issue to stay in the bucket.
     POOL_SPENT = "pool_spent", "Pool Spent"
+    #: Legacy rows only: outcomes (``done`` / ``blocked`` /
+    #: ``waiting_on_human``) used to stop the clock by inference
+    #: (PDASHOSS01-247). Kept so history stays readable; ``reconcile`` no
+    #: longer writes it.
     TERMINAL_SIGNAL = "terminal_signal", "Terminal Signal"
+    #: The run explicitly asked to stop the clock (``pidash run yield
+    #: --stop-ticking`` → ``done_payload.stop_ticking``). Cleared by the
+    #: same human levers that cleared ``TERMINAL_SIGNAL``.
+    STOP_SIGNAL = "stop_signal", "Stop Signal"
     USER_DISABLED = "user_disabled", "User Disabled"
 
 

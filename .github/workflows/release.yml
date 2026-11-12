@@ -255,6 +255,31 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      # Hand-added (cargo-dist doesn't know about this): stage the built-in
+      # engine (the pinned OpenAI Codex release in runner/ENGINE_VERSION,
+      # SHA-256-checked against the upstream release metadata and renamed
+      # pidash-agent-engine) so `include` in dist-workspace.toml puts
+      # engine/<version>/ into this target's archive, and runner/wix/main.wxs
+      # can put it into the MSI. See design
+      # .ai_design/built_engine_as_runner §4.5.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Stage built-in engine
+        shell: bash
+        env:
+          TARGETS: ${{ join(matrix.targets, ' ') }}
+        run: |
+          set -euo pipefail
+          read -r -a targets <<< "$TARGETS"
+          # One engine per archive: stage_engine.py replaces the staging
+          # directory, so a job building several targets would ship the last
+          # target's engine in all of them. Fail instead of doing that.
+          if [ "${#targets[@]}" -ne 1 ]; then
+            echo "::error::expected one target per build-local-artifacts job, got: $TARGETS"
+            exit 1
+          fi
+          python runner/scripts/stage_engine.py --target "${targets[0]}"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
@@ -404,11 +429,19 @@ jobs:
       # so a plain upload would mean that even a tag-pinned wrapper
       # (…/releases/download/pidash-v0.1.0/install.sh) would silently
       # fetch the latest binary. sed the actual tag in before upload
-      # so pinning works as documented.
+      # so pinning works as documented — including install.ps1's MSI
+      # fallback link, which must name the same release's MSI. The grep
+      # fails the step if any pidash-* asset URL is still on `latest`, so
+      # a wrapper edit that stops matching can't silently break pinning.
       - name: Upload install wrappers
         run: |
           sed -i "s|/releases/latest/download/pidash-installer.sh|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.sh|" runner/install.sh
           sed -i "s|/releases/latest/download/pidash-installer.ps1|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.ps1|" runner/install.ps1
+          sed -i "s|/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi|/releases/download/${{ needs.plan.outputs.tag }}/pidash-x86_64-pc-windows-msvc.msi|" runner/install.ps1
+          if grep -n "releases/latest/download/pidash-" runner/install.sh runner/install.ps1; then
+            echo "::error::install wrapper still references a 'latest' pidash-* asset (lines above); update the sed rewrites"
+            exit 1
+          fi
           gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh runner/install.ps1 --clobber
 
   publish-runner-version-advisory:
