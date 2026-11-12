@@ -350,10 +350,7 @@ pub fn url_validator_ok(value: &str) -> bool {
     let Some(host) = hostname_of(netloc) else {
         return false;
     };
-    if host.chars().count() > MAX_HOSTNAME_CHARS {
-        return false;
-    }
-    true
+    host.chars().count() <= MAX_HOSTNAME_CHARS
 }
 
 /// `(scheme, netloc, rest)` triple for [`url_validator_ok`], where `rest`
