@@ -30,27 +30,26 @@ use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, assistant_user_llm_config, git_code_review_links, git_repositories,
-    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
-    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
-    workspaces,
+    agent_run, agent_run_event, assistant_user_llm_config, dev_machine, git_code_review_links,
+    git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
+    issue_labels, issue_relations, issues, labels, pod, projects, prompt_section_override, runner,
+    states, users, workspaces,
 };
 use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::admission::RedisAdmissionCache;
 use pidash_services::dispatch::{
-    consume_admission_token, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
+    consume_admission_token, DeferredConsume, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
 use pidash_services::orchestration::creation::{
     finalize_error_details_patch, AdmissionError as ServiceAdmissionError, CreationError,
-    CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -227,6 +226,7 @@ struct IssueRow {
     parent_id: Option<Uuid>,
     created_by_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
     git_work_branch: Option<String>,
     workpad: Option<String>,
@@ -270,6 +270,7 @@ struct RunRow {
     pod_id: Uuid,
     runner_id: Option<Uuid>,
     pinned_runner_id: Option<Uuid>,
+    pin_kind: String,
     parent_run_id: Option<Uuid>,
     work_item_id: Option<Uuid>,
     status: String,
@@ -294,6 +295,7 @@ fn run_view_from_row(row: RunRow) -> Result<RunView, CreationError> {
         pod_id: row.pod_id,
         runner_id: row.runner_id,
         pinned_runner_id: row.pinned_runner_id,
+        pin_kind: row.pin_kind,
         parent_run_id: row.parent_run_id,
         work_item_id: row.work_item_id,
         status,
@@ -319,6 +321,7 @@ fn run_view_from_model(m: agent_run::Model) -> Result<RunView, CreationError> {
         pod_id: m.pod_id,
         runner_id: m.runner_id,
         pinned_runner_id: m.pinned_runner_id,
+        pin_kind: m.pin_kind,
         parent_run_id: m.parent_run_id,
         work_item_id: m.work_item_id,
         status,
@@ -343,6 +346,7 @@ fn issue_view_from_row(row: IssueRow) -> IssueView {
         parent_id: row.parent_id,
         created_by_id: row.created_by_id,
         assigned_pod_id: row.assigned_pod_id,
+        assigned_runner_id: row.assigned_runner_id,
         agent_executor: row.agent_executor,
         git_work_branch: row.git_work_branch,
         workpad: row.workpad,
@@ -382,6 +386,7 @@ fn issue_select_query(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
         issues::Column::ParentId,
         issues::Column::CreatedById,
         issues::Column::AssignedPodId,
+        issues::Column::AssignedRunnerId,
         issues::Column::AgentExecutor,
         issues::Column::GitWorkBranch,
         issues::Column::Workpad,
@@ -430,6 +435,7 @@ fn run_columns_select(q: sea_orm::Select<agent_run::Entity>) -> sea_orm::Select<
         agent_run::Column::PodId,
         agent_run::Column::RunnerId,
         agent_run::Column::PinnedRunnerId,
+        agent_run::Column::PinKind,
         agent_run::Column::ParentRunId,
         agent_run::Column::WorkItemId,
         agent_run::Column::Status,
@@ -479,6 +485,57 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .map_err(Self::db)?
             .ok_or_else(|| CreationError::Db("row not found".to_owned()))?;
         Ok(issue_view_from_row(row))
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        // Project-move handoffs never pass them through Django's
+        // refusal/waiting-comment path here; the pin still resolves.
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::flight_pin(&conn, args, args.actor_id)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::system_comment_row(&conn, comment)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::pod_once_started_comment(
+            &conn, issue_id, pod_id, actor_id, now,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        // `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+        // (`service.py:494-495,896-897`, `pod_once`, §23.3).
+        let conn = TxConn::new(self.tx.inner());
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::ThreadId, Expr::value(""))
+            .filter(agent_run::Column::Id.eq(run_id))
+            .filter(agent_run::Column::ThreadId.ne(""))
+            .exec(&conn)
+            .await
+            .map_err(Self::db)?;
+        Ok(())
     }
 
     async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
@@ -559,8 +616,12 @@ impl CreationSeam for HandoffStore<'_, '_> {
             id: Uuid,
             pod_id: Uuid,
             status: String,
+            name: String,
             last_heartbeat_at: Option<Moment>,
             paused_at: Option<Moment>,
+            provisioning: String,
+            pod_dispatch: String,
+            dev_machine_id: Option<Uuid>,
         }
         let conn = TxConn::new(self.tx.inner());
         let row = runner::Entity::find_by_id(runner_id)
@@ -569,19 +630,39 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 runner::Column::Id,
                 runner::Column::PodId,
                 runner::Column::Status,
+                runner::Column::Name,
                 runner::Column::LastHeartbeatAt,
                 runner::Column::PausedAt,
+                runner::Column::Provisioning,
+                runner::Column::PodDispatch,
+                runner::Column::DevMachineId,
             ])
             .into_model::<RunnerRow>()
             .one(&conn)
             .await
             .map_err(Self::db)?;
+        let engine_paused = match row.as_ref().and_then(|r| r.dev_machine_id) {
+            Some(machine_id) => {
+                let machine = dev_machine::Entity::find_by_id(machine_id)
+                    .one(&conn)
+                    .await
+                    .map_err(Self::db)?;
+                machine.is_some_and(|m| {
+                    m.engine_paused_by_owner || !m.engine_auto_pause_reason.is_empty()
+                })
+            }
+            None => false,
+        };
         Ok(row.map(|row| RunnerView {
             id: row.id,
             pod_id: row.pod_id,
             status: row.status,
+            name: row.name,
             last_heartbeat_at: row.last_heartbeat_at.map(|m| m.with_timezone(&Utc)),
             paused_at: row.paused_at.map(|m| m.with_timezone(&Utc)),
+            provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
+            engine_paused,
         }))
     }
 
@@ -750,6 +831,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             pod_id: Set(row.pod_id),
             runner_id: Set(None),
             pinned_runner_id: Set(row.pinned_runner_id),
+            pin_kind: Set(row.pin_kind.clone()),
             work_item_id: Set(Some(row.work_item_id)),
             scheduler_binding_id: Set(None),
             parent_run_id: Set(row.parent_run_id),
@@ -838,13 +920,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
             None => false,
         };
-        let profile = {
-            let mapped = assistant_seams::agent_model_profile_for_user(has_key);
-            LlmProfile {
-                available: mapped.available,
-                reason_code: mapped.reason_code,
-            }
-        };
         // The driver short-circuits a missing actor before consulting
         // the closure, so only a present actor consults the seam (and a
         // missing one never pays for the overlay's reads). Clone the seam
@@ -889,7 +964,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
             ExecutionSeams {
                 has_usable_llm_config: move || has_llm,
                 toolsets: toolsets.clone(),
-                llm_profile: move || profile,
             },
         )
         .await;
@@ -2206,6 +2280,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -2628,6 +2703,7 @@ mod tests {
             created_by_id: user,
             pod_id: pod,
             pinned_runner_id: None,
+            pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
             executor_kind: AgentExecutorKind::CloudAgent,

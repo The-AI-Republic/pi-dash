@@ -1076,9 +1076,9 @@ fn bool_field(value: &Value) -> Result<bool, Vec<String>> {
     parse_drf_bool(value).map_err(|()| vec![INVALID_BOOLEAN_MESSAGE.to_owned()])
 }
 
-/// `USER_TIMEZONE_CHOICES` (`pytz.common_timezones`, pinned pytz==2024.1, 433 zones).
+/// `USER_TIMEZONE_CHOICES` (`pytz.common_timezones`, pinned pytz==2025.2, 433 zones).
 /// Exact membership list for the `user_timezone` ChoiceField.
-const PYTZ_2024_1_ZONES: &[&str] = &[
+const PYTZ_2025_2_ZONES: &[&str] = &[
     "Africa/Abidjan",
     "Africa/Accra",
     "Africa/Addis_Ababa",
@@ -1170,6 +1170,7 @@ const PYTZ_2024_1_ZONES: &[&str] = &[
     "America/Chihuahua",
     "America/Ciudad_Juarez",
     "America/Costa_Rica",
+    "America/Coyhaique",
     "America/Creston",
     "America/Cuiaba",
     "America/Curacao",
@@ -1303,7 +1304,6 @@ const PYTZ_2024_1_ZONES: &[&str] = &[
     "Asia/Bishkek",
     "Asia/Brunei",
     "Asia/Chita",
-    "Asia/Choibalsan",
     "Asia/Colombo",
     "Asia/Damascus",
     "Asia/Dhaka",
@@ -1523,7 +1523,7 @@ fn choice_timezone(value: &Value) -> Result<String, Vec<String>> {
         return Err(vec![NULL_MESSAGE.to_owned()]);
     }
     if let Value::String(text) = value {
-        if PYTZ_2024_1_ZONES.contains(&text.as_str()) {
+        if PYTZ_2025_2_ZONES.contains(&text.as_str()) {
             return Ok(text.clone());
         }
         return Err(vec![format!("\"{text}\" is not a valid choice.")]);
@@ -2684,7 +2684,8 @@ pub async fn me_partial_update(
         is_staff: derived.is_staff,
         updated_at: now,
     };
-    let update = identity::save_me_profile(pool, row.id, &save).await;
+    let update =
+        identity::save_me_profile(&pidash_db::pool::sea_orm_connection(pool), row.id, &save).await;
     if let Err(error) = update {
         return write_denial(error).into_response();
     }
@@ -3139,9 +3140,10 @@ pub async fn me_deactivate(
             );
         }
     }
-    if let Err(denial) = project_members::deactivate_many(pool, &project_ids)
-        .await
-        .map_err(|_| Denial::ServerError)
+    if let Err(denial) =
+        project_members::deactivate_many(&pidash_db::pool::sea_orm_connection(pool), &project_ids)
+            .await
+            .map_err(|_| Denial::ServerError)
     {
         return denial.into_response();
     }
@@ -3164,6 +3166,46 @@ pub async fn me_deactivate(
         .map_err(|error| write_denial(pidash_db::orm_tx::into_sqlx(error)))
     {
         return error.into_response();
+    }
+    // Deactivating signs the engine out everywhere (`base.py:320-322`,
+    // #2910): every machine of the user loses its live credential.
+    {
+        let sea = pidash_db::pool::sea_orm_connection(pool);
+        match pidash_services::domain::engine_credential::revoke_engine_credentials_for_user(
+            &sea, actor.id, now,
+        )
+        .await
+        {
+            Ok((_count, effects)) => {
+                if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                    // Mirror Django's on_commit drains for the pause flips.
+                    let redis = pidash_db::redis::client_from_settings(state.settings());
+                    for pod_id in &effects.drain_pod_ids {
+                        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                            pool,
+                            redis.as_ref(),
+                            &state.settings().runner,
+                            *pod_id,
+                        )
+                        .await;
+                    }
+                    for runner_id in &effects.drain_runner_ids {
+                        let _ =
+                            pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                                pool,
+                                redis.as_ref(),
+                                &state.settings().runner,
+                                *runner_id,
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(pidash_services::domain::engine_credential::RevokeError::Database(error)) => {
+                return write_denial(error).into_response();
+            }
+            Err(_) => return Denial::ServerError.into_response(),
+        }
     }
     // Profile reset (`:319-339`; a miss is the 404).
     let profile = match fetch_profile(pool, actor.id).await {
@@ -4448,8 +4490,8 @@ mod tests {
     }
 
     #[test]
-    fn pytz_list_is_the_pinned_2024_1_transcription() {
-        assert_eq!(PYTZ_2024_1_ZONES.len(), 433);
+    fn pytz_list_is_the_pinned_2025_2_transcription() {
+        assert_eq!(PYTZ_2025_2_ZONES.len(), 433);
         for zone in [
             "UTC",
             "Asia/Kolkata",
@@ -4457,12 +4499,12 @@ mod tests {
             "Europe/Berlin",
             "Pacific/Auckland",
         ] {
-            assert!(PYTZ_2024_1_ZONES.contains(&zone), "{zone} listed");
+            assert!(PYTZ_2025_2_ZONES.contains(&zone), "{zone} listed");
         }
-        // pytz 2024.1 membership (differs from the `v1_projects`
-        // transcription by one zone each way).
-        assert!(PYTZ_2024_1_ZONES.contains(&"Asia/Choibalsan"));
-        assert!(!PYTZ_2024_1_ZONES.contains(&"America/Coyhaique"));
+        // pytz 2025.2 membership (`Asia/Choibalsan` left the common list when
+        // tzdata merged it into `Asia/Ulaanbaatar`).
+        assert!(!PYTZ_2025_2_ZONES.contains(&"Asia/Choibalsan"));
+        assert!(PYTZ_2025_2_ZONES.contains(&"America/Coyhaique"));
     }
 
     #[test]

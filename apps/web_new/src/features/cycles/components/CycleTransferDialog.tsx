@@ -40,6 +40,11 @@ export function CycleTransferDialog({
   onClose,
 }: CycleTransferDialogProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
+  // The search field takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close button,
+  // and on a busy host it can land after the user has already clicked into
+  // the field, swallowing their keystrokes (NEWFRONT-1055).
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
   const cycles = usePickerCycles(workspaceSlug, projectId, open);
   const transfer = useTransferCycleWork({ workspaceSlug, projectId, sourceCycleId });
   const options = transferTargetOptions(cycles.data ?? [], sourceCycleId, query);
@@ -58,6 +63,7 @@ export function CycleTransferDialog({
     <Dialog
       title={CYCLE_TRANSFER_TITLE}
       open={open}
+      initialFocus={searchRef}
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
@@ -70,6 +76,7 @@ export function CycleTransferDialog({
     >
       <div className="flex flex-col gap-(--space-4)">
         <input
+          ref={searchRef}
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}

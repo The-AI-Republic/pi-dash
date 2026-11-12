@@ -114,7 +114,6 @@ use pidash_auth::scope::TenantScope;
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
@@ -800,14 +799,12 @@ impl PubsubStore for PoolPubsub<'_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_svc::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
+        pubsub_svc::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::from(pidash_db::orm_tx::into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -884,6 +881,7 @@ fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
 /// failure log), drains and cleanup propagating.
 async fn fire_delete_bundle(
     pool: &PgPool,
+    state: &AppState,
     ports: &LivePorts,
     ctx: &RevokeCtx,
     bundle: RevokeBundle,
@@ -928,6 +926,66 @@ async fn fire_delete_bundle(
                     "{}",
                     revoke::handoff_failure_log(&runner_id, &run_id),
                 );
+            }
+        },
+        // §13.1: the ticking-issue bounce for a lost runner.
+        |issue_id, runner_name, reason, triggered_by| async move {
+            let name = runner_name.unwrap_or_else(|| "the dedicated runner".to_owned());
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                Uuid::nil(),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, _)) => {
+                    if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                        pool,
+                        deps,
+                        now,
+                        0.0,
+                        issue_id,
+                        &triggered_by,
+                        &reason,
+                        &name,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner bounce failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner bounce: dispatch deps failed");
+                }
+            }
+        },
+        // §13.1 `fall_back` step 2: recreate in the default pod.
+        |issue_id, _pod_id, trigger, creator| async move {
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                creator.unwrap_or(Uuid::nil()),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, matcher)) => {
+                    if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                        pool, deps, &matcher, now, 0.0, issue_id, &trigger, creator, false, false,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner recreate failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner recreate: dispatch deps failed");
+                }
             }
         },
     )
@@ -1007,7 +1065,7 @@ pub async fn runner_delete(
     let terminal_created_by = Some(user_id);
     let ports = LivePorts::new(pool.clone(), &state);
     if let Err(response) =
-        fire_delete_bundle(&pool, &ports, &ctx, bundle, terminal_created_by).await
+        fire_delete_bundle(&pool, &state, &ports, &ctx, bundle, terminal_created_by).await
     {
         return response;
     }
@@ -1085,7 +1143,7 @@ pub async fn machine_delete(
     let terminal_created_by = Some(user_id);
     let ports = LivePorts::new(pool.clone(), &state);
     if let Err(response) =
-        fire_delete_bundle(&pool, &ports, &ctx, bundle, terminal_created_by).await
+        fire_delete_bundle(&pool, &state, &ports, &ctx, bundle, terminal_created_by).await
     {
         return response;
     }
@@ -1860,6 +1918,7 @@ mod tests {
             created_at: Utc::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at: None,
             workspace_slug: None,
             dev_machine_revoked: false,
         };

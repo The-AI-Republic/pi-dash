@@ -1262,6 +1262,7 @@ async fn render_moved_issue(
     let state_id = issue.state_id.map(|id| uuid_string(&id));
     let parent_id = issue.parent_id.map(|id| uuid_string(&id));
     let assigned_pod_id = issue.assigned_pod_id.map(|id| uuid_string(&id));
+    let assigned_runner_id = issue.assigned_runner_id.map(|id| uuid_string(&id));
     let project_id = uuid_string(&issue.project_id);
     let estimate_point = issue.estimate_point_id.map(|id| uuid_string(&id));
     let created_by = issue.created_by_id.map(|id| uuid_string(&id));
@@ -1289,6 +1290,7 @@ async fn render_moved_issue(
         type_id: issue.type_id.as_deref(),
         is_epic,
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
         module_ids: None,
         label_ids: None,

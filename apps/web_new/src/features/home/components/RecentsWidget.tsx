@@ -40,7 +40,7 @@ const COLLAPSED_ROWS = 5;
 
 // Pure data: icon components (not elements) so the module stays
 // side-effect-free and tree-shakes out of route chains that only use the
-// feature's query options (performance budget: initial JS ≤ 220 KB).
+// feature's query options (size gate: see .size-limit.mjs).
 const EMPTY_ART: Record<RecentFilter, { icon: LucideIcon; heading: string; body: string }> = {
   all: {
     icon: History,
@@ -154,8 +154,8 @@ export function RecentsWidget({
       <div className="flex items-center justify-between gap-(--space-3)">
         <h2 className="text-emphasis text-(--text)">Recents</h2>
         {/* Native dropdown: the floating kit Menu would pull its popup
-            runtime into the initial route chain (performance budget:
-            initial JS at most 220 KB gzipped). */}
+            runtime into the initial route chain (size gate: see
+            .size-limit.mjs). */}
         <select
           aria-label="Filter recents"
           value={filter}

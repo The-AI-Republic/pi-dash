@@ -119,16 +119,24 @@ impl EngineChatProfile {
     }
 
     /// Start the engine for one chat session in `cwd`. The model is the
-    /// profile's (`CODEX_HOME/config.toml`), as for an engine runner.
-    pub(crate) async fn spawn(&self, cwd: &Path, mode: ApprovalMode) -> Result<AgentBridge> {
+    /// profile's (`CODEX_HOME/config.toml`), as for an engine runner. When
+    /// `resume_id` is the session's saved engine thread, the bridge's first
+    /// `warm` resumes it via `thread/resume` instead of starting a new thread.
+    pub(crate) async fn spawn(
+        &self,
+        cwd: &Path,
+        mode: ApprovalMode,
+        resume_id: Option<&str>,
+    ) -> Result<AgentBridge> {
         let prepared = self.prepared()?;
-        let b = crate::codex::bridge::Bridge::spawn_with_env(
+        let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
             &prepared.codex.binary,
             cwd,
             None,
             None,
             crate::approval::engine_thread_settings(mode),
             &crate::agent::agent_env_for_config(&prepared),
+            resume_id,
         )
         .await?;
         Ok(AgentBridge::Codex(b))

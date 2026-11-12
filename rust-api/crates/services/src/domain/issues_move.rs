@@ -619,6 +619,7 @@ fn map_source_row(row: &QueryResult) -> Result<SourceIssueRow, StoreError> {
         parent_id: get(row, "parent_id")?,
         estimate_point_id: get(row, "estimate_point_id")?,
         assigned_pod_id: get(row, "assigned_pod_id")?,
+        assigned_runner_id: get(row, "assigned_runner_id")?,
         type_id: type_id.map(|id| id.to_string()),
         created_at: get(row, "created_at")?,
         updated_at: get(row, "updated_at")?,
@@ -812,6 +813,27 @@ impl MoveStore for SeaMoveStore<'_> {
     async fn representation_has_open_blockers(&self, issue_id: Uuid) -> Result<bool, StoreError> {
         let hit = query_one(&self.conn, &has_open_blockers_statement(issue_id)).await?;
         Ok(hit.is_some())
+    }
+
+    async fn representation_assigned_runner_detail(
+        &self,
+        runner_id: Option<Uuid>,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        use sea_orm::EntityTrait;
+        let Some(runner_id) = runner_id else {
+            return Ok(None);
+        };
+        let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+            .one(&self.conn)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        crate::domain::issue_assignment::assigned_runner_detail(&self.conn, &runner)
+            .await
+            .map(Some)
+            .map_err(store_error)
     }
 
     async fn target_default_state(
@@ -1222,6 +1244,7 @@ pub async fn move_to_project(
                 actor_id,
                 spec: FireSpec {
                     dispatch_immediate: moved.dispatch_immediate,
+                    pod_once: false,
                     created_by: Some(actor_id),
                     moved_by_run: None,
                     now: input.now,
@@ -1586,6 +1609,7 @@ mod tests {
                 writes_enabled: false,
                 github_tools_enabled: false,
                 disabled_tools: Vec::new(),
+                job_queue: "celery".to_string(),
                 reconcile_interval_secs: 0,
                 model_request_timeout_secs: 0,
                 execution_timeout_secs: 0,
@@ -1703,6 +1727,8 @@ mod tests {
                     actor_id: uid(1),
                     spec: FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(uid(1)),
                         moved_by_run: None,
                         now: Utc::now(),

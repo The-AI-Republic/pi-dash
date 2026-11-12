@@ -43,8 +43,8 @@ pr-run-mode = "plan"
 install-path = "~/.local/bin"
 # The built-in engine (design .ai_design/built_engine_as_runner §4.5, PO-20):
 # every archive carries `engine/<version>/pidash-agent-engine[.exe]` with
-# Codex's LICENSE and NOTICE. The release workflow stages it per target with
-# runner/scripts/stage_engine.py before `cargo dist build`; `dist plan` does
+# Codex's LICENSE, NOTICE and sandbox helpers. The release workflow stages
+# it per target with runner/scripts/stage_engine.py before `cargo dist build`; `dist plan` does
 # not need it to exist. cargo-dist 0.22's shell and PowerShell installers
 # install only executables, so this directory reaches the user's machine via
 # `pidash engine install` (run by install.sh / install.ps1 and by
@@ -73,7 +73,7 @@ libclang-dev = '*'
 # Intel macOS uses GitHub's current x64 image. Windows builds run on the
 # MSVC image so cargo-dist can produce archives, PowerShell, and MSI installers.
 [dist.github-custom-runners]
-aarch64-apple-darwin = "macos-14"
+aarch64-apple-darwin = "macos-15"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
 aarch64-unknown-linux-musl = "ubuntu-22.04-arm"
 x86_64-apple-darwin = "macos-15-intel"

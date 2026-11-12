@@ -15,6 +15,7 @@ import {
   getInstanceBootstrap,
   getInstanceBootstrapForStartup,
   getLoopJob,
+  listAdminRunnerModels,
   listInstanceAdmins,
   listInstanceConfigurations,
   listInstanceRunners,
@@ -68,6 +69,8 @@ export const adminKeys = {
    * reuses the cache instead of refetching.
    */
   runners: (provisioning: string, page: number) => ["admin", "runners", provisioning, page],
+  /** The model catalog the god-mode page manages (NEWPIDASH-169). */
+  runnerModels: ["admin", "runner-models"],
 } as const;
 
 /**
@@ -290,6 +293,21 @@ export function instanceRunnersQueryOptions(client: ApiClient, provisioning: str
   return queryOptions({
     queryKey: adminKeys.runners(provisioning, page),
     queryFn: () => listInstanceRunners(client, { provisioning, page }),
+    ...adminQueryDefaults,
+    retry: false,
+  });
+}
+
+/**
+ * The model catalog (NEWPIDASH-169): the shared never-stale read of
+ * every row, including disabled ones, so the page renders each agent's
+ * table from the cache and revalidates only through mutation
+ * invalidation.
+ */
+export function runnerModelsQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.runnerModels,
+    queryFn: () => listAdminRunnerModels(client),
     ...adminQueryDefaults,
     retry: false,
   });

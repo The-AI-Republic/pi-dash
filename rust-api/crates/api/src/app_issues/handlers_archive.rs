@@ -6,10 +6,13 @@
 //!
 //! - `GET archived-issues/` (`IssueArchiveViewSet.list`, `:106-219`):
 //!   the pilot-2 list machinery over the archive scope (non-epic,
-//!   archived, this project/slug) with the archive annotations.
+//!   archived, this project/slug) with the archive annotations. Guests
+//!   read it, scoped to their own issues without `guest_view_all_features`
+//!   (PDASHOSS01-323).
 //! - `GET issues/<pk>/archive/` (`retrieve`, `:221-255`): the 30-key
 //!   [`ISSUE_DETAIL_ARCHIVE_FIELDS`] detail (only `is_subscribed`
-//!   annotated).
+//!   annotated). Guests read their own; others answer [`GUEST_VIEW_BODY`]
+//!   without `guest_view_all_features` (PDASHOSS01-323).
 //! - `POST issues/<pk>/archive/` (`archive`, `:257-279`): the
 //!   completed/cancelled gate, `issue_activity` enqueue, then `save()`
 //!   with its recomputes.
@@ -122,6 +125,8 @@ pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `archive()` state-gate body (`archive.py:262`).
 const ARCHIVE_STATE_MESSAGE: &str = "Can only archive completed or cancelled state group issue";
+/// The guest retrieve refusal (`archive.py` retrieve, PDASHOSS01-323).
+const GUEST_VIEW_BODY: &str = r#"{"error":"You are not allowed to view this issue"}"#;
 /// `BulkArchiveIssuesEndpoint` empty-list body (`archive.py:314`).
 const IDS_REQUIRED_MESSAGE: &str = "Issue IDs are required";
 /// `ERROR_CODES["INVALID_ARCHIVE_STATE_GROUP"]` (`utils/error_codes.py:7`).
@@ -133,7 +138,7 @@ const ENTITY_DENIED_BODY: &str =
 /// `handle_exception`'s `ValidationError` message (bad UUID in `issue_ids`).
 const INVALID_DETAIL_MESSAGE: &str = "Please provide valid detail";
 /// Session auth + `_rewrite_project_kwarg` + `@allow_permission([ADMIN,
-/// MEMBER])`, in Django's `initial()` order (rewrite, then the permission
+/// MEMBER])` (the writes; the reads use [`archive_read_context`]), in Django's `initial()` order (rewrite, then the permission
 /// checks, then `TimezoneMixin` activation). None of the archive endpoints
 /// checks project existence (`Project.objects.get` never runs here), so
 /// unlike [`super::resolve_gate`] there is no 404 for a missing project
@@ -148,7 +153,50 @@ async fn archive_context(
 ) -> Result<ArchiveContext, Denial> {
     let base = archive_base(state, slug, project_raw, extension).await?;
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
-    archive_tenant(base).await
+    archive_tenant(base, false).await
+}
+
+/// The two archive reads (`list`, `retrieve`): `@allow_permission([ADMIN,
+/// MEMBER, GUEST])` (the [`super::allow_project`] gate), then the view
+/// body's guest scoping (`is_scoped_guest`, PDASHOSS01-323).
+async fn archive_read_context(
+    state: &AppState,
+    slug: &str,
+    project_raw: &str,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<ArchiveContext, Denial> {
+    let base = archive_base(state, slug, project_raw, extension).await?;
+    super::allow_project(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    let guest_scoped =
+        scoped_guest(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    archive_tenant(base, guest_scoped).await
+}
+
+/// `is_scoped_guest`: an active, non-deleted role-5 membership on this
+/// project and slug whose project has `guest_view_all_features` off (the
+/// `project__` join carries no soft-delete filter, like Django's).
+async fn scoped_guest(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = super::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if role != Some(5) {
+        return Ok(false);
+    }
+    let view_all: Option<bool> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::GuestViewAllFeatures)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(view_all == Some(false))
 }
 
 /// Session auth + rewrite without the role check, so the bulk endpoint
@@ -176,7 +224,7 @@ async fn archive_base(
 
 /// The tenant facts for an allowed request: the render timezone plus the
 /// workspace row (see [`workspace_id`]).
-async fn archive_tenant(base: ArchiveBase) -> Result<ArchiveContext, Denial> {
+async fn archive_tenant(base: ArchiveBase, guest_scoped: bool) -> Result<ArchiveContext, Denial> {
     let timezone = user_timezone(&base.pool, &base.user_id).await?;
     let workspace_id = workspace_id(&base.pool, &base.slug).await?;
     Ok(ArchiveContext {
@@ -186,7 +234,7 @@ async fn archive_tenant(base: ArchiveBase) -> Result<ArchiveContext, Denial> {
             timezone,
             workspace_id,
             project_id: base.project_id,
-            guest_scoped: false,
+            guest_scoped,
         },
         slug: base.slug,
     })
@@ -295,7 +343,7 @@ pub async fn archived_list(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = archive_context(&state, &slug, &project_id, extension).await?;
+    let context = archive_read_context(&state, &slug, &project_id, extension).await?;
     // Main-list preamble order: the raw mismatch precedes `per_page`
     // parsing, and the parsed mismatch follows it.
     let multi = multi_map(&query);
@@ -406,7 +454,7 @@ pub async fn archive_retrieve(
     let Ok(issue_id) = pk_raw.parse::<uuid::Uuid>() else {
         return Ok(crate::edge::proxy(State(state), req).await);
     };
-    let context = archive_context(&state, &slug, &project_raw, extension).await?;
+    let context = archive_read_context(&state, &slug, &project_raw, extension).await?;
     let expands: Option<Vec<String>> =
         super::expand::split_expand(query_last(&query, "expand").as_deref());
     let stmt = archive_retrieve_select(
@@ -419,6 +467,11 @@ pub async fn archive_retrieve(
     let Some(row) = rows.into_iter().next() else {
         return Err(Denial::NotFound);
     };
+    if context.gate.guest_scoped
+        && anchor_opt_uuid(&row, "created_by_id")? != Some(context.gate.user_id)
+    {
+        return Ok(status_response(StatusCode::FORBIDDEN, GUEST_VIEW_BODY));
+    }
     let owned = DetailOwned::fetch(&context.pool, &row).await?;
     let input = owned.view();
     let view = issue_detail_to_representation(&input);
@@ -524,6 +577,21 @@ fn json_drf(row: &Map<String, Value>, key: &str) -> Result<String, Denial> {
     json_drf_opt(row, key)?.ok_or(Denial::ServerError)
 }
 
+/// `assigned_runner_detail` by serialized runner id (design §14.1).
+async fn fetch_archived_runner_detail(
+    pool: &sqlx::PgPool,
+    runner_id: Option<String>,
+) -> Result<Option<serde_json::Value>, Denial> {
+    let Some(raw) = runner_id else {
+        return Ok(None);
+    };
+    let id = raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    super::access::fetch_assigned_runner_detail(&orm, Some(id))
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 /// Everything the 30-key render borrows: the base scalars plus the
 /// ticker/policy/state/run/blocker inputs, all owned.
 struct DetailOwned {
@@ -543,6 +611,8 @@ struct DetailOwned {
     type_id: Option<String>,
     is_epic: bool,
     assigned_pod_id: Option<String>,
+    assigned_runner_id: Option<String>,
+    assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
     created_at: String,
     updated_at: String,
@@ -560,6 +630,7 @@ struct DetailOwned {
     latest_run: Option<RenderedAgentRun>,
     active_run: Option<RenderedAgentRun>,
     run_count: i64,
+    run_total_tokens: i64,
     blockers: pidash_services::orchestration::blockers::RelationsSummary,
 }
 
@@ -592,7 +663,8 @@ impl DetailOwned {
         let runs = agent_runs::issue_agent_runs(pool, issue_id)
             .await
             .map_err(|_| Denial::ServerError)?;
-        let (latest_run, active_run, run_count) = (runs.latest, runs.active, runs.count);
+        let (latest_run, active_run, run_count, run_total_tokens) =
+            (runs.latest, runs.active, runs.count, runs.total_tokens);
         let blockers = fetch_blockers(pool, issue_id).await?;
         Ok(Self {
             id,
@@ -611,6 +683,12 @@ impl DetailOwned {
             type_id: json_str_opt(row, "type_id"),
             is_epic: fetch_is_epic(pool, json_str_opt(row, "type_id")).await?,
             assigned_pod_id: json_str_opt(row, "assigned_pod_id"),
+            assigned_runner_id: json_str_opt(row, "assigned_runner_id"),
+            assigned_runner_detail: fetch_archived_runner_detail(
+                pool,
+                json_str_opt(row, "assigned_runner_id"),
+            )
+            .await?,
             agent_executor: json_str_opt(row, "agent_executor"),
             created_at: json_drf(row, "created_at")?,
             updated_at: json_drf(row, "updated_at")?,
@@ -628,6 +706,7 @@ impl DetailOwned {
             latest_run,
             active_run,
             run_count,
+            run_total_tokens,
             blockers,
         })
     }
@@ -654,6 +733,7 @@ impl DetailOwned {
             type_id: self.type_id.as_deref(),
             is_epic: self.is_epic,
             assigned_pod_id: self.assigned_pod_id.as_deref(),
+            assigned_runner_id: self.assigned_runner_id.as_deref(),
             agent_executor: self.agent_executor.as_deref(),
             module_ids: None,
             label_ids: None,
@@ -686,7 +766,9 @@ impl DetailOwned {
             latest_run: self.latest_run.as_ref().map(RenderedAgentRun::detail_row),
             active_run: self.active_run.as_ref().map(RenderedAgentRun::detail_row),
             run_count: self.run_count,
+            run_total_tokens: self.run_total_tokens,
             blockers: &self.blockers,
+            assigned_runner_detail: self.assigned_runner_detail.clone(),
         }
     }
 }
@@ -830,6 +912,7 @@ struct WriteRow {
     parent_id: Option<String>,
     type_id: Option<String>,
     assigned_pod_id: Option<String>,
+    assigned_runner_id: Option<String>,
     agent_executor: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
@@ -905,6 +988,8 @@ pub async fn archive_issue(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(context.gate.user_id),
                         moved_by_run: None,
                         now,
@@ -985,6 +1070,8 @@ pub async fn unarchive_issue(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(context.gate.user_id),
                         moved_by_run: None,
                         now,
@@ -1094,6 +1181,7 @@ fn write_row((issue, state): (issues::Model, Option<states::Model>)) -> WriteRow
         parent_id: id_text(issue.parent_id),
         type_id: id_text(issue.type_id),
         assigned_pod_id: id_text(issue.assigned_pod_id),
+        assigned_runner_id: id_text(issue.assigned_runner_id),
         agent_executor: issue.agent_executor,
         created_at: at(issue.created_at),
         updated_at: at(issue.updated_at),
@@ -1135,6 +1223,7 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         type_id: row.type_id.as_deref(),
         is_epic,
         assigned_pod_id: row.assigned_pod_id.as_deref(),
+        assigned_runner_id: row.assigned_runner_id.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
         module_ids: None,
         label_ids: None,
@@ -1214,7 +1303,7 @@ pub async fn bulk_archive(
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
-    let context = archive_tenant(base).await?;
+    let context = archive_tenant(base, false).await?;
     // `request.data` through the shared negotiator: empty (by the
     // Content-Length header, whatever the content-type) short-circuits
     // to `{}` — the required 400; an unsupported or missing content
@@ -1532,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_24_keys_in_meta_order() {
+    fn current_instance_is_25_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -1551,6 +1640,7 @@ mod tests {
             type_id: None,
             is_epic: false,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             module_ids: None,
             label_ids: None,
@@ -1582,7 +1672,7 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 24);
+        assert_eq!(parsed.len(), 25);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));
@@ -1616,6 +1706,7 @@ mod tests {
             type_id: None,
             is_epic: false,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             module_ids: None,
             label_ids: None,
@@ -1640,7 +1731,9 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &blockers,
+            assigned_runner_detail: None,
         };
         let view = issue_detail_to_representation(&row);
         let rendered = serde_json::to_string(&view).expect("json");
@@ -1924,6 +2017,33 @@ mod tests {
         assert!(render(false).contains(r#""issue"."parent_id" IS NULL"#));
     }
 
+    #[test]
+    fn filtered_set_scopes_guests_to_created_by() {
+        let mut gate = Gate {
+            user_id: uid(1),
+            timezone: chrono_tz::UTC,
+            workspace_id: uid(2),
+            project_id: uid(3),
+            guest_scoped: false,
+        };
+        let query = QueryMap::new();
+        let render = |gate: &Gate| {
+            let mut stmt =
+                super::super::list_engine::archive_issue_set(gate, "ws", &query, None, None, true)
+                    .expect("filtered")
+                    .select();
+            stmt.expr(sea_query::Expr::val(1));
+            stmt.to_string(sea_query::PostgresQueryBuilder)
+        };
+        assert!(!render(&gate).contains(r#""issue"."created_by_id""#));
+        gate.guest_scoped = true;
+        let sql = render(&gate);
+        assert!(
+            sql.contains(&format!(r#""issue"."created_by_id" = '{}'"#, uid(1))),
+            "{sql}"
+        );
+    }
+
     /// FX-ISS-21 archive row: the save fires the receivers and they no-op
     /// (equal states) with zero seam I/O — the lazy pool is never touched.
     #[tokio::test]
@@ -1942,6 +2062,8 @@ mod tests {
                 prev_state_id: Some(uid(3)),
                 current_state_id: Some(uid(3)),
                 dispatch_immediate: true,
+                pod_once: false,
+
                 moved_by_run: None,
                 now,
                 jitter_secs: 0.0,
@@ -1973,6 +2095,8 @@ mod tests {
                 prev_state_id: Some(uid(3)),
                 current_state_id: Some(uid(4)),
                 dispatch_immediate: true,
+                pod_once: false,
+
                 moved_by_run: None,
                 now,
                 jitter_secs: 0.0,

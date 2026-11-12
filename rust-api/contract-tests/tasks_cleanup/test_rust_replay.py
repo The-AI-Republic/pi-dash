@@ -2103,7 +2103,7 @@ def _rust_asset_row(conn, asset_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             'SELECT id, asset, is_uploaded, storage_metadata,'
-            ' created_by_id, updated_by_id FROM "file_assets"'
+            ' created_by_id, updated_by_id, updated_at FROM "file_assets"'
             " WHERE id = %s::uuid AND deleted_at IS NULL",
             (str(asset_id),),
         )
@@ -2355,6 +2355,59 @@ def test_rust_metadata_task_stores_head_dict(db_conn):
     assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]
 
 
+def test_rust_metadata_task_leaves_updated_at_unchanged(db_conn):
+    """Rust replay of test_metadata_task_leaves_updated_at_unchanged.
+
+    Same seeds, same payload, same assertions through ``rust_queue``:
+    ``storage_metadata`` is written while ``updated_at`` stays at the
+    seeded value. Red while the Rust save also stamps ``updated_at``
+    (PIDASHCONV-1731); Django's ``save(update_fields=[...])`` never
+    touches it.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"rmeta1731-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1731-metadata-updated-at-probe!"
+    key = f"{ws_id}/rmeta1731-{tag}.png"
+    s3_helpers.s3_put_key(bucket, key, body)
+    assert s3_helpers.s3_key_exists(bucket, key)
+    seeded_updated_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": key,
+            "attributes": {"name": f"rmeta1731-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": str(chain["project"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+            "updated_at": seeded_updated_at.isoformat(),
+        },
+    )
+    asset_id = str(asset["id"])
+    assert _rust_asset_row(db_conn, asset_id)["updated_at"] == seeded_updated_at
+    rust_queue.publish(_RUST_METADATA_TASK, kwargs={"asset_id": asset_id})
+    assert wait_for(
+        lambda: (_rust_asset_row(db_conn, asset_id) or {}).get("storage_metadata") != {},
+        what="rust metadata task saved storage_metadata",
+    )
+    row = _rust_asset_row(db_conn, asset_id)
+    assert row["storage_metadata"] is not None and row["storage_metadata"] != {}, (
+        "storage_metadata was not written"
+    )
+    assert row["updated_at"] == seeded_updated_at, (
+        f"updated_at moved from {seeded_updated_at} to {row['updated_at']}"
+    )
+
+
 def _assert_rust_soft_delete_acked(conn, celery_id: str, model_name: str) -> None:
     """Terminal-state poll: the row is gone (ack) or parked failed.
 
@@ -2424,6 +2477,109 @@ def test_rust_soft_delete_entry_models_ack(
         assert _column_is_null(
             db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
         ), "SET_NULL parity broken: agent_run still points at the stamped binding"
+
+
+def test_rust_soft_delete_issue_nulls_agent_run_work_item(db_conn):
+    """NEWPIDASH-135: soft-deleting an issue nulls its
+    ``agent_run.work_item_id`` (SET_NULL) and cascades ``issue_links``.
+
+    The Rust port bound SET NULL as ``None::<&str>`` (text) and Postgres
+    rejected uuid columns — ``column "work_item_id" is of type uuid but
+    expression is of type text`` — so the job failed and every child
+    stayed live. This replay via ``rust_queue`` pins the parity with
+    the Django oracle: children get ``deleted_at`` and
+    ``agent_run.work_item_id`` is nulled. Fails on Rust before the
+    typed-NULL fix.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"135rissue{tag}")
+    issue_id = chain["issue"]["id"]
+    owner_id = chain["owner"]["id"]
+    project_id = chain["project"]["id"]
+    workspace_id = chain["workspace"]["id"]
+
+    link1 = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "NEWPIDASH-135 link 1",
+            "url": f"https://example.com/{tag}/1",
+            "issue_id": str(issue_id),
+            "project_id": str(project_id),
+            "workspace_id": str(workspace_id),
+            "created_by_id": str(owner_id),
+            "updated_by_id": str(owner_id),
+            "metadata": {},
+        },
+    )
+    link2 = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "NEWPIDASH-135 link 2",
+            "url": f"https://example.com/{tag}/2",
+            "issue_id": str(issue_id),
+            "project_id": str(project_id),
+            "workspace_id": str(workspace_id),
+            "created_by_id": str(owner_id),
+            "updated_by_id": str(owner_id),
+            "metadata": {},
+        },
+    )
+    pod = insert_row(
+        db_conn,
+        "pod",
+        {
+            "workspace_id": str(workspace_id),
+            "project_id": str(project_id),
+            "name": f"135r-pod-{tag}",
+            "description": "",
+            "is_default": False,
+        },
+    )
+    run = insert_row(
+        db_conn,
+        "agent_run",
+        {
+            "status": "queued",
+            "prompt": "135 probe",
+            "run_config": {},
+            "required_capabilities": [],
+            "thread_id": uuid.uuid4().hex,
+            "error_details": {},
+            "workspace_id": str(workspace_id),
+            "pod_id": str(pod["id"]),
+            "created_by_id": str(owner_id),
+            "llm_model": "",
+            "trigger": "manual",
+            "executor_kind": "local_runner",
+            "dispatch_attempts": 0,
+            "cancel_reason": "",
+            "tool_plan": {},
+            "phase_kind": "",
+            "agent_metadata": {},
+            "usage": {},
+            "pin_kind": "locality",
+            "work_item_id": str(issue_id),
+        },
+    )
+
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "issue", str(issue_id)],
+        kwargs={"using": None},
+    )
+    _assert_rust_soft_delete_acked(db_conn, celery_id, "issue")
+    assert _soft_deleted(db_conn, "issues", issue_id), "issue row not stamped"
+    assert _soft_deleted(db_conn, "issue_links", link1["id"]), (
+        "cascade parity broken: live issue_links row under a stamped issue"
+    )
+    assert _soft_deleted(db_conn, "issue_links", link2["id"]), (
+        "cascade parity broken: live issue_links row under a stamped issue"
+    )
+    assert _column_is_null(db_conn, "agent_run", run["id"], "work_item_id"), (
+        "SET_NULL parity broken: agent_run still points at the stamped issue"
+    )
 
 
 def test_rust_sync_description_version_large_workspace(db_conn):

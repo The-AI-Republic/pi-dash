@@ -30,6 +30,7 @@ use super::run_turn::{context_eligible, SeamError, TurnContext, CODE_TURN_TIMEOU
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 use pidash_db::assistant::event_queries::{publish_frame, serialize_event_json, EventParts};
+use pidash_services::runner_runs::chat::dumps_value;
 
 /// Celery task name (`tasks.py:511`, `@shared_task(name=...)`).
 pub const SWEEP_TASK: &str = "assistant.sweep_stale_turns";
@@ -315,10 +316,11 @@ async fn publish_turn_failed(
     let thread_str = row.thread_id.to_string();
     let message_str = row.message_id.map(|id| id.to_string());
     let created = py_iso(&row.created_at.with_timezone(&Utc));
-    // The payload is the `Json` column value rendered compactly: `jsonb`
-    // text uses the same `": "`/`", "` separators as the former `::text`
-    // relay, and re-rendering the value matches the SSE replay bytes.
-    let payload_text = serde_json::to_string(&row.payload).expect("json value serializes");
+    // The payload is the `Json` column value rendered like
+    // `json.dumps(payload, default=str)` (`events.py:62`): `(", ", ": ")`
+    // separators, so the publish bytes match the SSE replay and the
+    // runner sweeps' chat publish (NEWPIDASH-162).
+    let payload_text = dumps_value(&row.payload);
     let body = serialize_event_json(&EventParts {
         id: row.id,
         thread_id: &thread_str,
@@ -776,6 +778,27 @@ mod tests {
             "{\"id\": 7, \"thread\": \"tid-1\", \"message\": \"mid-9\", \"seq\": 3, \
              \"kind\": \"turn_failed\", \"payload\": {\"Detail\": \"x\", \"turn_id\": \"t\", \
              \"error_code\": \"c\"}, \"created_at\": \"2026-09-29T13:50:51+00:00\"}"
+        );
+    }
+
+    /// The payload renders like `json.dumps` with default separators
+    /// (`events.py:62`), not compact, so the publish bytes match Django's
+    /// `json.dumps(serialize_event(event), default=str)` (NEWPIDASH-162).
+    /// A compact render (`serde_json::to_string`) splits the envelope: the
+    /// contract test's `raw == json.dumps(parsed)` assertion fails.
+    #[test]
+    fn turn_failed_payload_renders_spaced() {
+        use serde_json::json;
+        let payload = json!({
+            "turn_id": "11111111-1111-1111-1111-111111111111",
+            "error_code": "turn_timeout",
+            "detail": "The assistant turn did not finish (worker lost).",
+        });
+        assert_eq!(
+            dumps_value(&payload),
+            "{\"turn_id\": \"11111111-1111-1111-1111-111111111111\", \
+             \"error_code\": \"turn_timeout\", \
+             \"detail\": \"The assistant turn did not finish (worker lost).\"}"
         );
     }
 

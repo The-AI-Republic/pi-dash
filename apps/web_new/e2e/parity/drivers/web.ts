@@ -277,6 +277,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -4976,6 +4977,12 @@ export class WebDriver implements ParityDriver {
     await this.page.getByRole("button", { name }).first().click({ timeout: WebDriver.OPEN_MS });
   }
 
+  async widgetActionDisabled(name: string): Promise<boolean> {
+    const button = this.page.getByRole("button", { name }).first();
+    await button.waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await button.isDisabled()) as boolean;
+  }
+
   async typeComment(text: string): Promise<void> {
     const editor = this.page.locator("[contenteditable='true']").last();
     await editor.click({ timeout: WebDriver.OPEN_MS });
@@ -7634,6 +7641,35 @@ export class WebDriver implements ParityDriver {
     await row.hover({ timeout: 15_000 });
     await row.getByRole("button").first().click({ force: true, timeout: 15_000 });
     await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, { timeout: 30_000 });
+  }
+
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    // Old app rows carry the detach as the row's button (TrashIcon inside a tooltip),
+    // as a sibling of the row link inside the row div; the Collapsible toggle
+    // and the attach form are section-level, so scope to the row element.
+    return this.page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("*")).find(
+        (el) => el.children.length === 0 && el.textContent?.trim() === "Code reviews"
+      );
+      if (!heading) return false;
+      let container: Element | null = heading.parentElement;
+      while (container && container.querySelectorAll('a[target="_blank"]').length === 0)
+        container = container.parentElement;
+      if (!container) return false;
+      const links = container.querySelectorAll('a[target="_blank"]');
+      for (const link of links) {
+        const row = link.parentElement;
+        if (row && row.querySelector("button")) return true;
+      }
+      return false;
+    });
   }
 
   async worklogCreateVisible(): Promise<boolean> {
@@ -17500,6 +17536,16 @@ export class WebDriver implements ParityDriver {
       out.push({ label, active: classes.includes("border-accent-strong") });
     }
     return out;
+  }
+
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The List tab link sits directly in the tab row, so its parent is the row.
+    const row = this.page.getByRole("link", { name: "List", exact: true }).locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
   }
 
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
@@ -58766,6 +58812,15 @@ export class WebDriver implements ParityDriver {
     if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
     const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
     return text === "" ? null : text;
+  }
+
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the old
+  // --- app has no free-quota picker (new-system-only feature).
+  private cloudAssistantModelBudgetMissing(): never {
+    throw new Error("[parity] the old app has no free-quota model budget (new-system-only NEWPIDASH-150).");
+  }
+  async cloudAssistantModelBudget(_title: string): Promise<CloudAssistantModelBudgetFacts> {
+    this.cloudAssistantModelBudgetMissing();
   }
 
   private cloudProfileTabLabels(): string[] {

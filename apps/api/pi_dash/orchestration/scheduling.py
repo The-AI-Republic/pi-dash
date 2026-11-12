@@ -991,11 +991,136 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     human = triggered_by in HUMAN_TRIGGERS
     if pod_has_runner_for_issue_principal(pod, issue, creator_id, human=human):
         return True
-    _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by)
+    # §9.4: a dedicated issue bounced for usage-rule exclusion reports
+    # dedicated-runner-not-eligible and names the runner + failing rule.
+    if getattr(issue, "assigned_runner_id", None) is not None:
+        _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="dedicated-runner-not-eligible")
+    else:
+        _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by)
     return False
 
 
-def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str, reason: str = "no-eligible-runner") -> None:
+def _post_dedicated_refusal_comment(issue: Issue, *, code: str, actor=None) -> None:
+    """One system comment for a refused human run (design §11.2).
+
+    The state move stands (or the Comment & Run comment is saved); no run
+    starts. The clock was never armed: the refusal check ran before
+    ``reconcile``. The comment names the runner, why, and the two options.
+    """
+    from django.utils.html import format_html
+
+    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.orchestration.workpad import get_agent_system_user
+    from pi_dash.runner.services.issue_assignment import dedicated_refusal_body
+
+    body_text = dedicated_refusal_body(issue, code=code)["error"]
+    pod = getattr(issue, "assigned_pod", None)
+    pod_name = pod.name if pod is not None else "the pod"
+    if code == "assigned_runner_not_owner":
+        options = (
+            f"Run on my runner instead, or Run on any runner in {pod_name} once "
+            "(sends \\u201cpin\\u201d: \\u201cpod_once\\u201d)."
+        )
+    else:
+        options = (
+            f"Run on any runner in {pod_name} once "
+            "(sends \\u201cpin\\u201d: \\u201cpod_once\\u201d), or change the issue's runner."
+        )
+    body = format_html(
+        "<p>No run started: {}.</p><p>{}</p>",
+        body_text,
+        options,
+    )
+    IssueComment.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        actor=actor or get_agent_system_user(),
+        comment_html=body,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+    )
+
+
+def _post_pod_once_started_comment(issue: Issue, *, pod, actor) -> None:
+    """One system comment for a successful ``pod_once`` run (§23.3)."""
+    from django.utils.html import format_html
+
+    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    runner_name = getattr(getattr(issue, "assigned_runner", None), "name", "the dedicated runner")
+    actor_name = getattr(actor, "display_name", None) or getattr(actor, "username", None) or "a member"
+    body = format_html(
+        "<p>Run started on any runner in pod <strong>{}</strong> by {}, "
+        "for this run only. The issue stays assigned to <strong>{}</strong>.</p>",
+        pod.name if pod is not None else "the pod",
+        actor_name,
+        runner_name,
+    )
+    IssueComment.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        actor=actor or get_agent_system_user(),
+        comment_html=body,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+    )
+
+
+def _post_dedicated_waiting_comment(issue: Issue, *, run, runner) -> None:
+    """One system comment for an automatic run waiting on an unavailable runner (§9.4)."""
+    from django.conf import settings
+
+    from django.utils.html import format_html
+
+    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.orchestration.workpad import get_agent_system_user
+    from pi_dash.runner.services.issue_assignment import (
+        runner_is_offline,
+        runner_paused_reason,
+        refusal_pause_phrase,
+    )
+
+    pause = runner_paused_reason(runner)
+    pod = getattr(issue, "assigned_pod", None) or getattr(run, "pod", None)
+    pod_name = pod.name if pod is not None else "the pod"
+    if pause is not None:
+        detail = refusal_pause_phrase(pause)
+    elif runner_is_offline(runner):
+        seen = runner.last_heartbeat_at.strftime("%H:%M") if runner.last_heartbeat_at else "unknown"
+        detail = f"is offline (last seen {seen})"
+    else:
+        detail = "is unavailable"
+    expires = ""
+    if run.created_at is not None:
+        expires_at = run.created_at + timedelta(seconds=settings.DEDICATED_RUN_QUEUED_MAX_AGE_SECS)
+        expires = format_html(
+            " If it has not started by {} (12 hours), it fails and automatic runs on this issue stop.",
+            expires_at.strftime("%H:%M"),
+        )
+    body = format_html(
+        "<p>Queued for runner <strong>{}</strong>, which {}. "
+        "The run starts when it reconnects.{} "
+        "To run it elsewhere, cancel it and use <strong>Run on any runner in {} once</strong>, "
+        "or change the issue's runner.</p>",
+        runner.name,
+        detail,
+        expires,
+        pod_name,
+    )
+    IssueComment.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        actor=get_agent_system_user(),
+        comment_html=body,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+    )
+
+
+def _bounce_issue_no_eligible_runner(
+    issue: Issue, *, triggered_by: str, reason: str = "no-eligible-runner", reason_name: str = ""
+) -> None:
     """Move ``issue`` back to Backlog and post the no-eligible-runner notice.
 
     State move fires ``fire_state_transition`` which disarms the ticker as
@@ -1036,6 +1161,23 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str, reason:
             "<p>This project uses the Pi Dash Cloud Agent, which runs against "
             "the triggering user's AI provider. Configure one in Pi Dash AI "
             "settings, or assign this issue to a member who has one configured.</p>"
+        )
+    elif reason == "dedicated-runner-not-eligible":
+        assigned_name = getattr(getattr(issue, "assigned_runner", None), "name", "the dedicated runner")
+        body = format_html(
+            "<p><strong>Agent run skipped — dedicated runner not eligible.</strong></p>"
+            "<p>Runner <strong>{}</strong> cannot serve this run: its usage rule "
+            "excludes the run's creator or trigger. Reassign the issue to a "
+            "runner that can serve it, or return it to the pod.</p>",
+            assigned_name,
+        )
+    elif reason == "dedicated-runner-revoked":
+        body = format_html(
+            "<p><strong>Dedicated runner lost.</strong></p>"
+            "<p>Runner <strong>{}</strong> was revoked or deleted, so this issue "
+            "is no longer assigned to a dedicated runner. Choose a new runner "
+            "or return the issue to the pod.</p>",
+            reason_name,
         )
     else:
         body = format_html(
@@ -1099,6 +1241,8 @@ def dispatch_continuation_run(
     *,
     triggered_by: str,
     actor=None,
+    pod_once: bool = False,
+    held_entry: bool = False,
 ) -> Optional[AgentRun]:
     """Public wrapper for tick / Comment & Run dispatch.
 
@@ -1108,8 +1252,46 @@ def dispatch_continuation_run(
     Returns the created run, or ``None`` when the single-active-run
     guardrail blocks creation, no pod is available, or the eligibility
     preflight bounced the issue (§6.6).
+
+    A person's run on an offline, paused or usage-excluded dedicated
+    runner is refused here, before any reconcile or persistence (H-11,
+    H-10, §11, §23.3): no run is created and the issue stays where it is.
+    An automatic run waits. ``pod_once`` (§23.3) deliberately bypasses
+    the dedicated runner for this one run only; the tick never passes it.
     """
     from pi_dash.orchestration import service as orchestration_service
+    from pi_dash.runner.models import HUMAN_TRIGGERS
+    from pi_dash.runner.services.issue_assignment import (
+        dedicated_run_refusal,
+        pod_once_auth_code,
+    )
+
+    human = triggered_by in HUMAN_TRIGGERS
+    # A held entry (§11.2) already passed the check when the person asked;
+    # if the runner became unavailable since, the run is created and waits
+    # as an automatic one does. Skip the refusal, keep the preflight.
+    if held_entry:
+        pass
+    elif human and pod_once:
+        auth = pod_once_auth_code(issue, user=actor)
+        if auth is not None:
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                auth,
+                triggered_by,
+            )
+            return None
+    elif human:
+        code, _detail = dedicated_run_refusal(issue, human=True, user=actor, pod_once=pod_once)
+        if code is not None:
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                code,
+                triggered_by,
+            )
+            return None
 
     if orchestration_service._active_run_for(issue) is not None:
         logger.info(
@@ -1158,7 +1340,19 @@ def dispatch_continuation_run(
         )
         return None
 
-    if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=triggered_by):
+    if pod_once:
+        # §23.3: pod-branch preflight, no bounce — the issue stays dedicated.
+        from pi_dash.runner.services.matcher import pod_has_runner_for_issue_principal
+
+        if not pod_has_runner_for_issue_principal(pod, issue, getattr(creator, "id", None), human=human, pod_once=True):
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
+                triggered_by,
+            )
+            return None
+    elif not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=triggered_by):
         return None
 
     if fresh_session or parent is None:
@@ -1169,6 +1363,7 @@ def dispatch_continuation_run(
             pod=pod,
             fresh_session=True,
             trigger=triggered_by,
+            pod_once=pod_once,
         )
     else:
         outcome = orchestration_service._create_continuation_run(
@@ -1177,8 +1372,12 @@ def dispatch_continuation_run(
             creator=creator,
             pod=pod,
             trigger=triggered_by,
+            pod_once=pod_once,
         )
-    return outcome.created_run
+    run = outcome.created_run
+    if run is not None and pod_once:
+        _post_pod_once_started_comment(issue, pod=pod, actor=actor or creator)
+    return run
 
 
 # Machine-readable refusal reasons for a "Run AI" dispatch that produced no
@@ -1188,9 +1387,15 @@ def dispatch_continuation_run(
 RUN_AI_ACTIVE_RUN_EXISTS = "active_run_exists"
 RUN_AI_NO_POD = "no_pod"
 RUN_AI_NO_ELIGIBLE_RUNNER = "no_eligible_runner"
+RUN_AI_DEDICATED_RUNNER_OFFLINE = "assigned_runner_offline"
+RUN_AI_DEDICATED_RUNNER_PAUSED = "assigned_runner_paused"
+RUN_AI_DEDICATED_NOT_OWNER = "assigned_runner_not_owner"
+RUN_AI_POD_ONCE_NOT_ALLOWED = "pod_once_not_allowed"
+RUN_AI_POD_ONCE_NOT_APPLICABLE = "pod_once_not_applicable"
+RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD = "no_eligible_runner_in_pod"
 
 
-def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
+def dispatch_run_ai_run(issue: Issue, *, actor, pod_once: bool = False) -> Optional[AgentRun]:
     """Public wrapper for the "Run AI" button, returning just the run.
 
     Thin adapter over :func:`dispatch_run_ai_run_with_reason` for callers
@@ -1198,11 +1403,13 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
     and ``re_tick_ticker``). See that function for the prompt-parity
     contract and the refusal-reason vocabulary.
     """
-    run, _reason = dispatch_run_ai_run_with_reason(issue, actor=actor)
+    run, _reason = dispatch_run_ai_run_with_reason(issue, actor=actor, pod_once=pod_once)
     return run
 
 
-def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:
+def dispatch_run_ai_run_with_reason(
+    issue: Issue, *, actor, pod_once: bool = False
+) -> tuple[Optional[AgentRun], Optional[str]]:
     """"Run AI" dispatch that also reports *why* nothing was created.
 
     Builds the same templated prompt the state-transition-into-In-Progress
@@ -1219,16 +1426,51 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
       principal / eligible runner can serve the run (no creator, or the
       eligibility preflight bounced the issue).
     - Returns ``(None, RUN_AI_NO_POD)`` when no pod is available.
+    - Returns ``(None, RUN_AI_DEDICATED_RUNNER_OFFLINE/PAUSED/NOT_OWNER)``
+      when the dedicated runner refuses the run (H-11, H-10, §11, §23.3):
+      no run is created and the issue stays where it is. Busy is never
+      a refusal. Skipped on ``pod_once``.
+    - Returns ``(None, RUN_AI_POD_ONCE_*)`` / ``RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD``
+      for ``pod_once`` authorization / pod preflight failures (§23.3).
     - When a prior run exists, delegates to ``_create_continuation_run``
       so the new run inherits parent linkage and runner pinning (repo
       locality, same as Comment & Run / tick).
     - When no prior run exists, delegates to ``_create_and_dispatch_run``
       so a brand-new issue's first agent run still goes through the
       templated prompt path.
+    - ``pod_once=True`` sends the run to the pod for this run only (§23.3).
 
     On success returns ``(run, None)``.
     """
     from pi_dash.orchestration import service as orchestration_service
+    from pi_dash.runner.services.issue_assignment import (
+        dedicated_run_refusal,
+        pod_once_auth_code,
+    )
+
+    # H-11/H-10 refusal, before reconcile/persistence: a person's run on an
+    # offline, paused or usage-excluded dedicated runner is refused. Skipped
+    # on pod_once, which is authorized separately (§23.3).
+    if pod_once:
+        auth = pod_once_auth_code(issue, user=actor)
+        if auth is not None:
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                auth,
+                TRIGGER_RUN_AI,
+            )
+            return None, auth
+    else:
+        refusal, _detail = dedicated_run_refusal(issue, human=True, user=actor, pod_once=pod_once)
+        if refusal is not None:
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                refusal,
+                TRIGGER_RUN_AI,
+            )
+            return None, refusal
 
     if orchestration_service._active_run_for(issue) is not None:
         logger.info(
@@ -1261,7 +1503,18 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
         )
         return None, RUN_AI_NO_POD
 
-    if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI):
+    if pod_once:
+        from pi_dash.runner.services.matcher import pod_has_runner_for_issue_principal
+
+        if not pod_has_runner_for_issue_principal(pod, issue, getattr(creator, "id", None), human=True, pod_once=True):
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
+                TRIGGER_RUN_AI,
+            )
+            return None, RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD
+    elif not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI):
         return None, RUN_AI_NO_ELIGIBLE_RUNNER
 
     parent, fresh_session = orchestration_service.parent_for_next_run(issue)
@@ -1272,6 +1525,7 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
             creator=creator,
             pod=pod,
             trigger=TRIGGER_RUN_AI,
+            pod_once=pod_once,
         )
     else:
         outcome = orchestration_service._create_and_dispatch_run(
@@ -1281,11 +1535,15 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
             pod=pod,
             fresh_session=fresh_session,
             trigger=TRIGGER_RUN_AI,
+            pod_once=pod_once,
         )
-    return outcome.created_run, None
+    run = outcome.created_run
+    if run is not None and pod_once:
+        _post_pod_once_started_comment(issue, pod=pod, actor=actor)
+    return run, None
 
 
-def run_ai_for_human(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:
+def run_ai_for_human(issue: Issue, *, actor, pod_once: bool = False) -> tuple[Optional[AgentRun], Optional[str]]:
     """Shared body for a human-initiated "Run AI" over the token API.
 
     Re-times the clock for the free human run, dispatches through the same
@@ -1297,7 +1555,7 @@ def run_ai_for_human(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Option
     """
     with transaction.atomic():
         reset_ticker_after_comment_and_run(issue)
-        run, reason = dispatch_run_ai_run_with_reason(issue, actor=actor)
+        run, reason = dispatch_run_ai_run_with_reason(issue, actor=actor, pod_once=pod_once)
         if run is None:
             transaction.set_rollback(True)
     return run, reason

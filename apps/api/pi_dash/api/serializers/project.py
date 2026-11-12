@@ -112,6 +112,7 @@ class ProjectCreateSerializer(BaseSerializer):
             "repo_url",
             "base_branch",
             "default_agent_executor",
+            "dedicated_runner_lost_action",
         ]
 
         read_only_fields = [

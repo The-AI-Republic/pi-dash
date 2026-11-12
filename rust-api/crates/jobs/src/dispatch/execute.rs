@@ -78,23 +78,34 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use sea_orm::sea_query::{Alias, Expr, Func, Query, SelectStatement};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType,
+    Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, Select, UpdateMany,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::entity::{
+    agent_run, agent_run_tool_call, git_code_review_links, git_repositories,
+    git_repository_bindings, issues, pod, project_members, scheduler_bindings, users,
+    workspace_members, workspaces,
+};
+use pidash_db::orm_tx::into_sqlx;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::llm::ModelRef;
 use pidash_services::dispatch::{
     build_tools, cloud_agent_is_configured, github_available_for_project, github_mcp_spec,
-    github_toolset_spec, resolve_current_tool_names, resolve_model_for_run, resolve_run_project,
-    truncate_chars, user_has_llm_config, GithubMcpSpec, GithubToolsetSpec, LinkedPrCtx, ProjectRef,
-    RequiredToolUnavailable, UserFlags, BINDING_REPO_SQL, CODE_REVIEW_LINK_EXISTS_SQL,
-    GITHUB_BINDING_EXISTS_SQL, GITHUB_TOOL_NAMES, PROJECT_READ_GATE_SQL,
-    SCOPE_WORKSPACE_MEMBER_SQL,
+    github_toolset_spec, resolve_current_tool_names, resolve_run_project, truncate_chars,
+    user_has_llm_config, GithubMcpSpec, GithubToolsetSpec, LinkedPrCtx, ProjectRef,
+    RequiredToolUnavailable, UserFlags, GITHUB_TOOL_NAMES,
 };
 use pidash_services::extensions::{
-    CloudAgentToolsetsSeam, ToolsetsResolution, ToolsetsRun, ToolsetsUnavailable,
+    CloudAgentToolsetsSeam, ResolvedRunModel, RunModelKey, ToolsetsResolution, ToolsetsRun,
+    ToolsetsUnavailable,
 };
 use pidash_types::assistant::errors::AssistantError;
 use pidash_types::dispatch::{
@@ -103,8 +114,7 @@ use pidash_types::dispatch::{
 };
 
 use crate::dispatch::{
-    append_event, dispatch_waiting, RUNNING_CLOUD_COUNT_SQL, RUN_CLOUD_AGENT_TASK,
-    WORKSPACE_LOCK_SQL,
+    append_event, dispatch_waiting, running_cloud_count_query, RUN_CLOUD_AGENT_TASK,
 };
 use crate::queue::{JobRow, NewJob};
 use crate::task_message::TaskMessage;
@@ -674,20 +684,7 @@ pub struct ModelSettings {
     pub timeout_secs: i64,
 }
 
-/// The creator LLM facts the model seam reads (`resolve_model_for_run`
-/// inputs): has-key bit, configured name, provider kind, base URL, and
-/// the caller-computed SSRF verdict (the `llm.rs` precedent — presence
-/// bits in, no DB handle here).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreatorLlmFacts {
-    pub has_api_key: bool,
-    pub model_name: String,
-    pub provider_kind: String,
-    pub base_url: String,
-    pub base_url_blocked: bool,
-}
-
-/// The resolved model name (`runtime.py:51`): the BYOK descriptor's
+/// The resolved model name (`runtime.py:51`): the descriptor's
 /// configured name on either branch, truncated to 128 chars.
 pub fn model_name_for(model: &ModelRef) -> String {
     let name = match model {
@@ -717,8 +714,13 @@ pub struct ModelInvocation {
     pub retries: u32,
     /// `CLOUD_AGENT_TOOL_TIMEOUT_SECONDS` (`runtime.py:49`).
     pub tool_timeout_secs: i64,
-    /// [`ModelRef`] from [`resolve_model_for_run`][pidash_services::dispatch::resolve_model_for_run].
+    /// [`ModelRef`] from the resolved run model (the assistant seam's
+    /// `resolve_model_for_user` answer).
     pub model: ModelRef,
+    /// The lane credential the invocation executes with: the creator's
+    /// BYOK ciphertext (decrypted inside the model runtime) or the
+    /// seam-minted credential for overlay lanes.
+    pub key: RunModelKey,
     /// Plan-or-settings limits (`runtime.py:57-63`).
     pub usage_limits: UsageLimits,
     /// Per-request settings (`runtime.py:68-71`).
@@ -800,103 +802,465 @@ pub fn usage_report(usage: &RawUsage) -> Map<String, Value> {
 }
 
 // ---------------------------------------------------------------------------
-// SQL: claim, context, scans, sweeps
+// Queries (SeaORM fetchers)
 // ---------------------------------------------------------------------------
 
-/// The claim select (`tasks.py:33-38`): the queued cloud row, locked.
-/// Django's `select_related("created_by")` joins `users` under the same
-/// `FOR UPDATE` (locking both rows), with `.first()` adding the model's
-/// `-created_at` ordering — all kept here, while only the consumed
-/// `agent_run` columns (`id`, `workspace_id`) are projected. Param: `$1`
-/// run id (uuid).
-pub const CLAIM_RUN_SQL: &str = "SELECT agent_run.id, agent_run.workspace_id FROM agent_run \
-    INNER JOIN users ON users.id = agent_run.created_by_id \
-    WHERE agent_run.id = $1 AND agent_run.executor_kind = 'cloud_agent' \
-    AND agent_run.status = 'queued' ORDER BY agent_run.created_at DESC LIMIT 1 FOR UPDATE";
+pub(crate) fn claim_run_query(run_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            agent_run::Entity::belongs_to(users::Entity)
+                .from(agent_run::Column::CreatedById)
+                .to(users::Column::Id)
+                .into(),
+        )
+        .select_only()
+        .columns([agent_run::Column::Id, agent_run::Column::WorkspaceId])
+        .filter(agent_run::Column::Id.eq(run_id))
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+}
 
-/// The capped-claim lease push (`tasks.py:52`,
-/// `save(update_fields=["lease_expires_at"])`): single-column update.
-/// Params: `$1` lease (timestamptz), `$2` run id (uuid).
-pub const CLAIM_PUSH_LEASE_SQL: &str = "UPDATE agent_run SET lease_expires_at = $1 WHERE id = $2";
+pub(crate) fn workspace_lock_query(workspace_id: Uuid) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Id.eq(workspace_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .lock_exclusive()
+}
 
-/// The claim write (`tasks.py:54-57`,
-/// `save(update_fields=["status", "started_at", "lease_expires_at"])`).
-/// Params: `$1` now (timestamptz), `$2` run id (uuid).
-pub const CLAIM_MARK_RUNNING_SQL: &str =
-    "UPDATE agent_run SET status = 'running', started_at = $1, lease_expires_at = NULL WHERE id = $2";
+pub(crate) fn claim_push_lease_update(
+    run_id: Uuid,
+    lease: DateTime<Utc>,
+) -> UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::LeaseExpiresAt, Expr::value(lease))
+        .filter(agent_run::Column::Id.eq(run_id))
+}
 
-/// The post-claim re-fetch (`tasks.py:59-66`): the run plus everything
-/// the guards consume — creator flags, workspace slug, and the three
-/// project refs (read off the `_id` columns directly; the follow-up
-/// project joins are unobservable). Join types mirror `select_related`:
-/// inner for non-null FKs (`created_by`, `workspace`, `pod`), left for
-/// nullable ones (`work_item`, `scheduler_binding`). Column order is the
-/// [`RunContext`] field order. Param: `$1` run id (uuid).
-pub const RUN_CONTEXT_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.workspace_id, \
-    agent_run.created_by_id, agent_run.work_item_id, agent_run.scheduler_binding_id, \
-    agent_run.pod_id, agent_run.prompt, agent_run.tool_plan, agent_run.cancel_requested_at, \
-    agent_run.cancel_reason, users.is_active AS creator_is_active, users.is_bot AS creator_is_bot, \
-    workspaces.slug AS workspace_slug, work_item.project_id AS work_item_project_id, \
-    scheduler_binding.project_id AS scheduler_binding_project_id, pod.project_id AS pod_project_id \
-    FROM agent_run INNER JOIN users ON users.id = agent_run.created_by_id \
-    INNER JOIN workspaces ON workspaces.id = agent_run.workspace_id \
-    LEFT OUTER JOIN issues AS work_item ON work_item.id = agent_run.work_item_id \
-    LEFT OUTER JOIN scheduler_bindings AS scheduler_binding \
-    ON scheduler_binding.id = agent_run.scheduler_binding_id \
-    INNER JOIN pod ON pod.id = agent_run.pod_id \
-    WHERE agent_run.id = $1 LIMIT 1";
+pub(crate) fn claim_mark_running_update(
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::Status, Expr::value("running"))
+        .col_expr(agent_run::Column::StartedAt, Expr::value(now))
+        .col_expr(
+            agent_run::Column::LeaseExpiresAt,
+            Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+}
 
-/// The cancel re-read (`tasks.py:140`,
-/// `refresh_from_db(fields=["cancel_requested_at", "cancel_reason"])`).
-/// Param: `$1` run id (uuid).
-pub const REREAD_CANCEL_SQL: &str =
-    "SELECT cancel_requested_at, cancel_reason FROM agent_run WHERE id = $1";
+pub(crate) fn run_context_query(run_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            agent_run::Entity::belongs_to(users::Entity)
+                .from(agent_run::Column::CreatedById)
+                .to(users::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            agent_run::Entity::belongs_to(workspaces::Entity)
+                .from(agent_run::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::LeftJoin,
+            agent_run::Entity::belongs_to(issues::Entity)
+                .from(agent_run::Column::WorkItemId)
+                .to(issues::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::LeftJoin,
+            agent_run::Entity::belongs_to(scheduler_bindings::Entity)
+                .from(agent_run::Column::SchedulerBindingId)
+                .to(scheduler_bindings::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            agent_run::Entity::belongs_to(pod::Entity)
+                .from(agent_run::Column::PodId)
+                .to(pod::Column::Id)
+                .into(),
+        )
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::Status,
+            agent_run::Column::WorkspaceId,
+            agent_run::Column::CreatedById,
+            agent_run::Column::WorkItemId,
+            agent_run::Column::SchedulerBindingId,
+            agent_run::Column::PodId,
+            agent_run::Column::Prompt,
+            agent_run::Column::ToolPlan,
+            agent_run::Column::CancelRequestedAt,
+            agent_run::Column::CancelReason,
+        ])
+        .column_as(users::Column::IsActive, "creator_is_active")
+        .column_as(users::Column::IsBot, "creator_is_bot")
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .column_as(issues::Column::ProjectId, "work_item_project_id")
+        .column_as(
+            scheduler_bindings::Column::ProjectId,
+            "scheduler_binding_project_id",
+        )
+        .column_as(pod::Column::ProjectId, "pod_project_id")
+        .filter(agent_run::Column::Id.eq(run_id))
+        .limit(1)
+}
 
-/// Succeeded tool calls (`tasks.py:151`). Param: `$1` run id (uuid).
-pub const SUCCEEDED_TOOL_CALLS_COUNT_SQL: &str =
-    "SELECT COUNT(*) FROM agent_run_tool_call WHERE agent_run_id = $1 AND status = 'succeeded'";
+pub(crate) fn reread_cancel_query(run_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::CancelRequestedAt,
+            agent_run::Column::CancelReason,
+        ])
+        .filter(agent_run::Column::Id.eq(run_id))
+        .limit(1)
+}
 
-/// Succeeded write calls (`tasks.py:152`, a second query in Python — kept
-/// as one rather than folded into the count above). Param: `$1` run id.
-pub const SUCCEEDED_WRITE_CALLS_COUNT_SQL: &str =
-    "SELECT COUNT(*) FROM agent_run_tool_call WHERE agent_run_id = $1 AND status = 'succeeded' \
-    AND risk = 'write'";
+fn succeeded_tool_calls_count_query(run_id: Uuid) -> Select<agent_run_tool_call::Entity> {
+    agent_run_tool_call::Entity::find()
+        .filter(agent_run_tool_call::Column::AgentRunId.eq(run_id))
+        .filter(agent_run_tool_call::Column::Status.eq("succeeded"))
+}
 
-/// Overdue queued rows (`tasks.py:215-218`): filter kwargs in order
-/// (`executor_kind`, `status`, `created_at__lt`), default `-created_at`
-/// ordering, `SCAN_BATCH` slice. Params: `$1` max-age cutoff
-/// (timestamptz), `$2` batch (int).
-pub const SCAN_EXPIRED_IDS_SQL: &str = "SELECT id FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND status = 'queued' AND created_at < $1 \
-    ORDER BY created_at DESC LIMIT $2";
+fn succeeded_write_calls_count_query(run_id: Uuid) -> Select<agent_run_tool_call::Entity> {
+    succeeded_tool_calls_count_query(run_id).filter(agent_run_tool_call::Column::Risk.eq("write"))
+}
 
-/// Queued workspaces, oldest first (`tasks.py:220-227`): the lease
-/// predicate (`Q` null-or-due), grouped by workspace, ordered by the
-/// `Min(created_at)` annotation, `SCAN_BATCH` slice. Params: `$1` now
-/// (timestamptz), `$2` batch (int).
-pub const SCAN_WORKSPACE_IDS_SQL: &str = "SELECT workspace_id FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND status = 'queued' \
-    AND (lease_expires_at IS NULL OR lease_expires_at <= $1) \
-    GROUP BY workspace_id ORDER BY MIN(created_at) ASC LIMIT $2";
+pub(crate) fn scan_expired_ids_query(
+    cutoff: DateTime<Utc>,
+    batch: i64,
+) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .filter(agent_run::Column::CreatedAt.lt(cutoff))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(batch as u64)
+}
 
-/// Queued rows for the disabled scan (`tasks.py:229-231`): first
-/// `SCAN_BATCH` by default ordering. Param: `$1` batch (int).
-pub const SCAN_DISABLED_IDS_SQL: &str = "SELECT id FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND status = 'queued' ORDER BY created_at DESC LIMIT $1";
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct WorkspaceIdRow {
+    workspace_id: Uuid,
+}
 
-/// Stale running rows (`tasks.py:244-246`): full rows for the
-/// cancel-branch check, default ordering, `SCAN_BATCH` slice. Params:
-/// `$1` staleness cutoff (timestamptz), `$2` batch (int).
-pub const SWEEP_ROWS_SQL: &str = "SELECT id, cancel_requested_at, cancel_reason FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND status = 'running' AND started_at < $1 \
-    ORDER BY created_at DESC LIMIT $2";
+pub(crate) fn scan_workspace_ids_query(
+    now: DateTime<Utc>,
+    batch: i64,
+) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::WorkspaceId)
+        .expr_as(
+            Func::min(Expr::col(agent_run::Column::CreatedAt)),
+            "min_created_at",
+        )
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .filter(
+            Condition::any()
+                .add(agent_run::Column::LeaseExpiresAt.is_null())
+                .add(agent_run::Column::LeaseExpiresAt.lte(now)),
+        )
+        .group_by(agent_run::Column::WorkspaceId)
+        .order_by(Expr::col(Alias::new("min_created_at")), Order::Asc)
+        .limit(batch as u64)
+}
 
-/// Overdue managed waits (`managed_runner/tasks.py:40-44`): filter
-/// kwargs in order, default ordering, literal `[:500]` slice
-/// ([`EXPIRE_BATCH_CAP`]). Param: `$1` wait cutoff (timestamptz).
-pub const EXPIRE_IDS_SQL: &str = "SELECT id FROM agent_run \
-    WHERE executor_kind = 'managed_runner' AND status = 'queued' AND created_at < $1 \
-    ORDER BY created_at DESC LIMIT 500";
+pub(crate) fn scan_disabled_ids_query(batch: i64) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(batch as u64)
+}
+
+pub(crate) fn sweep_rows_query(cutoff: DateTime<Utc>, batch: i64) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::CancelRequestedAt,
+            agent_run::Column::CancelReason,
+        ])
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::Status.eq("running"))
+        .filter(agent_run::Column::StartedAt.lt(cutoff))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(batch as u64)
+}
+
+pub(crate) fn expire_ids_query(cutoff: DateTime<Utc>) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::ExecutorKind.eq("managed_runner"))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .filter(agent_run::Column::CreatedAt.lt(cutoff))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(500)
+}
+
+pub(crate) fn workspace_member_exists_query(
+    creator_id: Uuid,
+    workspace_id: Uuid,
+) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::MemberId.eq(creator_id))
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+fn project_member_leg_query(
+    creator_id: Uuid,
+    workspace_slug: &str,
+    project_id: Uuid,
+    with_role: bool,
+) -> Select<project_members::Entity> {
+    let mut query = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Entity::belongs_to(workspaces::Entity)
+                .from(project_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::MemberId.eq(creator_id))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1);
+    if with_role {
+        query = query.filter(project_members::Column::Role.is_in([20, 15, 5]));
+    }
+    query
+}
+
+fn workspace_admin_leg_query(
+    creator_id: Uuid,
+    workspace_slug: &str,
+) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::MemberId.eq(creator_id))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .filter(workspace_members::Column::Role.eq(20))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+pub(crate) fn project_role_gate_stmt(
+    creator_id: Uuid,
+    workspace_slug: &str,
+    project_id: Uuid,
+) -> SelectStatement {
+    Query::select()
+        .expr_as(
+            Expr::exists(
+                project_member_leg_query(creator_id, workspace_slug, project_id, true).into_query(),
+            ),
+            "role_leg",
+        )
+        .expr_as(
+            Expr::exists(
+                project_member_leg_query(creator_id, workspace_slug, project_id, false)
+                    .into_query(),
+            ),
+            "member_leg",
+        )
+        .expr_as(
+            Expr::exists(workspace_admin_leg_query(creator_id, workspace_slug).into_query()),
+            "admin_leg",
+        )
+        .to_owned()
+}
+
+pub(crate) fn github_binding_exists_stmt(project_id: Uuid, workspace_id: Uuid) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.expr(Expr::value(1));
+    stmt.from(Alias::new("git_repository_bindings"));
+    stmt.join(
+        JoinType::InnerJoin,
+        Alias::new("git_repositories"),
+        Expr::col((Alias::new("git_repositories"), Alias::new("id"))).eq(Expr::col((
+            Alias::new("git_repository_bindings"),
+            Alias::new("repository_id"),
+        ))),
+    );
+    stmt.join(
+        JoinType::InnerJoin,
+        Alias::new("git_provider_accounts"),
+        Expr::col((Alias::new("git_provider_accounts"), Alias::new("id"))).eq(Expr::col((
+            Alias::new("git_repository_bindings"),
+            Alias::new("provider_account_id"),
+        ))),
+    );
+    stmt.join(
+        JoinType::InnerJoin,
+        Alias::new("workspace_integrations"),
+        Expr::col((Alias::new("workspace_integrations"), Alias::new("id"))).eq(Expr::col((
+            Alias::new("git_provider_accounts"),
+            Alias::new("workspace_integration_id"),
+        ))),
+    );
+    stmt.join(
+        JoinType::InnerJoin,
+        Alias::new("github_app_installations"),
+        Expr::col((
+            Alias::new("github_app_installations"),
+            Alias::new("workspace_integration_id"),
+        ))
+        .eq(Expr::col((
+            Alias::new("workspace_integrations"),
+            Alias::new("id"),
+        ))),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("git_repository_bindings"),
+            Alias::new("project_id"),
+        ))
+        .eq(project_id),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("git_repository_bindings"),
+            Alias::new("workspace_id"),
+        ))
+        .eq(workspace_id),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("git_repository_bindings"),
+            Alias::new("deleted_at"),
+        ))
+        .is_null(),
+    );
+    stmt.and_where(
+        Expr::col((Alias::new("git_repositories"), Alias::new("provider"))).eq("github"),
+    );
+    stmt.and_where(
+        Expr::col((Alias::new("git_repositories"), Alias::new("host_url")))
+            .eq("https://github.com"),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("git_provider_accounts"),
+            Alias::new("workspace_id"),
+        ))
+        .eq(workspace_id),
+    );
+    stmt.and_where(
+        Expr::col((Alias::new("git_provider_accounts"), Alias::new("provider"))).eq("github"),
+    );
+    stmt.and_where(
+        Expr::col((Alias::new("git_provider_accounts"), Alias::new("host_url")))
+            .eq("https://github.com"),
+    );
+    stmt.and_where(
+        Expr::col((Alias::new("git_provider_accounts"), Alias::new("auth_type"))).eq("github_app"),
+    );
+    stmt.and_where(
+        Expr::col((Alias::new("git_provider_accounts"), Alias::new("status"))).eq("connected"),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("git_provider_accounts"),
+            Alias::new("verified_at"),
+        ))
+        .is_not_null(),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("github_app_installations"),
+            Alias::new("verified_at"),
+        ))
+        .is_not_null(),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("github_app_installations"),
+            Alias::new("suspended_at"),
+        ))
+        .is_null(),
+    );
+    stmt.limit(1);
+    stmt.to_owned()
+}
+
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct BindingRepoRow {
+    namespace: String,
+    name: String,
+}
+
+pub(crate) fn binding_repo_query(project_id: Uuid) -> Select<git_repository_bindings::Entity> {
+    git_repository_bindings::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Entity::belongs_to(git_repositories::Entity)
+                .from(git_repository_bindings::Column::RepositoryId)
+                .to(git_repositories::Column::Id)
+                .into(),
+        )
+        .select_only()
+        .column_as(git_repositories::Column::Namespace, "namespace")
+        .column_as(git_repositories::Column::Name, "name")
+        .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+pub(crate) fn code_review_link_exists_query(
+    issue_id: Uuid,
+    namespace: &str,
+    repo_name: &str,
+) -> Select<git_code_review_links::Entity> {
+    git_code_review_links::Entity::find()
+        .select_only()
+        .column(git_code_review_links::Column::Id)
+        .filter(git_code_review_links::Column::IssueId.eq(issue_id))
+        .filter(git_code_review_links::Column::Provider.eq("github"))
+        .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+        .filter(git_code_review_links::Column::Namespace.eq(namespace))
+        .filter(git_code_review_links::Column::RepoName.eq(repo_name))
+        .filter(git_code_review_links::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 // ---------------------------------------------------------------------------
 // Seams: the planes this domain does not own
@@ -915,6 +1279,42 @@ impl std::fmt::Display for SeamError {
 }
 
 impl std::error::Error for SeamError {}
+
+/// A model-resolution failure at the execute seam: a seam/DB failure,
+/// or the assistant's own resolution error. The drive maps the first
+/// through the generic seam arm and the second through the
+/// `AssistantError` arm (with `LlmConfigMissing` short-circuiting to
+/// `llm_config_missing`, the `except LLMConfigMissing` arm).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// `(seam)` — the facts read failed.
+    Seam(SeamError),
+    /// `(model)` — the assistant seam's own resolution error.
+    Model(AssistantError),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::Seam(error) => write!(f, "{error}"),
+            ResolveError::Model(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+impl From<SeamError> for ResolveError {
+    fn from(error: SeamError) -> Self {
+        ResolveError::Seam(error)
+    }
+}
+
+impl From<AssistantError> for ResolveError {
+    fn from(error: AssistantError) -> Self {
+        ResolveError::Model(error)
+    }
+}
 
 /// One `finalize_agent_run` call
 /// (`runner/services/agent_run_finalization.py:48-86`): the terminal
@@ -991,12 +1391,13 @@ pub trait ExecuteSeams: Send + Sync {
         &self,
         creator_id: Uuid,
     ) -> impl std::future::Future<Output = Result<bool, SeamError>> + Send;
-    /// The creator's provider row as presence bits (assistant-owned
-    /// tables): [`resolve_model_for_run`] inputs.
-    fn creator_llm_facts(
+    /// `resolve_model_for_run` (the assistant-owned EE seam chain,
+    /// `ee/cloud_agent/model_provider.py` → `resolve_model_for_user`):
+    /// the resolved model plus the creator's lane credential.
+    fn resolve_model_for_run(
         &self,
         creator_id: Uuid,
-    ) -> impl std::future::Future<Output = Result<CreatorLlmFacts, SeamError>> + Send;
+    ) -> impl std::future::Future<Output = Result<ResolvedRunModel, ResolveError>> + Send;
     /// `agent.run(prompt, usage_limits, model_settings)`
     /// (`runtime.py:64-72`): the structured output plus the raw usage
     /// object. The drive wraps this call — and only this call — in the
@@ -1175,46 +1576,59 @@ pub async fn claim_run(
     sample_backoff: &(dyn Fn(i64, i64) -> i64 + Send + Sync),
 ) -> Result<ClaimOutcome, sqlx::Error> {
     let mut tx = Transaction::begin(pool).await?;
-    let claimed: Option<(Uuid, Uuid)> = sqlx::query_as(CLAIM_RUN_SQL)
-        .bind(run_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-    let Some((id, workspace_id)) = claimed else {
+    let claimed = {
+        let conn = pidash_db::orm_tx::TxConn::new(tx.inner());
+        claim_run_query(run_id)
+            .into_model::<ClaimRunRow>()
+            .one(&conn)
+            .await
+            .map_err(into_sqlx)?
+    };
+    let Some(claimed) = claimed else {
         tx.rollback().await?;
         return Ok(ClaimOutcome::Ignored);
     };
-    sqlx::query_scalar::<_, i32>(WORKSPACE_LOCK_SQL)
-        .bind(workspace_id)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    let running = sqlx::query_scalar::<_, i64>(RUNNING_CLOUD_COUNT_SQL)
-        .bind(workspace_id)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    if running >= cloud.max_running_per_workspace {
-        let (lo, hi) = claim_backoff_bounds(cloud.dispatch_backoff_secs);
-        let lease = capped_lease_at(now, sample_backoff(lo, hi));
-        sqlx::query(CLAIM_PUSH_LEASE_SQL)
-            .bind(lease)
-            .bind(id)
-            .execute(&mut **tx.inner())
-            .await?;
-        tx.commit().await?;
-        return Ok(ClaimOutcome::Ignored);
+    let (id, workspace_id) = (claimed.id, claimed.workspace_id);
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(tx.inner());
+        workspace_lock_query(workspace_id)
+            .into_tuple::<Uuid>()
+            .one(&conn)
+            .await
+            .map_err(into_sqlx)?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        let running = running_cloud_count_query(workspace_id)
+            .count(&conn)
+            .await
+            .map_err(into_sqlx)? as i64;
+        if running >= cloud.max_running_per_workspace {
+            let (lo, hi) = claim_backoff_bounds(cloud.dispatch_backoff_secs);
+            let lease = capped_lease_at(now, sample_backoff(lo, hi));
+            claim_push_lease_update(id, lease)
+                .exec(&conn)
+                .await
+                .map_err(into_sqlx)?;
+            tx.commit().await?;
+            return Ok(ClaimOutcome::Ignored);
+        }
+        claim_mark_running_update(id, now)
+            .exec(&conn)
+            .await
+            .map_err(into_sqlx)?;
     }
-    sqlx::query(CLAIM_MARK_RUNNING_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(&mut **tx.inner())
-        .await?;
     tx.commit().await?;
     append_event(pool, cloud.max_events, id, "run_started", None, now).await?;
     Ok(ClaimOutcome::Claimed)
 }
 
-/// The post-claim context (`tasks.py:59-66` re-fetch): [`RUN_CONTEXT_SQL`]
-/// column order (17 columns — past sqlx's tuple arity, hence `FromRow`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
+pub(crate) struct ClaimRunRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+}
+
+/// The post-claim context (`tasks.py:59-66` re-fetch).
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct RunContext {
     pub id: Uuid,
     pub status: String,
@@ -1305,10 +1719,13 @@ impl RunContext {
 /// Fetch the post-claim context (`tasks.py:59-66`). A vanished row is an
 /// infra error (the `.get()` raises outside any `try`).
 pub async fn fetch_run_context(pool: &PgPool, run_id: Uuid) -> Result<RunContext, sqlx::Error> {
-    sqlx::query_as::<_, RunContext>(RUN_CONTEXT_SQL)
-        .bind(run_id)
-        .fetch_one(pool)
+    let db = sea_orm_connection(pool);
+    run_context_query(run_id)
+        .into_model::<RunContext>()
+        .one(&db)
         .await
+        .map_err(into_sqlx)?
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 /// `is_workspace_member(run.created_by, run.workspace_id)`
@@ -1319,11 +1736,12 @@ pub async fn creator_is_workspace_member(
     creator_id: Uuid,
     workspace_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let found: Option<i32> = sqlx::query_scalar(SCOPE_WORKSPACE_MEMBER_SQL)
-        .bind(creator_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await?;
+    let db = sea_orm_connection(pool);
+    let found = workspace_member_exists_query(creator_id, workspace_id)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(found.is_some())
 }
 
@@ -1336,12 +1754,18 @@ pub async fn creator_has_project_role(
     workspace_slug: &str,
     project_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>(PROJECT_READ_GATE_SQL)
-        .bind(creator_id)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .fetch_one(pool)
+    let db = sea_orm_connection(pool);
+    let gate = project_role_gate_stmt(creator_id, workspace_slug, project_id);
+    let stmt = DbBackend::Postgres.build(&gate);
+    let row = db
+        .query_one(stmt)
         .await
+        .map_err(into_sqlx)?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    let role_leg: bool = row.try_get("", "role_leg").map_err(into_sqlx)?;
+    let member_leg: bool = row.try_get("", "member_leg").map_err(into_sqlx)?;
+    let admin_leg: bool = row.try_get("", "admin_leg").map_err(into_sqlx)?;
+    Ok(role_leg || (member_leg && admin_leg))
 }
 
 /// The linked-PR leg (`policy.py:177-191`): skipped without a bound
@@ -1369,19 +1793,21 @@ pub async fn linked_pr_leg(
     let Some(issue_id) = work_item_id else {
         return Ok(LinkedPrLeg::Skipped);
     };
-    let repo: Option<(String, String)> = sqlx::query_as(BINDING_REPO_SQL)
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await?;
-    let Some((namespace, name)) = repo else {
+    let db = sea_orm_connection(pool);
+    let repo = binding_repo_query(project_id)
+        .into_model::<BindingRepoRow>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    let Some(repo) = repo else {
         return Ok(LinkedPrLeg::BindingGone);
     };
-    let link: Option<i32> = sqlx::query_scalar(CODE_REVIEW_LINK_EXISTS_SQL)
-        .bind(issue_id)
-        .bind(&namespace)
-        .bind(&name)
-        .fetch_optional(pool)
-        .await?;
+    let (namespace, name) = (repo.namespace, repo.name);
+    let link = code_review_link_exists_query(issue_id, &namespace, &name)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(LinkedPrLeg::Present {
         namespace,
         name,
@@ -1395,11 +1821,12 @@ pub async fn scan_expired_ids(
     cutoff: DateTime<Utc>,
     batch: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(SCAN_EXPIRED_IDS_SQL)
-        .bind(cutoff)
-        .bind(batch)
-        .fetch_all(pool)
+    let db = sea_orm_connection(pool);
+    scan_expired_ids_query(cutoff, batch)
+        .into_tuple::<Uuid>()
+        .all(&db)
         .await
+        .map_err(into_sqlx)
 }
 
 /// Queued workspace ids, oldest first (`tasks.py:220-227`).
@@ -1408,23 +1835,27 @@ pub async fn scan_workspace_ids(
     now: DateTime<Utc>,
     batch: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(SCAN_WORKSPACE_IDS_SQL)
-        .bind(now)
-        .bind(batch)
-        .fetch_all(pool)
+    let db = sea_orm_connection(pool);
+    let rows = scan_workspace_ids_query(now, batch)
+        .into_model::<WorkspaceIdRow>()
+        .all(&db)
         .await
+        .map_err(into_sqlx)?;
+    Ok(rows.iter().map(|row| row.workspace_id).collect())
 }
 
 /// Queued ids for the disabled scan (`tasks.py:229-231`).
 pub async fn scan_disabled_ids(pool: &PgPool, batch: i64) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(SCAN_DISABLED_IDS_SQL)
-        .bind(batch)
-        .fetch_all(pool)
+    let db = sea_orm_connection(pool);
+    scan_disabled_ids_query(batch)
+        .into_tuple::<Uuid>()
+        .all(&db)
         .await
+        .map_err(into_sqlx)
 }
 
 /// One stale running row (`tasks.py:244-246`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
 pub struct SweepRow {
     pub id: Uuid,
     pub cancel_requested_at: Option<DateTime<Utc>>,
@@ -1437,27 +1868,22 @@ pub async fn sweep_rows(
     cutoff: DateTime<Utc>,
     batch: i64,
 ) -> Result<Vec<SweepRow>, sqlx::Error> {
-    let rows: Vec<(Uuid, Option<DateTime<Utc>>, String)> = sqlx::query_as(SWEEP_ROWS_SQL)
-        .bind(cutoff)
-        .bind(batch)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, cancel_requested_at, cancel_reason)| SweepRow {
-            id,
-            cancel_requested_at,
-            cancel_reason,
-        })
-        .collect())
+    let db = sea_orm_connection(pool);
+    sweep_rows_query(cutoff, batch)
+        .into_model::<SweepRow>()
+        .all(&db)
+        .await
+        .map_err(into_sqlx)
 }
 
 /// Overdue managed waits (`managed_runner/tasks.py:40-44`).
 pub async fn expire_ids(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(EXPIRE_IDS_SQL)
-        .bind(cutoff)
-        .fetch_all(pool)
+    let db = sea_orm_connection(pool);
+    expire_ids_query(cutoff)
+        .into_tuple::<Uuid>()
+        .all(&db)
         .await
+        .map_err(into_sqlx)
 }
 
 // ---------------------------------------------------------------------------
@@ -1732,6 +2158,7 @@ async fn apply_try_done<S: ExecuteSeams>(
 pub fn build_invocation(
     ctx: &RunContext,
     model: ModelRef,
+    key: RunModelKey,
     current_tools: Vec<String>,
     cloud: &CloudAgentSettings,
     usage_limits: UsageLimits,
@@ -1755,6 +2182,7 @@ pub fn build_invocation(
         retries: AGENT_RETRIES,
         tool_timeout_secs: cloud.tool_timeout_secs,
         model,
+        key,
         usage_limits,
         model_settings: ModelSettings {
             max_tokens: cloud.max_output_tokens_per_request,
@@ -1809,23 +2237,15 @@ pub async fn drive_execute<S: ExecuteSeams>(
     current_tools: Vec<String>,
     toolsets: &dyn CloudAgentToolsetsSeam,
 ) -> Result<(CloudAgentOutput, String, Value), TryError> {
-    let facts = seams
-        .creator_llm_facts(ctx.created_by_id)
-        .await
-        .map_err(TryError::Seam)?;
-    let model = match resolve_model_for_run(
-        facts.has_api_key,
-        &facts.model_name,
-        &facts.provider_kind,
-        &facts.base_url,
-        facts.base_url_blocked,
-    ) {
-        Ok(model) => model,
-        Err(AssistantError::LlmConfigMissing(message)) => {
+    let resolved = match seams.resolve_model_for_run(ctx.created_by_id).await {
+        Ok(resolved) => resolved,
+        Err(ResolveError::Seam(error)) => return Err(TryError::Seam(error)),
+        Err(ResolveError::Model(AssistantError::LlmConfigMissing(message))) => {
             return Err(TryError::LlmConfigMissing(message));
         }
-        Err(error) => return Err(TryError::Resolve(error)),
+        Err(ResolveError::Model(error)) => return Err(TryError::Resolve(error)),
     };
+    let model = resolved.model;
     let model_name = model_name_for(&model);
     // Deployment-provided toolsets (`runtime.py:29-37`): the run's own
     // snapshot gates the seam — never consulted when the flag is off —
@@ -1860,6 +2280,7 @@ pub async fn drive_execute<S: ExecuteSeams>(
     let invocation = build_invocation(
         ctx,
         model,
+        resolved.key,
         current_tools,
         cloud,
         usage_limits,
@@ -1999,13 +2420,16 @@ async fn run_try_region<S: ExecuteSeams>(
     let github_available = if !cloud.github_tools_enabled {
         false
     } else {
-        let found: Option<i32> = sqlx::query_scalar(GITHUB_BINDING_EXISTS_SQL)
-            .bind(project.project_id)
-            .bind(project.workspace_id)
-            .fetch_optional(pool)
+        let db = sea_orm_connection(pool);
+        let stmt = DbBackend::Postgres.build(&github_binding_exists_stmt(
+            project.project_id,
+            project.workspace_id,
+        ));
+        db.query_one(stmt)
             .await
-            .map_err(TryError::Db)?;
-        found.is_some()
+            .map_err(into_sqlx)
+            .map_err(TryError::Db)?
+            .is_some()
     };
     debug_assert_eq!(
         github_available,
@@ -2047,27 +2471,34 @@ async fn run_try_region<S: ExecuteSeams>(
     if !cloud_agent_is_configured(cloud) {
         return Ok(TryDone::Disabled);
     }
-    let reread: Option<(Option<DateTime<Utc>>, String)> = sqlx::query_as(REREAD_CANCEL_SQL)
-        .bind(ctx.id)
-        .fetch_optional(pool)
+    let db = sea_orm_connection(pool);
+    #[derive(Debug, sea_orm::FromQueryResult)]
+    struct CancelReRead {
+        cancel_requested_at: Option<DateTime<Utc>>,
+        cancel_reason: String,
+    }
+    let reread = reread_cancel_query(ctx.id)
+        .into_model::<CancelReRead>()
+        .one(&db)
         .await
+        .map_err(into_sqlx)
         .map_err(TryError::Db)?;
-    let Some((cancel_requested_at, cancel_reason)) = reread else {
+    let Some(reread) = reread else {
         return Err(TryError::RefreshGone);
     };
-    if cancel_requested_at.is_some() {
-        return Ok(TryDone::Cancelled(cancel_reason));
+    if reread.cancel_requested_at.is_some() {
+        return Ok(TryDone::Cancelled(reread.cancel_reason));
     }
-    let tool_calls = sqlx::query_scalar::<_, i64>(SUCCEEDED_TOOL_CALLS_COUNT_SQL)
-        .bind(ctx.id)
-        .fetch_one(pool)
+    let tool_calls = succeeded_tool_calls_count_query(ctx.id)
+        .count(&db)
         .await
-        .map_err(TryError::Db)?;
-    let writes = sqlx::query_scalar::<_, i64>(SUCCEEDED_WRITE_CALLS_COUNT_SQL)
-        .bind(ctx.id)
-        .fetch_one(pool)
+        .map_err(into_sqlx)
+        .map_err(TryError::Db)? as i64;
+    let writes = succeeded_write_calls_count_query(ctx.id)
+        .count(&db)
         .await
-        .map_err(TryError::Db)?;
+        .map_err(into_sqlx)
+        .map_err(TryError::Db)? as i64;
     let payload = done_payload(&output, tool_calls, writes);
     if final_result_too_large(&payload, cloud.max_final_result_bytes) {
         return Ok(TryDone::ResultTooLarge);
@@ -2341,6 +2772,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -2491,7 +2923,8 @@ mod tests {
         finalize_fail_times: Mutex<usize>,
         normalized: Mutex<Vec<Map<String, Value>>>,
         llm_ok: bool,
-        facts: CreatorLlmFacts,
+        resolved: ResolvedRunModel,
+        resolve_err: Mutex<Option<ResolveError>>,
         invoke: Mutex<Option<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
         invocations: Mutex<Vec<ModelInvocation>>,
     }
@@ -2504,13 +2937,13 @@ mod tests {
                 finalize_fail_times: Mutex::new(0),
                 normalized: Mutex::new(Vec::new()),
                 llm_ok: true,
-                facts: CreatorLlmFacts {
-                    has_api_key: true,
-                    model_name: "fake-model".to_owned(),
-                    provider_kind: "anthropic".to_owned(),
-                    base_url: String::new(),
-                    base_url_blocked: false,
+                resolved: ResolvedRunModel {
+                    model: ModelRef::Anthropic {
+                        model: "fake-model".to_owned(),
+                    },
+                    key: RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
                 },
+                resolve_err: Mutex::new(None),
                 invoke: Mutex::new(None),
                 invocations: Mutex::new(Vec::new()),
             }
@@ -2541,8 +2974,14 @@ mod tests {
             Ok(self.llm_ok)
         }
 
-        async fn creator_llm_facts(&self, _creator_id: Uuid) -> Result<CreatorLlmFacts, SeamError> {
-            Ok(self.facts.clone())
+        async fn resolve_model_for_run(
+            &self,
+            _creator_id: Uuid,
+        ) -> Result<ResolvedRunModel, ResolveError> {
+            match self.resolve_err.lock().unwrap().take() {
+                Some(error) => Err(error),
+                None => Ok(self.resolved.clone()),
+            }
         }
 
         async fn invoke_model(
@@ -3017,9 +3456,11 @@ mod tests {
             model: "claude-x".to_owned(),
         };
         let limits = usage_limits_for(&ctx.tool_plan, &cloud).unwrap();
+        let key = RunModelKey::ByokEncrypted(b"fake-key".to_vec());
         let invocation = build_invocation(
             &ctx,
             model.clone(),
+            key.clone(),
             vec![
                 "pidash_search_project_issues".to_owned(),
                 "github_get_file".to_owned(),
@@ -3046,6 +3487,7 @@ mod tests {
         assert_eq!(invocation.retries, 2);
         assert_eq!(invocation.tool_timeout_secs, 20);
         assert_eq!(invocation.model, model);
+        assert_eq!(invocation.key, key);
         assert_eq!(invocation.usage_limits, limits);
         assert_eq!(
             invocation.model_settings,
@@ -3059,6 +3501,7 @@ mod tests {
         let invocation = build_invocation(
             &ctx,
             model,
+            key,
             vec!["pidash_search_project_issues".to_owned()],
             &cloud,
             limits,
@@ -3078,6 +3521,7 @@ mod tests {
         let invocation = build_invocation(
             &ctx,
             model,
+            RunModelKey::Direct("test".to_owned()),
             Vec::new(),
             &cloud,
             limits,
@@ -3201,6 +3645,89 @@ mod tests {
             json!("provider_auth_failed")
         );
         assert_eq!(calls[0].updates["error"], json!("bad key"));
+    }
+
+    /// The resolve-error mapping through the drive (`resolve_model_for_run`
+    /// — PIDASHCONV-1725): a `LlmConfigMissing` from the assistant seam
+    /// short-circuits to `llm_config_missing` before any DB write, a
+    /// seam failure classifies generic, and any other assistant error
+    /// carries its own code. None of the three touches the pool (the
+    /// resolution runs first, exactly like `runtime.py`).
+    #[tokio::test]
+    async fn resolve_errors_map_through_the_drive() {
+        let cloud = django_cloud_settings();
+        let ctx = run_ctx();
+        // LlmConfigMissing: the `except LLMConfigMissing` arm.
+        let seams = FakeSeams {
+            resolve_err: Mutex::new(Some(ResolveError::Model(AssistantError::LlmConfigMissing(
+                "gone".to_owned(),
+            )))),
+            ..FakeSeams::new()
+        };
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("missing config");
+        assert!(matches!(error, TryError::LlmConfigMissing(ref message) if message == "gone"));
+        // Any other assistant error: the exception's own `.code`.
+        let seams = FakeSeams {
+            resolve_err: Mutex::new(Some(ResolveError::Model(
+                AssistantError::AssistantNotConfigured("crypto missing".to_owned()),
+            ))),
+            ..FakeSeams::new()
+        };
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("crypto missing");
+        assert!(matches!(
+            error,
+            TryError::Resolve(AssistantError::AssistantNotConfigured(_))
+        ));
+        // A seam failure classifies generic (`provider_error` downstream).
+        let seams = FakeSeams {
+            resolve_err: Mutex::new(Some(ResolveError::Seam(SeamError("boom".to_owned())))),
+            ..FakeSeams::new()
+        };
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("seam failure");
+        assert!(matches!(error, TryError::Seam(_)));
+        // A resolved model that then hits the lazy pool classifies as a
+        // DB error (the `model_started` write), proving resolution
+        // itself succeeded and reached the event write.
+        let seams = FakeSeams::new();
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("lazy pool fails at the event write");
+        assert!(matches!(error, TryError::Db(_)));
+        assert!(seams.invocations.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3401,23 +3928,155 @@ mod tests {
             .any(|(name, _, _)| *name == "agent-run-reconcile-terminal-effects"));
     }
 
+    fn render_select<E: EntityTrait>(select: Select<E>) -> String {
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn render_update<E: EntityTrait>(update: UpdateMany<E>) -> String {
+        update.build(DbBackend::Postgres).to_string()
+    }
+
     #[test]
     fn sql_shapes_carry_ordering_limits_and_locks() {
-        assert!(CLAIM_RUN_SQL.contains("FOR UPDATE"));
-        assert!(CLAIM_RUN_SQL.contains("INNER JOIN users"));
-        assert!(CLAIM_RUN_SQL.contains("ORDER BY agent_run.created_at DESC LIMIT 1"));
-        assert!(CLAIM_PUSH_LEASE_SQL.contains("SET lease_expires_at = $1"));
-        assert!(CLAIM_MARK_RUNNING_SQL.contains("status = 'running'"));
-        assert!(RUN_CONTEXT_SQL.contains("LEFT OUTER JOIN issues"));
-        assert!(RUN_CONTEXT_SQL.contains("INNER JOIN pod"));
-        assert!(SCAN_EXPIRED_IDS_SQL.contains("ORDER BY created_at DESC"));
-        assert!(SCAN_WORKSPACE_IDS_SQL.contains("GROUP BY workspace_id"));
-        assert!(SCAN_WORKSPACE_IDS_SQL.contains("ORDER BY MIN(created_at) ASC"));
-        assert!(SCAN_WORKSPACE_IDS_SQL.contains("lease_expires_at IS NULL OR lease_expires_at <="));
-        assert!(SWEEP_ROWS_SQL.contains("status = 'running'"));
-        assert!(SWEEP_ROWS_SQL.contains("started_at < $1"));
-        assert!(EXPIRE_IDS_SQL.contains("LIMIT 500"));
+        let claim = render_select(claim_run_query(Uuid::new_v4()));
+        assert!(claim.contains("INNER JOIN \"users\""));
+        assert!(!claim.contains("LEFT JOIN \"users\""));
+        assert!(claim.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE"));
+        assert!(claim.contains("\"agent_run\".\"status\" = 'queued'"));
+        let push = render_update(claim_push_lease_update(Uuid::new_v4(), Utc::now()));
+        assert!(push.contains("\"lease_expires_at\""));
+        assert!(!push.contains("dispatch_attempts"));
+        let mark = render_update(claim_mark_running_update(Uuid::new_v4(), Utc::now()));
+        assert!(mark.contains("\"status\" = 'running'"));
+        assert!(mark.contains("\"lease_expires_at\" = NULL"));
+        let ctx = render_select(run_context_query(Uuid::new_v4()));
+        assert!(ctx.contains("INNER JOIN \"users\""));
+        assert!(ctx.contains("INNER JOIN \"workspaces\""));
+        assert!(ctx.contains("INNER JOIN \"pod\""));
+        assert!(ctx.contains("LEFT JOIN \"issues\""));
+        assert!(ctx.contains("LEFT JOIN \"scheduler_bindings\""));
+        assert!(ctx.contains("AS \"creator_is_active\""));
+        assert!(ctx.contains("AS \"workspace_slug\""));
+        let expired = render_select(scan_expired_ids_query(Utc::now(), 50));
+        assert!(expired.contains("\"agent_run\".\"created_at\" <"));
+        assert!(expired.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 50"));
+        let workspaces = render_select(scan_workspace_ids_query(Utc::now(), 50));
+        assert!(workspaces.contains("MIN(\"created_at\") AS \"min_created_at\""));
+        assert!(workspaces.contains("GROUP BY \"agent_run\".\"workspace_id\""));
+        assert!(workspaces.contains("ORDER BY \"min_created_at\" ASC LIMIT 50"));
+        assert!(workspaces.contains(
+            "(\"agent_run\".\"lease_expires_at\" IS NULL OR \"agent_run\".\"lease_expires_at\" <="
+        ));
+        let sweep = render_select(sweep_rows_query(Utc::now(), 50));
+        assert!(sweep.contains("\"agent_run\".\"status\" = 'running'"));
+        assert!(sweep.contains("\"agent_run\".\"started_at\" <"));
+        assert!(sweep.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 50"));
+        let expire = render_select(expire_ids_query(Utc::now()));
+        assert!(expire.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
+        assert!(expire.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 500"));
         assert_eq!(EXPIRE_BATCH_CAP, 500);
+    }
+
+    #[tokio::test]
+    async fn live_scan_workspace_ids_against_temp_agent_run() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        if url.is_empty() {
+            return;
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("CREATE TEMP TABLE agent_run AS SELECT * FROM public.agent_run WITH NO DATA")
+            .execute(&mut *tx)
+            .await
+            .expect("temp agent_run");
+        let now = Utc::now();
+        let ws_old = Uuid::new_v4();
+        let ws_new = Uuid::new_v4();
+        let mut run = async |id: Uuid,
+                             ws: Uuid,
+                             kind: &str,
+                             status: &str,
+                             created: DateTime<Utc>,
+                             lease: Option<DateTime<Utc>>| {
+            sqlx::query(
+                "INSERT INTO agent_run (id, workspace_id, executor_kind, status, created_at, lease_expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(id)
+            .bind(ws)
+            .bind(kind)
+            .bind(status)
+            .bind(created)
+            .bind(lease)
+            .execute(&mut *tx)
+            .await
+            .expect("seed temp agent_run");
+        };
+        // ws_old: two eligible runs; MIN is the older one.
+        run(
+            Uuid::new_v4(),
+            ws_old,
+            "cloud_agent",
+            "queued",
+            now - ChronoDuration::minutes(10),
+            None,
+        )
+        .await;
+        run(
+            Uuid::new_v4(),
+            ws_old,
+            "cloud_agent",
+            "queued",
+            now - ChronoDuration::minutes(5),
+            None,
+        )
+        .await;
+        // ws_new: nothing eligible (running / wrong kind / live lease).
+        run(
+            Uuid::new_v4(),
+            ws_new,
+            "cloud_agent",
+            "running",
+            now - ChronoDuration::minutes(1),
+            None,
+        )
+        .await;
+        run(
+            Uuid::new_v4(),
+            ws_new,
+            "local_runner",
+            "queued",
+            now - ChronoDuration::minutes(1),
+            None,
+        )
+        .await;
+        run(
+            Uuid::new_v4(),
+            ws_new,
+            "cloud_agent",
+            "queued",
+            now - ChronoDuration::minutes(1),
+            Some(now + ChronoDuration::minutes(5)),
+        )
+        .await;
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let rows = scan_workspace_ids_query(now, 10)
+            .into_model::<WorkspaceIdRow>()
+            .all(&conn)
+            .await
+            .expect("scan against temp agent_run");
+        assert_eq!(
+            rows.iter().map(|row| row.workspace_id).collect::<Vec<_>>(),
+            vec![ws_old],
+            "grouped, lease- and kind-filtered, oldest first"
+        );
+        tx.rollback().await.expect("rollback temp");
     }
 
     // -- live Postgres (ignored; needs a migrated scratch DB) ------------------
@@ -3663,7 +4322,7 @@ mod tests {
             finalize: Mutex<Vec<FinalizeCall>>,
             force_lose: bool,
             llm_ok: bool,
-            facts: CreatorLlmFacts,
+            resolved: ResolvedRunModel,
             invoke: Mutex<Option<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
             invocations: Mutex<Vec<ModelInvocation>>,
             pool: PgPool,
@@ -3675,12 +4334,11 @@ mod tests {
                     finalize: Mutex::new(Vec::new()),
                     force_lose: false,
                     llm_ok: true,
-                    facts: CreatorLlmFacts {
-                        has_api_key: true,
-                        model_name: "fake-model".to_owned(),
-                        provider_kind: "anthropic".to_owned(),
-                        base_url: String::new(),
-                        base_url_blocked: false,
+                    resolved: ResolvedRunModel {
+                        model: ModelRef::Anthropic {
+                            model: "fake-model".to_owned(),
+                        },
+                        key: RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
                     },
                     invoke: Mutex::new(None),
                     invocations: Mutex::new(Vec::new()),
@@ -3791,11 +4449,11 @@ mod tests {
                 Ok(self.llm_ok)
             }
 
-            async fn creator_llm_facts(
+            async fn resolve_model_for_run(
                 &self,
                 _creator_id: Uuid,
-            ) -> Result<CreatorLlmFacts, SeamError> {
-                Ok(self.facts.clone())
+            ) -> Result<ResolvedRunModel, ResolveError> {
+                Ok(self.resolved.clone())
             }
 
             async fn invoke_model(
@@ -4251,6 +4909,147 @@ mod tests {
                     .await
                     .expect("events");
             assert_eq!(kinds, vec!["model_started".to_owned()]);
+            teardown(&pool, &graph).await;
+        }
+
+        /// The execute gate and model resolution consult the INSTALLED
+        /// assistant seam (PIDASHCONV-1725): a creator with no BYOK row
+        /// is admitted when the seam says so, and the resolved model +
+        /// credential are the seam's answer — never the (absent) row's.
+        #[derive(Debug)]
+        struct OpenHubSeam;
+
+        impl pidash_services::extensions::AssistantModelSeam for OpenHubSeam {
+            fn has_usable_llm_config(
+                &self,
+                _user_id: Uuid,
+                _has_api_key: bool,
+            ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+                Box::pin(async move { true })
+            }
+
+            fn resolve_model_for_user(
+                &self,
+                _user_id: Uuid,
+                _inputs: pidash_services::extensions::ExecuteModelInputs,
+            ) -> pidash_services::extensions::SeamFuture<'_, Result<ResolvedRunModel, AssistantError>>
+            {
+                Box::pin(async move {
+                    Ok(ResolvedRunModel {
+                        model: ModelRef::OpenAICompatible {
+                            // A stub answer: the plumbing (whatever the
+                            // seam returns flows through), not a model
+                            // choice — hosted answers take their model
+                            // from the cloud seam's openhub_model_for.
+                            model: "stub-model".to_owned(),
+                            base_url: "https://gateway.example.invalid/v1".to_owned(),
+                        },
+                        key: RunModelKey::Direct("stub-key".to_owned()),
+                    })
+                })
+            }
+
+            fn generate_title(
+                &self,
+                _request: pidash_services::extensions::TitleRequest,
+            ) -> pidash_services::extensions::SeamFuture<
+                '_,
+                Result<String, pidash_services::extensions::TitleError>,
+            > {
+                Box::pin(async move { Ok(String::new()) })
+            }
+        }
+
+        /// The mirror's `ToolCtx` needs a transition hook; this
+        /// test never invokes, so it is never called.
+        #[derive(Debug)]
+        struct NoopTransitionHook;
+
+        impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
+            fn enqueue_completion_comment(
+                &self,
+                _issue_id: Uuid,
+                _prev_state_id: Option<Uuid>,
+                _current_state_id: Option<Uuid>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {})
+            }
+
+            fn fire(
+                &self,
+                _actor_id: Uuid,
+                _request: pidash_services::orchestration::entries::FireRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                pidash_services::orchestration::entries::FireOutcome,
+                                (),
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
+                })
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execute_consults_the_installed_assistant_seam() {
+            use pidash_db::config::Settings;
+
+            let pool = pool().await;
+            // The seeded creator holds no `assistant_user_llm_config`
+            // row (seed_graph inserts none) — the OpenHub-only shape.
+            let graph = seed_graph(&pool, "seam").await;
+            let settings = Settings::test_defaults();
+            let cloud = cloud_on();
+            let invoke = crate::oss_worker::model_runtime::invoke::InvokeCtx {
+                tools: crate::oss_worker::model_runtime::tools_exec::ToolCtx {
+                    toolsets: std::sync::Arc::new(NoExtraToolsets),
+                    pool: pool.clone(),
+                    orm: pidash_db::pool::sea_orm_connection(&pool),
+                    cloud: cloud.clone(),
+                    managed: django_managed_settings(),
+                    http: reqwest::Client::new(),
+                    github: crate::oss_worker::model_runtime::github::GithubAppContext::new(
+                        pool.clone(),
+                        pidash_db::redis::RedisHandle::from_settings(&settings),
+                        settings.secret_key.clone(),
+                    ),
+                    redis: None,
+                    runner: settings.runner.clone(),
+                    transition_hook: std::sync::Arc::new(NoopTransitionHook),
+                },
+                keys: crate::oss_worker::model_runtime::keys::KeyResolver::from_env(
+                    settings.assistant.key_cache_ttl_secs,
+                    settings.assistant.key_cache_maxsize,
+                ),
+            };
+            let seams = crate::oss_worker::execute_seams::LiveExecuteSeams::new(
+                pool.clone(),
+                cloud.block_private_urls,
+                invoke,
+                std::sync::Arc::new(OpenHubSeam),
+            );
+            // No BYOK row, yet the gate passes (the seam admits the
+            // lane) and the resolve answers the seam's model + key.
+            assert!(seams.has_usable_llm_config(graph.user).await.expect("gate"));
+            let resolved = seams
+                .resolve_model_for_run(graph.user)
+                .await
+                .expect("resolve");
+            assert_eq!(
+                resolved.model,
+                ModelRef::OpenAICompatible {
+                    model: "stub-model".to_owned(),
+                    base_url: "https://gateway.example.invalid/v1".to_owned(),
+                }
+            );
+            assert_eq!(resolved.key, RunModelKey::Direct("stub-key".to_owned()));
             teardown(&pool, &graph).await;
         }
 

@@ -837,6 +837,42 @@ async fn run_yield_stop_ticking_succeeds_against_an_older_server_that_ignores_it
 }
 
 #[tokio::test]
+async fn run_yield_succeeds_for_a_scheduler_run() {
+    // A scheduler run has no work item. The server records the outcome on
+    // the run and answers 200 with `work_item_id: null` — the command must
+    // exit 0 on that shape, with the scheduler run's id on the same route
+    // an issue run uses.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(
+            r#"{"ok":true,"run_id":"471f1cf9-0000-4000-8000-000000000000","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"b1","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#,
+        )
+    }))
+    .await;
+    let run_id = "471f1cf9-0000-4000-8000-000000000000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("a scheduler run's yield must succeed");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/agent-runs/{run_id}/yield/")
+    );
+    assert_eq!(recorded[0].run_id.as_deref(), Some(run_id));
+}
+
+#[tokio::test]
 async fn run_yield_without_a_run_id_fails_before_any_request() {
     let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
     let client = client(&fake);
@@ -883,9 +919,12 @@ const LIST_PATH: &str = "/api/v1/workspaces/acme/projects/ENG/work-items/";
 
 #[tokio::test]
 async fn issue_list_without_filters_sends_no_query() {
+    // No flags now defaults to open groups (PDASHOSS01-352).
     assert_eq!(
         list_paths(list_args("ENG")).await,
-        vec![LIST_PATH.to_string()]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
     );
 }
 
@@ -913,9 +952,12 @@ async fn issue_list_state_group_flag() {
 async fn issue_list_label_flag_maps_to_labels_param() {
     let mut args = list_args("ENG");
     args.label = Some("bug,frontend".into());
+    // Label alone still gets the default open filter.
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?labels=bug%2Cfrontend")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&labels=bug%2Cfrontend"
+        )]
     );
 }
 
@@ -925,7 +967,9 @@ async fn issue_list_priority_flag() {
     args.priority = Some("urgent,high".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?priority=urgent%2Chigh")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&priority=urgent%2Chigh"
+        )]
     );
 }
 
@@ -936,7 +980,7 @@ async fn issue_list_fields_flag() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
         )]
     );
 }
@@ -947,7 +991,9 @@ async fn issue_list_parent_none_sends_null_without_lookup() {
     args.parent = Some("none".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?parent=null")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=null"
+        )]
     );
 }
 
@@ -958,9 +1004,86 @@ async fn issue_list_parent_uuid_is_passed_as_is() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?parent=00000000-0000-0000-0000-000000000009"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=00000000-0000-0000-0000-000000000009"
         )]
     );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_open_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_closed_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("closed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state_group=completed%2Ccancelled")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_omits_filter() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    assert_eq!(list_paths(args).await, vec![LIST_PATH.to_string()]);
+}
+
+#[tokio::test]
+async fn issue_list_state_group_mixed_alias() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open,completed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_response_carries_visible_state_group() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let resp = pidash::cli::issue::list_issues(&client, &list_args("ENG"))
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "open");
+    assert_eq!(resp["count"], 0);
+}
+
+#[tokio::test]
+async fn issue_list_explicit_state_disables_default_and_omits_state_group_key() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state = Some("Backlog".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    // Explicit --state: no default, and no state_group key (or null).
+    assert!(resp.get("state_group").is_none() || resp["state_group"].is_null());
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_shows_all_in_output() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "all");
 }
 
 #[tokio::test]
@@ -2196,6 +2319,9 @@ async fn issue_patch_add_label_merges_with_the_issues_current_labels() {
             remove_label: vec![],
             clear_labels: false,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await
@@ -2233,6 +2359,9 @@ async fn issue_patch_clear_labels_sends_an_empty_array() {
             remove_label: vec![],
             clear_labels: true,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await
@@ -2279,6 +2408,9 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
             remove_label: vec!["Frontend".into()],
             clear_labels: false,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await

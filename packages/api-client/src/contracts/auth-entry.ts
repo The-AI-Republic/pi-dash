@@ -223,8 +223,21 @@ export const DeviceStartResponse = z.object({
 });
 export type DeviceStartResponse = z.infer<typeof DeviceStartResponse>;
 
-export async function startDeviceGrant(client: ApiClient): Promise<DeviceStartResponse> {
-  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/start/", { json: {} });
+/**
+ * Optional start fields. `scope: "engine"` asks for an engine-only grant —
+ * the one the desktop app approves to renew this computer's built-in
+ * engine sign-in; omitted is an ordinary workspace sign-in grant.
+ */
+export interface DeviceStartOptions {
+  scope?: "engine";
+}
+
+export async function startDeviceGrant(
+  client: ApiClient,
+  options: DeviceStartOptions = {}
+): Promise<DeviceStartResponse> {
+  const json: Record<string, unknown> = options.scope ? { scope: options.scope } : {};
+  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/start/", { json });
   return client.parse(DeviceStartResponse, envelope.data, "POST /api/v1/auth/device/start/");
 }
 

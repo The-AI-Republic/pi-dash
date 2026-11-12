@@ -13,8 +13,18 @@ import type { Page } from "@playwright/test";
 
 /** Scenario knobs for the mocked native shell. All optional. */
 export interface DesktopMockConfig {
-  /** managed_doctor answer. Default: both binaries present, host "parity-host". */
-  doctor?: { runnerPresent: boolean; enginePresent: boolean; hostLabel: string };
+  /**
+   * What daemon_discover classifies this computer's Pi Dash daemon as.
+   * Default: "compatible" — a daemon signed in as the app's own account.
+   * "no_daemon" until daemon_install_service runs (the set-up path).
+   */
+  daemon?: "compatible" | "no_daemon" | "account_mismatch";
+  /** The engine sign-in state the daemon reports. Default: "active". */
+  engineSignIn?: "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
+  /** Reason code when the engine is unavailable; absent = available. */
+  engineUnavailableReason?: string;
+  /** The daemon's runners at start (daemon_runners). Default: none. */
+  localRunners?: Array<Record<string, unknown>>;
   /** desktop_pending_update answer. Default: null (nothing waiting). */
   pendingUpdate?: { version: string; currentVersion: string; installing: boolean } | null;
   /** Make desktop_install_update reject. Default: false. */
@@ -35,6 +45,24 @@ export interface DesktopMockConfig {
    * blocked, warm absorbed, cancel).
    */
   chatHold?: boolean;
+  /** The machine id the discover `Hello` carries (replace-machine prompt). */
+  machineId?: string;
+  /** Legacy trees still on disk (`legacy_scan` answers these). */
+  legacyTrees?: Array<{
+    workspace: string;
+    dir: string;
+    cloud_url: string | null;
+    dev_machine_id: string | null;
+    engine_runners: { name: string; runner_id: string | null; project: string; working_dir: string }[];
+  }>;
+  /** Seeded notices store (per-account, in-memory). */
+  notices?: {
+    notices: {
+      legacy_folders: { workspace: string; project: string; path: string }[];
+      pod_member_projects: { runner_id: string; workspace: string; project: string }[];
+    };
+    dismissed: string[];
+  };
 }
 
 /** One recorded native invoke. */
@@ -60,7 +88,7 @@ declare global {
  * Install the mocked desktop bridge. Call before the first navigation:
  * the init script runs on every subsequent page load. The mock records
  * invokes, proxies API traffic through fetch, and serves the lifecycle,
- * chat, history, updater, CLI, opener and deep-link commands from memory.
+ * chat, history, updater, CLI, browser-open and deep-link commands from memory.
  */
 export async function installDesktopMock(page: Page, config: DesktopMockConfig = {}): Promise<void> {
   await page.addInitScript((seed: DesktopMockConfig) => {
@@ -72,6 +100,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       sessions: Array<[string, Record<string, unknown>]>;
       events: Array<[string, Record<string, unknown>[]]>;
       seq: number;
+      created: number;
       modes: Record<string, Record<string, string>>;
     };
     function loadPersisted(): PersistedChat {
@@ -83,13 +112,14 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
             sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
             events: Array.isArray(parsed.events) ? parsed.events : [],
             seq: typeof parsed.seq === "number" ? parsed.seq : 0,
+            created: typeof parsed.created === "number" ? parsed.created : 0,
             modes: parsed.modes !== null && typeof parsed.modes === "object" ? parsed.modes : {},
           };
         }
       } catch {
         // A store that cannot load reads as empty.
       }
-      return { sessions: [], events: [], seq: 0, modes: {} };
+      return { sessions: [], events: [], seq: 0, created: 0, modes: {} };
     }
     const persisted = loadPersisted();
     const store = {
@@ -99,11 +129,19 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       chatSessions: new Map<string, Record<string, unknown>>(persisted.sessions),
       chatEvents: new Map<string, Record<string, unknown>[]>(persisted.events),
       chatSeq: persisted.seq,
+      // Sessions take ids from a counter that only ever grows, so an id
+      // never repeats after a delete or a clear the way the native store's
+      // uuids never do. An address left pointing at a removed conversation
+      // therefore stays stale instead of aliasing a newer one.
+      chatCreated: persisted.created,
       chatModes: persisted.modes as Record<string, Record<string, string>>,
       installInFlight: false,
       apiControllers: new Map<string, AbortController>(),
     };
-    store.config.doctor ??= { runnerPresent: true, enginePresent: true, hostLabel: "parity-host" };
+    store.config.daemon ??= "compatible";
+    store.config.engineSignIn ??= "active";
+    store.config.localRunners ??= [];
+    const localRunners: Array<Record<string, unknown>> = [...store.config.localRunners];
     store.config.pendingUpdate ??= null;
     store.config.installFails ??= false;
     store.config.cli ??= { installed: false, path: null, version: null };
@@ -112,6 +150,13 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
     store.config.chatEcho ??= "mocked assistant reply";
     store.config.approvalModes ??= {};
     store.config.chatHold ??= false;
+    store.config.machineId ??= "machine-new";
+    // Legacy trees the mock holds in memory; `legacy_finish` clears one.
+    store.config.legacyTrees ??= [];
+    store.config.notices ??= {
+      notices: { legacy_folders: [], pod_member_projects: [] },
+      dismissed: [],
+    };
 
     function savePersisted(): void {
       try {
@@ -121,6 +166,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
             sessions: [...store.chatSessions],
             events: [...store.chatEvents],
             seq: store.chatSeq,
+            created: store.chatCreated,
             modes: store.chatModes,
           } satisfies PersistedChat)
         );
@@ -272,6 +318,13 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       }
     }
 
+    /** Newest `updated_at` first, then newest `created_at`, like the native SQL. */
+    function compareSessionsByActivity(left: Record<string, unknown>, right: Record<string, unknown>): number {
+      const byUpdated = Number(right["updated_at"] ?? 0) - Number(left["updated_at"] ?? 0);
+      if (byUpdated !== 0) return byUpdated;
+      return Number(right["created_at"] ?? 0) - Number(left["created_at"] ?? 0);
+    }
+
     function chatRecord(args: Record<string, unknown>): { account: string; sessionId: string } {
       return { account: String(args["account"] ?? ""), sessionId: String(args["sessionId"] ?? "") };
     }
@@ -292,41 +345,80 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           await apiStream(params, channel);
           return null;
         }
-        case "plugin:opener|open_url":
+        case "open_in_browser":
         case "plugin:window|set_title":
         case "desktop_clear_web_data":
           return null;
-        case "managed_doctor": {
-          const doctor = store.config.doctor;
+        case "daemon_discover": {
+          // The shell classifies the daemon for the app's account; the mock
+          // answers for whichever account the page names.
+          const identity = (params["appIdentity"] as Record<string, unknown> | undefined) ?? {};
+          const cloudUrl = String(identity["cloudUrl"] ?? "");
+          const cli = {
+            installed: store.config.cli.installed,
+            path: store.config.cli.path,
+            version: store.config.cli.version,
+            updatable: false,
+          };
+          if (store.config.daemon === "no_daemon") return { kind: "no_daemon", cli };
+          if (store.config.daemon === "account_mismatch") {
+            return {
+              kind: "account_mismatch",
+              daemon_account: "someone-else@parity.test",
+              daemon_cloud_url: cloudUrl,
+              hosts_runners: false,
+            };
+          }
+          const unavailable = store.config.engineUnavailableReason;
+          const engine = unavailable ? "unavailable" : "available";
           return {
-            runner_present: doctor.runnerPresent,
-            engine_present: doctor.enginePresent,
-            host_label: doctor.hostLabel,
+            kind: "compatible",
+            hello: {
+              daemon_version: "parity",
+              ipc_version: 1,
+              cloud_url: cloudUrl,
+              account: { user_id: String(identity["userId"] ?? ""), email: identity["email"], cloud_url: cloudUrl },
+              workspaces: [],
+              machine_id: store.config.machineId,
+              engine,
+              engine_detail: {
+                state: engine,
+                sign_in_state: store.config.engineSignIn,
+                ...(unavailable ? { reason_code: unavailable } : {}),
+              },
+            },
           };
         }
-        case "managed_write_engine_config":
-        case "managed_write_model_token":
-        case "managed_bootstrap":
-        case "managed_enroll":
-        case "managed_start_daemon":
-        case "managed_stop_daemon":
-          return null;
-        case "managed_sign_out": {
-          // The native side owns history deletion: the page only names the
-          // account, so the mock clears that account's on-machine store.
-          const clear = (params["clearChatHistory"] as Record<string, unknown> | undefined) ?? {};
-          const account = String(clear["account"] ?? "");
-          if (account !== "") {
-            for (const key of [...store.chatSessions.keys()]) {
-              if (key.startsWith(`${account}:`)) {
-                store.chatSessions.delete(key);
-                store.chatEvents.delete(key);
-              }
-            }
-            savePersisted();
-          }
-          return null;
+        case "daemon_runners":
+          return localRunners;
+        case "daemon_engine_runner_add": {
+          const workspace = String(params["workspace"] ?? "");
+          const project = String(params["project"] ?? "");
+          const runner = {
+            name: `engine-${workspace}-${project}`,
+            runner_id: `mock-runner-${localRunners.length + 1}`,
+            workspace_slug: workspace,
+            project_slug: project,
+            working_dir: String(params["workingDir"] ?? `/mock/tasks/${workspace}/${project}`),
+            agent: "engine",
+          };
+          localRunners.push(runner);
+          return {
+            runner: runner.name,
+            runner_id: runner.runner_id,
+            workspace,
+            project,
+            working_dir: runner.working_dir,
+          };
         }
+        case "daemon_install_service":
+          // Set-up installed and started the service: the daemon answers now.
+          store.config.daemon = "compatible";
+          return null;
+        case "daemon_ensure_engine":
+        case "daemon_credentials_reload":
+        case "pidash_cli_engine_login":
+          return null;
         case "chat_approval_modes_save": {
           const modesAccount = String(params["account"] ?? "");
           const modes = (params["modes"] as Record<string, string> | undefined) ?? {};
@@ -359,11 +451,59 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           }
         }
         case "pidash_cli_login":
+        case "pidash_cli_logout":
           return null;
+        case "legacy_scan":
+          return store.config.legacyTrees;
+        case "legacy_finish": {
+          const dir = String(params["dir"] ?? "");
+          store.config.legacyTrees = store.config.legacyTrees.filter((t: { dir: string }) => t.dir !== dir);
+          return null;
+        }
+        case "legacy_restore_folder": {
+          const runner = String(params["runner"] ?? "");
+          const workingDir = String(params["workingDir"] ?? "");
+          const local = localRunners.find((r) => r["name"] === runner);
+          if (local) local["working_dir"] = workingDir;
+          return null;
+        }
+        case "desktop_notices_load":
+          return store.config.notices;
+        case "desktop_notices_record": {
+          const next = params["notices"] as {
+            legacy_folders: { workspace: string; project: string; path: string }[];
+            pod_member_projects: { runner_id: string; workspace: string; project: string }[];
+          };
+          const dismissed = new Set<string>(store.config.notices.dismissed);
+          const legacy = (next.legacy_folders ?? []).filter((n) => !dismissed.has(`folder:${n.path}`));
+          const pod = (next.pod_member_projects ?? []).filter((n) => !dismissed.has(`pod:${n.runner_id}`));
+          store.config.notices = {
+            notices: { legacy_folders: legacy, pod_member_projects: pod },
+            dismissed: [...dismissed],
+          };
+          return store.config.notices;
+        }
+        case "desktop_notices_dismiss": {
+          const keys = (params["keys"] as string[] | undefined) ?? [];
+          const dismissed = new Set<string>([...store.config.notices.dismissed, ...keys]);
+          store.config.notices = {
+            notices: {
+              legacy_folders: store.config.notices.notices.legacy_folders.filter(
+                (n) => !dismissed.has(`folder:${n.path}`)
+              ),
+              pod_member_projects: store.config.notices.notices.pod_member_projects.filter(
+                (n) => !dismissed.has(`pod:${n.runner_id}`)
+              ),
+            },
+            dismissed: [...dismissed],
+          };
+          return store.config.notices;
+        }
         case "chat_create_session": {
           const account = String(params["account"] ?? "");
           const session = (params["session"] as Record<string, unknown> | undefined) ?? {};
-          const id = `mock-chat-${store.chatSessions.size + 1}`;
+          store.chatCreated += 1;
+          const id = `mock-chat-${store.chatCreated}`;
           const now = Date.now();
           const record = {
             id,
@@ -387,7 +527,10 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           for (const [key, record] of store.chatSessions) {
             if (key.startsWith(`${account}:`)) rows.push(record);
           }
-          return rows;
+          // The native store lists `ORDER BY updated_at DESC, created_at
+          // DESC`; an append bumps `updated_at`, so the conversation that
+          // just took a turn sorts first here too.
+          return rows.sort(compareSessionsByActivity);
         }
         case "chat_get_session": {
           const { account, sessionId } = chatRecord(params);
@@ -403,25 +546,37 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           const rows = store.chatEvents.get(key);
           if (!rows) throw new Error("mocked history has no such session");
           const event = (params["event"] as Record<string, unknown> | undefined) ?? {};
+          // The native store numbers each conversation's events from 1
+          // (`COALESCE(MAX(seq), 0) + 1`), and a turn bumps the session's
+          // `updated_at` so the list and the row's age follow the activity.
+          const nextSeq = rows.reduce((highest, entry) => Math.max(highest, Number(entry["seq"] ?? 0)), 0) + 1;
           store.chatSeq += 1;
+          const now = Date.now();
           const row = {
             id: `mock-event-${store.chatSeq}`,
             session_id: sessionId,
-            seq: store.chatSeq,
+            seq: nextSeq,
             role: String(event["role"] ?? "user"),
             content: String(event["content"] ?? ""),
             tool_calls: null,
             approval_decision: null,
-            created_at: Date.now(),
+            created_at: now,
           };
           rows.push(row);
+          const record = store.chatSessions.get(key);
+          if (record) record["updated_at"] = now;
           savePersisted();
           return row;
         }
         case "chat_set_thread_id": {
           const { account, sessionId } = chatRecord(params);
           const record = store.chatSessions.get(sessionKey(account, sessionId));
-          if (record) record["engine_thread_id"] = String(params["engineThreadId"] ?? "");
+          if (record) {
+            record["engine_thread_id"] = String(params["engineThreadId"] ?? "");
+            // The native command writes the same `updated_at` it stamps on
+            // an append.
+            record["updated_at"] = Date.now();
+          }
           savePersisted();
           return null;
         }

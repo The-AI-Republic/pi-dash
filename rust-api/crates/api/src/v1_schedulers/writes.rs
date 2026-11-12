@@ -28,7 +28,7 @@
 //! install [`crate::app_scheduler::handlers_bind::apply_install`], the
 //! uninstall [`crate::app_scheduler::handlers_bind::uninstall_binding`], the
 //! definition edit [`crate::app_scheduler::handlers_sched::validate_patch_body`]
-//! plus the app's `SCHEDULER_PATCH_SQL`, the create
+//! plus its `schedulers` update, the create
 //! [`crate::app_scheduler::handlers_sched::create_scheduler`] and the delete
 //! [`crate::app_scheduler::handlers_sched::soft_delete_scheduler`], so the
 //! two surfaces cannot drift.
@@ -58,10 +58,20 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{patch, MethodRouter};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect,
+};
+use sea_query::{Alias, Expr, Query as SeaQuery};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    agent_run, project_members, projects, scheduler_bindings, schedulers, workspace_members,
+    workspaces,
+};
+use pidash_db::orm_tx::TxConn;
 use pidash_db::tasks_ticker::models::scheduler_binding::SchedulerBinding;
 use pidash_services::app_scheduler::queries;
 
@@ -176,67 +186,164 @@ const ROLE_ADMIN: i32 = 20;
 const ROLE_MEMBER: i32 = 15;
 
 // ---------------------------------------------------------------------------
-// SQL
+// Queries (same JOIN/WHERE/lock semantics as the Django querysets, on SeaORM)
 // ---------------------------------------------------------------------------
 
-/// `_locked_binding`: the install, row-locked
-/// (`select_for_update(of=("self",))`), with `select_related("scheduler")`
-/// — whose `is_enabled` the run-now check reads. Columns 0..22 are
-/// `BINDING_DETAIL_SQL`'s, decoded by `decode_binding`.
-const LOCKED_BINDING_SQL: &str = concat!(
-    r#"SELECT "scheduler_bindings"."created_at", "scheduler_bindings"."updated_at", "scheduler_bindings"."created_by_id", "scheduler_bindings"."updated_by_id", "scheduler_bindings"."deleted_at", "scheduler_bindings"."id", "scheduler_bindings"."workspace_id", "scheduler_bindings"."project_id", "scheduler_bindings"."scheduler_id", "scheduler_bindings"."dtstart", "scheduler_bindings"."tzid", "scheduler_bindings"."rrule", "scheduler_bindings"."rdates", "scheduler_bindings"."exdates", "scheduler_bindings"."extra_context", "scheduler_bindings"."enabled", "scheduler_bindings"."outcome_mode", "scheduler_bindings"."next_run_at", "scheduler_bindings"."last_run_id", "scheduler_bindings"."last_error", "scheduler_bindings"."actor_id", "scheduler_bindings"."pod_id", "schedulers"."is_enabled""#,
-    r#" FROM "scheduler_bindings" INNER JOIN "schedulers" ON ("scheduler_bindings"."scheduler_id" = "schedulers"."id") INNER JOIN "workspaces" ON ("scheduler_bindings"."workspace_id" = "workspaces"."id")"#,
-    r#" WHERE ("scheduler_bindings"."deleted_at" IS NULL AND "scheduler_bindings"."scheduler_id" = $1 AND "scheduler_bindings"."project_id" = $2 AND "workspaces"."slug" = $3)"#,
-    r#" FOR UPDATE OF "scheduler_bindings""#,
-);
-
-/// The v1 render columns of `_binding_queryset()` (the read handlers'
-/// `BindingRow`), shared by the by-id and by-scheduler fetches below.
-const BINDING_RENDER_SELECT: &str = concat!(
-    "SELECT ",
-    r#""b"."created_at", "b"."updated_at", "b"."id", "b"."workspace_id", "b"."project_id", "b"."scheduler_id", "b"."dtstart", "b"."tzid", "b"."rrule", "b"."rdates", "b"."exdates", "b"."extra_context", "b"."enabled", "b"."outcome_mode", "b"."next_run_at", "b"."last_run_id", "b"."last_error", "b"."pod_id", "s"."slug" AS "scheduler_slug", "s"."name" AS "scheduler_name", "p"."name" AS "pod_name", "lr"."status" AS "last_run_status", "lr"."started_at" AS "last_run_started_at", "lr"."ended_at" AS "last_run_ended_at""#,
-    r#" FROM "scheduler_bindings" "b" JOIN "schedulers" "s" ON "s"."id" = "b"."scheduler_id" LEFT JOIN "pod" "p" ON "p"."id" = "b"."pod_id" LEFT JOIN "agent_run" "lr" ON "lr"."id" = "b"."last_run_id""#,
-);
-
-/// `_binding_queryset().get(pk=...)`.
-fn binding_by_id_sql() -> String {
-    format!(r#"{BINDING_RENDER_SELECT} WHERE "b"."deleted_at" IS NULL AND "b"."id" = $1"#)
-}
-
-/// The definition edit's blast radius: `_binding_queryset()
-/// .filter(scheduler=...).select_related("project").order_by("project__name")`
-/// — every live install, whichever projects the caller belongs to, with
-/// the project's identifier and name.
-fn bindings_of_scheduler_sql() -> String {
-    format!(
-        r#"SELECT "x".*, "pr"."identifier" AS "project_identifier", "pr"."name" AS "project_name" FROM ({BINDING_RENDER_SELECT} WHERE "b"."deleted_at" IS NULL AND "b"."scheduler_id" = $1) "x" JOIN "projects" "pr" ON "pr"."id" = "x"."project_id" ORDER BY "pr"."name" ASC"#
-    )
-}
-
-/// `get_object_or_404(Scheduler.objects.select_for_update(), pk=...,
-/// workspace__slug=...)`: soft-delete scope, `FOR UPDATE` over the join.
-const LOCKED_SCHEDULER_SQL: &str = concat!(
-    r#"SELECT "schedulers"."created_at", "schedulers"."updated_at", "schedulers"."created_by_id", "schedulers"."updated_by_id", "schedulers"."deleted_at", "schedulers"."id", "schedulers"."workspace_id", "schedulers"."slug", "schedulers"."name", "schedulers"."description", "schedulers"."prompt", "schedulers"."source", "schedulers"."is_enabled", "schedulers"."color""#,
-    r#" FROM "schedulers" INNER JOIN "workspaces" ON ("schedulers"."workspace_id" = "workspaces"."id")"#,
-    r#" WHERE ("schedulers"."deleted_at" IS NULL AND "schedulers"."id" = $1 AND "workspaces"."slug" = $2) FOR UPDATE"#,
-);
-
-/// `AgentRun.objects.filter(scheduler_binding=..., status__in=NON_TERMINAL_STATUSES).exists()`.
-const ACTIVE_RUN_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM "agent_run" WHERE "scheduler_binding_id" = $1 AND "status" = ANY($2))"#;
-
 /// The role facts both decorators and both class gates read, one
-/// `exists()` each (`is_active` rows, soft-delete scope).
-const ROLE_FACTS_SQL: &str = r#"SELECT
-  EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL AND "role" = ANY($4)) AS "ws_admin_or_member",
-  EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL AND "role" = $5) AS "ws_admin",
-  EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL) AS "project_member",
-  EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL AND "role" = ANY($4)) AS "project_admin_or_member",
-  EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL AND "role" = $5) AS "project_admin""#;
+/// `exists()` each (`is_active` rows, soft-delete scope), in one statement.
+fn role_facts_stmt(
+    workspace_id: Uuid,
+    user_id: Uuid,
+    project_id: Uuid,
+) -> sea_query::SelectStatement {
+    fn ws_exists(
+        workspace_id: Uuid,
+        user_id: Uuid,
+        admin_or_member: bool,
+    ) -> sea_query::SimpleExpr {
+        let mut sub = SeaQuery::select();
+        sub.expr(Expr::val(1))
+            .from(workspace_members::Entity)
+            .and_where(workspace_members::Column::WorkspaceId.eq(workspace_id))
+            .and_where(workspace_members::Column::MemberId.eq(user_id))
+            .and_where(workspace_members::Column::IsActive.eq(true))
+            .and_where(workspace_members::Column::DeletedAt.is_null());
+        if admin_or_member {
+            sub.and_where(
+                workspace_members::Column::Role.is_in([ROLE_ADMIN as i16, ROLE_MEMBER as i16]),
+            );
+        } else {
+            sub.and_where(workspace_members::Column::Role.eq(ROLE_ADMIN as i16));
+        }
+        Expr::exists(sub.to_owned())
+    }
+
+    #[derive(Clone, Copy)]
+    enum PmRole {
+        Any,
+        Admin,
+        AdminOrMember,
+    }
+
+    fn pm_exists(
+        workspace_id: Uuid,
+        user_id: Uuid,
+        project_id: Uuid,
+        role: PmRole,
+    ) -> sea_query::SimpleExpr {
+        let mut sub = SeaQuery::select();
+        sub.expr(Expr::val(1))
+            .from(project_members::Entity)
+            .and_where(project_members::Column::WorkspaceId.eq(workspace_id))
+            .and_where(project_members::Column::MemberId.eq(user_id))
+            .and_where(project_members::Column::ProjectId.eq(project_id))
+            .and_where(project_members::Column::IsActive.eq(true))
+            .and_where(project_members::Column::DeletedAt.is_null());
+        match role {
+            PmRole::Any => {}
+            PmRole::Admin => {
+                sub.and_where(project_members::Column::Role.eq(ROLE_ADMIN as i16));
+            }
+            PmRole::AdminOrMember => {
+                sub.and_where(
+                    project_members::Column::Role.is_in([ROLE_ADMIN as i16, ROLE_MEMBER as i16]),
+                );
+            }
+        }
+        Expr::exists(sub.to_owned())
+    }
+
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(
+        ws_exists(workspace_id, user_id, true),
+        Alias::new("ws_admin_or_member"),
+    )
+    .expr_as(
+        ws_exists(workspace_id, user_id, false),
+        Alias::new("ws_admin"),
+    )
+    .expr_as(
+        pm_exists(workspace_id, user_id, project_id, PmRole::Any),
+        Alias::new("project_member"),
+    )
+    .expr_as(
+        pm_exists(workspace_id, user_id, project_id, PmRole::AdminOrMember),
+        Alias::new("project_admin_or_member"),
+    )
+    .expr_as(
+        pm_exists(workspace_id, user_id, project_id, PmRole::Admin),
+        Alias::new("project_admin"),
+    );
+    stmt
+}
+
+#[derive(Debug, FromQueryResult)]
+struct RoleFactsRow {
+    ws_admin_or_member: bool,
+    ws_admin: bool,
+    project_member: bool,
+    project_admin_or_member: bool,
+    project_admin: bool,
+}
+
+/// The locked binding the write holds: the entity row plus the scheduler's
+/// `is_enabled` the run-now check reads, with the workspace-slug predicate
+/// the old `FOR UPDATE OF scheduler_bindings` join carried.
+struct LockedBinding {
+    binding: SchedulerBinding,
+    scheduler_enabled: bool,
+}
+
+fn binding_from_model(model: &scheduler_bindings::Model) -> Result<SchedulerBinding, Denial> {
+    let workspace_id = model.workspace_id.ok_or(Denial::ServerError)?;
+    Ok(SchedulerBinding {
+        id: model.id,
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+        created_by_id: model.created_by_id,
+        updated_by_id: model.updated_by_id,
+        // Deleted bindings never reach here (the lock filters them out).
+        deleted_at: model.deleted_at.map(|t| t.with_timezone(&Utc)),
+        workspace_id,
+        project_id: model.project_id,
+        scheduler_id: model.scheduler_id,
+        dtstart: model.dtstart.with_timezone(&Utc),
+        tzid: model.tzid.clone(),
+        rrule: model.rrule.clone(),
+        rdates: model.rdates.clone(),
+        exdates: model.exdates.clone(),
+        extra_context: model.extra_context.clone(),
+        enabled: model.enabled,
+        outcome_mode: model.outcome_mode.clone(),
+        next_run_at: model.next_run_at.map(|t| t.with_timezone(&Utc)),
+        last_run_id: model.last_run_id,
+        last_error: model.last_error.clone(),
+        actor_id: model.actor_id,
+        pod_id: model.pod_id,
+    })
+}
+
+fn scheduler_from_model(model: &schedulers::Model) -> app_sched::SchedulerRow {
+    app_sched::SchedulerRow {
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+        created_by_id: model.created_by_id,
+        updated_by_id: model.updated_by_id,
+        deleted_at: model.deleted_at.map(|t| t.with_timezone(&Utc)),
+        id: model.id,
+        workspace_id: model.workspace_id,
+        slug: model.slug.clone(),
+        name: model.name.clone(),
+        description: model.description.clone(),
+        prompt: model.prompt.clone(),
+        source: model.source.clone(),
+        is_enabled: model.is_enabled,
+        color: model.color.clone(),
+    }
+}
 
 /// One blast-radius row: the rendered binding plus its project.
-#[derive(Debug, Clone, sqlx::FromRow)]
 struct AffectedBindingRow {
-    #[sqlx(flatten)]
     binding: BindingRow,
     project_identifier: String,
     project_name: String,
@@ -266,28 +373,36 @@ pub(crate) async fn role_facts(
     let Some(workspace_id) = workspace_id else {
         return Ok(RoleFacts::default());
     };
-    let row = sqlx::query(ROLE_FACTS_SQL)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(project_id.copied().unwrap_or_else(Uuid::nil))
-        .bind(vec![ROLE_ADMIN, ROLE_MEMBER])
-        .bind(ROLE_ADMIN)
-        .fetch_one(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = role_facts_stmt(
+        *workspace_id,
+        *user_id,
+        project_id.copied().unwrap_or_else(Uuid::nil),
+    );
+    let decoded = match db
+        .query_one(sea_orm::DbBackend::Postgres.build(&row))
         .await
-        .map_err(|error| db_error(error, "v1-scheduler-roles"))?;
-    let flag = |name: &str| -> Result<bool, Denial> {
-        row.try_get::<bool, _>(name)
-            .map_err(|error| db_error(error, "v1-scheduler-roles-decode"))
+        .map_err(|error| db_error(error, "v1-scheduler-roles"))?
+    {
+        Some(row) => RoleFactsRow::from_query_result(&row, "")
+            .map_err(|error| db_error(error, "v1-scheduler-roles-decode"))?,
+        None => RoleFactsRow {
+            ws_admin_or_member: false,
+            ws_admin: false,
+            project_member: false,
+            project_admin_or_member: false,
+            project_admin: false,
+        },
     };
     let mut facts = RoleFacts {
-        ws_admin_or_member: flag("ws_admin_or_member")?,
-        ws_admin: flag("ws_admin")?,
+        ws_admin_or_member: decoded.ws_admin_or_member,
+        ws_admin: decoded.ws_admin,
         ..RoleFacts::default()
     };
     if project_id.is_some() {
-        facts.project_member = flag("project_member")?;
-        facts.project_admin_or_member = flag("project_admin_or_member")?;
-        facts.project_admin = flag("project_admin")?;
+        facts.project_member = decoded.project_member;
+        facts.project_admin_or_member = decoded.project_admin_or_member;
+        facts.project_admin = decoded.project_admin;
     }
     Ok(facts)
 }
@@ -571,39 +686,172 @@ fn respond(result: Result<Response, Denial>) -> Response {
 // Fetches
 // ---------------------------------------------------------------------------
 
-/// `_locked_binding`: the install plus its scheduler's `is_enabled`.
+/// `_locked_binding`: the install (row-locked), its scheduler's
+/// `is_enabled` the run-now check reads, and the workspace-slug predicate
+/// the old `FOR UPDATE OF scheduler_bindings` join carried. The slug and
+/// `is_enabled` legs are unlocked reads (nothing writes those rows inside
+/// this transaction), so the binding row lock is the lock the write holds.
+/// The predicate is then three statements in one transaction, not one.
 async fn lock_binding(
-    conn: &mut sqlx::PgConnection,
+    conn: &TxConn<'_>,
     scheduler_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
-) -> Result<(SchedulerBinding, bool), Denial> {
-    let row = sqlx::query(LOCKED_BINDING_SQL)
-        .bind(scheduler_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(&mut *conn)
+) -> Result<LockedBinding, Denial> {
+    let model = scheduler_bindings::Entity::find()
+        .filter(scheduler_bindings::Column::SchedulerId.eq(*scheduler_id))
+        .filter(scheduler_bindings::Column::ProjectId.eq(*project_id))
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .lock_exclusive()
+        .one(conn)
         .await
         .map_err(|error| db_error(error, "v1-binding-lock"))?
         .ok_or(Denial::BindingNotFound)?;
-    let binding = app_bind::decode_binding(&row).map_err(from_app)?;
-    let scheduler_enabled: bool = row
-        .try_get(22)
-        .map_err(|error| db_error(error, "v1-binding-lock-decode"))?;
-    Ok((binding, scheduler_enabled))
+    let binding = binding_from_model(&model)?;
+    let workspace_slug = workspaces::Entity::find_by_id(binding.workspace_id)
+        .select_only()
+        .columns([workspaces::Column::Slug])
+        .into_model::<WorkspaceSlugRow>()
+        .one(conn)
+        .await
+        .map_err(|error| db_error(error, "v1-binding-lock"))?;
+    if workspace_slug.as_ref().is_none_or(|row| row.slug != slug) {
+        return Err(Denial::BindingNotFound);
+    }
+    let scheduler_enabled = schedulers::Entity::find_by_id(binding.scheduler_id)
+        .select_only()
+        .columns([schedulers::Column::IsEnabled])
+        .into_model::<SchedulerEnabledRow>()
+        .one(conn)
+        .await
+        .map_err(|error| db_error(error, "v1-binding-lock"))?
+        .map(|row| row.is_enabled)
+        .ok_or(Denial::BindingNotFound)?;
+    Ok(LockedBinding {
+        binding,
+        scheduler_enabled,
+    })
+}
+
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceSlugRow {
+    slug: String,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct SchedulerEnabledRow {
+    is_enabled: bool,
 }
 
 /// The binding as the v1 reads render it.
-async fn render_row(
-    executor: impl sqlx::PgExecutor<'_>,
-    binding_id: &Uuid,
-) -> Result<BindingRow, Denial> {
-    sqlx::query_as::<_, BindingRow>(&binding_by_id_sql())
-        .bind(binding_id)
-        .fetch_optional(executor)
+async fn render_row<C: ConnectionTrait>(conn: &C, binding_id: &Uuid) -> Result<BindingRow, Denial> {
+    super::handlers::binding_select()
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::Id.eq(*binding_id))
+        .into_model::<BindingRow>()
+        .one(conn)
         .await
         .map_err(|error| db_error(error, "v1-binding-render"))?
         .ok_or(Denial::ObjectNotFound)
+}
+
+/// The definition edit's blast radius: `_binding_queryset()
+/// .filter(scheduler=...).select_related("project").order_by("project__name")`
+/// — every live install, whichever projects the caller belongs to, with
+/// the project's identifier and name. The bindings and their projects are
+/// two statements in one call (the project leg joins in Rust), not one.
+async fn bindings_of_scheduler(
+    pool: &PgPool,
+    scheduler_id: &Uuid,
+) -> Result<Vec<AffectedBindingRow>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let bindings = super::handlers::binding_select()
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::SchedulerId.eq(*scheduler_id))
+        .into_model::<BindingRow>()
+        .all(&db)
+        .await
+        .map_err(|error| db_error(error, "v1-definition-bindings"))?;
+    let project_ids: Vec<Uuid> = bindings.iter().map(|row| row.project_id).collect();
+    #[derive(Debug, FromQueryResult)]
+    struct ProjectRow {
+        id: Uuid,
+        identifier: String,
+        name: String,
+    }
+    let project_rows = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+        ])
+        .filter(projects::Column::Id.is_in(project_ids.iter().copied()))
+        .order_by_asc(projects::Column::Name)
+        .into_model::<ProjectRow>()
+        .all(&db)
+        .await
+        .map_err(|error| db_error(error, "v1-definition-bindings"))?;
+    // `ORDER BY project__name ASC` in the database: the project leg is
+    // ordered by Postgres so the blast-radius list inherits the Django
+    // collation, not Rust's byte-wise `cmp`.
+    let rank: std::collections::HashMap<Uuid, usize> = project_rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id, index))
+        .collect();
+    let by_project: std::collections::HashMap<Uuid, (String, String)> = project_rows
+        .into_iter()
+        .map(|row| (row.id, (row.identifier, row.name)))
+        .collect();
+    let mut affected: Vec<AffectedBindingRow> = bindings
+        .into_iter()
+        .filter_map(|binding| {
+            let (identifier, name) = by_project.get(&binding.project_id)?.clone();
+            Some(AffectedBindingRow {
+                binding,
+                project_identifier: identifier,
+                project_name: name,
+            })
+        })
+        .collect();
+    affected.sort_by_key(|row| rank[&row.binding.project_id]);
+    Ok(affected)
+}
+
+/// `get_object_or_404(Scheduler.objects.select_for_update(), pk=...,
+/// workspace__slug=...)`: the locked definition row. The slug predicate
+/// the old `FOR UPDATE` join carried is checked against the resolved
+/// workspace id before the lock (two statements in one transaction).
+async fn lock_scheduler(
+    conn: &TxConn<'_>,
+    scheduler_id: &Uuid,
+    slug: &str,
+) -> Result<app_sched::SchedulerRow, Denial> {
+    let workspace_id = workspaces::Entity::find()
+        .select_only()
+        .columns([workspaces::Column::Id])
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .into_model::<WorkspaceIdRow>()
+        .one(conn)
+        .await
+        .map_err(|error| db_error(error, "v1-definition-lock"))?
+        .map(|row| row.id)
+        .ok_or(Denial::SchedulerNotFound)?;
+    let model = schedulers::Entity::find_by_id(*scheduler_id)
+        .filter(schedulers::Column::WorkspaceId.eq(workspace_id))
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .lock_exclusive()
+        .one(conn)
+        .await
+        .map_err(|error| db_error(error, "v1-definition-lock"))?
+        .ok_or(Denial::SchedulerNotFound)?;
+    Ok(scheduler_from_model(&model))
+}
+
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceIdRow {
+    id: Uuid,
 }
 
 /// `_binding_payload`: the fresh binding plus `previous`.
@@ -669,13 +917,21 @@ pub(crate) async fn binding_patch_inner(
         .begin()
         .await
         .map_err(|error| db_error(error, "v1-binding-begin"))?;
-    let (binding, _) = lock_binding(&mut tx, scheduler_id, &project_id, slug).await?;
+    let binding = {
+        let conn = TxConn::new(&mut tx);
+        lock_binding(&conn, scheduler_id, &project_id, slug)
+            .await?
+            .binding
+    };
     let token = if_match.or_else(|| body_token(Some(body)));
     if let Some(denial) = precondition_denial(token, &binding.updated_at, "scheduler binding") {
         return Err(denial);
     }
-    let before = match render_binding(&render_row(&mut *tx, &binding.id).await?, &context.timezone)
-    {
+    let before_row = {
+        let conn = TxConn::new(&mut tx);
+        render_row(&conn, &binding.id).await?
+    };
+    let before = match render_binding(&before_row, &context.timezone) {
         Value::Object(map) => map,
         _ => Map::new(),
     };
@@ -712,7 +968,8 @@ pub(crate) async fn binding_patch_inner(
     tx.commit()
         .await
         .map_err(|error| db_error(error, "v1-binding-commit"))?;
-    let fresh = render_row(&context.pool, &binding.id).await?;
+    let fresh_db = pidash_db::pool::sea_orm_connection(&context.pool);
+    let fresh = render_row(&fresh_db, &binding.id).await?;
     Ok(binding_payload(&fresh, previous, &context.timezone))
 }
 
@@ -770,8 +1027,12 @@ pub(crate) async fn run_now_core(
         .begin()
         .await
         .map_err(|error| db_error(error, "v1-run-now-begin"))?;
-    let (binding, scheduler_enabled) =
-        lock_binding(&mut tx, scheduler_id, &project_id, slug).await?;
+    let locked = {
+        let conn = TxConn::new(&mut tx);
+        lock_binding(&conn, scheduler_id, &project_id, slug).await?
+    };
+    let binding = locked.binding;
+    let scheduler_enabled = locked.scheduler_enabled;
     if let Some(denial) = precondition_denial(if_match, &binding.updated_at, "scheduler binding") {
         return Err(denial);
     }
@@ -830,12 +1091,14 @@ async fn run_now_write(
             .iter()
             .map(|status| (*status).to_owned())
             .collect();
-        sqlx::query_scalar::<_, bool>(ACTIVE_RUN_SQL)
-            .bind(binding.id)
-            .bind(statuses)
-            .fetch_one(&mut *tx)
+        let conn = TxConn::new(&mut tx);
+        let active = agent_run::Entity::find()
+            .filter(agent_run::Column::SchedulerBindingId.eq(binding.id))
+            .filter(agent_run::Column::Status.is_in(statuses))
+            .exists(&conn)
             .await
-            .map_err(|error| db_error(error, "v1-run-now-active"))?
+            .map_err(|error| db_error(error, "v1-run-now-active"))?;
+        active
     } else {
         false
     };
@@ -844,7 +1107,10 @@ async fn run_now_write(
     {
         return Err(conflict(code, message));
     }
-    let before = render_row(&mut *tx, &binding.id).await?;
+    let before = {
+        let conn = TxConn::new(&mut tx);
+        render_row(&conn, &binding.id).await?
+    };
     let mut previous = Map::with_capacity(1);
     previous.insert(
         "next_run_at".to_owned(),
@@ -863,7 +1129,8 @@ async fn run_now_write(
     tx.commit()
         .await
         .map_err(|error| db_error(error, "v1-run-now-commit"))?;
-    let fresh = render_row(&context.pool, &binding.id).await?;
+    let fresh_db = pidash_db::pool::sea_orm_connection(&context.pool);
+    let fresh = render_row(&fresh_db, &binding.id).await?;
     Ok(binding_payload(&fresh, previous, &context.timezone))
 }
 
@@ -929,13 +1196,10 @@ pub(crate) async fn definition_patch_inner(
         .begin()
         .await
         .map_err(|error| db_error(error, "v1-definition-begin"))?;
-    let record: app_sched::SchedulerRow = sqlx::query_as(LOCKED_SCHEDULER_SQL)
-        .bind(scheduler_id)
-        .bind(slug)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| db_error(error, "v1-definition-lock"))?
-        .ok_or(Denial::SchedulerNotFound)?;
+    let record = {
+        let conn = TxConn::new(&mut tx);
+        lock_scheduler(&conn, scheduler_id, slug).await?
+    };
     if is_builtin_slug(&record.slug) {
         return Err(conflict("builtin_scheduler", BUILTIN_MESSAGE));
     }
@@ -959,28 +1223,32 @@ pub(crate) async fn definition_patch_inner(
     // `serializer.save()`: every writable column with the merged values,
     // plus `updated_at` / `updated_by_id` (the app's R4 statement).
     let now = Utc::now();
-    let sql = app_sched::positional(
-        queries::SCHEDULER_PATCH_SQL,
-        queries::SCHEDULER_PATCH_PARAMS,
-    );
-    let saved = sqlx::query(&sql)
-        .bind(now)
-        .bind(context.user_id)
-        .bind(&write.slug)
-        .bind(&write.name)
-        .bind(&write.description)
-        .bind(&write.prompt)
-        .bind(&write.color)
-        .bind(write.is_enabled)
-        .bind(scheduler_id)
-        .execute(&mut *tx)
-        .await;
+    let saved = {
+        let conn = TxConn::new(&mut tx);
+        schedulers::Entity::update_many()
+            .col_expr(schedulers::Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                schedulers::Column::UpdatedById,
+                Expr::value(Some(context.user_id)),
+            )
+            .col_expr(schedulers::Column::Slug, Expr::value(write.slug.clone()))
+            .col_expr(schedulers::Column::Name, Expr::value(write.name.clone()))
+            .col_expr(
+                schedulers::Column::Description,
+                Expr::value(write.description.clone()),
+            )
+            .col_expr(
+                schedulers::Column::Prompt,
+                Expr::value(write.prompt.clone()),
+            )
+            .col_expr(schedulers::Column::Color, Expr::value(write.color.clone()))
+            .col_expr(schedulers::Column::IsEnabled, Expr::value(write.is_enabled))
+            .filter(schedulers::Column::Id.eq(*scheduler_id))
+            .exec(&conn)
+            .await
+    };
     if let Err(error) = saved {
-        let integrity = error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .is_some_and(|code| code.starts_with("23"));
-        return Err(if integrity {
+        return Err(if pidash_db::orm_tx::is_integrity_violation(&error) {
             Denial::BadError("The payload is not valid".to_owned())
         } else {
             db_error(error, "v1-definition-save")
@@ -991,11 +1259,7 @@ pub(crate) async fn definition_patch_inner(
         .map_err(|error| db_error(error, "v1-definition-commit"))?;
     // Every live install, not only the caller's projects: the caller is a
     // workspace admin and this is the blast radius of the edit.
-    let affected: Vec<AffectedBindingRow> = sqlx::query_as(&bindings_of_scheduler_sql())
-        .bind(scheduler_id)
-        .fetch_all(&context.pool)
-        .await
-        .map_err(|error| db_error(error, "v1-definition-bindings"))?;
+    let affected = bindings_of_scheduler(&context.pool, scheduler_id).await?;
     let scheduler = SchedulerRow {
         created_at: record.created_at,
         updated_at: now,
@@ -1041,17 +1305,6 @@ fn affected_project(row: &AffectedBindingRow) -> Value {
 // ---------------------------------------------------------------------------
 // PDASHOSS01-318: create / delete a definition, install / uninstall it
 // ---------------------------------------------------------------------------
-
-/// `_scheduler_by_ref` by id: the workspace's live scheduler with that pk
-/// (`Scheduler.objects.filter(workspace_id=..., pk=...).first()`).
-const SCHEDULER_BY_ID_SQL: &str = r#"SELECT "id", "is_enabled" FROM "schedulers" WHERE "deleted_at" IS NULL AND "workspace_id" = $1 AND "id" = $2 ORDER BY "created_at" DESC LIMIT 1"#;
-
-/// `_scheduler_by_ref` by slug.
-const SCHEDULER_BY_SLUG_SQL: &str = r#"SELECT "id", "is_enabled" FROM "schedulers" WHERE "deleted_at" IS NULL AND "workspace_id" = $1 AND "slug" = $2 ORDER BY "created_at" DESC LIMIT 1"#;
-
-/// `SchedulerBinding.objects.filter(scheduler=..., project=...,
-/// deleted_at__isnull=True).exists()`.
-const INSTALLED_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM "scheduler_bindings" WHERE "deleted_at" IS NULL AND "scheduler_id" = $1 AND "project_id" = $2)"#;
 
 /// A JSON response with `status` (key order is the construction order).
 fn json_status(status: StatusCode, value: &Value) -> Response {
@@ -1221,13 +1474,10 @@ pub(crate) async fn definition_delete_core(
         .begin()
         .await
         .map_err(|error| db_error(error, "v1-definition-delete-begin"))?;
-    let record: app_sched::SchedulerRow = sqlx::query_as(LOCKED_SCHEDULER_SQL)
-        .bind(scheduler_id)
-        .bind(slug)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| db_error(error, "v1-definition-delete-lock"))?
-        .ok_or(Denial::SchedulerNotFound)?;
+    let record = {
+        let conn = TxConn::new(&mut tx);
+        lock_scheduler(&conn, scheduler_id, slug).await?
+    };
     if is_builtin_slug(&record.slug) {
         return Err(conflict("builtin_scheduler", BUILTIN_MESSAGE));
     }
@@ -1266,23 +1516,43 @@ pub async fn binding_install(
 
 /// The scheduler a ref names, as `(id, is_enabled)`: a ref that parses
 /// as a UUID (`uuid.UUID(ref)`) is only ever an id, anything else a slug.
+#[derive(Debug, FromQueryResult)]
+struct SchedulerRefRow {
+    id: Uuid,
+    is_enabled: bool,
+}
+
 async fn scheduler_by_ref(
     pool: &PgPool,
     workspace_id: &Uuid,
     reference: &str,
 ) -> Result<Option<(Uuid, bool)>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let query = match app_bind::uuid_from_hex_forms(reference) {
-        Some(id) => sqlx::query_as(SCHEDULER_BY_ID_SQL)
-            .bind(workspace_id)
-            .bind(id),
-        None => sqlx::query_as(SCHEDULER_BY_SLUG_SQL)
-            .bind(workspace_id)
-            .bind(reference),
+        Some(id) => schedulers::Entity::find()
+            .select_only()
+            .columns([schedulers::Column::Id, schedulers::Column::IsEnabled])
+            .filter(schedulers::Column::DeletedAt.is_null())
+            .filter(schedulers::Column::WorkspaceId.eq(*workspace_id))
+            .filter(schedulers::Column::Id.eq(id))
+            .order_by_desc(schedulers::Column::CreatedAt)
+            .limit(1)
+            .into_model::<SchedulerRefRow>(),
+        None => schedulers::Entity::find()
+            .select_only()
+            .columns([schedulers::Column::Id, schedulers::Column::IsEnabled])
+            .filter(schedulers::Column::DeletedAt.is_null())
+            .filter(schedulers::Column::WorkspaceId.eq(*workspace_id))
+            .filter(schedulers::Column::Slug.eq(reference.to_owned()))
+            .order_by_desc(schedulers::Column::CreatedAt)
+            .limit(1)
+            .into_model::<SchedulerRefRow>(),
     };
-    query
-        .fetch_optional(pool)
+    let row = query
+        .one(&db)
         .await
-        .map_err(|error| db_error(error, "v1-install-scheduler"))
+        .map_err(|error| db_error(error, "v1-install-scheduler"))?;
+    Ok(row.map(|row| (row.id, row.is_enabled)))
 }
 
 /// The id a UUID-or-slug scheduler ref names, for the non-HTTP entries
@@ -1366,10 +1636,12 @@ pub(crate) async fn binding_install_inner(
             "The scheduler is already installed on this project.",
         )
     };
-    let installed: bool = sqlx::query_scalar(INSTALLED_SQL)
-        .bind(scheduler_id)
-        .bind(project_id)
-        .fetch_one(&context.pool)
+    let installed_db = pidash_db::pool::sea_orm_connection(&context.pool);
+    let installed = scheduler_bindings::Entity::find()
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::SchedulerId.eq(scheduler_id))
+        .filter(scheduler_bindings::Column::ProjectId.eq(project_id))
+        .exists(&installed_db)
         .await
         .map_err(|error| db_error(error, "v1-install-exists"))?;
     if installed {
@@ -1397,7 +1669,8 @@ pub(crate) async fn binding_install_inner(
             Err(app_bind::Denial::InvalidPayload) => return Err(already()),
             Err(other) => return Err(from_app(other)),
         };
-    let fresh = render_row(&context.pool, &saved.row.id).await?;
+    let fresh_db = pidash_db::pool::sea_orm_connection(&context.pool);
+    let fresh = render_row(&fresh_db, &saved.row.id).await?;
     Ok(json_status(
         StatusCode::CREATED,
         &render_binding(&fresh, &context.timezone),
@@ -1448,7 +1721,12 @@ pub(crate) async fn binding_uninstall_core(
         .begin()
         .await
         .map_err(|error| db_error(error, "v1-uninstall-begin"))?;
-    let (binding, _) = lock_binding(&mut tx, scheduler_id, &project_id, slug).await?;
+    let binding = {
+        let conn = TxConn::new(&mut tx);
+        lock_binding(&conn, scheduler_id, &project_id, slug)
+            .await?
+            .binding
+    };
     if let Some(denial) = precondition_denial(if_match, &binding.updated_at, "scheduler binding") {
         return Err(denial);
     }
@@ -1751,5 +2029,91 @@ mod tests {
     #[test]
     fn routes_build_and_merge_with_reads() {
         let _router: axum::Router<AppState> = super::super::routes();
+    }
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.workspace_members')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn live_role_facts_read_memberships() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        for table in ["workspace_members", "project_members"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let workspace_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, created_at, updated_at, view_props, default_props, issue_props, explored_features, getting_started_checklist, tips) \
+             VALUES ($1, $2, $3, 15, true, $4, $4, '{}', '{}', '{}', '{}', '{}', '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed workspace membership");
+        sqlx::query(
+            "INSERT INTO project_members (id, workspace_id, member_id, project_id, role, is_active, created_at, updated_at, view_props, default_props, sort_order, preferences) \
+             VALUES ($1, $2, $3, $4, 20, true, $5, $5, '{}', '{}', 0, '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed project membership");
+        let facts = role_facts(&pool, Some(&workspace_id), &user_id, Some(&project_id))
+            .await
+            .expect("role facts");
+        assert!(facts.ws_admin_or_member, "member passes");
+        assert!(!facts.ws_admin, "workspace member is not admin");
+        assert!(facts.project_member);
+        assert!(facts.project_admin_or_member);
+        assert!(facts.project_admin, "project admin passes");
+        assert!(project_class_allows(&facts));
+        assert!(project_admin_decorator_allows(&facts));
+        // No project: the project gates stay closed.
+        let bare = role_facts(&pool, Some(&workspace_id), &user_id, None)
+            .await
+            .expect("role facts");
+        assert!(bare.ws_admin_or_member);
+        assert!(!bare.project_member);
+        assert!(!bare.project_admin);
+        // Unknown workspace: every gate denies.
+        let denied = role_facts(&pool, None, &user_id, None)
+            .await
+            .expect("role facts");
+        assert_eq!(denied, RoleFacts::default());
     }
 }

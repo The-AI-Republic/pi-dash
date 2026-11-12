@@ -429,13 +429,14 @@ impl AgentBridge {
                 let engine_settings = mode
                     .map(crate::approval::engine_thread_settings)
                     .unwrap_or_default();
-                let b = crate::codex::bridge::Bridge::spawn_with_env(
+                let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
                     runner.codex.effort_default.clone(),
                     engine_settings,
                     &agent_env_for_config(runner),
+                    resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))
@@ -447,7 +448,7 @@ impl AgentBridge {
                 let engine_settings = mode
                     .map(crate::approval::engine_thread_settings)
                     .unwrap_or_default();
-                let b = crate::codex::bridge::Bridge::spawn_with_env(
+                let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
                     &prepared.codex.binary,
                     cwd,
                     // The model is the profile's (CODEX_HOME/config.toml); a
@@ -456,6 +457,7 @@ impl AgentBridge {
                     None,
                     engine_settings,
                     &agent_env_for_config(&prepared),
+                    resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))

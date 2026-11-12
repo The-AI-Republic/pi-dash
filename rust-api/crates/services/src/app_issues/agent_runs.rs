@@ -39,6 +39,8 @@ struct RunRow {
     assigned_at: Option<Moment>,
     started_at: Option<Moment>,
     ended_at: Option<Moment>,
+    cancel_requested_at: Option<Moment>,
+    cancel_reason: String,
     done_payload: Option<Value>,
     error_message: Option<Value>,
     error_code: Option<Value>,
@@ -77,6 +79,8 @@ pub struct RenderedAgentRun {
     pub assigned_at: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    pub cancel_requested_at: Option<String>,
+    pub cancel_reason: String,
     pub done_payload: Option<Value>,
     pub error: String,
     pub error_code: String,
@@ -118,6 +122,8 @@ impl RenderedAgentRun {
             assigned_at: self.assigned_at.as_deref(),
             started_at: self.started_at.as_deref(),
             ended_at: self.ended_at.as_deref(),
+            cancel_requested_at: self.cancel_requested_at.as_deref(),
+            cancel_reason: &self.cancel_reason,
             done_payload: self.done_payload.as_ref(),
             error: &self.error,
             error_code: &self.error_code,
@@ -144,12 +150,16 @@ impl RenderedAgentRun {
     }
 }
 
-/// The issue's newest run, its newest active run, and its run count.
+/// The issue's newest run, its newest active run, its run count and the
+/// cumulative token total over every run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueAgentRuns {
     pub latest: Option<RenderedAgentRun>,
     pub active: Option<RenderedAgentRun>,
     pub count: i64,
+    /// `runs.aggregate(total=Sum("total_tokens"))["total"] or 0`
+    /// (`issue.py:1415-1421`, PDASHOSS01-189).
+    pub total_tokens: i64,
 }
 
 /// Latest run, active run and count for one issue, over the request's pool
@@ -167,9 +177,11 @@ pub async fn issue_agent_runs(
             latest: None,
             active: None,
             count: 0,
+            total_tokens: 0,
         });
     };
     let count = run_count(&db, issue_id).await?;
+    let total_tokens = run_total_tokens(&db, issue_id).await?;
     let active = if ACTIVE_RUN_STATUSES.contains(&latest.status.as_str()) {
         Some(latest.clone())
     } else {
@@ -179,7 +191,37 @@ pub async fn issue_agent_runs(
         latest: Some(latest),
         active,
         count,
+        total_tokens,
     })
+}
+
+/// `runs.aggregate(total=Sum("total_tokens"))["total"] or 0`
+/// (`issue.py:1415-1421`): cumulative tokens over every run of the issue.
+/// `total_tokens` is the generated column over `usage`; `SUM` skips the
+/// NULLs a run that never reported usage leaves, and an issue with none
+/// reads 0.
+async fn run_total_tokens(db: &DatabaseConnection, issue_id: Uuid) -> Result<i64, DbErr> {
+    let total: Option<Option<i64>> = total_tokens_query(issue_id)
+        .into_tuple()
+        .one(db)
+        .await
+        .inspect_err(|error| tracing::error!(%error, %issue_id, "agent run token total failed"))?;
+    Ok(total.flatten().unwrap_or(0))
+}
+
+/// `SELECT CAST(SUM("agent_run"."total_tokens") AS bigint) AS "total" ...
+/// WHERE work_item_id = $1`. `SUM(bigint)` is `numeric`; the cast lets it
+/// decode as `i64` (Django's `Sum` over an integer field renders an int).
+fn total_tokens_query(issue_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column_as(
+            agent_run::Column::TotalTokens
+                .sum()
+                .cast_as(sea_orm::sea_query::Alias::new("bigint")),
+            "total",
+        )
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
 }
 
 /// `runs.count()` (`issue.py:1412`): every run of the issue, any status.
@@ -229,6 +271,8 @@ fn run_query(issue_id: Uuid, active_only: bool) -> Select<agent_run::Entity> {
             agent_run::Column::AssignedAt,
             agent_run::Column::StartedAt,
             agent_run::Column::EndedAt,
+            agent_run::Column::CancelRequestedAt,
+            agent_run::Column::CancelReason,
             agent_run::Column::DonePayload,
             agent_run::Column::LlmModel,
             agent_run::Column::InputTokens,
@@ -314,6 +358,8 @@ fn render(row: RunRow) -> RenderedAgentRun {
         assigned_at: iso(row.assigned_at),
         started_at: iso(row.started_at),
         ended_at: iso(row.ended_at),
+        cancel_requested_at: iso(row.cancel_requested_at),
+        cancel_reason: row.cancel_reason,
         done_payload: row.done_payload,
         error: details_text(row.error_message.as_ref()),
         error_code: details_text(row.error_code.as_ref()),
@@ -401,7 +447,7 @@ mod tests {
     fn run_query_has_one_name_per_output_column() {
         for active_only in [false, true] {
             let mut names = unique_output_names(&built(active_only));
-            assert_eq!(names.len(), 30, "{names:?}");
+            assert_eq!(names.len(), 32, "{names:?}");
             names.sort();
             let total = names.len();
             names.dedup();
@@ -494,12 +540,12 @@ mod tests {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
-             name, host_label, provisioning, visibility, refresh_token_hash, \
+             name, host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
              refresh_token_fingerprint, refresh_token_generation, \
              previous_refresh_token_hash, access_token_signing_key_version, \
              enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
              os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
-             VALUES ($1, now(), now(), $2, $3, $4, 'macmini-7', '', 'desktop_bundled', 0, '', \
+             VALUES ($1, now(), now(), $2, $3, $4, 'macmini-7', '', 'desktop_bundled', 'pinned_only', 0, '', \
              '', 0, '', 1, '', '', '[]', 'online', '', '', '', '{}', 1, '')",
         )
         .bind(id)

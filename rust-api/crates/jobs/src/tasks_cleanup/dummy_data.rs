@@ -33,6 +33,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate};
+use pidash_db::entity::{
+    cycle_issues, cycles, intake_issues, intakes, issue_activities, issue_labels, issue_sequences,
+    issues, labels, module_issues, modules, page_labels, pages, project_members, project_pages,
+    project_user_properties, projects, states, users, workspaces,
+};
 use pidash_db::RequestContext;
 use pidash_services::app_project::ser_project::next_work_item_sequence;
 use pidash_services::tasks_cleanup::dummy_data as plan;
@@ -40,6 +45,8 @@ use pidash_types::{UserId, WorkspaceId};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 use serde_json::Map;
 
 use crate::queue::JobRow;
@@ -198,17 +205,25 @@ fn db_error(error: sqlx::Error) -> String {
     error.to_string()
 }
 
-/// `get_default_agent_executor` (`core/agent_execution.py:26`):
-/// `DEFAULT_AGENT_EXECUTOR` when it names a known executor,
-/// `local_runner` otherwise.
+fn sea_err(error: sea_orm::DbErr) -> String {
+    error.to_string()
+}
+
+fn do_nothing() -> OnConflict {
+    OnConflict::new().do_nothing().to_owned()
+}
+
+/// The task carries ids as `uuid::text` strings (its own statements cast
+/// them back); the domain writers take `Uuid`.
+fn parse_uuid(id: &str) -> DbResult<uuid::Uuid> {
+    uuid::Uuid::parse_str(id).map_err(|error| error.to_string())
+}
+
+/// `get_default_agent_executor` (`core/agent_execution.py:48-55`, #2903):
+/// always `local_runner`; the setting is ignored (reported by the
+/// `managed.W001` system check, not refused).
 fn default_agent_executor() -> String {
-    let candidate =
-        std::env::var("DEFAULT_AGENT_EXECUTOR").unwrap_or_else(|_| "local_runner".to_owned());
-    if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
-        candidate
-    } else {
-        "local_runner".to_owned()
-    }
+    "local_runner".to_owned()
 }
 
 /// Postgres executor for the dummy-data task.
@@ -219,6 +234,10 @@ pub struct PgDummyData {
 impl PgDummyData {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
+    }
+
+    fn db(&self) -> sea_orm::DatabaseConnection {
+        pidash_db::pool::sea_orm_connection(&self.pool)
     }
 
     /// The fifteen steps of `create_dummy_data` (`:488-553`) with one
@@ -307,21 +326,28 @@ impl PgDummyData {
     /// `Workspace.objects.get(slug=...)` + `User.objects.get(email=...)`
     /// (`:499-502`); missing rows raise, as `get()` does.
     async fn resolve_workspace_user(&self, slug: &str, email: &str) -> DbResult<(String, String)> {
-        let workspace_id: Option<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#,
-        )
-        .bind(slug)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let user_id: Option<String> =
-            sqlx::query_scalar(r#"SELECT id::text FROM users WHERE email = $1"#)
-                .bind(email)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db_error)?;
+        let db = self.db();
+        let workspace_id: Option<uuid::Uuid> = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([workspaces::Column::Id])
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(sea_err)?;
+        let user_id: Option<uuid::Uuid> = users::Entity::find()
+            .filter(users::Column::Email.eq(email.to_owned()))
+            .select_only()
+            .columns([users::Column::Id])
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(sea_err)?;
         match (workspace_id, user_id) {
-            (Some(workspace_id), Some(user_id)) => Ok((workspace_id, user_id)),
+            (Some(workspace_id), Some(user_id)) => {
+                Ok((workspace_id.to_string(), user_id.to_string()))
+            }
             (None, _) => Err(NO_WORKSPACE.to_owned()),
             (_, None) => Err(NO_USER.to_owned()),
         }
@@ -361,27 +387,35 @@ impl PgDummyData {
         // workspace's (the task never passes one), and the first
         // live project in the workspace becomes the default (the
         // demote-others update then matches zero rows).
-        let timezone: String =
-            sqlx::query_scalar(r#"SELECT timezone FROM workspaces WHERE id = $1::uuid"#)
-                .bind(workspace_id)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(db_error)?;
-        let has_default: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM projects
-                WHERE workspace_id = $1::uuid AND is_default AND deleted_at IS NULL)"#,
-        )
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
+        let timezone: String = workspaces::Entity::find_by_id(workspace_uuid)
+            .select_only()
+            .columns([workspaces::Column::Timezone])
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(sea_err)?
+            .ok_or_else(|| NO_WORKSPACE.to_owned())?;
+        let has_default: bool = projects::Entity::find()
+            .filter(projects::Column::WorkspaceId.eq(workspace_uuid))
+            .filter(projects::Column::IsDefault.eq(true))
+            .filter(projects::Column::DeletedAt.is_null())
+            .select_only()
+            .column(projects::Column::Id)
+            .limit(1)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(sea_err)?
+            .is_some();
         use pidash_services::domain::projects::{insert_demo_project, DemoProject};
         let now = chrono::Utc::now();
         let default_executor = default_agent_executor();
-        let project_id = insert_demo_project(
-            &self.pool,
+        let project_uuid = insert_demo_project(
+            &db,
             &DemoProject {
-                workspace_id,
+                workspace_id: workspace_uuid,
                 name: &full_name,
                 identifier: &identifier,
                 is_default: !has_default,
@@ -392,75 +426,71 @@ impl PgDummyData {
         )
         .await
         .map_err(db_error)?;
+        let project_id = project_uuid.to_string();
         // `create_default_pod_for_new_project` (`runner/signals.py:31-66`):
         // the `post_save` handler fires during `Project.objects.create`,
         // before the member rows below. Best-effort + idempotent — never
         // fails the task. Lead/assignee are `None` on this path (the task
         // passes neither), so `created_by` stamps `NULL`, like Django.
-        if let (Ok(project_uuid), Ok(workspace_uuid)) = (
-            uuid::Uuid::parse_str(&project_id),
-            uuid::Uuid::parse_str(workspace_id),
-        ) {
-            pidash_services::runner_runs::signals::create_default_pod_for_new_project(
-                &self.pool,
-                &pidash_services::runner_runs::signals::NewProject {
-                    id: project_uuid,
-                    workspace_id: workspace_uuid,
-                    identifier: identifier.clone(),
-                    created: true,
-                    project_lead: None,
-                    default_assignee: None,
-                },
-            )
-            .await;
-        }
+        pidash_services::runner_runs::signals::create_default_pod_for_new_project(
+            &self.pool,
+            &pidash_services::runner_runs::signals::NewProject {
+                id: project_uuid,
+                workspace_id: workspace_uuid,
+                identifier: identifier.clone(),
+                created: true,
+                project_lead: None,
+                default_assignee: None,
+            },
+        )
+        .await;
         // `ProjectMember.objects.create` runs the `save()` hook: the
         // property row persists BEFORE the member row, and `save()`
         // nulls the audit user on both.
         let member_props = pidash_db::ops::users::project_member_props_json();
         let member_prefs = pidash_db::ops::users::project_preferences_json();
-        let min_sort: Option<f64> = sqlx::query_scalar(
-            r#"SELECT MIN(sort_order) FROM project_user_properties
-                WHERE workspace_id = $1::uuid AND user_id = $2::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(workspace_id)
-        .bind(user_id)
-        .fetch_optional(&self.pool)
+        let user_uuid = parse_uuid(user_id)?;
+        let min_sort: Option<f64> = project_user_properties::Entity::find()
+            .filter(project_user_properties::Column::WorkspaceId.eq(workspace_uuid))
+            .filter(project_user_properties::Column::UserId.eq(user_uuid))
+            .filter(project_user_properties::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(
+                Expr::col(project_user_properties::Column::SortOrder).min(),
+                "min_sort",
+            )
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(sea_err)?
+            .flatten();
+        project_user_properties::Entity::insert(project_user_properties::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            workspace_id: Set(workspace_uuid),
+            project_id: Set(project_uuid),
+            user_id: Set(user_uuid),
+            filters: Set(pidash_db::ops::users::property_filters_json()),
+            display_filters: Set(pidash_db::ops::users::property_display_filters_json()),
+            display_properties: Set(pidash_db::ops::users::property_display_properties_json()),
+            rich_filters: Set(serde_json::json!({})),
+            preferences: Set(member_prefs.clone()),
+            sort_order: Set(min_sort.map(|min| min - 10000.0).unwrap_or(65535.0)),
+            deleted_at: Set(None),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(db_error)?
-        .flatten();
-        sqlx::query(
-            r#"INSERT INTO project_user_properties
-                (id, created_at, updated_at, workspace_id, project_id, user_id,
-                 filters, display_filters, display_properties, rich_filters, preferences, sort_order)
-                VALUES ($1::uuid, $2, $2, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, '{}', $9, $10)"#,
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(&project_id)
-        .bind(user_id)
-        .bind(sqlx::types::Json(
-            pidash_db::ops::users::property_filters_json(),
-        ))
-        .bind(sqlx::types::Json(
-            pidash_db::ops::users::property_display_filters_json(),
-        ))
-        .bind(sqlx::types::Json(
-            pidash_db::ops::users::property_display_properties_json(),
-        ))
-        .bind(sqlx::types::Json(&member_prefs))
-        .bind(min_sort.map(|min| min - 10000.0).unwrap_or(65535.0))
-        .execute(&self.pool)
-        .await
-        .map_err(db_error)?;
+        .map_err(sea_err)?;
         use pidash_services::domain::projects::members::{add_demo, DemoProjectMember};
         add_demo(
-            &self.pool,
+            &db,
             &DemoProjectMember {
-                project_id: &project_id,
-                workspace_id,
-                member_id: user_id,
+                project_id: project_uuid,
+                workspace_id: workspace_uuid,
+                member_id: user_uuid,
                 role: plan::PROJECT_MEMBER_ROLE,
                 sort_order: 65535.0,
                 view_props: &member_props,
@@ -484,24 +514,29 @@ impl PgDummyData {
         members: &[String],
         rng: &mut StdRng,
     ) -> DbResult<()> {
-        let user_ids: Vec<String> =
-            sqlx::query_scalar(r#"SELECT id::text FROM users WHERE email = ANY($1)"#)
-                .bind(members.to_vec())
-                .fetch_all(&self.pool)
-                .await
-                .map_err(db_error)?;
+        let db = self.db();
+        let user_ids: Vec<uuid::Uuid> = users::Entity::find()
+            .filter(users::Column::Email.is_in(members.to_vec()))
+            .select_only()
+            .columns([users::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
         let now = chrono::Utc::now();
         let member_props = pidash_db::ops::users::project_member_props_json();
         let member_prefs = pidash_db::ops::users::project_preferences_json();
         use pidash_services::domain::projects::members::{add_demo, DemoProjectMember};
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
         for member_id in &user_ids {
             let sort_order = f64::from(randint(rng, 0, 65535));
             add_demo(
-                &self.pool,
+                &db,
                 &DemoProjectMember {
-                    project_id,
-                    workspace_id,
-                    member_id,
+                    project_id: project_uuid,
+                    workspace_id: workspace_uuid,
+                    member_id: *member_id,
                     role: plan::PROJECT_MEMBER_ROLE,
                     sort_order,
                     view_props: &member_props,
@@ -526,13 +561,17 @@ impl PgDummyData {
     ) -> DbResult<()> {
         use pidash_services::domain::projects::states::{add_demo, DemoState};
         let now = chrono::Utc::now();
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let created_by = parse_uuid(user_id)?;
+        let db = self.db();
         for state in plan::DEFAULT_STATES {
             add_demo(
-                &self.pool,
+                &db,
                 &DemoState {
-                    project_id,
-                    workspace_id,
-                    created_by: user_id,
+                    project_id: project_uuid,
+                    workspace_id: workspace_uuid,
+                    created_by,
                     name: state.name,
                     color: state.color,
                     sequence: state.sequence,
@@ -558,26 +597,36 @@ impl PgDummyData {
     ) -> DbResult<()> {
         let mut fake = seeded_fake();
         let now = chrono::Utc::now();
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let user_uuid = parse_uuid(user_id)?;
+        let db = self.db();
         for _ in 0..plan::LABEL_ROWS {
+            // Draw order (sort, name, color) matches the old bind order.
             let sort_order = f64::from(randint(rng, 0, 65535));
-            sqlx::query(
-                r#"INSERT INTO labels
-                    (id, name, color, project_id, workspace_id, created_by_id, sort_order, created_at, updated_at,
-                     description)
-                    VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, $7, $8, $8, '')
-                    ON CONFLICT DO NOTHING"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(fake_color_name(&mut fake))
-            .bind(fake_hex_color(&mut fake))
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(user_id)
-            .bind(sort_order)
-            .bind(now)
-            .execute(&self.pool)
+            let name = fake_color_name(&mut fake);
+            let color = fake_hex_color(&mut fake);
+            labels::Entity::insert(labels::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                name: Set(name),
+                color: Set(color),
+                project_id: Set(Some(project_uuid)),
+                workspace_id: Set(workspace_uuid),
+                created_by_id: Set(Some(user_uuid)),
+                sort_order: Set(sort_order),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                description: Set(String::new()),
+                deleted_at: Set(None),
+                updated_by_id: Set(None),
+                parent_id: Set(None),
+                external_id: Set(None),
+                external_source: Set(None),
+            })
+            .on_conflict(do_nothing())
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         }
         Ok(())
     }
@@ -619,27 +668,39 @@ impl PgDummyData {
             ));
         }
         let now = chrono::Utc::now();
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let user_uuid = parse_uuid(user_id)?;
+        let db = self.db();
         for (name, start, end, sort_order) in &rows {
-            sqlx::query(
-                r#"INSERT INTO cycles
-                    (id, name, owned_by_id, sort_order, start_date, end_date, project_id, workspace_id, created_at, updated_at,
-                     description, view_props, progress_snapshot, logo_props, timezone, version)
-                    VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9, $9,
-                     '', '{}', '{}', '{}', 'UTC', 1)
-                    ON CONFLICT DO NOTHING"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(name)
-            .bind(user_id)
-            .bind(*sort_order)
-            .bind(start.map(midnight))
-            .bind(end.map(midnight))
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(now)
-            .execute(&self.pool)
+            cycles::Entity::insert(cycles::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                name: Set(name.clone()),
+                owned_by_id: Set(user_uuid),
+                sort_order: Set(*sort_order),
+                start_date: Set(start.map(|day| midnight(day).into())),
+                end_date: Set(end.map(|day| midnight(day).into())),
+                project_id: Set(project_uuid),
+                workspace_id: Set(workspace_uuid),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                description: Set(String::new()),
+                view_props: Set(serde_json::json!({})),
+                progress_snapshot: Set(serde_json::json!({})),
+                logo_props: Set(serde_json::json!({})),
+                timezone: Set("UTC".to_owned()),
+                version: Set(1),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                external_id: Set(None),
+                external_source: Set(None),
+                archived_at: Set(None),
+                deleted_at: Set(None),
+            })
+            .on_conflict(do_nothing())
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         }
         Ok(())
     }
@@ -656,6 +717,9 @@ impl PgDummyData {
         let mut fake = seeded_fake();
         let today = chrono::Utc::now().date_naive();
         let now = chrono::Utc::now();
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
         for _ in 0..plan::module_row_count(module_count) {
             let start = if randint(rng, 0, 1) == 0 {
                 None
@@ -663,25 +727,37 @@ impl PgDummyData {
                 Some(fake_date_this_year(&mut fake, today))
             };
             let end = start.map(|day| fake_date_between(&mut fake, day, year_end(today)));
-            sqlx::query(
-                r#"INSERT INTO modules
-                    (id, name, sort_order, start_date, target_date, project_id, workspace_id, created_at, updated_at,
-                     description, status, view_props, logo_props)
-                    VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7::uuid, $8, $8,
-                     '', 'planned', '{}', '{}')
-                    ON CONFLICT DO NOTHING"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(fake_name(&mut fake))
-            .bind(f64::from(randint(rng, 0, 65535)))
-            .bind(start)
-            .bind(end)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(now)
-            .execute(&self.pool)
+            // Draw order (name, sort) matches the old bind order.
+            let name = fake_name(&mut fake);
+            let sort_order = f64::from(randint(rng, 0, 65535));
+            modules::Entity::insert(modules::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                name: Set(name),
+                sort_order: Set(sort_order),
+                start_date: Set(start),
+                target_date: Set(end),
+                project_id: Set(project_uuid),
+                workspace_id: Set(workspace_uuid),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                description: Set(String::new()),
+                status: Set("planned".to_owned()),
+                view_props: Set(serde_json::json!({})),
+                logo_props: Set(serde_json::json!({})),
+                description_text: Set(None),
+                description_html: Set(None),
+                created_by_id: Set(None),
+                lead_id: Set(None),
+                updated_by_id: Set(None),
+                external_id: Set(None),
+                external_source: Set(None),
+                archived_at: Set(None),
+                deleted_at: Set(None),
+            })
+            .on_conflict(do_nothing())
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         }
         Ok(())
     }
@@ -699,41 +775,63 @@ impl PgDummyData {
     ) -> DbResult<()> {
         let mut fake = seeded_fake();
         let now = chrono::Utc::now();
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let user_uuid = parse_uuid(user_id)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let db = self.db();
         for _ in 0..plan::page_row_count(pages_count) {
             let text = fake_text(&mut fake, 60000);
-            let page_id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
-                r#"INSERT INTO pages
-                    (id, name, workspace_id, owned_by_id, access, color, description_html, is_locked, created_at, updated_at,
-                     description_json, view_props, logo_props, is_global, sort_order)
-                    VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, FALSE, $8, $8,
-                     '{}', '{"full_width": false}', '{}', FALSE, 65535)
-                    ON CONFLICT DO NOTHING"#,
-            )
-            .bind(&page_id)
-            .bind(fake_name(&mut fake))
-            .bind(workspace_id)
-            .bind(user_id)
-            .bind(randint(rng, 0, 1) as i16)
-            .bind(fake_hex_color(&mut fake))
-            .bind(format!("<p>{text}</p>"))
-            .bind(now)
-            .execute(&self.pool)
+            let page_uuid = uuid::Uuid::new_v4();
+            // Draw order (name, access, color) matches the old bind order.
+            let name = fake_name(&mut fake);
+            let access = randint(rng, 0, 1) as i16;
+            let color = fake_hex_color(&mut fake);
+            pages::Entity::insert(pages::ActiveModel {
+                id: Set(page_uuid),
+                name: Set(name),
+                workspace_id: Set(workspace_uuid),
+                owned_by_id: Set(user_uuid),
+                access: Set(access),
+                color: Set(color),
+                description_html: Set(format!("<p>{text}</p>")),
+                is_locked: Set(false),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                description_json: Set(serde_json::json!({})),
+                view_props: Set(serde_json::json!({"full_width": false})),
+                logo_props: Set(serde_json::json!({})),
+                is_global: Set(false),
+                sort_order: Set(65535.0),
+                description_stripped: Set(None),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                archived_at: Set(None),
+                parent_id: Set(None),
+                description_binary: Set(None),
+                deleted_at: Set(None),
+                moved_to_page: Set(None),
+                moved_to_project: Set(None),
+                external_id: Set(None),
+                external_source: Set(None),
+            })
+            .on_conflict(do_nothing())
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
-            sqlx::query(
-                r#"INSERT INTO project_pages (id, page_id, project_id, workspace_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6)"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(&page_id)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(now)
-            .bind(now)
-            .execute(&self.pool)
+            .map_err(sea_err)?;
+            project_pages::Entity::insert(project_pages::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                page_id: Set(page_uuid),
+                project_id: Set(project_uuid),
+                workspace_id: Set(workspace_uuid),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+            })
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         }
         Ok(())
     }
@@ -748,42 +846,65 @@ impl PgDummyData {
         pages_count: i64,
         rng: &mut StdRng,
     ) -> DbResult<()> {
-        let label_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM labels WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let page_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT p.id::text FROM pages p
-                JOIN project_pages pp ON pp.page_id = p.id AND pp.project_id = $1::uuid
-                WHERE p.deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
+        let label_ids: Vec<uuid::Uuid> = labels::Entity::find()
+            .filter(labels::Column::ProjectId.eq(project_uuid))
+            .filter(labels::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([labels::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
+        // The pages-for-project JOIN as two steps (no relation edge
+        // guaranteed): linked rows preserve duplicate links exactly.
+        let linked: Vec<uuid::Uuid> = project_pages::Entity::find()
+            .filter(project_pages::Column::ProjectId.eq(project_uuid))
+            .select_only()
+            .columns([project_pages::Column::PageId])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
+        let live: HashSet<uuid::Uuid> = if linked.is_empty() {
+            HashSet::new()
+        } else {
+            pages::Entity::find()
+                .filter(pages::Column::Id.is_in(linked.clone()))
+                .filter(pages::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([pages::Column::Id])
+                .into_tuple()
+                .all(&db)
+                .await
+                .map_err(sea_err)?
+                .into_iter()
+                .collect()
+        };
+        let page_ids: Vec<uuid::Uuid> = linked.into_iter().filter(|id| live.contains(id)).collect();
         let take = plan::half_sample_size(pages_count)?;
         let max_draw = plan::per_row_draw_max(label_ids.len())?;
         let now = chrono::Utc::now();
         for position in sample_positions(rng, page_ids.len(), take)? {
             let draw = randint(rng, 0, max_draw as u32) as usize;
             for label_position in sample_positions(rng, label_ids.len(), draw)? {
-                sqlx::query(
-                    r#"INSERT INTO page_labels (id, page_id, label_id, workspace_id, created_at, updated_at)
-                        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6)
-                        ON CONFLICT DO NOTHING"#,
-                )
-                .bind(uuid::Uuid::new_v4().to_string())
-                .bind(&page_ids[position])
-                .bind(&label_ids[label_position])
-                .bind(workspace_id)
-                .bind(now)
-                .bind(now)
-                .execute(&self.pool)
+                page_labels::Entity::insert(page_labels::ActiveModel {
+                    id: Set(uuid::Uuid::new_v4()),
+                    page_id: Set(page_ids[position]),
+                    label_id: Set(label_ids[label_position]),
+                    workspace_id: Set(workspace_uuid),
+                    created_at: Set(now.into()),
+                    updated_at: Set(now.into()),
+                    created_by_id: Set(None),
+                    updated_by_id: Set(None),
+                    deleted_at: Set(None),
+                })
+                .on_conflict(do_nothing())
+                .exec_without_returning(&db)
                 .await
-                .map_err(db_error)?;
+                .map_err(sea_err)?;
             }
         }
         Ok(())
@@ -803,46 +924,58 @@ impl PgDummyData {
     ) -> DbResult<Vec<String>> {
         let mut fake = seeded_fake();
         let today = chrono::Utc::now().date_naive();
-        let state_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM states
-                WHERE workspace_id = $1::uuid AND project_id = $2::uuid
-                AND "group" != $3 AND deleted_at IS NULL"#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(plan::TRIAGE_GROUP)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let creator_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT member_id::text FROM project_members
-                WHERE workspace_id = $1::uuid AND project_id = $2::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let user_uuid = parse_uuid(user_id)?;
+        let db = self.db();
+        let state_ids: Vec<uuid::Uuid> = states::Entity::find()
+            .filter(states::Column::WorkspaceId.eq(workspace_uuid))
+            .filter(states::Column::ProjectId.eq(project_uuid))
+            .filter(states::Column::Group.ne(plan::TRIAGE_GROUP.to_owned()))
+            .filter(states::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([states::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
+        let creator_ids: Vec<uuid::Uuid> = project_members::Entity::find()
+            .filter(project_members::Column::WorkspaceId.eq(workspace_uuid))
+            .filter(project_members::Column::ProjectId.eq(project_uuid))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([project_members::Column::MemberId])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
         if state_ids.is_empty() || creator_ids.is_empty() {
             return Err("randint(0, -1) on an empty state or creator pool".to_owned());
         }
-        let max_sequence: Option<i64> = sqlx::query_scalar(
-            r#"SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1::uuid"#,
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let max_sequence: Option<i64> = issue_sequences::Entity::find()
+            .filter(issue_sequences::Column::ProjectId.eq(project_uuid))
+            .select_only()
+            .column_as(
+                Expr::col(issue_sequences::Column::Sequence).max(),
+                "max_sequence",
+            )
+            .into_tuple::<Option<i64>>()
+            .one(&db)
+            .await
+            .map_err(sea_err)?
+            .flatten();
         let mut last_id = next_work_item_sequence(max_sequence);
-        let probe_state = &state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
-        let max_sort: Option<f64> = sqlx::query_scalar(
-            r#"SELECT MAX(sort_order) FROM issues WHERE project_id = $1::uuid AND state_id = $2::uuid"#,
-        )
-        .bind(project_id)
-        .bind(probe_state)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let probe_state = state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
+        let max_sort: Option<f64> = issues::Entity::find()
+            .filter(issues::Column::ProjectId.eq(project_uuid))
+            .filter(issues::Column::StateId.eq(probe_state))
+            .select_only()
+            .column_as(Expr::col(issues::Column::SortOrder).max(), "max_sort")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(sea_err)?
+            .flatten();
         use pidash_services::domain::issues::{
             insert_demo_issue, insert_demo_issue_sequence, DemoIssue, DemoIssueSequence,
         };
@@ -860,16 +993,18 @@ impl PgDummyData {
             let description_html = format!("<p>{text}</p>");
             // Draw order (state, priority, creator) matches the old
             // bind order.
-            let state_id = &state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
+            let state_id = state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
             let priority = plan::PRIORITIES[randint(rng, 0, 4) as usize];
-            let creator_id = &creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize];
+            let creator_id = creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize];
+            let state_str = state_id.to_string();
+            let creator_str = creator_id.to_string();
             let issue_id = insert_demo_issue(
-                &pidash_db::pool::sea_orm_connection(&self.pool),
+                &db,
                 &DemoIssue {
-                    state_id,
+                    state_id: &state_str,
                     project_id,
                     workspace_id,
-                    created_by: creator_id,
+                    created_by: &creator_str,
                     name: plan::truncate_code_points(&text, 254),
                     description_html: &description_html,
                     description_stripped: &text,
@@ -884,7 +1019,7 @@ impl PgDummyData {
             .await
             .map_err(db_error)?;
             insert_demo_issue_sequence(
-                &pidash_db::pool::sea_orm_connection(&self.pool),
+                &db,
                 &DemoIssueSequence {
                     issue_id: &issue_id,
                     project_id,
@@ -895,24 +1030,32 @@ impl PgDummyData {
             )
             .await
             .map_err(db_error)?;
-            sqlx::query(
-                r#"INSERT INTO issue_activities
-                    (id, issue_id, actor_id, project_id, workspace_id, comment, verb, created_by_id, created_at, updated_at,
-                     attachments)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::uuid, $9, $9, '{}')"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(&issue_id)
-            .bind(user_id)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(plan::ISSUE_ACTIVITY_COMMENT)
-            .bind(plan::ISSUE_ACTIVITY_VERB)
-            .bind(user_id)
-            .bind(now)
-            .execute(&self.pool)
+            let issue_uuid = parse_uuid(&issue_id)?;
+            issue_activities::Entity::insert(issue_activities::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                issue_id: Set(Some(issue_uuid)),
+                actor_id: Set(Some(user_uuid)),
+                project_id: Set(project_uuid),
+                workspace_id: Set(workspace_uuid),
+                comment: Set(plan::ISSUE_ACTIVITY_COMMENT.to_owned()),
+                verb: Set(plan::ISSUE_ACTIVITY_VERB.to_owned()),
+                created_by_id: Set(Some(user_uuid)),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                attachments: Set(Vec::new()),
+                field: Set(None),
+                old_value: Set(None),
+                new_value: Set(None),
+                issue_comment_id: Set(None),
+                updated_by_id: Set(None),
+                new_identifier: Set(None),
+                old_identifier: Set(None),
+                epoch: Set(None),
+                deleted_at: Set(None),
+            })
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
             sort_order =
                 plan::advance_sort_order(sort_order, randint(rng, 0, plan::SORT_ADVANCE_DRAW_MAX));
             last_id += 1;
@@ -944,34 +1087,44 @@ impl PgDummyData {
                 rng,
             )
             .await?;
-        let intake_id: Option<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM intakes
-                WHERE project_id = $1::uuid AND name = $2 AND is_default AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .bind(plan::INTAKE_NAME)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let intake_id = match intake_id {
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
+        let found: Option<uuid::Uuid> = intakes::Entity::find()
+            .filter(intakes::Column::ProjectId.eq(project_uuid))
+            .filter(intakes::Column::Name.eq(plan::INTAKE_NAME.to_owned()))
+            .filter(intakes::Column::IsDefault.eq(true))
+            .filter(intakes::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([intakes::Column::Id])
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(sea_err)?;
+        let intake_id: uuid::Uuid = match found {
             Some(intake_id) => intake_id,
             None => {
-                let intake_id = uuid::Uuid::new_v4().to_string();
+                let intake_uuid = uuid::Uuid::new_v4();
                 let now = chrono::Utc::now();
-                sqlx::query(
-                    r#"INSERT INTO intakes (id, name, project_id, workspace_id, is_default, created_at, updated_at,
-                         description, view_props, logo_props)
-                        VALUES ($1::uuid, $2, $3::uuid, $4::uuid, TRUE, $5, $5, '', '{}', '{}')"#,
-                )
-                .bind(&intake_id)
-                .bind(plan::INTAKE_NAME)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(now)
-                .execute(&self.pool)
+                intakes::Entity::insert(intakes::ActiveModel {
+                    id: Set(intake_uuid),
+                    name: Set(plan::INTAKE_NAME.to_owned()),
+                    project_id: Set(project_uuid),
+                    workspace_id: Set(workspace_uuid),
+                    is_default: Set(true),
+                    created_at: Set(now.into()),
+                    updated_at: Set(now.into()),
+                    description: Set(String::new()),
+                    view_props: Set(serde_json::json!({})),
+                    logo_props: Set(serde_json::json!({})),
+                    created_by_id: Set(None),
+                    updated_by_id: Set(None),
+                    deleted_at: Set(None),
+                })
+                .exec_without_returning(&db)
                 .await
-                .map_err(db_error)?;
-                intake_id
+                .map_err(sea_err)?;
+                intake_uuid
             }
         };
         let now = chrono::Utc::now();
@@ -982,24 +1135,29 @@ impl PgDummyData {
             } else {
                 None
             };
-            sqlx::query(
-                r#"INSERT INTO intake_issues
-                    (id, issue_id, intake_id, status, snoozed_till, source, workspace_id, project_id, created_at, updated_at,
-                     extra)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid, $9, $9, '{}')"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(issue_id)
-            .bind(&intake_id)
-            .bind(status)
-            .bind(snoozed_till)
-            .bind(plan::SOURCE_IN_APP)
-            .bind(workspace_id)
-            .bind(project_id)
-            .bind(now)
-            .execute(&self.pool)
+            intake_issues::Entity::insert(intake_issues::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                issue_id: Set(parse_uuid(issue_id)?),
+                intake_id: Set(intake_id),
+                status: Set(status),
+                snoozed_till: Set(snoozed_till.map(|t| t.into())),
+                source: Set(Some(plan::SOURCE_IN_APP.to_owned())),
+                workspace_id: Set(workspace_uuid),
+                project_id: Set(project_uuid),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                extra: Set(serde_json::json!({})),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                duplicate_to_id: Set(None),
+                external_id: Set(None),
+                external_source: Set(None),
+                deleted_at: Set(None),
+                source_email: Set(None),
+            })
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         }
         Ok(())
     }
@@ -1014,21 +1172,32 @@ impl PgDummyData {
         issue_count: i64,
         rng: &mut StdRng,
     ) -> DbResult<()> {
-        let assignee_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT member_id::text FROM project_members
-                WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let issue_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM issues WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let db = self.db();
+        let assignee_ids: Vec<String> = project_members::Entity::find()
+            .filter(project_members::Column::ProjectId.eq(project_uuid))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([project_members::Column::MemberId])
+            .into_tuple::<uuid::Uuid>()
+            .all(&db)
+            .await
+            .map_err(sea_err)?
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        let issue_ids: Vec<String> = issues::Entity::find()
+            .filter(issues::Column::ProjectId.eq(project_uuid))
+            .filter(issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([issues::Column::Id])
+            .into_tuple::<uuid::Uuid>()
+            .all(&db)
+            .await
+            .map_err(sea_err)?
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
         use pidash_services::domain::issues::{insert_demo_issue_assignee, DemoIssueAssignee};
         let take = plan::half_sample_size(issue_count)?;
         let max_draw = plan::per_row_draw_max(assignee_ids.len())?;
@@ -1037,7 +1206,7 @@ impl PgDummyData {
             let draw = randint(rng, 0, max_draw as u32) as usize;
             for assignee_position in sample_positions(rng, assignee_ids.len(), draw)? {
                 insert_demo_issue_assignee(
-                    &pidash_db::pool::sea_orm_connection(&self.pool),
+                    &db,
                     &DemoIssueAssignee {
                         issue_id: &issue_ids[position],
                         assignee_id: &assignee_ids[assignee_position],
@@ -1063,42 +1232,49 @@ impl PgDummyData {
         workspace_id: &str,
         rng: &mut StdRng,
     ) -> DbResult<()> {
-        let label_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM labels WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let issue_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM issues WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
+        let label_ids: Vec<uuid::Uuid> = labels::Entity::find()
+            .filter(labels::Column::ProjectId.eq(project_uuid))
+            .filter(labels::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([labels::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
+        let issue_ids: Vec<uuid::Uuid> = issues::Entity::find()
+            .filter(issues::Column::ProjectId.eq(project_uuid))
+            .filter(issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([issues::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
         let now = chrono::Utc::now();
         for issue_id in &issue_ids {
             let mut shuffled = label_ids.clone();
             shuffled.shuffle(rng);
             let draw = randint(rng, 0, plan::MULTI_LINK_DRAW_MAX as u32) as usize;
             for label_id in sample_positions(rng, shuffled.len(), draw)? {
-                sqlx::query(
-                    r#"INSERT INTO issue_labels
-                        (id, issue_id, label_id, project_id, workspace_id, created_at, updated_at)
-                        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7)
-                        ON CONFLICT DO NOTHING"#,
-                )
-                .bind(uuid::Uuid::new_v4().to_string())
-                .bind(issue_id)
-                .bind(&shuffled[label_id])
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(now)
-                .bind(now)
-                .execute(&self.pool)
+                issue_labels::Entity::insert(issue_labels::ActiveModel {
+                    id: Set(uuid::Uuid::new_v4()),
+                    issue_id: Set(*issue_id),
+                    label_id: Set(shuffled[label_id]),
+                    project_id: Set(project_uuid),
+                    workspace_id: Set(workspace_uuid),
+                    created_at: Set(now.into()),
+                    updated_at: Set(now.into()),
+                    created_by_id: Set(None),
+                    updated_by_id: Set(None),
+                    deleted_at: Set(None),
+                })
+                .on_conflict(do_nothing())
+                .exec_without_returning(&db)
                 .await
-                .map_err(db_error)?;
+                .map_err(sea_err)?;
             }
         }
         Ok(())
@@ -1114,43 +1290,50 @@ impl PgDummyData {
         issue_count: i64,
         rng: &mut StdRng,
     ) -> DbResult<()> {
-        let cycle_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM cycles WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
+        let cycle_ids: Vec<uuid::Uuid> = cycles::Entity::find()
+            .filter(cycles::Column::ProjectId.eq(project_uuid))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([cycles::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
         if cycle_ids.is_empty() {
             return Err("randint(0, -1) with no cycles for cycle issues".to_owned());
         }
-        let issue_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM issues WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let issue_ids: Vec<uuid::Uuid> = issues::Entity::find()
+            .filter(issues::Column::ProjectId.eq(project_uuid))
+            .filter(issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([issues::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
         let take = plan::half_sample_size(issue_count)?;
         let now = chrono::Utc::now();
         for position in sample_positions(rng, issue_ids.len(), take)? {
-            let cycle = &cycle_ids[randint(rng, 0, (cycle_ids.len() - 1) as u32) as usize];
-            sqlx::query(
-                r#"INSERT INTO cycle_issues
-                    (id, cycle_id, issue_id, project_id, workspace_id, created_at, updated_at)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7)
-                    ON CONFLICT DO NOTHING"#,
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(cycle)
-            .bind(&issue_ids[position])
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(now)
-            .bind(now)
-            .execute(&self.pool)
+            let cycle = cycle_ids[randint(rng, 0, (cycle_ids.len() - 1) as u32) as usize];
+            cycle_issues::Entity::insert(cycle_issues::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                cycle_id: Set(cycle),
+                issue_id: Set(issue_ids[position]),
+                project_id: Set(project_uuid),
+                workspace_id: Set(workspace_uuid),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+            })
+            .on_conflict(do_nothing())
+            .exec_without_returning(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         }
         Ok(())
     }
@@ -1164,42 +1347,49 @@ impl PgDummyData {
         workspace_id: &str,
         rng: &mut StdRng,
     ) -> DbResult<()> {
-        let module_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM modules WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let issue_ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id::text FROM issues WHERE project_id = $1::uuid AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let db = self.db();
+        let module_ids: Vec<uuid::Uuid> = modules::Entity::find()
+            .filter(modules::Column::ProjectId.eq(project_uuid))
+            .filter(modules::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([modules::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
+        let issue_ids: Vec<uuid::Uuid> = issues::Entity::find()
+            .filter(issues::Column::ProjectId.eq(project_uuid))
+            .filter(issues::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([issues::Column::Id])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(sea_err)?;
         let now = chrono::Utc::now();
         for issue_id in &issue_ids {
             let mut shuffled = module_ids.clone();
             shuffled.shuffle(rng);
             let draw = randint(rng, 0, plan::MULTI_LINK_DRAW_MAX as u32) as usize;
             for module_position in sample_positions(rng, shuffled.len(), draw)? {
-                sqlx::query(
-                    r#"INSERT INTO module_issues
-                        (id, module_id, issue_id, project_id, workspace_id, created_at, updated_at)
-                        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7)
-                        ON CONFLICT DO NOTHING"#,
-                )
-                .bind(uuid::Uuid::new_v4().to_string())
-                .bind(&shuffled[module_position])
-                .bind(issue_id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(now)
-                .bind(now)
-                .execute(&self.pool)
+                module_issues::Entity::insert(module_issues::ActiveModel {
+                    id: Set(uuid::Uuid::new_v4()),
+                    module_id: Set(shuffled[module_position]),
+                    issue_id: Set(*issue_id),
+                    project_id: Set(project_uuid),
+                    workspace_id: Set(workspace_uuid),
+                    created_at: Set(now.into()),
+                    updated_at: Set(now.into()),
+                    created_by_id: Set(None),
+                    updated_by_id: Set(None),
+                    deleted_at: Set(None),
+                })
+                .on_conflict(do_nothing())
+                .exec_without_returning(&db)
                 .await
-                .map_err(db_error)?;
+                .map_err(sea_err)?;
             }
         }
         Ok(())
@@ -1233,11 +1423,13 @@ mod tests {
 
     #[test]
     fn default_executor_follows_validated_env() {
+        // #2903: DEFAULT_AGENT_EXECUTOR is ignored; the default is
+        // always local_runner.
         let saved = std::env::var("DEFAULT_AGENT_EXECUTOR").ok();
         std::env::remove_var("DEFAULT_AGENT_EXECUTOR");
         assert_eq!(default_agent_executor(), "local_runner");
         std::env::set_var("DEFAULT_AGENT_EXECUTOR", "cloud_agent");
-        assert_eq!(default_agent_executor(), "cloud_agent");
+        assert_eq!(default_agent_executor(), "local_runner");
         std::env::set_var("DEFAULT_AGENT_EXECUTOR", "bogus");
         assert_eq!(default_agent_executor(), "local_runner");
         match saved {
@@ -1288,6 +1480,74 @@ mod tests {
             sqlx::PgPool::connect_lazy("postgres://localhost:5432/postgres").expect("lazy pool");
         register(&mut registry, pool);
         assert!(registry.owns(TASK_NAME));
+    }
+
+    #[test]
+    fn seaorm_states_filter_excludes_triage() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let ws = uuid::Uuid::from_u128(1);
+        let proj = uuid::Uuid::from_u128(2);
+        let sql = states::Entity::find()
+            .filter(states::Column::WorkspaceId.eq(ws))
+            .filter(states::Column::ProjectId.eq(proj))
+            .filter(states::Column::Group.ne("triage".to_owned()))
+            .filter(states::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([states::Column::Id])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("\"group\" <>"), "triage excluded: {sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(!sql.contains("MAX("), "id list, not aggregate: {sql}");
+    }
+
+    #[test]
+    fn seaorm_max_sequence_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let proj = uuid::Uuid::from_u128(3);
+        let sql = issue_sequences::Entity::find()
+            .filter(issue_sequences::Column::ProjectId.eq(proj))
+            .select_only()
+            .column_as(
+                Expr::col(issue_sequences::Column::Sequence).max(),
+                "max_sequence",
+            )
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("MAX(\"sequence\")"), "{sql}");
+        assert!(sql.contains("max_sequence"), "single aliased output: {sql}");
+    }
+
+    #[test]
+    fn seaorm_label_insert_has_on_conflict() {
+        use sea_orm::{DbBackend, EntityTrait, QueryTrait};
+        let now = chrono::Utc::now();
+        let id = uuid::Uuid::from_u128(1);
+        let ws = uuid::Uuid::from_u128(2);
+        let proj = uuid::Uuid::from_u128(3);
+        let user = uuid::Uuid::from_u128(4);
+        let stmt = labels::Entity::insert(labels::ActiveModel {
+            id: Set(id),
+            name: Set("n".to_owned()),
+            color: Set("c".to_owned()),
+            project_id: Set(Some(proj)),
+            workspace_id: Set(ws),
+            created_by_id: Set(Some(user)),
+            sort_order: Set(1.0),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            description: Set(String::new()),
+            deleted_at: Set(None),
+            updated_by_id: Set(None),
+            parent_id: Set(None),
+            external_id: Set(None),
+            external_source: Set(None),
+        })
+        .on_conflict(do_nothing())
+        .build(DbBackend::Postgres);
+        let sql = stmt.to_string();
+        assert!(sql.contains("INSERT INTO \"labels\""), "{sql}");
+        assert!(sql.contains("DO NOTHING"), "idempotent insert: {sql}");
     }
 
     #[test]

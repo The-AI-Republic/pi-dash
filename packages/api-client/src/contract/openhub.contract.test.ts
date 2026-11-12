@@ -14,6 +14,7 @@ import {
   getAppAuthStatus,
   getAppManifest,
   getOpenhubStatus,
+  getUsageQuota,
   installApp,
   listInstalledApps,
   listMarketplaceApps,
@@ -72,6 +73,12 @@ describe.skipIf(!cloudContractEnabled)("openhub contract", () => {
 
   it("refuses installs without a gateway through the taxonomy", async () => {
     const error = await taxonomyOf(async () => installApp(await signedIn(), "app-notes"));
+    expect(error.status).toBe(401);
+    expect(error.message).toBe("openhub_reauth_required");
+  });
+
+  it("refuses the usage quota without a gateway through the taxonomy", async () => {
+    const error = await taxonomyOf(async () => getUsageQuota(await signedIn()));
     expect(error.status).toBe(401);
     expect(error.message).toBe("openhub_reauth_required");
   });

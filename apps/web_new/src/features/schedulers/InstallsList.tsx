@@ -4,7 +4,8 @@
 // One project's installed schedulers (parity/specs/agents.md §2, AGT-007).
 // The list renders for every project viewer; the inline enable switch is
 // live for project admins and inert for everyone else, and the creation
-// control only exists for project admins. A row opens the install detail
+// control only exists for project admins (and only when the host asks for
+// it; the project section carries its own in the tab row). A row opens the install detail
 // while the switch and the action cell never navigate. The same panel
 // backs the project tab and the project-settings variant.
 
@@ -29,8 +30,12 @@ export interface InstallsListProps {
   variant?: "project" | "settings";
   /** Opens the install detail; the route owns navigation. */
   onOpenInstall: (binding: SchedulerBinding) => void;
-  /** Opens the install/author dialog (project admins only). */
-  onCreate: () => void;
+  /**
+   * Opens the install/author dialog (project admins only). Without it the
+   * header carries no creation control: the project schedulers section
+   * puts that control in its tab row instead.
+   */
+  onCreate?: (() => void) | undefined;
   /** NEWFRONT-587 supplies these; without them the action cell is empty. */
   onEditInstall?: ((binding: SchedulerBinding) => void) | undefined;
   onUninstallInstall?: ((binding: SchedulerBinding) => void) | undefined;
@@ -149,7 +154,7 @@ export function InstallsList({
           </h1>
           <p className="text-body text-(--text-muted)">{intro}</p>
         </div>
-        {canManage ? (
+        {canManage && onCreate !== undefined ? (
           <Button variant="primary" onClick={onCreate}>
             <Plus size={16} strokeWidth={1.5} aria-hidden="true" />
             New Scheduler

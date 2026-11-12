@@ -971,13 +971,14 @@ pub async fn runner_is_busy(db: &impl ConnectionTrait, runner_id: Uuid) -> Resul
 }
 
 /// R3 write (`runners.py:422, 424`, [`runner_patch_sql`]):
-/// `runner.save(update_fields=...)` for the changed pod / name plus
-/// `updated_at`.
+/// `runner.save(update_fields=...)` for the changed pod / name /
+/// `pod_dispatch` (#2903) plus `updated_at`.
 pub async fn patch_runner(
     db: &impl ConnectionTrait,
     runner_id: Uuid,
     pod_id: Option<Uuid>,
     name: Option<&str>,
+    pod_dispatch: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), DbErr> {
     let mut update = runner::Entity::update_many();
@@ -986,6 +987,9 @@ pub async fn patch_runner(
     }
     if let Some(name) = name {
         update = update.col_expr(runner::Column::Name, Expr::value(name));
+    }
+    if let Some(pod_dispatch) = pod_dispatch {
+        update = update.col_expr(runner::Column::PodDispatch, Expr::value(pod_dispatch));
     }
     update
         .col_expr(runner::Column::UpdatedAt, Expr::value(now))
@@ -1745,7 +1749,7 @@ mod tests {
         .await
         .expect("seed");
         assert!(runner_is_busy(&conn, r1).await.expect("busy"));
-        patch_runner(&conn, r2, None, Some("renamed"), chrono::Utc::now())
+        patch_runner(&conn, r2, None, Some("renamed"), None, chrono::Utc::now())
             .await
             .expect("patch");
         assert_eq!(

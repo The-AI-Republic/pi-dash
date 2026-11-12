@@ -9,6 +9,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::schema::{Config, canonical_for_compare};
+use crate::util::fs::create_dir_all_private;
 use crate::util::paths::Paths;
 
 /// `<daemon data>/engine/workdirs`: the root while `[engine] task_root` is
@@ -103,7 +104,7 @@ pub fn validate_task_root_for(
     if lexical.parent().is_none() {
         return Err(RootError::FilesystemRoot(shown));
     }
-    std::fs::create_dir_all(candidate).map_err(|e| RootError::NotCreatable {
+    create_dir_all_private(candidate).map_err(|e| RootError::NotCreatable {
         path: shown.clone(),
         why: e.to_string(),
     })?;
@@ -195,9 +196,38 @@ pub fn allocate_engine_folder(
     let cfg = crate::config::file::load_config(paths)?;
     let root = task_root(paths, &cfg);
     let dir = allocate_working_dir(&root, workspace, project, &cfg)?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
+    create_dir_all_private(&dir).map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+/// True when `name` names a Windows reserved device (`CON`, `PRN`, `AUX`,
+/// `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), case-insensitively and ignoring
+/// any extension after the first `.`. Win32 path normalisation treats any
+/// trailing path component with that stem as a device, so it can never be
+/// created as a directory.
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            let bytes = upper.as_bytes();
+            bytes.len() == 4
+                && (bytes.starts_with(b"COM") || bytes.starts_with(b"LPT"))
+                && bytes[3].is_ascii_digit()
+                && bytes[3] != b'0'
+        }
+    }
+}
+
+/// Append `_` to the file stem of a reserved device name (`CON` → `CON_`,
+/// `CON.txt` → `CON_.txt`) so it becomes a creatable directory name while
+/// keeping the original spelling readable.
+fn escape_reserved_name(name: &str) -> String {
+    match name.find('.') {
+        Some(idx) => format!("{}_.{}", &name[..idx], &name[idx + 1..]),
+        None => format!("{name}_"),
+    }
 }
 
 /// A safe single path component from a slug or project identifier.
@@ -214,7 +244,7 @@ fn component(raw: &str, fallback: &str) -> String {
         })
         .collect();
     let out = out.trim_matches(|c| c == '.' || c == '-').to_string();
-    if out.is_empty()
+    let candidate = if out.is_empty()
         || Path::new(&out)
             .components()
             .any(|c| c != Component::Normal(out.as_ref()))
@@ -222,6 +252,11 @@ fn component(raw: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         out
+    };
+    if is_windows_reserved_name(&candidate) {
+        escape_reserved_name(&candidate)
+    } else {
+        candidate
     }
 }
 
@@ -395,6 +430,56 @@ mod tests {
     }
 
     #[test]
+    fn reserved_device_names_are_escaped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let c = cfg(vec![]);
+        // Project position
+        for (raw, expected) in [
+            ("CON", "CON_"),
+            ("con", "con_"),
+            ("Aux", "Aux_"),
+            ("NUL", "NUL_"),
+            ("nul", "nul_"),
+            ("COM1", "COM1_"),
+            ("com9", "com9_"),
+            ("LPT1", "LPT1_"),
+            ("lpt9", "lpt9_"),
+            ("PRN", "PRN_"),
+            ("CON.txt", "CON_.txt"),
+            ("con.dat", "con_.dat"),
+            ("CoM3.foo", "CoM3_.foo"),
+        ] {
+            let got = allocate_working_dir(&root, "acme", raw, &c).unwrap();
+            assert_eq!(
+                got,
+                root.join("acme").join(expected),
+                "project {raw:?} should map to {expected:?}"
+            );
+        }
+        // Workspace position
+        for (raw, expected) in [("CON", "CON_"), ("aux", "aux_"), ("nul.txt", "nul_.txt")] {
+            let got = allocate_working_dir(&root, raw, "WEB", &c).unwrap();
+            assert_eq!(
+                got,
+                root.join(expected).join("WEB"),
+                "workspace {raw:?} should map to {expected:?}"
+            );
+        }
+        // Non-reserved names unchanged
+        for raw in [
+            "WEB", "acme", "api-2", "my_proj", "CONX", "COM10", "LPT", "cons",
+        ] {
+            let got = allocate_working_dir(&root, "acme", raw, &c).unwrap();
+            assert_eq!(
+                got,
+                root.join("acme").join(raw),
+                "non-reserved {raw:?} should be unchanged"
+            );
+        }
+    }
+
+    #[test]
     fn root_validation_rules() {
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(tmp.path());
@@ -437,6 +522,55 @@ mod tests {
         assert!(ok.is_ok(), "{ok:?}");
         let ok = check(&tmp.path().join("tasks"), false).unwrap();
         assert!(ok.warnings.is_empty());
+    }
+
+    /// A task root the daemon creates must be owner-only: engine runs hold
+    /// source checkouts and generated output under it, and a configured root
+    /// may sit outside the daemon's data dir, where no other hardening
+    /// applies.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_task_root_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let candidate = tmp.path().join("tasks");
+        let valid = validate_task_root_for(&p, &cfg(vec![]), &candidate, false, None).unwrap();
+        let mode = std::fs::metadata(&valid.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "created task root must be owner-only");
+    }
+
+    /// An allocated engine folder (`<root>/<ws>/<project>/`, daemon-created)
+    /// is owner-only, including the parents created along the way. The root
+    /// itself is left alone when it already exists.
+    #[cfg(unix)]
+    #[test]
+    fn an_allocated_engine_folder_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        std::fs::create_dir_all(&p.config_dir).unwrap();
+        std::fs::create_dir_all(&p.data_dir).unwrap();
+        std::fs::write(
+            p.config_path(),
+            "version = 2\n\n[daemon]\ncloud_url = \"https://x\"\n",
+        )
+        .unwrap();
+        let dir = allocate_engine_folder(&p, "acme", "WEB").unwrap();
+        for dir in [
+            p.data_dir.join("engine"),
+            p.data_dir.join("engine/workdirs"),
+            p.data_dir.join("engine/workdirs/acme"),
+            dir.clone(),
+        ] {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "created dir {} must be owner-only",
+                dir.display()
+            );
+        }
     }
 
     #[cfg(unix)]

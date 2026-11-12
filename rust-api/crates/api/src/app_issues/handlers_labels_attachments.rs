@@ -892,21 +892,30 @@ fn validate_label_fields(
         }
     }
 
-    // `name` (`CharField(255)`, required, no blank).
+    // `name` (`CharField(255)`, required, no blank): DRF
+    // `trim_whitespace=True` strips before the blank check, the
+    // max-length validator, and storage (`validate_name` dedupes the
+    // stripped value via `write.name`).
     if data_has_file(&data.files, "name") {
         errors.push("name", "Not a valid string.".to_owned());
     } else if let Some(raw) = object.get("name") {
         match raw {
             Value::Null => errors.push("name", "This field may not be null.".to_owned()),
-            Value::String(text) if text.is_empty() => {
+            Value::String(text) if text.trim_matches(super::is_py_strip_ws).is_empty() => {
                 errors.push("name", "This field may not be blank.".to_owned());
             }
             _ => match drf_str_of_value(raw) {
-                Some(text) if text.chars().count() > 255 => errors.push(
-                    "name",
-                    "Ensure this field has no more than 255 characters.".to_owned(),
-                ),
-                Some(text) => write.name = Some(text),
+                Some(text) => {
+                    let trimmed = text.trim_matches(super::is_py_strip_ws);
+                    if trimmed.chars().count() > 255 {
+                        errors.push(
+                            "name",
+                            "Ensure this field has no more than 255 characters.".to_owned(),
+                        );
+                    } else {
+                        write.name = Some(trimmed.to_owned());
+                    }
+                }
                 None => errors.push("name", "Not a valid string.".to_owned()),
             },
         }
@@ -914,18 +923,25 @@ fn validate_label_fields(
         errors.push("name", "This field is required.".to_owned());
     }
 
-    // `color` (`CharField(255)`, blank: optional everywhere, `""` kept).
+    // `color` (`CharField(255)`, blank: optional everywhere, `""` kept):
+    // same trim as `name` (whitespace-only validates as `""`).
     if data_has_file(&data.files, "color") {
         errors.push("color", "Not a valid string.".to_owned());
     } else if let Some(raw) = object.get("color") {
         match raw {
             Value::Null => errors.push("color", "This field may not be null.".to_owned()),
             _ => match drf_str_of_value(raw) {
-                Some(text) if text.chars().count() > 255 => errors.push(
-                    "color",
-                    "Ensure this field has no more than 255 characters.".to_owned(),
-                ),
-                Some(text) => write.color = Some(text),
+                Some(text) => {
+                    let trimmed = text.trim_matches(super::is_py_strip_ws);
+                    if trimmed.chars().count() > 255 {
+                        errors.push(
+                            "color",
+                            "Ensure this field has no more than 255 characters.".to_owned(),
+                        );
+                    } else {
+                        write.color = Some(trimmed.to_owned());
+                    }
+                }
                 None => errors.push("color", "Not a valid string.".to_owned()),
             },
         }
@@ -3754,6 +3770,53 @@ mod tests {
         let object = object_or_errors(&data.value).expect("object");
         let write = validate_label_fields(&data, object, false).expect("valid");
         assert_eq!(write.sort_order, Some(2.5));
+    }
+
+    #[test]
+    fn label_name_and_color_are_trimmed() {
+        // NEWPIDASH-139: DRF `CharField(trim_whitespace=True)` strips
+        // before the blank/max-length checks and storage; the dedupe
+        // (`validate_name` over `write.name`) sees the stripped value.
+        let data = json_data(r#"{"name":"  Padded probe  ","color":"  #aabbcc  "}"#);
+        let object = object_or_errors(&data.value).expect("object");
+        let write = validate_label_fields(&data, object, false).expect("valid");
+        assert_eq!(write.name.as_deref(), Some("Padded probe"));
+        assert_eq!(write.color.as_deref(), Some("#aabbcc"));
+        // Whitespace-only names are blank (incl. the Python strip set
+        // U+001C-U+001F, which `str::trim` would miss).
+        assert_eq!(
+            label_errors(r#"{"name":"   "}"#, false),
+            r#"{"name":["This field may not be blank."]}"#
+        );
+        assert_eq!(
+            label_errors(r#"{"name":"\u001c\u001f "}"#, false),
+            r#"{"name":["This field may not be blank."]}"#
+        );
+        // Whitespace-only color validates as `""` (`allow_blank`).
+        let data = json_data(r#"{"name":"x","color":"   "}"#);
+        let object = object_or_errors(&data.value).expect("object");
+        let write = validate_label_fields(&data, object, false).expect("valid");
+        assert_eq!(write.color.as_deref(), Some(""));
+        // Max-length runs on the stripped value: padded 255-core passes,
+        // padded 256-core fails, over-long whitespace is blank alone.
+        let padded_core = format!(" {} ", "n".repeat(255));
+        let data = json_data(&format!(r#"{{"name":"{}"}}"#, padded_core));
+        let object = object_or_errors(&data.value).expect("object");
+        let write = validate_label_fields(&data, object, false).expect("valid");
+        assert_eq!(write.name.as_deref(), Some("n".repeat(255).as_str()));
+        assert_eq!(
+            label_errors(&format!(r#"{{"name":" {} "}}"#, "n".repeat(256)), false),
+            r#"{"name":["Ensure this field has no more than 255 characters."]}"#
+        );
+        let long_ws = " ".repeat(300);
+        let data = json_data(&format!(r#"{{"name":"{}"}}"#, long_ws));
+        let object = object_or_errors(&data.value).expect("object");
+        assert_eq!(
+            validate_label_fields(&data, object, false)
+                .expect_err("blank alone")
+                .body(),
+            r#"{"name":["This field may not be blank."]}"#
+        );
     }
 
     #[test]

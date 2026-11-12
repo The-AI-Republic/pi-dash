@@ -55,3 +55,9 @@ mongodb = "3"
 tracing = "0.1"
 # NFKD for Django `slugify` parity (`state::slugify_name`, allow_unicode=False).
 unicode-normalization = "0.1"
+
+[dev-dependencies]
+# The shipped binary unifies `arbitrary_precision` in from pidash-api; pin
+# it here so `cargo test -p pidash-db` sees the same Number semantics as
+# the workspace build (big-integer renderer tests, PIDASHCONV-1733).
+serde_json = { version = "1", features = ["arbitrary_precision"] }

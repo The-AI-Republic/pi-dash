@@ -17,6 +17,7 @@ const ME = { is_password_autoset: false, id: "u1" };
 
 function queryClient(fixtures: { me?: unknown; settings?: unknown; workspaces?: unknown }): QueryClient {
   return {
+    getQueryState: () => undefined,
     ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
       const key = options.queryKey[1];
       const value = key === "profile" ? { is_onboarded: true } : fixtures[key as "me" | "settings" | "workspaces"];

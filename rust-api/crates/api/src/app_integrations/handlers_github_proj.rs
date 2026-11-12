@@ -2044,7 +2044,7 @@ async fn bind_transaction(
     .await?;
     if current_repo_url != canonical_url {
         pidash_services::domain::projects::stamp_text_field(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             pidash_services::domain::projects::ProjectTextField::RepoUrl,
             canonical_url,
             *project_id,

@@ -231,3 +231,28 @@ mod live {
         assert!(missing.is_none());
     }
 }
+
+// PrLinkDbRow stub for compatibility with sdk surface (PrLinkDbRow expected by read/mod.rs).
+// The PgRow functions are the actual data path; this type is for the sdk surface
+// that expects a typed row. It is not used by the PgRow fetchers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrLinkDbRow {
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub id: uuid::Uuid,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub pr_number: i32,
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub pr_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_by_id: Option<uuid::Uuid>,
+    pub issue_id: uuid::Uuid,
+    pub project_id: uuid::Uuid,
+    pub updated_by_id: Option<uuid::Uuid>,
+    pub workspace_id: uuid::Uuid,
+}

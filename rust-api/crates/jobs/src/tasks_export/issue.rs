@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use pidash_services::app_analytics::export_format as porter;
@@ -50,6 +51,9 @@ use super::{
     ISSUE_EXPORT_TASK, STATUS_FAILED, STATUS_PROCESSING,
 };
 use crate::queue::JobRow;
+use crate::tasks_cleanup::assets::{
+    s3_error_code, s3_retryable_answer, sleep_backoff, S3_MAX_ATTEMPTS,
+};
 use crate::worker::{Handler, Verdict};
 use pidash_db::entity::{
     cycle_issues as cycle_issues_entity, cycles as cycles_entity,
@@ -1102,36 +1106,79 @@ pub fn encode_project_file(
 
 /// Execute one signed PUT (`upload_fileobj` single-part shape for zips
 /// under the 8 MiB multipart threshold — identical object bytes either
-/// way): `PUT url` with the signed headers + content SHA. Any transport
-/// or status failure is the task error (boto raises the same way).
+/// way): `PUT url` with the signed headers + content SHA. The client is
+/// bounded like botocore's defaults (60s to connect, 60s to read — the
+/// Python task passes no timeout `Config`), and a transport or retryable
+/// service answer gets the legacy 5 attempts with `rand * 2**(n-1)`
+/// backoff (the `tasks_cleanup/assets.rs` loop); any final failure is
+/// the task error (boto raises the same way). The signed request is
+/// reused across attempts: the backoff (max ~15s) stays far inside
+/// SigV4's 15-minute skew.
 pub async fn put_object(
     signed: &pidash_storage::SignedRequest,
     payload: &[u8],
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let mut request = client
-        .put(&signed.url)
-        .header("authorization", &signed.authorization)
-        .header("x-amz-date", &signed.amz_date)
-        .header("x-amz-content-sha256", &signed.content_sha256);
-    if let Some(content_type) = &signed.content_type {
-        request = request.header("content-type", content_type);
-    }
-    for (name, value) in &signed.extra_headers {
-        request = request.header(name.as_str(), value.as_str());
-    }
-    let response = request
-        .body(payload.to_vec())
-        .send()
-        .await
+    // Bounded like botocore's defaults (PIDASHCONV-1291 precedent in
+    // tasks_cleanup/expiry.rs): a wedged S3 fails the upload instead
+    // of holding the worker slot forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(60))
+        .build()
         .map_err(|error| format!("issue_export_task: S3 upload failed ({error})"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "issue_export_task: S3 upload failed (HTTP {})",
-            response.status()
-        ));
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let mut request = client
+            .put(&signed.url)
+            .header("authorization", &signed.authorization)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256);
+        if let Some(content_type) = &signed.content_type {
+            request = request.header("content-type", content_type);
+        }
+        for (name, value) in &signed.extra_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = match request.body(payload.to_vec()).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if attempt >= S3_MAX_ATTEMPTS {
+                    return Err(format!("issue_export_task: S3 upload failed ({error})"));
+                }
+                sleep_backoff(attempt).await;
+                continue;
+            }
+        };
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // Error status: parse the `<Code>` for the retry decision. A body
+        // that will not read is a transport failure (retryable); an empty
+        // or codeless body decides on the status alone.
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                if attempt >= S3_MAX_ATTEMPTS {
+                    return Err(format!("issue_export_task: S3 upload failed ({error})"));
+                }
+                sleep_backoff(attempt).await;
+                continue;
+            }
+        };
+        let code = std::str::from_utf8(&body)
+            .ok()
+            .and_then(s3_error_code)
+            .map(str::to_owned);
+        if !s3_retryable_answer(status.as_u16(), code.as_deref()) || attempt >= S3_MAX_ATTEMPTS {
+            return Err(format!(
+                "issue_export_task: S3 upload failed (HTTP {})",
+                status
+            ));
+        }
+        sleep_backoff(attempt).await;
     }
-    Ok(())
 }
 
 /// `upload_to_s3` (`export_task.py:20-125`): PUT the zip, then mint the

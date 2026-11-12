@@ -194,6 +194,7 @@ pub struct IssueFieldSet {
     pub workpad: String,
     pub created_via: Option<String>,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub agent_executor: Option<String>,
 }
 
@@ -237,6 +238,7 @@ impl IssueFieldSet {
             workpad: Set(self.workpad),
             created_via: Set(self.created_via),
             assigned_pod_id: Set(self.assigned_pod_id),
+            assigned_runner_id: Set(self.assigned_runner_id),
             agent_executor: Set(self.agent_executor),
         }
     }
@@ -280,6 +282,7 @@ impl IssueFieldSet {
             workpad: Set(self.workpad),
             created_via: Set(self.created_via),
             assigned_pod_id: Set(self.assigned_pod_id),
+            assigned_runner_id: Set(self.assigned_runner_id),
             agent_executor: Set(self.agent_executor),
         }
     }
@@ -321,6 +324,7 @@ impl From<&issues::Model> for IssueFieldSet {
             workpad: model.workpad.clone(),
             created_via: model.created_via.clone(),
             assigned_pod_id: model.assigned_pod_id,
+            assigned_runner_id: model.assigned_runner_id,
             agent_executor: model.agent_executor.clone(),
         }
     }
@@ -706,12 +710,18 @@ impl ChainOutcome {
 /// The post-save transition fire arguments (one `fire_after_save` call).
 /// `moved_by_run` is the resolved `X-Pi-Dash-Run-Id` run on the v1 patch
 /// path (`views/issue.py:794-807`); every other driver passes `None`.
+/// `pod_once` is the `pin:"pod_once"` one-off (design §23.3): the
+/// transition's run goes to the pod unpinned for that run only; the
+/// issue stays dedicated. PIDASHCONV-1723 threads it from the MCP
+/// `pidash_update_issue` pin through `FireRequest` to
+/// `TransitionRequest`.
 #[derive(Debug, Clone)]
 pub struct FireSpec {
     pub dispatch_immediate: bool,
     pub created_by: Option<Uuid>,
     pub moved_by_run: Option<Uuid>,
     pub now: DateTime<Utc>,
+    pub pod_once: bool,
 }
 
 /// An `issue_activity` enqueue with its origin pre-resolved by the driver
@@ -925,6 +935,7 @@ pub(crate) async fn run_chain(
                     now: spec.now,
                     jitter_secs: 0.0,
                     created_by: spec.created_by,
+                    pod_once: spec.pod_once,
                 };
                 match transition.fire(actor_id, request).await {
                     Ok(FireOutcome::Failed { log_line, .. }) => {
@@ -2000,6 +2011,7 @@ fn mirror_issue_row(insert: &MirrorIssueInsert) -> Result<issues::ActiveModel, s
         workpad: Set(String::new()),
         created_via: Set(None),
         assigned_pod_id: Set(insert.pod_id),
+        assigned_runner_id: sea_orm::NotSet,
         agent_executor: Set(None),
     })
 }
@@ -2196,6 +2208,9 @@ pub struct ToolIssueInsert<'a> {
     pub parent_id: Option<Uuid>,
     pub state_id: Option<Uuid>,
     pub pod_id: Option<Uuid>,
+    /// The dedicated runner (PDASHOSS01-350); the pod follows the
+    /// runner — the executor resolves pod = requested or runner's pod.
+    pub runner_id: Option<Uuid>,
 }
 
 fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, sqlx::Error> {
@@ -2234,6 +2249,7 @@ fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, s
         estimate_point_id: Set(None),
         type_id: Set(None),
         assigned_pod_id: Set(insert.pod_id),
+        assigned_runner_id: Set(insert.runner_id),
     })
 }
 
@@ -2306,6 +2322,10 @@ pub struct ToolIssueUpdate<'a> {
     pub state_id: Option<Uuid>,
     pub parent_touched: bool,
     pub parent_id: Option<Uuid>,
+    /// Pod write (PDASHOSS01-350): set to the requested pod, or `None`
+    /// to clear when `pod_touched`.
+    pub pod_touched: bool,
+    pub pod_id: Option<Uuid>,
     pub updated_by_id: Uuid,
     pub now: DateTime<Utc>,
 }
@@ -2333,6 +2353,9 @@ fn tool_issue_update(upd: &ToolIssueUpdate<'_>) -> sea_orm::UpdateMany<issues::E
     }
     if upd.parent_touched {
         update = update.col_expr(issues::Column::ParentId, Expr::value(upd.parent_id));
+    }
+    if upd.pod_touched {
+        update = update.col_expr(issues::Column::AssignedPodId, Expr::value(upd.pod_id));
     }
     update
         .col_expr(issues::Column::UpdatedAt, Expr::value(upd.now))
@@ -2445,6 +2468,7 @@ fn seed_issue_row(id: Uuid, issue: &SeedIssue<'_>) -> Result<issues::ActiveModel
         deleted_at: Set(None),
         git_work_branch: Set(String::new()),
         assigned_pod_id: Set(issue.assigned_pod_id),
+        assigned_runner_id: sea_orm::NotSet,
         workpad: Set(String::new()),
         created_via: Set(None),
         agent_executor: Set(None),
@@ -3660,6 +3684,7 @@ mod tests {
             parent_id: None,
             state_id: Some(uid(5)),
             pod_id: None,
+            runner_id: None,
         })
         .expect("row");
         assert_eq!(row.created_by_id, Set(Some(uid(2))));
@@ -3687,6 +3712,8 @@ mod tests {
             state_id: None,
             parent_touched: false,
             parent_id: None,
+            pod_touched: false,
+            pod_id: None,
             updated_by_id: uid(2),
             now: pin_time(),
         };
@@ -4042,6 +4069,8 @@ mod tests {
     fn fire_spec() -> FireSpec {
         FireSpec {
             dispatch_immediate: true,
+            pod_once: false,
+
             created_by: Some(uid(9)),
             moved_by_run: None,
             now: Utc::now(),
@@ -4340,6 +4369,7 @@ mod tests {
             workpad: String::new(),
             created_via: None,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
         };
         let issue_id = fields.id;
@@ -4364,6 +4394,8 @@ mod tests {
                         labels: vec![],
                         fire: FireSpec {
                             dispatch_immediate: true,
+                            pod_once: false,
+
                             created_by: Some(actor),
                             moved_by_run: None,
                             now: now_micros(),
@@ -4441,6 +4473,8 @@ mod tests {
                         prev_state: Some(backlog_id),
                         fire: FireSpec {
                             dispatch_immediate: true,
+                            pod_once: false,
+
                             created_by: Some(actor),
                             moved_by_run: None,
                             now: now_micros(),
@@ -4903,6 +4937,7 @@ mod tests {
                                     workpad: String::new(),
                                     created_via: None,
                                     assigned_pod_id: None,
+                                    assigned_runner_id: None,
                                     agent_executor: None,
                                 },
                                 assignees: Some(vec![new_link]),
@@ -4910,6 +4945,8 @@ mod tests {
                                 prev_state: Some(backlog_id),
                                 fire: FireSpec {
                                     dispatch_immediate: true,
+                                    pod_once: false,
+
                                     created_by: Some(actor),
                                     moved_by_run: None,
                                     now: now_micros(),
@@ -5777,6 +5814,7 @@ mod tests {
                 parent_id: None,
                 state_id: Some(state),
                 pod_id: None,
+                runner_id: None,
             },
         )
         .await
@@ -5817,6 +5855,8 @@ mod tests {
                 state_id: None,
                 parent_touched: false,
                 parent_id: None,
+                pod_touched: true,
+                pod_id: Some(uid(9)),
                 updated_by_id: actor,
                 now: later,
             },

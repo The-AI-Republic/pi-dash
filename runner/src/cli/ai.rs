@@ -255,10 +255,8 @@ fn stream_progress(msg: &Value, printed: &mut HashSet<i64>) {
         .unwrap_or("")
         .trim();
     match role {
-        "tool_call" | "tool_result" => {
-            if printed.insert(seq) && !content.is_empty() {
-                eprintln!("  · {content}");
-            }
+        "tool_call" | "tool_result" if printed.insert(seq) && !content.is_empty() => {
+            eprintln!("  · {content}");
         }
         "error" if printed.insert(seq) && !content.is_empty() => {
             eprintln!("  ✗ {content}");

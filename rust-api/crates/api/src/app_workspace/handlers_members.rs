@@ -33,8 +33,8 @@
 //! and the project-member role shape in
 //! [`pidash_services::app_project::ser_member`] (D-25, PIDASHCONV-564).
 //! This module owns the HTTP shell (routes, session auth, gates), the
-//! executed SQL text, the PATCH validation kernels, the response rendering,
-//! and the leave cache invalidations.
+//! executed query text (SeaORM-built), the PATCH validation kernels, the
+//! response rendering, and the leave cache invalidations.
 //!
 //! Handler notes (all verified against the Python source at drift baseline
 //! `01a93e17`, DRF 3.15.2, Django 4.2):
@@ -142,12 +142,24 @@ use pidash_auth::permissions::workspace::WorkspaceFacts;
 use pidash_compat::py::{py_is_space, py_strip, py_uuid_or_none};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_db::entity::{
+    draft_issues, file_assets, project_members, projects, users, workspace_members, workspaces,
+};
 use pidash_services::app_project::ser_member as d25;
 use pidash_services::app_workspace::models_user::user::avatar_url as resolve_avatar_url;
 use pidash_services::app_workspace::queries_membership as qm;
 use pidash_services::app_workspace::{ser_user, ser_workspace};
 use pidash_services::domain::workspaces::members;
 use pidash_types::WorkspaceId;
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::{
+    Alias, BinOper, CaseStatement, Condition, Expr, Func, IntoIden, JoinType, Order, Query,
+    SelectStatement, SimpleExpr, SubQueryStatement,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -390,6 +402,35 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// The SeaORM connection over a pool (a wrapper; no I/O).
+fn orm(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// `alias.column` for the aliased selects below.
+fn col<C: IntoIden + 'static>(alias: &'static str, column: C) -> Expr {
+    Expr::col((Alias::new(alias), column))
+}
+
+/// Table alias for the aliased selects below.
+fn a(name: &'static str) -> Alias {
+    Alias::new(name)
+}
+
+/// Run a sea-query-built statement into typed rows, decoded by name.
+async fn query_built<T: FromQueryResult>(
+    db: &sea_orm::DatabaseConnection,
+    stmt: &SelectStatement,
+) -> Result<Vec<T>, Denial> {
+    let rows = db
+        .query_all(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    rows.iter()
+        .map(|row| T::from_query_result(row, "").map_err(|_| Denial::ServerError))
+        .collect()
+}
+
 /// One active workspace-membership row: the id (self-remove compares
 /// WorkspaceMember PKs, `member.py:110`), the role (branch + guards), and
 /// the user id (self-role compares user ids, `member.py:81`).
@@ -400,31 +441,50 @@ struct Requester {
     member_id: Uuid,
 }
 
+#[derive(Debug, FromQueryResult)]
+struct RequesterRow {
+    id: Uuid,
+    role: i16,
+    member_id: Uuid,
+}
+
 /// Active workspace membership for `(user, slug)`, or `None` (no row).
 /// Mirrors the `allow_permission` workspace lookup (`is_active=True`,
 /// soft-deleted rows excluded, `app/permissions/base.py:44-51`) and the
 /// half-dozen bare `.get(member, slug, active)` requester lookups in
-/// `member.py` (`:47`, `:59`, `:106-108`, `:162`, `:210`).
+/// `member.py` (`:47`, `:59`, `:106-108`, `:162`, `:210`). The slug
+/// scope is an INNER JOIN to `workspaces` (1:1, slug unique), matching
+/// the former scalar subselect (a missing slug matches no rows) with no
+/// soft-delete guard on the workspace itself.
 async fn requester_lookup(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<Requester>, Denial> {
-    let row: Option<(Uuid, i16, Uuid)> = sqlx::query_as(
-        "SELECT wm.id, wm.role, wm.member_id FROM workspace_members wm \
-         WHERE wm.member_id = $1 AND wm.workspace_id = \
-         (SELECT id FROM workspaces WHERE slug = $2) AND wm.is_active \
-         AND wm.deleted_at IS NULL LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(id, role, member_id)| Requester {
-        id,
-        role: i32::from(role),
-        member_id,
+    let row = workspace_members::Entity::find()
+        .select_only()
+        .columns([
+            workspace_members::Column::Id,
+            workspace_members::Column::Role,
+            workspace_members::Column::MemberId,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_model::<RequesterRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| Requester {
+        id: row.id,
+        role: i32::from(row.role),
+        member_id: row.member_id,
     }))
 }
 
@@ -2097,12 +2157,12 @@ fn pre_transition_offset(timezone: &chrono_tz::Tz, naive: &chrono::NaiveDateTime
 /// (`select_related("member")`) and the avatar-asset context
 /// (`select_related("member__avatar_asset")` plus the asset's workspace
 /// slug for the attachment/description URL branches).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct MemberFullRow {
     id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    deleted_at: Option<DateTime<Utc>>,
+    created_at: DateTimeWithTimeZone,
+    updated_at: DateTimeWithTimeZone,
+    deleted_at: Option<DateTimeWithTimeZone>,
     role: i16,
     company_role: Option<String>,
     view_props: Value,
@@ -2131,76 +2191,141 @@ struct MemberFullRow {
     fa_workspace_slug: Option<String>,
 }
 
-/// The R1 list/retrieve SELECT head: scope + `select_related` joins. No
-/// `is_active` filter (ported bug B5); the avatar join is a bare `LEFT`
-/// join (the FK is nullable) with no manager scope — `select_related`
-/// never applies the related manager, so a soft-deleted avatar asset
-/// still attaches and its `asset_url` renders — and the asset-workspace
-/// join is likewise unscoped (forward FK descriptors read through the
-/// unscoped base manager, so a soft-deleted asset workspace still
-/// renders its slug). The head ends right after `slug = ` so
-/// [`member_rows_builder`] can bind the slug as `$1` itself — a literal
-/// `$1` here would duplicate the bind and 500 every list/retrieve.
-const MEMBER_SELECT: &str = "SELECT wm.id AS id, wm.created_at AS created_at, \
-     wm.updated_at AS updated_at, wm.deleted_at AS deleted_at, wm.role AS role, \
-     wm.company_role AS company_role, wm.view_props AS view_props, \
-     wm.default_props AS default_props, wm.issue_props AS issue_props, \
-     wm.is_active AS is_active, \
-     wm.getting_started_checklist AS getting_started_checklist, wm.tips AS tips, \
-     wm.explored_features AS explored_features, wm.created_by_id AS created_by_id, \
-     wm.updated_by_id AS updated_by_id, wm.workspace_id AS workspace_id, \
-     u.id AS u_id, u.first_name AS u_first_name, \
-     u.last_name AS u_last_name, u.avatar AS u_avatar, u.is_bot AS u_is_bot, \
-     u.display_name AS u_display_name, u.email AS u_email, \
-     u.last_login_medium AS u_last_login_medium, fa.id AS fa_id, \
-     fa.entity_type AS fa_entity_type, fa.workspace_id AS fa_workspace_id, \
-     fa.project_id AS fa_project_id, fa.issue_id AS fa_issue_id, \
-     faw.slug AS fa_workspace_slug FROM workspace_members wm \
-     JOIN users u ON u.id = wm.member_id \
-     LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id \
-     LEFT JOIN workspaces faw ON faw.id = fa.workspace_id \
-     WHERE wm.workspace_id = (SELECT id FROM workspaces WHERE slug = ";
+/// The `select_related` columns for [`MemberFullRow`]: `wm` scans the
+/// member, `u` the nested user, `fa`/`faw` the avatar-asset context.
+/// The avatar joins are bare `LEFT` joins with no manager scope —
+/// `select_related` never applies the related manager, so a
+/// soft-deleted avatar asset still attaches and its `asset_url`
+/// renders — and the asset-workspace join is likewise unscoped
+/// (forward FK descriptors read through the unscoped base manager, so
+/// a soft-deleted asset workspace still renders its slug).
+fn select_member_columns(stmt: &mut SelectStatement) {
+    stmt.column((a("wm"), workspace_members::Column::Id))
+        .column((a("wm"), workspace_members::Column::CreatedAt))
+        .column((a("wm"), workspace_members::Column::UpdatedAt))
+        .column((a("wm"), workspace_members::Column::DeletedAt))
+        .column((a("wm"), workspace_members::Column::Role))
+        .column((a("wm"), workspace_members::Column::CompanyRole))
+        .column((a("wm"), workspace_members::Column::ViewProps))
+        .column((a("wm"), workspace_members::Column::DefaultProps))
+        .column((a("wm"), workspace_members::Column::IssueProps))
+        .column((a("wm"), workspace_members::Column::IsActive))
+        .column((a("wm"), workspace_members::Column::GettingStartedChecklist))
+        .column((a("wm"), workspace_members::Column::Tips))
+        .column((a("wm"), workspace_members::Column::ExploredFeatures))
+        .column((a("wm"), workspace_members::Column::CreatedById))
+        .column((a("wm"), workspace_members::Column::UpdatedById))
+        .column((a("wm"), workspace_members::Column::WorkspaceId))
+        .expr_as(col("u", users::Column::Id), a("u_id"))
+        .expr_as(col("u", users::Column::FirstName), a("u_first_name"))
+        .expr_as(col("u", users::Column::LastName), a("u_last_name"))
+        .expr_as(col("u", users::Column::Avatar), a("u_avatar"))
+        .expr_as(col("u", users::Column::IsBot), a("u_is_bot"))
+        .expr_as(col("u", users::Column::DisplayName), a("u_display_name"))
+        .expr_as(col("u", users::Column::Email), a("u_email"))
+        .expr_as(
+            col("u", users::Column::LastLoginMedium),
+            a("u_last_login_medium"),
+        )
+        .expr_as(col("fa", file_assets::Column::Id), a("fa_id"))
+        .expr_as(
+            col("fa", file_assets::Column::EntityType),
+            a("fa_entity_type"),
+        )
+        .expr_as(
+            col("fa", file_assets::Column::WorkspaceId),
+            a("fa_workspace_id"),
+        )
+        .expr_as(
+            col("fa", file_assets::Column::ProjectId),
+            a("fa_project_id"),
+        )
+        .expr_as(col("fa", file_assets::Column::IssueId), a("fa_issue_id"))
+        .expr_as(col("faw", workspaces::Column::Slug), a("fa_workspace_slug"));
+}
 
-/// Build the list/retrieve statement: the slug binds as `$1`, then the
-/// soft-delete guard, the optional `?search=` terms (ANDed, `icontains`
-/// over display/first name), the optional target, and the `-created_at`
+/// The `select_related` joins for [`MemberFullRow`]: `wm` → `u` (INNER,
+/// `select_related("member")`), `u` → `fa` (LEFT, nullable FK), `fa` →
+/// `faw` (LEFT). `users.avatar_asset_id → file_assets.id` has no entity
+/// relation (trimmed), so it is spelled as an explicit `join_as` ON
+/// condition; the two `workspaces` joins are aliased `w` (scope) and
+/// `faw` (asset context) so the statement never references one table
+/// twice without an alias.
+fn join_member_tables(stmt: &mut SelectStatement) {
+    stmt.join_as(
+        JoinType::InnerJoin,
+        users::Entity,
+        a("u"),
+        col("u", users::Column::Id).equals((a("wm"), workspace_members::Column::MemberId)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        file_assets::Entity,
+        a("fa"),
+        col("fa", file_assets::Column::Id).equals((a("u"), users::Column::AvatarAssetId)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        workspaces::Entity,
+        a("faw"),
+        col("faw", workspaces::Column::Id).equals((a("fa"), file_assets::Column::WorkspaceId)),
+    );
+}
+
+/// Build the list/retrieve statement: the slug scope (INNER JOIN to
+/// `workspaces` aliased `w`, 1:1, matching the former scalar subselect
+/// with no soft-delete guard on the workspace), the soft-delete guard,
+/// the optional `?search=` terms (ANDed, `icontains` over
+/// display/first name), the optional target, and the `-created_at`
 /// ordering. Ported bug B5: no `is_active` filter. Split from execution
-/// so tests can assert the exact statement + placeholder numbering via
-/// `.sql()`.
-fn member_rows_builder<'q>(
-    slug: &'q str,
+/// so tests can assert the statement shape.
+fn member_rows_select(
+    slug: &str,
     terms: &[String],
     target: Option<&Uuid>,
     one: bool,
-) -> sqlx::QueryBuilder<'q, sqlx::Postgres> {
-    let mut qb = sqlx::QueryBuilder::new(MEMBER_SELECT);
-    qb.push_bind(slug);
-    qb.push(") AND wm.deleted_at IS NULL ");
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    select_member_columns(&mut stmt);
+    stmt.from_as(workspace_members::Entity, a("wm"));
+    join_member_tables(&mut stmt);
+    stmt.join_as(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        a("w"),
+        col("w", workspaces::Column::Id).equals((a("wm"), workspace_members::Column::WorkspaceId)),
+    )
+    .and_where(col("w", workspaces::Column::Slug).eq(slug))
+    .and_where(col("wm", workspace_members::Column::DeletedAt).is_null());
     for term in terms {
-        // `icontains` is `UPPER(col::text) LIKE UPPER($N)` on Postgres
+        // `icontains` is `UPPER(col::text) LIKE UPPER(?)` on Postgres
         // (`backends/postgresql/base.py` + `lookups.py`), not `ILIKE`:
         // upper- and lower-case folding disagree on Turkic-I and
         // Greek-sigma pairs, so only the `UPPER` form matches row for
-        // row (the `app_pages` search precedent).
-        qb.push("AND (UPPER(u.display_name::text) LIKE UPPER(");
-        qb.push_bind(like_param(term));
-        qb.push(") OR UPPER(u.first_name::text) LIKE UPPER(");
-        qb.push_bind(like_param(term));
-        qb.push(")) ");
+        // row (the `app_pages` search precedent). Both sides upper in
+        // SQL — never in Rust, whose folding differs.
+        let pattern = like_param(term);
+        let contains = |column: users::Column| {
+            Expr::expr(Func::upper(col("u", column).cast_as(Alias::new("text"))))
+                .binary(BinOper::Like, Func::upper(Expr::val(pattern.clone())))
+        };
+        stmt.cond_where(
+            Condition::any()
+                .add(contains(users::Column::DisplayName))
+                .add(contains(users::Column::FirstName)),
+        );
     }
     if let Some(id) = target {
-        qb.push("AND wm.id = ");
-        qb.push_bind(*id);
-        qb.push(" ");
+        stmt.and_where(col("wm", workspace_members::Column::Id).eq(*id));
     }
-    qb.push("ORDER BY wm.created_at DESC");
+    stmt.order_by((a("wm"), workspace_members::Column::CreatedAt), Order::Desc);
     if one {
-        qb.push(" LIMIT 1");
+        stmt.limit(1);
     }
-    qb
+    stmt
 }
 
-/// Fetch list/retrieve rows through [`member_rows_builder`].
+/// Fetch list/retrieve rows through [`member_rows_select`].
 async fn fetch_member_rows(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2208,11 +2333,8 @@ async fn fetch_member_rows(
     target: Option<&Uuid>,
     one: bool,
 ) -> Result<Vec<MemberFullRow>, Denial> {
-    member_rows_builder(slug, terms, target, one)
-        .build_query_as::<MemberFullRow>()
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)
+    let stmt = member_rows_select(slug, terms, target, one);
+    query_built(&orm(pool), &stmt).await
 }
 
 /// Fetch one row by id alone: the post-PATCH re-render reads what was
@@ -2223,38 +2345,22 @@ async fn fetch_member_row_by_id(
     pool: &sqlx::PgPool,
     id: &Uuid,
 ) -> Result<Option<MemberFullRow>, Denial> {
-    sqlx::query_as(
-        "SELECT wm.id AS id, wm.created_at AS created_at, wm.updated_at AS updated_at, \
-         wm.deleted_at AS deleted_at, wm.role AS role, wm.company_role AS company_role, \
-         wm.view_props AS view_props, wm.default_props AS default_props, \
-         wm.issue_props AS issue_props, wm.is_active AS is_active, \
-         wm.getting_started_checklist AS getting_started_checklist, wm.tips AS tips, \
-         wm.explored_features AS explored_features, wm.created_by_id AS created_by_id, \
-         wm.updated_by_id AS updated_by_id, wm.workspace_id AS workspace_id, \
-         u.id AS u_id, u.first_name AS u_first_name, u.last_name AS u_last_name, \
-         u.avatar AS u_avatar, u.is_bot AS u_is_bot, u.display_name AS u_display_name, \
-         u.email AS u_email, u.last_login_medium AS u_last_login_medium, fa.id AS fa_id, \
-         fa.entity_type AS fa_entity_type, fa.workspace_id AS fa_workspace_id, \
-         fa.project_id AS fa_project_id, fa.issue_id AS fa_issue_id, \
-         faw.slug AS fa_workspace_slug FROM workspace_members wm \
-         JOIN users u ON u.id = wm.member_id \
-         LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id \
-         LEFT JOIN workspaces faw ON faw.id = fa.workspace_id \
-         WHERE wm.id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let mut stmt = Query::select();
+    select_member_columns(&mut stmt);
+    stmt.from_as(workspace_members::Entity, a("wm"));
+    join_member_tables(&mut stmt);
+    stmt.and_where(col("wm", workspace_members::Column::Id).eq(*id))
+        .limit(1);
+    Ok(query_built(&orm(pool), &stmt).await?.into_iter().next())
 }
 
 /// One me-get row: the member columns plus the draft-count annotation.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct MeRow {
     id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    deleted_at: Option<DateTime<Utc>>,
+    created_at: DateTimeWithTimeZone,
+    updated_at: DateTimeWithTimeZone,
+    deleted_at: Option<DateTimeWithTimeZone>,
     role: i16,
     company_role: Option<String>,
     view_props: Value,
@@ -2271,39 +2377,76 @@ struct MeRow {
     draft_issue_count: i64,
 }
 
-/// The R7 me SELECT: lookup + `draft_issue_count` annotation (the inner
-/// `GROUP BY` yields no row on empty matches, hence the `COALESCE`), no
-/// explicit ordering beyond the `-created_at` fallback, first row only.
+/// `(SELECT COUNT(d.id) FROM draft_issues d WHERE d.created_by_id = ?
+/// AND d.workspace_id = wm.workspace_id AND d.deleted_at IS NULL)`
+/// correlated to the `wm` alias. The former shape wrapped this in
+/// `COALESCE(... GROUP BY ..., 0)`; a bare `COUNT(*)` always yields
+/// one row (0 on empty matches), so the `COALESCE`/`GROUP BY` carried
+/// no information and is dropped — same counts, same annotation.
+fn draft_issue_count_sub(user_id: &Uuid) -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.expr(Func::count(col("d", draft_issues::Column::Id)))
+        .from_as(draft_issues::Entity, a("d"))
+        .and_where(col("d", draft_issues::Column::CreatedById).eq(*user_id))
+        .and_where(
+            col("d", draft_issues::Column::WorkspaceId)
+                .equals((a("wm"), workspace_members::Column::WorkspaceId)),
+        )
+        .and_where(col("d", draft_issues::Column::DeletedAt).is_null());
+    SimpleExpr::SubQuery(None, Box::new(SubQueryStatement::SelectStatement(stmt)))
+}
+
+/// The R7 me SELECT: lookup + `draft_issue_count` annotation,
+/// `-created_at` ordering, first row only.
+fn me_rows_select(user_id: &Uuid, slug: &str) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.column((a("wm"), workspace_members::Column::Id))
+        .column((a("wm"), workspace_members::Column::CreatedAt))
+        .column((a("wm"), workspace_members::Column::UpdatedAt))
+        .column((a("wm"), workspace_members::Column::DeletedAt))
+        .column((a("wm"), workspace_members::Column::Role))
+        .column((a("wm"), workspace_members::Column::CompanyRole))
+        .column((a("wm"), workspace_members::Column::ViewProps))
+        .column((a("wm"), workspace_members::Column::DefaultProps))
+        .column((a("wm"), workspace_members::Column::IssueProps))
+        .column((a("wm"), workspace_members::Column::IsActive))
+        .column((a("wm"), workspace_members::Column::GettingStartedChecklist))
+        .column((a("wm"), workspace_members::Column::Tips))
+        .column((a("wm"), workspace_members::Column::ExploredFeatures))
+        .column((a("wm"), workspace_members::Column::CreatedById))
+        .column((a("wm"), workspace_members::Column::UpdatedById))
+        .column((a("wm"), workspace_members::Column::WorkspaceId))
+        .column((a("wm"), workspace_members::Column::MemberId))
+        .expr_as(draft_issue_count_sub(user_id), a("draft_issue_count"));
+    stmt.from_as(workspace_members::Entity, a("wm"))
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            a("w"),
+            col("w", workspaces::Column::Id)
+                .equals((a("wm"), workspace_members::Column::WorkspaceId)),
+        )
+        .and_where(col("w", workspaces::Column::Slug).eq(slug))
+        .and_where(col("wm", workspace_members::Column::MemberId).eq(*user_id))
+        .and_where(col("wm", workspace_members::Column::IsActive).eq(true))
+        .and_where(col("wm", workspace_members::Column::DeletedAt).is_null())
+        .order_by((a("wm"), workspace_members::Column::CreatedAt), Order::Desc)
+        .limit(1);
+    stmt
+}
+
 async fn fetch_me_row(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<MeRow>, Denial> {
-    sqlx::query_as(
-        "SELECT wm.id AS id, wm.created_at AS created_at, wm.updated_at AS updated_at, \
-         wm.deleted_at AS deleted_at, wm.role AS role, wm.company_role AS company_role, \
-         wm.view_props AS view_props, wm.default_props AS default_props, \
-         wm.issue_props AS issue_props, wm.is_active AS is_active, \
-         wm.getting_started_checklist AS getting_started_checklist, wm.tips AS tips, \
-         wm.explored_features AS explored_features, wm.created_by_id AS created_by_id, \
-         wm.updated_by_id AS updated_by_id, wm.workspace_id AS workspace_id, \
-         wm.member_id AS member_id, COALESCE((SELECT COUNT(d.id) FROM draft_issues d \
-         WHERE d.created_by_id = $1 AND d.workspace_id = wm.workspace_id \
-         AND d.deleted_at IS NULL GROUP BY d.workspace_id), 0) AS draft_issue_count \
-         FROM workspace_members wm WHERE wm.member_id = $1 AND wm.workspace_id = \
-         (SELECT id FROM workspaces WHERE slug = $2) AND wm.is_active \
-         AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let stmt = me_rows_select(user_id, slug);
+    Ok(query_built(&orm(pool), &stmt).await?.into_iter().next())
 }
 
 /// One write-target row (partial_update/destroy): the PK, the user id,
 /// and the role.
-#[derive(Debug, Clone, Copy, sqlx::FromRow)]
+#[derive(Debug, Clone, Copy, FromQueryResult)]
 struct WriteTarget {
     id: Uuid,
     member_id: Uuid,
@@ -2317,28 +2460,41 @@ async fn fetch_write_target(
     slug: &str,
     pk: &Uuid,
 ) -> Result<Option<WriteTarget>, Denial> {
-    sqlx::query_as(
-        "SELECT wm.id AS id, wm.member_id AS member_id, wm.role AS role \
-         FROM workspace_members wm \
-         JOIN users u ON u.id = wm.member_id AND u.is_bot = FALSE \
-         WHERE wm.id = $1 AND wm.workspace_id = (SELECT id FROM workspaces WHERE slug = $2) \
-         AND wm.is_active AND wm.deleted_at IS NULL LIMIT 1",
-    )
-    .bind(pk)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    workspace_members::Entity::find()
+        .select_only()
+        .columns([
+            workspace_members::Column::Id,
+            workspace_members::Column::MemberId,
+            workspace_members::Column::Role,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Users2.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::Id.eq(*pk))
+        .filter(users::Column::IsBot.eq(false))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_model::<WriteTarget>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// One project-members row: the `ProjectMemberRoleSerializer` columns.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct ProjectMemberRow {
     id: Uuid,
     role: i16,
     member_id: Option<Uuid>,
     project_id: Uuid,
-    created_at: DateTime<Utc>,
+    created_at: DateTimeWithTimeZone,
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:79-99`) for an attached
@@ -2411,12 +2567,12 @@ fn render_member(
 ) -> Result<Value, Denial> {
     use crate::serializer::render_datetime_in;
     let id = row.id.to_string();
-    let created_at = render_datetime_in(&row.created_at, timezone);
-    let updated_at = render_datetime_in(&row.updated_at, timezone);
+    let created_at = render_datetime_in(&row.created_at.with_timezone(&Utc), timezone);
+    let updated_at = render_datetime_in(&row.updated_at.with_timezone(&Utc), timezone);
     let deleted_at = row
         .deleted_at
         .as_ref()
-        .map(|dt| render_datetime_in(dt, timezone));
+        .map(|dt| render_datetime_in(&dt.with_timezone(&Utc), timezone));
     let created_by = row.created_by_id.map(|id| id.to_string());
     let updated_by = row.updated_by_id.map(|id| id.to_string());
     let workspace = row.workspace_id.to_string();
@@ -2484,17 +2640,17 @@ fn render_member(
 }
 
 /// Render one me row through `WorkspaceMemberMeSerializer`: the annotation
-/// is always present (the `COALESCE` never yields null), the FKs render
+/// is always present (the `COUNT` never yields null), the FKs render
 /// as PK strings.
 fn render_me(row: &MeRow, timezone: &chrono_tz::Tz) -> Value {
     use crate::serializer::render_datetime_in;
     let id = row.id.to_string();
-    let created_at = render_datetime_in(&row.created_at, timezone);
-    let updated_at = render_datetime_in(&row.updated_at, timezone);
+    let created_at = render_datetime_in(&row.created_at.with_timezone(&Utc), timezone);
+    let updated_at = render_datetime_in(&row.updated_at.with_timezone(&Utc), timezone);
     let deleted_at = row
         .deleted_at
         .as_ref()
-        .map(|dt| render_datetime_in(dt, timezone));
+        .map(|dt| render_datetime_in(&dt.with_timezone(&Utc), timezone));
     let created_by = row.created_by_id.map(|id| id.to_string());
     let updated_by = row.updated_by_id.map(|id| id.to_string());
     let workspace = row.workspace_id.to_string();
@@ -2556,7 +2712,7 @@ fn render_project_member(row: &ProjectMemberRow, timezone: &chrono_tz::Tz) -> Ma
     let id = row.id.to_string();
     let member = row.member_id.map(|id| id.to_string());
     let project = row.project_id.to_string();
-    let created_at = render_datetime_in(&row.created_at, timezone);
+    let created_at = render_datetime_in(&row.created_at.with_timezone(&Utc), timezone);
     let role_row = d25::ProjectMemberRoleRow {
         id: &id,
         role: i64::from(row.role),
@@ -2698,9 +2854,13 @@ async fn guest_demote_cascade(
     slug: &str,
     target_user_id: &Uuid,
 ) -> Result<(), Denial> {
-    pidash_services::domain::projects::members::demote_cascade(pool, slug, *target_user_id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::demote_cascade(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        *target_user_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2708,39 +2868,72 @@ async fn guest_demote_cascade(
 /// a project in this workspace whose only member row is an admin for the
 /// compared id. The caller picks the id: the WorkspaceMember PK for
 /// destroy (ported bug B3 — never fires) and the user id for leave.
+/// `HAVING COUNT(pm.id) = 1 AND COUNT(CASE WHEN ...) = 1` is spelled
+/// verbatim (LEFT JOIN, no `is_active`/`deleted_at` guard on `pm`);
+/// running the grouped select and testing non-empty is the `EXISTS`
+/// over it, in one statement.
+fn sole_project_admin_select(slug: &str, compared_id: &Uuid) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.column((a("p"), projects::Column::Id))
+        .from_as(projects::Entity, a("p"))
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            a("w"),
+            col("w", workspaces::Column::Id).equals((a("p"), projects::Column::WorkspaceId)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            project_members::Entity,
+            a("pm"),
+            col("pm", project_members::Column::ProjectId).equals((a("p"), projects::Column::Id)),
+        )
+        .and_where(col("w", workspaces::Column::Slug).eq(slug))
+        .and_where(col("p", projects::Column::DeletedAt).is_null())
+        .group_by_col((a("p"), projects::Column::Id));
+    let total = Expr::expr(Func::count(col("pm", project_members::Column::Id))).eq(1);
+    let case = CaseStatement::new().case(
+        Condition::all()
+            .add(col("pm", project_members::Column::MemberId).eq(*compared_id))
+            .add(col("pm", project_members::Column::Role).eq(20)),
+        Expr::val(1),
+    );
+    let admins = Expr::expr(Func::count(SimpleExpr::Case(Box::new(case)))).eq(1);
+    stmt.and_having(total).and_having(admins).limit(1);
+    stmt
+}
+
+#[derive(Debug, FromQueryResult)]
+#[allow(dead_code)]
+struct ProjectIdRow {
+    id: Uuid,
+}
+
 async fn sole_project_admin_exists(
     pool: &sqlx::PgPool,
     slug: &str,
     compared_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM projects p LEFT JOIN project_members pm \
-         ON pm.project_id = p.id WHERE p.workspace_id = \
-         (SELECT id FROM workspaces WHERE slug = $1) AND p.deleted_at IS NULL \
-         GROUP BY p.id HAVING COUNT(pm.id) = 1 \
-         AND COUNT(CASE WHEN pm.member_id = $2 AND pm.role = 20 THEN 1 END) = 1)",
-    )
-    .bind(slug)
-    .bind(compared_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(exists)
+    let stmt = sole_project_admin_select(slug, compared_id);
+    let rows = query_built::<ProjectIdRow>(&orm(pool), &stmt).await?;
+    Ok(!rows.is_empty())
 }
 
 /// Active admin count for the R6 sole-workspace-admin guard.
 async fn workspace_admin_count(pool: &sqlx::PgPool, slug: &str) -> Result<i64, Denial> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workspace_members WHERE workspace_members.workspace_id = \
-         (SELECT id FROM workspaces WHERE slug = $1) \
-         AND workspace_members.role = 20 AND workspace_members.is_active = TRUE \
-         AND workspace_members.deleted_at IS NULL",
-    )
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(count)
+    let count = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::Role.eq(20i16))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(count as i64)
 }
 
 /// The R5/R6 project deactivation (`.update(is_active=False)` — no
@@ -2752,7 +2945,7 @@ async fn deactivate_project_rows(
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
     pidash_services::domain::projects::members::cascade_deactivate_ws(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         slug,
         *target_user_id,
         *now,
@@ -2795,22 +2988,29 @@ fn map_write_error(error: sqlx::Error) -> Denial {
 /// FK existence for PATCH `workspace` (the default manager scope:
 /// soft-deleted workspaces do not exist).
 async fn workspace_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let hit: Option<Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Id.eq(*id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// FK existence for PATCH `created_by`/`updated_by` (plain manager).
 async fn user_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(id)
-        .fetch_one(pool)
+    let hit: Option<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(*id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// Validate one PATCH body in wire order: every field is collected, then
@@ -3369,6 +3569,63 @@ async fn member_me(
     )
 }
 
+/// The involved-project ids (`member.py:245-249`): unscoped by
+/// workspace — ported bug B7 — so a user with project rows in another
+/// workspace still names those projects here. `DISTINCT`, active +
+/// live rows only.
+#[derive(Debug, FromQueryResult)]
+struct ProjectIdListRow {
+    project_id: Uuid,
+}
+
+async fn involved_project_ids(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Vec<Uuid>, Denial> {
+    let rows = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::ProjectId)
+        .distinct()
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_model::<ProjectIdListRow>()
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows.into_iter().map(|row| row.project_id).collect())
+}
+
+/// The scoped project-members for [`project_members`]: the slug's
+/// workspace (INNER JOIN, 1:1, matching the former scalar subselect),
+/// `project_id IN (...)` (the former `ANY($2)`), active + live rows,
+/// newest first.
+async fn fetch_project_rows(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_ids: &[Uuid],
+) -> Result<Vec<ProjectMemberRow>, Denial> {
+    project_members::Entity::find()
+        .select_only()
+        .columns([
+            project_members::Column::Id,
+            project_members::Column::Role,
+            project_members::Column::MemberId,
+            project_members::Column::ProjectId,
+            project_members::Column::CreatedAt,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.is_in(project_ids.iter().copied()))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .order_by_desc(project_members::Column::CreatedAt)
+        .into_model::<ProjectMemberRow>()
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 /// `GET workspaces/<slug>/project-members/`: the entity gate, the
 /// involved-project ids (unscoped — ported bug B7), the scoped members,
 /// grouped by project with the key popped.
@@ -3385,36 +3642,18 @@ async fn project_members(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let project_ids: Vec<Uuid> = match sqlx::query_scalar(
-        "SELECT DISTINCT pm.project_id FROM project_members pm WHERE pm.member_id = $1 \
-         AND pm.is_active = TRUE AND pm.deleted_at IS NULL",
-    )
-    .bind(actor.id)
-    .fetch_all(pool)
-    .await
-    {
+    let project_ids = match involved_project_ids(pool, &actor.id).await {
         Ok(ids) => ids,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(denial) => return denial.into_response(),
     };
     if project_ids.is_empty() {
         // `project_id__in=[]` is Django's `EmptyResultSet`: no second
         // query, an empty dict.
         return json_response(StatusCode::OK, "{}".to_owned());
     }
-    let rows: Vec<ProjectMemberRow> = match sqlx::query_as(
-        "SELECT pm.id AS id, pm.role AS role, pm.member_id AS member_id, \
-         pm.project_id AS project_id, pm.created_at AS created_at FROM project_members pm \
-         WHERE pm.workspace_id = (SELECT id FROM workspaces WHERE slug = $1) \
-         AND pm.project_id = ANY($2) AND pm.is_active = TRUE AND pm.deleted_at IS NULL \
-         ORDER BY pm.created_at DESC",
-    )
-    .bind(&slug)
-    .bind(&project_ids)
-    .fetch_all(pool)
-    .await
-    {
+    let rows = match fetch_project_rows(pool, &slug, &project_ids).await {
         Ok(rows) => rows,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(denial) => return denial.into_response(),
     };
     let rendered: Vec<Map<String, Value>> = rows
         .iter()
@@ -5335,72 +5574,89 @@ mod tests {
         );
     }
 
+    fn member_sql(stmt: &SelectStatement) -> String {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        stmt.to_string(PostgresQueryBuilder)
+    }
+
     #[test]
     fn member_select_carries_scope_without_active_filter() {
-        // R1 shape via the built statement: the slug subselect bound as
-        // `$1`, the soft-delete guard, the `-created_at` ordering — and
-        // no `is_active` filter (B5).
-        let sql = member_rows_builder("acme", &[], None, false)
-            .sql()
-            .to_owned();
-        assert!(
-            sql.contains("(SELECT id FROM workspaces WHERE slug = $1)"),
-            "{sql}"
-        );
-        assert!(sql.contains("wm.deleted_at IS NULL"));
-        assert!(sql.contains("JOIN users u ON u.id = wm.member_id"));
+        // R1 shape via the built statement: the slug scope (INNER JOIN
+        // aliased `w`), the soft-delete guard, the `-created_at`
+        // ordering — and no `is_active` filter (B5).
+        let sql = member_sql(&member_rows_select("acme", &[], None, false));
+        assert!(sql.contains(r#"FROM "workspace_members" AS "wm""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "workspaces" AS "w""#), "{sql}");
+        assert!(sql.contains(r#""w"."slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""wm"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "users" AS "u""#), "{sql}");
         // The avatar joins are bare `LEFT` joins: `select_related` and
         // the FK descriptors ignore the related managers, so soft-deleted
         // assets and asset workspaces still attach.
-        assert!(sql.contains("LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id "));
-        assert!(sql.contains("LEFT JOIN workspaces faw ON faw.id = fa.workspace_id "));
-        assert!(!sql.contains("fa.deleted_at"));
-        assert!(!sql.contains("faw.deleted_at"));
+        assert!(sql.contains(r#"LEFT JOIN "file_assets" AS "fa""#), "{sql}");
+        assert!(sql.contains(r#"LEFT JOIN "workspaces" AS "faw""#), "{sql}");
+        assert!(!sql.contains(r#""fa"."deleted_at""#));
+        assert!(!sql.contains(r#""faw"."deleted_at""#));
         // B5 pins the *filter*, not the column: `is_active` is selected
         // (the serializer renders it) but never filtered on.
         let where_clause = sql
             .split_once("WHERE")
             .expect("member select filters in where")
             .1;
-        assert!(!where_clause.contains("is_active"));
-        // The slug binds exactly once: a literal `$1` in the head plus
-        // `push_bind` would emit it twice and 500 every list/retrieve.
-        assert_eq!(sql.matches("$1").count(), 1, "{sql}");
+        assert!(!where_clause.contains("is_active"), "{sql}");
+        assert!(sql.contains(r#"ORDER BY "wm"."created_at" DESC"#), "{sql}");
+        // Joined columns are aliased `u_*`/`fa_*`: every output name
+        // unique, so the decode can never read the wrong column.
+        for alias in [
+            r#""u_id""#,
+            r#""u_first_name""#,
+            r#""fa_id""#,
+            r#""fa_entity_type""#,
+            r#""fa_workspace_slug""#,
+        ] {
+            assert!(sql.contains(alias), "{sql}");
+        }
     }
 
     #[test]
-    fn member_statement_numbers_placeholders() {
-        // No terms, no target: the slug binds `$1`, then the guard and
-        // the ordering follow with no gap or duplicated bind.
-        let plain = member_rows_builder("acme", &[], None, false)
-            .sql()
-            .to_owned();
-        assert_eq!(
-            plain,
-            format!("{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC")
-        );
+    fn member_statement_search_targets_and_limits() {
+        let plain = member_sql(&member_rows_select("acme", &[], None, false));
+        assert!(plain.contains(r#""w"."slug" = 'acme'"#), "{plain}");
+        assert!(!plain.contains("LIKE"), "{plain}");
+        assert!(!plain.contains("LIMIT"), "{plain}");
         // Terms AND after the guard, each binding two LIKEs.
         // `icontains` is the `UPPER` form, not `ILIKE`.
-        let terms = member_rows_builder("acme", &["ada".to_owned()], None, false)
-            .sql()
-            .to_owned();
-        assert_eq!(
-            terms,
-            format!(
-                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (UPPER(u.display_name::text) LIKE UPPER($2) OR UPPER(u.first_name::text) LIKE UPPER($3)) ORDER BY wm.created_at DESC"
-            )
-        );
-        // Target + LIMIT 1 (retrieve): the id binds after the term LIKEs.
+        let terms = member_sql(&member_rows_select(
+            "acme",
+            &["ada".to_owned()],
+            None,
+            false,
+        ));
+        assert!(terms.contains("UPPER("), "{terms}");
+        assert!(terms.contains("LIKE"), "{terms}");
+        assert!(terms.contains("CAST"), "{terms}");
+        assert!(!terms.contains("ILIKE"), "{terms}");
+        for fragment in [
+            r#""u"."display_name""#,
+            r#""u"."first_name""#,
+            r#""wm"."deleted_at" IS NULL"#,
+            r#"ORDER BY "wm"."created_at" DESC"#,
+        ] {
+            assert!(terms.contains(fragment), "{terms}");
+        }
+        // Target + LIMIT 1 (retrieve): the id filters after the term LIKEs.
         let id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid");
-        let detail = member_rows_builder("acme", &["ada".to_owned()], Some(&id), true)
-            .sql()
-            .to_owned();
-        assert_eq!(
-            detail,
-            format!(
-                "{MEMBER_SELECT}$1) AND wm.deleted_at IS NULL AND (UPPER(u.display_name::text) LIKE UPPER($2) OR UPPER(u.first_name::text) LIKE UPPER($3)) AND wm.id = $4 ORDER BY wm.created_at DESC LIMIT 1"
-            )
+        let detail = member_sql(&member_rows_select(
+            "acme",
+            &["ada".to_owned()],
+            Some(&id),
+            true,
+        ));
+        assert!(
+            detail.contains(&format!(r#""wm"."id" = '{id}'"#)),
+            "{detail}"
         );
+        assert!(detail.contains("LIMIT 1"), "{detail}");
     }
 
     #[test]
@@ -5546,10 +5802,12 @@ mod tests {
             id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("uuid"),
             created_at: chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
                 .expect("dt")
-                .with_timezone(&chrono::Utc),
+                .with_timezone(&chrono::Utc)
+                .into(),
             updated_at: chrono::DateTime::parse_from_rfc3339("2025-01-02T00:00:00Z")
                 .expect("dt")
-                .with_timezone(&chrono::Utc),
+                .with_timezone(&chrono::Utc)
+                .into(),
             deleted_at: None,
             role: 20,
             company_role: None,
@@ -5593,10 +5851,12 @@ mod tests {
             id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("uuid"),
             created_at: chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
                 .expect("dt")
-                .with_timezone(&chrono::Utc),
+                .with_timezone(&chrono::Utc)
+                .into(),
             updated_at: chrono::DateTime::parse_from_rfc3339("2025-01-02T00:00:00Z")
                 .expect("dt")
-                .with_timezone(&chrono::Utc),
+                .with_timezone(&chrono::Utc)
+                .into(),
             deleted_at: None,
             role: 15,
             company_role: None,
@@ -5625,5 +5885,268 @@ mod tests {
             fa_issue_id: None,
             fa_workspace_slug: None,
         }
+    }
+
+    #[test]
+    fn guard_selects_pin_joins_filters_and_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::nil();
+        let requester = workspace_members::Entity::find()
+            .select_only()
+            .columns([
+                workspace_members::Column::Id,
+                workspace_members::Column::Role,
+                workspace_members::Column::MemberId,
+            ])
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                workspace_members::Relation::Workspaces.def(),
+            )
+            .filter(workspace_members::Column::MemberId.eq(id))
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            requester.contains(r#"INNER JOIN "workspaces""#),
+            "{requester}"
+        );
+        assert!(
+            requester.contains(r#""workspaces"."slug" = 'acme'"#),
+            "{requester}"
+        );
+        assert!(requester.contains("LIMIT 1"), "{requester}");
+        let target = workspace_members::Entity::find()
+            .select_only()
+            .columns([
+                workspace_members::Column::Id,
+                workspace_members::Column::MemberId,
+                workspace_members::Column::Role,
+            ])
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                workspace_members::Relation::Users2.def(),
+            )
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                workspace_members::Relation::Workspaces.def(),
+            )
+            .filter(workspace_members::Column::Id.eq(id))
+            .filter(users::Column::IsBot.eq(false))
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            target.contains(
+                r#"INNER JOIN "users" ON "workspace_members"."member_id" = "users"."id""#
+            ),
+            "{target}"
+        );
+        assert!(target.contains(r#""users"."is_bot" = FALSE"#), "{target}");
+        let sole = member_sql(&sole_project_admin_select("acme", &id));
+        assert!(sole.contains(r#"FROM "projects" AS "p""#), "{sole}");
+        assert!(
+            sole.contains(r#"LEFT JOIN "project_members" AS "pm""#),
+            "{sole}"
+        );
+        assert!(sole.contains("GROUP BY"), "{sole}");
+        assert!(sole.contains("HAVING"), "{sole}");
+        assert!(sole.contains("COUNT"), "{sole}");
+        assert!(sole.contains("CASE WHEN"), "{sole}");
+        let me = member_sql(&me_rows_select(&id, "acme"));
+        assert!(me.contains(r#"FROM "draft_issues" AS "d""#), "{me}");
+        assert!(me.contains(r#""draft_issue_count""#), "{me}");
+        assert!(me.contains(r#""wm"."is_active" = TRUE"#), "{me}");
+        assert!(me.contains("LIMIT 1"), "{me}");
+    }
+
+    /// The migrated reads against constraint-free temp tables on a
+    /// one-connection pool: scopes, the bare LEFT joins, the draft
+    /// annotation, the grouped sole-admin probe, and the unscoped
+    /// involved ids. Needs `DATABASE_URL`; otherwise skips.
+    #[tokio::test]
+    async fn live_member_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "users",
+            "workspace_members",
+            "file_assets",
+            "projects",
+            "project_members",
+            "draft_issues",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, other_ws, user_a, user_b, bot) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (member_a, member_a2, member_b, member_bot, member_deleted) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let asset = Uuid::new_v4();
+        let (proj1, proj2, other_proj, other_ws_proj) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!(
+                "INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme'), ('{other_ws}', 'other')"
+            ),
+            format!(
+                "INSERT INTO users (id, first_name, last_name, avatar, display_name, is_bot, email, last_login_medium) \
+                 VALUES ('{user_a}', 'Ada', 'L', '', 'Ada', false, 'ada@x.io', 'email'), \
+                 ('{user_b}', 'Grace', 'H', '', 'Grace', false, NULL, 'email'), \
+                 ('{bot}', 'Bot', 'B', '', 'Bot', true, NULL, 'email')"
+            ),
+            format!(
+                "INSERT INTO workspace_members (id, role, member_id, workspace_id, is_active, created_at, updated_at, \
+                 view_props, default_props, issue_props, getting_started_checklist, tips, explored_features) \
+                 VALUES ('{member_a}', 20, '{user_a}', '{ws}', true, now() - interval '2 min', now(), '{{}}', '{{}}', '{{}}', '{{}}', '{{}}', '{{}}'), \
+                 ('{member_a2}', 15, '{user_a}', '{ws}', true, now() - interval '1 min', now(), '{{}}', '{{}}', '{{}}', '{{}}', '{{}}', '{{}}'), \
+                 ('{member_b}', 15, '{user_b}', '{ws}', false, now(), now(), '{{}}', '{{}}', '{{}}', '{{}}', '{{}}', '{{}}'), \
+                 ('{member_bot}', 15, '{bot}', '{ws}', true, now(), now(), '{{}}', '{{}}', '{{}}', '{{}}', '{{}}', '{{}}'), \
+                 ('{member_deleted}', 15, '{user_b}', '{ws}', true, now(), now(), '{{}}', '{{}}', '{{}}', '{{}}', '{{}}', '{{}}')"
+            ),
+            format!(
+                "UPDATE workspace_members SET deleted_at = now() WHERE id = '{member_deleted}'"
+            ),
+            format!(
+                "INSERT INTO file_assets (id, attributes, asset, is_deleted, is_archived, is_uploaded, size, entity_type, workspace_id) \
+                 VALUES ('{asset}', '{{}}', '', false, false, false, 0, 'USER_AVATAR', '{ws}')"
+            ),
+            format!(
+                "UPDATE users SET avatar_asset_id = '{asset}' WHERE id = '{user_a}'"
+            ),
+            format!(
+                "INSERT INTO projects (id, workspace_id, name, identifier, description, network, logo_props, timezone, repo_url, base_branch, default_agent_executor) \
+                 VALUES ('{proj1}', '{ws}', 'P1', 'P1', '', 0, '{{}}', 'UTC', '', '', ''), \
+                 ('{proj2}', '{ws}', 'P2', 'P2', '', 0, '{{}}', 'UTC', '', '', ''), \
+                 ('{other_proj}', '{ws}', 'P3', 'P3', '', 0, '{{}}', 'UTC', '', '', ''), \
+                 ('{other_ws_proj}', '{other_ws}', 'P4', 'P4', '', 0, '{{}}', 'UTC', '', '', '')"
+            ),
+            format!(
+                "INSERT INTO project_members (id, role, member_id, project_id, workspace_id, is_active, created_at, updated_at, view_props, default_props, preferences, sort_order) \
+                 VALUES (gen_random_uuid(), 20, '{user_a}', '{proj1}', '{ws}', true, now() - interval '2 min', now(), '{{}}', '{{}}', '{{}}', 0), \
+                 (gen_random_uuid(), 15, '{user_b}', '{proj1}', '{ws}', true, now() - interval '1 min', now(), '{{}}', '{{}}', '{{}}', 0), \
+                 (gen_random_uuid(), 15, '{user_a}', '{proj2}', '{other_ws}', true, now(), now(), '{{}}', '{{}}', '{{}}', 0), \
+                 (gen_random_uuid(), 20, '{user_a}', '{other_ws_proj}', '{other_ws}', true, now(), now(), '{{}}', '{{}}', '{{}}', 0)"
+            ),
+            format!(
+                "INSERT INTO draft_issues (id, workspace_id, created_by_id, description_json, description_html, priority, sort_order, created_at, updated_at) \
+                 VALUES (gen_random_uuid(), '{ws}', '{user_a}', '{{}}', '', 'none', 0, now(), now()), \
+                 (gen_random_uuid(), '{ws}', '{user_a}', '{{}}', '', 'none', 0, now(), now())"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // Requester: active + live only.
+        let req = requester_lookup(&pool, &user_a, "acme")
+            .await
+            .expect("requester")
+            .expect("row");
+        assert_eq!(req.member_id, user_a);
+        assert!(requester_lookup(&pool, &user_b, "acme")
+            .await
+            .expect("inactive membership")
+            .is_none());
+        // List: inactive rows listed (B5), deleted rows hidden, order newest first.
+        let rows = fetch_member_rows(&pool, "acme", &[], None, false)
+            .await
+            .expect("list");
+        let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        assert!(ids.contains(&member_a), "{ids:?}");
+        assert!(ids.contains(&member_a2), "{ids:?}");
+        // Inactive `member_b` listed; soft-deleted `member_deleted` hidden.
+        assert!(ids.contains(&member_b), "{ids:?}");
+        assert!(!ids.contains(&member_deleted), "{ids:?}");
+        assert_eq!(ids.iter().filter(|id| *id == &member_a).count(), 1);
+        // Search narrows on display/first name (icontains).
+        let searched = fetch_member_rows(&pool, "acme", &["ada".to_owned()], None, false)
+            .await
+            .expect("search");
+        assert!(searched
+            .iter()
+            .all(|row| row.u_display_name.contains("Ada")));
+        assert!(!searched.is_empty());
+        // By-id ignores the scope (post-PATCH re-render).
+        let by_id = fetch_member_row_by_id(&pool, &member_b)
+            .await
+            .expect("by id")
+            .expect("row");
+        assert_eq!(by_id.id, member_b);
+        // Write target: bots are invisible.
+        assert!(fetch_write_target(&pool, "acme", &member_bot)
+            .await
+            .expect("bot target")
+            .is_none());
+        assert!(fetch_write_target(&pool, "acme", &member_a)
+            .await
+            .expect("human target")
+            .is_some());
+        // Me: draft annotation counts this user's live drafts in this workspace.
+        let me = fetch_me_row(&pool, &user_a, "acme")
+            .await
+            .expect("me")
+            .expect("row");
+        assert_eq!(me.draft_issue_count, 2);
+        // Sole-project-admin: proj1 has two members (not sole); other_ws_proj
+        // is outside `acme` and must not fire.
+        assert!(!sole_project_admin_exists(&pool, "acme", &user_a)
+            .await
+            .expect("sole (multi)"));
+        // Admin count: one active admin in `acme`.
+        assert_eq!(
+            workspace_admin_count(&pool, "acme").await.expect("count"),
+            1
+        );
+        // Exists checks honour the manager scopes.
+        assert!(workspace_exists(&pool, &ws).await.expect("ws exists"));
+        assert!(user_exists(&pool, &user_a).await.expect("user exists"));
+        assert!(!user_exists(&pool, &Uuid::new_v4())
+            .await
+            .expect("user miss"));
+        // Involved ids span workspaces (B7): proj2 + other_ws_proj ride along.
+        let involved = involved_project_ids(&pool, &user_a)
+            .await
+            .expect("involved");
+        assert!(involved.contains(&proj1), "{involved:?}");
+        assert!(involved.contains(&proj2), "{involved:?}");
+        assert!(involved.contains(&other_ws_proj), "{involved:?}");
+        assert!(!involved.contains(&other_proj), "{involved:?}");
+        // Scoped rows: only `acme` workspace rows for the involved projects.
+        let scoped = fetch_project_rows(&pool, "acme", &involved)
+            .await
+            .expect("scoped");
+        assert!(scoped.iter().all(|row| row.project_id == proj1));
+        assert_eq!(scoped.len(), 2);
     }
 }

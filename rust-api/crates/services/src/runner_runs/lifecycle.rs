@@ -548,17 +548,22 @@ pub struct RequeueRunFacts {
     pub pod_id: Option<Uuid>,
     pub parent_run_id: Option<Uuid>,
     pub parent_thread_id: Option<String>,
+    pub pin_kind: String,
 }
 
 /// Requeue writes (`apply_run_resume_unavailable:272-295`): the run
 /// row back to `QUEUED` with runner/pin/assigned/queue cleared, the
 /// parent thread cleared when set (saved *before* the run row, both
 /// inside the caller's transaction), and the pod drain `on_commit`.
+/// `keep_pin` for a dedicated pin: Django drops the pin only for
+/// locality pins (`if run.pin_kind != PinKind.DEDICATED`), so a
+/// dedicated run is re-queued still pinned to its runner (§9.3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequeuePlan {
     pub run_id: Uuid,
     pub parent_thread_clear: Option<Uuid>,
     pub after_commit: Option<LifecycleEffect>,
+    pub keep_pin: bool,
 }
 
 /// Plan the requeue from the locked row. `None` from the fallback
@@ -578,6 +583,7 @@ pub fn plan_requeue_from_locked(run: &RequeueRunFacts) -> RequeuePlan {
         after_commit: run
             .pod_id
             .map(|pod_id| LifecycleEffect::DrainPod { pod_id }),
+        keep_pin: run.pin_kind == "dedicated",
     }
 }
 
@@ -590,6 +596,17 @@ pub fn requeue_update_sql() -> &'static str {
     "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
      \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
      WHERE \"agent_run\".\"id\" = $5"
+}
+
+/// Requeue `UPDATE` for a dedicated pin
+/// (`apply_run_resume_unavailable:282-290`):
+/// `save(update_fields=["status", "runner", "assigned_at"])`, in that
+/// order — the pin is kept (§9.3). Params: `$1` `queued`, `$2..$3`
+/// null, `$4` run id.
+pub fn requeue_update_keep_pin_sql() -> &'static str {
+    "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
+     \"assigned_at\" = $3 \
+     WHERE \"agent_run\".\"id\" = $4"
 }
 
 /// Parent thread clear (`apply_run_resume_unavailable:279-281`):
@@ -1077,6 +1094,34 @@ pub async fn requeue_update(
         .rows_affected)
 }
 
+/// Requeue `UPDATE` for a dedicated pin (`apply_run_resume_unavailable:
+/// 272-290`): `save(update_fields=["status", "runner", "assigned_at"])`
+/// — the pin and its kind are kept, so the run is re-queued still
+/// pinned to the issue's dedicated runner (§9.3).
+pub fn requeue_update_keep_pin_statement(
+    run_id: Uuid,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::{Expr, Keyword, SimpleExpr};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(AgentRunStatus::Queued.value()))
+        .col_expr(Column::RunnerId, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::AssignedAt, SimpleExpr::Keyword(Keyword::Null))
+        .filter(Column::Id.eq(run_id))
+}
+
+/// Run [`requeue_update_keep_pin_statement`]; returns the rows written.
+pub async fn requeue_update_keep_pin(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(requeue_update_keep_pin_statement(run_id)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
 /// Runner `BUSY` flip ([`runner_busy_update_sql`]): single-column
 /// update, no timestamp touch.
 pub fn runner_busy_update_statement(runner_id: Uuid) -> sea_orm::UpdateMany<orm::runner::Entity> {
@@ -1517,6 +1562,7 @@ mod tests {
             pod_id: Some(Uuid::nil()),
             parent_run_id: Some(Uuid::nil()),
             parent_thread_id: Some("thread-1".to_owned()),
+            pin_kind: "locality".to_owned(),
         }
     }
 
@@ -1537,6 +1583,8 @@ mod tests {
 
         let plan = plan_requeue_from_locked(&requeue_facts());
         assert_eq!(plan.run_id, Uuid::nil());
+        // Locality pin: dropped (Django's pre-design requeue).
+        assert!(!plan.keep_pin);
         assert_eq!(plan.parent_thread_clear, Some(Uuid::nil()));
         assert_eq!(
             plan.after_commit,
@@ -1554,6 +1602,29 @@ mod tests {
         // No pod: no drain.
         facts.pod_id = None;
         assert_eq!(plan_requeue_from_locked(&facts).after_commit, None);
+    }
+
+    #[test]
+    fn requeue_keeps_dedicated_pin() {
+        // Dedicated pin: kept (§9.3) — the run goes back to QUEUED
+        // still pinned to the issue's dedicated runner.
+        let mut facts = requeue_facts();
+        facts.pin_kind = "dedicated".to_owned();
+        let plan = plan_requeue_from_locked(&facts);
+        assert!(plan.keep_pin);
+        assert_eq!(plan.parent_thread_clear, Some(Uuid::nil()));
+        assert_eq!(
+            plan.after_commit,
+            Some(LifecycleEffect::DrainPod {
+                pod_id: Uuid::nil()
+            })
+        );
+        assert_eq!(
+            requeue_update_keep_pin_sql(),
+            "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
+             \"assigned_at\" = $3 \
+             WHERE \"agent_run\".\"id\" = $4"
+        );
     }
 
     #[test]
@@ -2023,7 +2094,7 @@ mod tests {
     fn lock_sql_match_django_tails() {
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 39)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 40)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -2036,7 +2107,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 39)]
+            vec![("\"agent_run\"".to_owned(), 40)]
         );
         assert!(
             requeue.ends_with(
@@ -2055,7 +2126,7 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
             ]
         );
@@ -2071,7 +2142,7 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -2091,7 +2162,7 @@ mod tests {
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
             ]
