@@ -1,0 +1,30 @@
+{
+ "enabled_false": {
+  "description": "desc",
+  "enabled": false,
+  "interval_label": "daily",
+  "name": "Close merged",
+  "slug": "auto-close-merged"
+ },
+ "enabled_true": {
+  "description": "desc",
+  "enabled": true,
+  "interval_label": "daily",
+  "name": "Close merged",
+  "slug": "auto-close-merged"
+ },
+ "input": {
+  "min_role": 20,
+  "name": "ADMIN NAME",
+  "prompt": "SECRET PROMPT",
+  "public_description": "desc",
+  "public_name": "Close merged",
+  "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+  "slug": "auto-close-merged"
+ },
+ "method": "Ran public_job_payload() against an unsaved LoopJob under pi_dash.settings.test (no DB).",
+ "notes": [
+  "whitelist output: slug/name(=public_name)/description/interval_label/enabled only; prompt, min_role, admin name never leak."
+ ],
+ "source": "apps/api/pi_dash/loop/serializers.py:35-43"
+}

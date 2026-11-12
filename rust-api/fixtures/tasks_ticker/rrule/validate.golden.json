@@ -1,0 +1,118 @@
+{
+  "_trace": "bgtasks/_rrule.py:218-263 (SECONDLY reject 256-259; empty ok 230-231)",
+  "_method": "ran validate_rrule_string live",
+  "vectors": [
+    {
+      "rrule": "FREQ=MINUTELY",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=MINUTELY;INTERVAL=5",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=HOURLY;BYMINUTE=15",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=WEEKLY;BYDAY=MO,WE,FR",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=MONTHLY;BYMONTHDAY=1",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=YEARLY;BYMONTH=6",
+      "valid": true
+    },
+    {
+      "rrule": "RRULE:FREQ=DAILY",
+      "valid": true
+    },
+    {
+      "rrule": "",
+      "valid": true
+    },
+    {
+      "rrule": "FREQ=SECONDLY",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "FREQ=SECONDLY is not allowed (allowed: ['DAILY', 'HOURLY', 'MINUTELY', 'MONTHLY', 'WEEKLY', 'YEARLY'])"
+    },
+    {
+      "rrule": "not a real rrule",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: not enough values to unpack (expected 2, got 1)"
+    },
+    {
+      "rrule": "FREQ=DAILY;UNTIL=20271231",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
+    },
+    {
+      "rrule": "FREQ=DAILY;UNTIL=20271231T000000",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
+    },
+    {
+      "rrule": "FREQ=DAILY;BYSETPOS=0",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: bysetpos must be between 1 and 366, or between -366 and -1"
+    },
+    {
+      "rrule": "FREQ=DAILY;BYMINUTE=60",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: minute must be in 0..59"
+    },
+    {
+      "rrule": "FREQ=DAILY;BYHOUR=24",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: hour must be in 0..23"
+    },
+    {
+      "rrule": "FREQ=WEEKLY;BYSECOND=61",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: second must be in 0..59"
+    },
+    {
+      "rrule": "BYHOUR=3",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: rrule.__init__() missing 1 required positional argument: 'freq'"
+    },
+    {
+      "rrule": "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231",
+      "valid": true
+    },
+    {
+      "rrule": "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231T000000Z",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
+    },
+    {
+      "rrule": "FREQ=WEEKLY;BYDAY=0MO",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: invalid 'BYDAY': 0MO"
+    },
+    {
+      "rrule": "FREQ=MONTHLY;BYDAY=+0MO",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: invalid 'BYDAY': +0MO"
+    }
+  ]
+}

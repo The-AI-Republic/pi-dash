@@ -1,0 +1,395 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import * as React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { issueKeys } from "./keys.js";
+import {
+  CREATE_TOAST_COPY_LABEL,
+  CREATE_TOAST_VIEW_LABEL,
+  useCreateWorkItem,
+  WORK_ITEM_CREATED_TITLE,
+  WORK_ITEM_CREATE_FAILED_TITLE,
+  type WorkItemCreateInput,
+} from "./create.js";
+
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/shell/index.js")>()),
+  notifyError: vi.fn(),
+  notifySuccess: vi.fn(),
+}));
+
+import { ToastHost } from "@pidash/kit";
+
+import { getToastManager, notifyError, notifySuccess } from "../../../shared/shell/index.js";
+
+const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
+
+function createdRow(): Record<string, unknown> {
+  return {
+    id: "323e4567-e89b-12d3-a456-426614174002",
+    name: "Fresh report",
+    state_id: null,
+    sort_order: 65535,
+    completed_at: null,
+    estimate_point: null,
+    priority: "none",
+    start_date: null,
+    target_date: null,
+    sequence_id: 7,
+    project_id: PROJECT_ID,
+    parent_id: null,
+    cycle_id: null,
+    module_ids: [],
+    label_ids: [],
+    assignee_ids: [],
+    sub_issues_count: null,
+    attachment_count: null,
+    link_count: null,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+    deleted_at: null,
+  };
+}
+
+function stubClient(status: number, failureBody = "{}") {
+  const calls: Array<{ url: string; method: string; body: string }> = [];
+  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+    calls.push({ url, method: init.method ?? "GET", body: init.body ?? "" });
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ csrf_token: "csrf" }),
+      };
+    }
+    return {
+      status,
+      url,
+      headers: { get: () => null },
+      text: async () => (status === 201 ? JSON.stringify(createdRow()) : failureBody),
+    };
+  }) as never);
+  return { calls };
+}
+
+describe("useCreateWorkItem", () => {
+  function renderHandle(status: number, failureBody = "{}") {
+    const { calls } = stubClient(status, failureBody);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    let save: ((input: WorkItemCreateInput) => void) | null = null;
+    function Probe(): React.ReactElement {
+      const mutation = useCreateWorkItem("acme");
+      save = (input) => mutation.mutate(input);
+      return (
+        <>
+          <p>{`create:${mutation.status}`}</p>
+          <ToastHost manager={getToastManager()} />
+        </>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>
+    );
+    return {
+      calls,
+      invalidate,
+      save: (input: WorkItemCreateInput) => save?.(input),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    resetAppClient();
+  });
+
+  it("posts the title and announces the new row", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    // The oracle create-modal scenario keys on this exact sentence.
+    expect(await screen.findByText(WORK_ITEM_CREATED_TITLE)).toBeInTheDocument();
+    expect(WORK_ITEM_CREATED_TITLE).toBe("Work item created successfully");
+    const post = h.calls.find((call) => call.method === "POST");
+    expect(post?.url).toBe(`https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/issues/`);
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({ name: "Fresh report" });
+    await waitFor(() => expect(h.invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.all("acme") }));
+    expect(screen.getByText("create:success")).toBeInTheDocument();
+    // ISS-131: the toast offers the new record in another tab and a copy.
+    expect(screen.queryByTestId("toast-actions")).not.toBeInTheDocument();
+  });
+
+  it("offers a new-tab view and a copy link with the project code (ISS-131)", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, projectIdentifier: "WEB", payload: { name: "Fresh report" } });
+    const view = await screen.findByRole("link", { name: CREATE_TOAST_VIEW_LABEL });
+    expect(view).toHaveAttribute("href", "/acme/browse/WEB-7/");
+    expect(view).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("button", { name: CREATE_TOAST_COPY_LABEL })).toBeInTheDocument();
+  });
+
+  it("shows Copied! only after the clipboard write lands", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(globalThis.navigator, "clipboard", { configurable: true, value: { writeText } });
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, projectIdentifier: "WEB", payload: { name: "Fresh report" } });
+    await user.click(await screen.findByRole("button", { name: CREATE_TOAST_COPY_LABEL }));
+    expect(await screen.findByRole("button", { name: "Copied!" })).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/acme/browse/WEB-7/"));
+    // The toast's own confirmation is the only feedback, so no second notice.
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("keeps the copy label when the clipboard refuses the write", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error("denied"))) },
+    });
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, projectIdentifier: "WEB", payload: { name: "Fresh report" } });
+    await user.click(await screen.findByRole("button", { name: CREATE_TOAST_COPY_LABEL }));
+    await waitFor(() => expect(screen.getByRole("button", { name: CREATE_TOAST_COPY_LABEL })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Copied!" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the plain notice when the project code is unknown", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    expect(await screen.findByText(WORK_ITEM_CREATED_TITLE)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: CREATE_TOAST_VIEW_LABEL })).not.toBeInTheDocument();
+  });
+
+  it("announces the failure without creating", async () => {
+    const h = renderHandle(400);
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(screen.getByText("create:error")).toBeInTheDocument();
+  });
+
+  it("stays quiet on execution-target rejections, which report in place", async () => {
+    const h = renderHandle(400, JSON.stringify({ assigned_runner_id: ["That runner belongs to another project."] }));
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    await waitFor(() => expect(screen.getByText("create:error")).toBeInTheDocument());
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+});
+
+describe("useCreateWorkItem temp rows", () => {
+  const LISTS_KEY = [...issueKeys.lists("acme", PROJECT_ID), { density: "list" }] as const;
+
+  function seededRows(): Record<string, unknown>[] {
+    return [
+      {
+        id: "123e4567-e89b-12d3-a456-426614174000",
+        name: "Seeded row",
+        state_id: null,
+        sort_order: 1,
+        completed_at: null,
+        priority: "none",
+        sequence_id: 1,
+        project_id: PROJECT_ID,
+        parent_id: null,
+        cycle_id: null,
+        module_ids: [],
+        label_ids: [],
+        assignee_ids: [],
+        sub_issues_count: null,
+        attachment_count: null,
+        link_count: null,
+        created_at: "2024-01-02T03:04:05Z",
+        updated_at: "2024-02-03T04:05:06Z",
+        created_by: null,
+        updated_by: null,
+        is_draft: false,
+        archived_at: null,
+      },
+    ];
+  }
+
+  function renderTempHandle(status: number, holdPost: { release: () => void } | null = null) {
+    const serverRows: Record<string, unknown>[] = seededRows();
+    const calls: Array<{ url: string; method: string; body: string }> = [];
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      calls.push({ url, method: init.method ?? "GET", body: init.body ?? "" });
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "csrf" }),
+        };
+      }
+      if (init.method === "POST") {
+        if (holdPost) await new Promise<void>((resolve) => (holdPost.release = resolve));
+        if (status !== 201) {
+          return { status, url, headers: { get: () => null }, text: async () => "{}" };
+        }
+        serverRows.push(createdRow());
+        return {
+          status,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify(createdRow()),
+        };
+      }
+      return { status, url, headers: { get: () => null }, text: async () => "{}" };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let save: ((input: WorkItemCreateInput) => void) | null = null;
+    function Probe(): React.ReactElement {
+      const mutation = useCreateWorkItem("acme");
+      // An active lists subscriber, standing in for the rendered layout.
+      useQuery({
+        queryKey: LISTS_KEY,
+        queryFn: async () => ({ results: [...serverRows], total_count: serverRows.length }),
+      });
+      save = (input) => mutation.mutate(input);
+      return (
+        <>
+          <p>{`create:${mutation.status}`}</p>
+          <ToastHost manager={getToastManager()} />
+        </>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>
+    );
+    return {
+      queryClient,
+      calls,
+      cached: () =>
+        queryClient.getQueryData(LISTS_KEY) as { results: Array<{ id: string; name: string }>; total_count: number },
+      save: (input: WorkItemCreateInput) => save?.(input),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    resetAppClient();
+  });
+
+  it("paints the temp row while the post pends, then reconciles to the server row", async () => {
+    const holdPost: { release: () => void } = { release: () => {} };
+    const h = renderTempHandle(201, holdPost);
+    await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    await waitFor(() => expect(h.cached().results).toHaveLength(2));
+    expect(h.cached().results[0]?.id).toMatch(/^temp-/);
+    expect(h.cached().results[0]?.name).toBe("Fresh report");
+    expect(h.cached().total_count).toBe(2);
+    holdPost.release();
+    expect(await screen.findByText(WORK_ITEM_CREATED_TITLE)).toBeInTheDocument();
+    // The confirm invalidates the workspace lists, so the refetch carries
+    // the server row instead of the temp one.
+    await waitFor(() => expect(h.cached().results.some((entry) => entry.id.startsWith("temp-"))).toBe(false));
+    expect(h.cached().results.map((entry) => entry.name)).toEqual(["Seeded row", "Fresh report"]);
+    expect(h.cached().total_count).toBe(2);
+  });
+
+  it("seeds the temp bar's dates and posts them on the create (ISS-055)", async () => {
+    const holdPost: { release: () => void } = { release: () => {} };
+    const h = renderTempHandle(201, holdPost);
+    await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
+    h.save({
+      projectId: PROJECT_ID,
+      payload: { name: "Fresh report", start_date: "2026-10-18", target_date: "2026-10-19" },
+    });
+    await waitFor(() => expect(h.cached().results).toHaveLength(2));
+    // The optimistic row carries the seeded dates, so its bar can draw
+    // before the server answers.
+    expect(h.cached().results[0]).toMatchObject({
+      start_date: "2026-10-18",
+      target_date: "2026-10-19",
+    });
+    const post = h.calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      name: "Fresh report",
+      start_date: "2026-10-18",
+      target_date: "2026-10-19",
+    });
+    holdPost.release();
+  });
+
+  it("leaves the dates out of the body when the caller did not seed them", async () => {
+    const h = renderTempHandle(201);
+    await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    await waitFor(() => expect(h.calls.some((call) => call.method === "POST")).toBe(true));
+    const post = h.calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({ name: "Fresh report" });
+  });
+
+  it("removes the temp row again when the post fails", async () => {
+    const h = renderTempHandle(400);
+    await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
+    expect(h.cached().results.map((entry) => entry.id)).toEqual(["123e4567-e89b-12d3-a456-426614174000"]);
+    expect(h.cached().total_count).toBe(1);
+  });
+
+  it("posts group prefill fields and paints the matching grouped bucket", async () => {
+    const calls: Array<{ method: string; body: string }> = [];
+    const groupedKey = [...issueKeys.lists("acme", PROJECT_ID), "grouped"] as const;
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+      }
+      calls.push({ method: init.method ?? "GET", body: init.body ?? "" });
+      return { status: 201, url, headers: { get: () => null }, text: async () => JSON.stringify(createdRow()) };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(groupedKey, {
+      results: { state: { results: [], total_results: 0 } },
+      total_count: 0,
+    });
+    let save: ((input: WorkItemCreateInput) => void) | null = null;
+    function Probe(): React.ReactElement {
+      const mutation = useCreateWorkItem("acme");
+      save = (input) => mutation.mutate(input);
+      return <p>{mutation.status}</p>;
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>
+    );
+    (save as ((input: WorkItemCreateInput) => void) | null)?.({
+      projectId: PROJECT_ID,
+      payload: { name: "Grouped create", state_id: PROJECT_ID, priority: "high", label_ids: ["label-1"] },
+      tempGroupKey: "state",
+    });
+    await waitFor(() => expect(calls.some((call) => call.method === "POST")).toBe(true));
+    const post = calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      name: "Grouped create",
+      state_id: PROJECT_ID,
+      priority: "high",
+      label_ids: ["label-1"],
+    });
+  });
+});
