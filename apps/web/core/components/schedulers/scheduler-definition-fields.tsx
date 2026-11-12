@@ -9,8 +9,7 @@ import type { Control, FieldErrors, FieldValues, Path } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Input, TextArea } from "@pi-dash/ui";
 import { SCHEDULER_COLOR_PALETTE as COLOR_PALETTE } from "@/components/project/scheduler-bindings/constants";
-
-const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+import { deriveSchedulerSlug } from "./definition-helpers";
 
 type RhfPath<T extends FieldValues> = Path<T>;
 
@@ -18,12 +17,9 @@ type Props<T extends FieldValues> = {
   control: Control<T>;
   errors: FieldErrors<T>;
   nameName: RhfPath<T>;
-  slugName: RhfPath<T>;
   descriptionName: RhfPath<T>;
   promptName: RhfPath<T>;
   colorName: RhfPath<T>;
-  /** Lock the slug field (edit mode — slug is immutable after creation). */
-  slugDisabled?: boolean;
   /**
    * Return false to skip required/pattern validation, e.g. when these fields
    * sit behind an inactive tab. RHF keeps hidden fields registered by
@@ -34,9 +30,12 @@ type Props<T extends FieldValues> = {
 };
 
 /**
- * Scheduler definition fields (name, slug, description, prompt, color) shared
+ * Scheduler definition fields (name, description, prompt, color) shared
  * between the workspace Schedulers form modal and the project-side
  * "New Scheduler" modal's create path.
+ *
+ * There is no slug input: the server derives the slug from the name, and a
+ * name that collides with another scheduler comes back as a `name` error.
  *
  * Generic over the form values type so each consumer keeps its own value
  * shape, mirroring {@link BindingScheduleFields}.
@@ -45,11 +44,9 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
   control,
   errors,
   nameName,
-  slugName,
   descriptionName,
   promptName,
   colorName,
-  slugDisabled,
   isActive,
 }: Props<T>) {
   const { t } = useTranslation();
@@ -58,8 +55,6 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const nameErr = (errors as any)[nameName as string];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slugErr = (errors as any)[slugName as string];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const promptErr = (errors as any)[promptName as string];
 
@@ -73,7 +68,13 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
           control={control}
           name={nameName}
           rules={{
-            validate: (v) => !active() || String(v ?? "").trim().length > 0 || t("Name is required."),
+            validate: (v) => {
+              if (!active()) return true;
+              const name = String(v ?? "").trim();
+              if (!name) return t("Name is required.");
+              if (!deriveSchedulerSlug(name)) return t("Name must contain at least one letter or digit.");
+              return true;
+            },
           }}
           render={({ field: { value, onChange, ref } }) => (
             <Input
@@ -90,43 +91,6 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
           )}
         />
         {nameErr?.message && <p className="text-12 text-danger-primary">{String(nameErr.message)}</p>}
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <label htmlFor="scheduler-slug" className="text-13 font-medium text-primary">
-          {t("Slug")}
-        </label>
-        <Controller
-          control={control}
-          name={slugName}
-          rules={{
-            validate: (v) => {
-              if (!active()) return true;
-              const s = String(v ?? "");
-              if (!s) return t("Slug is required.");
-              if (!SLUG_PATTERN.test(s)) return "Use lowercase letters, numbers, and dashes only.";
-              return true;
-            },
-          }}
-          render={({ field: { value, onChange, ref } }) => (
-            <Input
-              id="scheduler-slug"
-              name="slug"
-              type="text"
-              value={value}
-              onChange={onChange}
-              ref={ref}
-              disabled={slugDisabled}
-              hasError={Boolean(slugErr)}
-              placeholder={t("security-audit")}
-              className="w-full"
-            />
-          )}
-        />
-        <p className="text-12 text-secondary">
-          {t("Lowercase identifier used in URLs. Cannot be changed after creation.")}
-        </p>
-        {slugErr?.message && <p className="text-12 text-danger-primary">{String(slugErr.message)}</p>}
       </div>
 
       <div className="flex flex-col gap-1">

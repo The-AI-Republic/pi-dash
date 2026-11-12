@@ -61,7 +61,11 @@ export const DeleteSchedulerModal = observer(function DeleteSchedulerModal(props
       title={t("Delete scheduler?")}
       content={
         <>
-          <p>{t("This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.")}</p>
+          <p>
+            {t(
+              "This soft-deletes the scheduler. Any active project bindings will stop firing. Its name becomes available for a new scheduler."
+            )}
+          </p>
           {scheduler && <p className="mt-2 font-medium text-primary">{scheduler.name}</p>}
         </>
       }

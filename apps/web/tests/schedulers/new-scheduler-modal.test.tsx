@@ -207,17 +207,10 @@ describe("NewSchedulerModal", () => {
   });
 
   describe("create path", () => {
-    it("auto-derives the slug from the name until the slug is edited", async () => {
-      const user = userEvent.setup();
+    it("has no slug input; the server derives the slug from the name", async () => {
       renderModal({ availableSchedulers: [] });
-
-      await user.type(screen.getByLabelText("Name"), "Weekly Review");
-      expect(screen.getByLabelText("Slug")).toHaveValue("weekly-review");
-
-      await user.clear(screen.getByLabelText("Slug"));
-      await user.type(screen.getByLabelText("Slug"), "custom");
-      await user.type(screen.getByLabelText("Name"), " 2");
-      expect(screen.getByLabelText("Slug")).toHaveValue("custom");
+      expect(screen.getByLabelText("Name")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Slug")).toBeNull();
     });
 
     it("creates the definition then the binding, and closes on success", async () => {
@@ -232,7 +225,6 @@ describe("NewSchedulerModal", () => {
 
       await waitFor(() => {
         expect(createScheduler).toHaveBeenCalledWith("acme", {
-          slug: "weekly-review",
           name: "Weekly Review",
           description: "",
           prompt: "Review the week",
@@ -263,23 +255,36 @@ describe("NewSchedulerModal", () => {
 
       expect(createScheduler).not.toHaveBeenCalled();
       expect(await screen.findByText("Name is required.")).toBeInTheDocument();
-      expect(screen.getByText("Slug is required.")).toBeInTheDocument();
       expect(screen.getByText("Prompt is required.")).toBeInTheDocument();
     });
 
-    it("maps a slug 400 from the serializer onto the slug field inline", async () => {
+    it("rejects a name with no letter or digit before calling the API", async () => {
       const user = userEvent.setup();
-      // Real wire shape: SchedulerSerializer.validate_slug returns 400
-      // {"slug": ["This slug is already in use in this workspace."]} and the
-      // service rethrows err.response.data.
-      createScheduler.mockRejectedValue({ slug: ["This slug is already in use in this workspace."] });
+      renderModal({ availableSchedulers: [] });
+
+      await user.type(screen.getByLabelText("Name"), "!!!");
+      await user.type(screen.getByLabelText("Prompt"), "Review the week");
+      await user.click(screen.getByRole("button", { name: "Create & install" }));
+
+      expect(await screen.findByText("Name must contain at least one letter or digit.")).toBeInTheDocument();
+      expect(createScheduler).not.toHaveBeenCalled();
+    });
+
+    it("maps a duplicate-name 400 from the serializer onto the name field inline", async () => {
+      const user = userEvent.setup();
+      // Real wire shape: SchedulerSerializer.validate_name returns 400
+      // {"name": ["A scheduler with the same name already exists in this workspace."]}
+      // and the service rethrows err.response.data.
+      createScheduler.mockRejectedValue({ name: ["A scheduler with the same name already exists in this workspace."] });
       const { onClose } = renderModal({ availableSchedulers: [] });
 
       await user.type(screen.getByLabelText("Name"), "Weekly Review");
       await user.type(screen.getByLabelText("Prompt"), "Review the week");
       await user.click(screen.getByRole("button", { name: "Create & install" }));
 
-      expect(await screen.findByText("This slug is already in use in this workspace.")).toBeInTheDocument();
+      expect(
+        await screen.findByText("A scheduler with the same name already exists in this workspace.")
+      ).toBeInTheDocument();
       expect(createBinding).not.toHaveBeenCalled();
       expect(setToast).not.toHaveBeenCalled();
       expect(onClose).not.toHaveBeenCalled();

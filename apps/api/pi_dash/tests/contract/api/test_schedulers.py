@@ -1190,7 +1190,6 @@ class TestWorkspaceSchedulerDefinitionUpdate:
 
 NEW_SCHEDULER = {
     "name": "Nightly Bug Scan",
-    "slug": "nightly-bug-scan",
     "description": "Looks for regressions.",
     "prompt": "## Nightly\n\nScan for regressions and file issues.",
 }
@@ -1217,6 +1216,8 @@ class TestWorkspaceSchedulerCreate:
         data = response.data
         for key, value in NEW_SCHEDULER.items():
             assert data[key] == value
+        # The slug is derived from the name (PDASHOSS01-319).
+        assert data["slug"] == "nightly-bug-scan"
         assert data["is_enabled"] is True
         assert data["is_builtin"] is False
         assert data["color"] == "#3b82f6"
@@ -1243,51 +1244,83 @@ class TestWorkspaceSchedulerCreate:
         assert response.data["color"] == "#aabbcc"
 
     @pytest.mark.django_db
-    def test_duplicate_slug_is_a_field_error(
+    def test_duplicate_name_is_a_field_error(
         self, api_key_client, workspace, scheduler
     ):
+        # ``scheduler`` is the fixture row (name "Contract Test Scheduler",
+        # slug "contract-test-scheduler"): a body slug is ignored and the
+        # check is on the derived slug, so the same name collides.
         response = api_key_client.post(
             _ws_url(workspace.slug),
-            {**NEW_SCHEDULER, "slug": scheduler.slug},
+            {**NEW_SCHEDULER, "name": scheduler.name},
             format="json",
         )
 
         assert response.status_code == http_status.HTTP_400_BAD_REQUEST
-        assert "slug" in response.data
-        assert Scheduler.objects.filter(slug=scheduler.slug).count() == 1
+        assert response.data == {
+            "name": [
+                "A scheduler with the same name already exists in this workspace."
+            ]
+        }
+        assert Scheduler.objects.filter(name=scheduler.name).count() == 1
 
     @pytest.mark.django_db
-    def test_slug_of_a_deleted_definition_is_reusable(
+    def test_body_slug_is_ignored(self, api_key_client, workspace):
+        # Old CLI callers still send ``slug``; the server ignores it and
+        # derives the slug from the name instead.
+        response = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "slug": "evil"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+        assert response.data["slug"] == "nightly-bug-scan"
+        assert not Scheduler.objects.filter(slug="evil").exists()
+
+    @pytest.mark.django_db
+    def test_name_of_a_deleted_definition_is_reusable(
         self, api_key_client, workspace, scheduler
     ):
         scheduler.delete()
 
         response = api_key_client.post(
             _ws_url(workspace.slug),
-            {**NEW_SCHEDULER, "slug": scheduler.slug},
+            {
+                "name": scheduler.name,
+                "description": "Re-created after delete.",
+                "prompt": "Scan it.",
+            },
             format="json",
         )
 
         assert response.status_code == http_status.HTTP_201_CREATED
+        assert response.data["slug"] == scheduler.slug
 
     @pytest.mark.django_db
-    def test_builtin_slug_is_reserved(self, api_key_client, workspace):
-        Scheduler.objects.filter(workspace=workspace, slug="security-audit").delete()
-
+    def test_builtin_name_is_a_duplicate(self, api_key_client, workspace):
+        # The built-in row (slug "security-audit") still exists, so a
+        # user-created scheduler with the same derived slug collides.
         response = api_key_client.post(
             _ws_url(workspace.slug),
-            {**NEW_SCHEDULER, "slug": "security-audit"},
+            {
+                "name": "Security Audit",
+                "description": "Looks like the built-in.",
+                "prompt": "Scan it.",
+            },
             format="json",
         )
 
         assert response.status_code == http_status.HTTP_400_BAD_REQUEST
         assert response.data == {
-            "slug": ["This slug is reserved for a built-in scheduler."]
+            "name": [
+                "A scheduler with the same name already exists in this workspace."
+            ]
         }
 
     @pytest.mark.django_db
     @pytest.mark.parametrize(
-        "missing", ["name", "slug", "prompt"]
+        "missing", ["name", "prompt"]
     )
     def test_required_fields(self, api_key_client, workspace, missing):
         body = {k: v for k, v in NEW_SCHEDULER.items() if k != missing}

@@ -6,26 +6,16 @@
 
 import { describe, expect, it } from "vitest";
 import { deriveSchedulerSlug } from "@/components/schedulers/definition-helpers";
+// Shared with the server's derive_scheduler_slug (and the Rust port) so the
+// client and server rules can't drift apart.
+import vectors from "../../../api/pi_dash/scheduler/slug_vectors.json";
 
 describe("deriveSchedulerSlug", () => {
-  it("lowercases and dashes a plain name", () => {
-    expect(deriveSchedulerSlug("Security Audit")).toBe("security-audit");
+  it("has shared vectors to check", () => {
+    expect(vectors.length).toBeGreaterThan(10);
   });
 
-  it("collapses runs of non-alphanumerics into one dash", () => {
-    expect(deriveSchedulerSlug("GDPR — compliance & audit")).toBe("gdpr-compliance-audit");
-  });
-
-  it("strips leading and trailing dashes", () => {
-    expect(deriveSchedulerSlug("  ...weekly review!  ")).toBe("weekly-review");
-  });
-
-  it("keeps digits", () => {
-    expect(deriveSchedulerSlug("SOC2 Type 2")).toBe("soc2-type-2");
-  });
-
-  it("returns empty string when nothing usable remains", () => {
-    expect(deriveSchedulerSlug("!!!")).toBe("");
-    expect(deriveSchedulerSlug("")).toBe("");
+  it.each(vectors.map((v) => [v.name, v.slug] as const))("derives %j -> %j", (name, slug) => {
+    expect(deriveSchedulerSlug(name)).toBe(slug);
   });
 });

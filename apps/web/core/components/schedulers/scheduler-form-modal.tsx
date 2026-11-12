@@ -17,7 +17,6 @@ import { SCHEDULER_COLOR_PALETTE as COLOR_PALETTE } from "@/components/project/s
 import { SchedulerDefinitionFields } from "./scheduler-definition-fields";
 
 interface SchedulerFormValues {
-  slug: string;
   name: string;
   description: string;
   prompt: string;
@@ -28,13 +27,17 @@ interface SchedulerFormValues {
 type Props = {
   isOpen: boolean;
   onClose: () => void;
+  /**
+   * Save the scheduler. Rejecting with the API's `{name: [...]}` body (e.g. a
+   * duplicate name) shows that message under the Name field and keeps the
+   * modal open.
+   */
   onSubmit: (values: SchedulerFormValues) => Promise<void>;
-  /** When set, the form is in edit mode — slug is locked. */
+  /** When set, the form is in edit mode. */
   scheduler?: IScheduler | null;
 };
 
 const emptyValues: SchedulerFormValues = {
-  slug: "",
   name: "",
   description: "",
   prompt: "",
@@ -51,6 +54,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
     control,
     handleSubmit,
     reset,
+    setError,
     formState: { errors, isSubmitting },
   } = useForm<SchedulerFormValues>({ defaultValues: emptyValues });
 
@@ -58,7 +62,6 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
     if (!isOpen) return;
     if (scheduler) {
       reset({
-        slug: scheduler.slug,
         name: scheduler.name,
         description: scheduler.description ?? "",
         prompt: scheduler.prompt,
@@ -71,7 +74,12 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
   }, [isOpen, scheduler, reset]);
 
   const handleFormSubmit: SubmitHandler<SchedulerFormValues> = async (values) => {
-    await onSubmit(values);
+    try {
+      await onSubmit(values);
+    } catch (e: unknown) {
+      const err = e as { name?: string[] } | null;
+      if (err?.name?.[0]) setError("name", { type: "server", message: err.name[0] });
+    }
   };
 
   return (
@@ -83,11 +91,9 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
           control={control}
           errors={errors}
           nameName="name"
-          slugName="slug"
           descriptionName="description"
           promptName="prompt"
           colorName="color"
-          slugDisabled={isEdit}
         />
 
         <div className="flex items-start justify-between gap-4">
