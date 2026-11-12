@@ -3874,18 +3874,25 @@ pub async fn update(
         Box::pin(async move {
             txn.hooks_mut().register(transition);
             txn.hooks_mut().register(enqueue);
-            domain_issues::partial_update(
-                &ctx,
+            // The shared update core (NEWPIDASH-190 §4.3): m2m legs,
+            // full save, state fire and updated-activity legs, exactly as
+            // `partial_update` drove them. The wrapper keeps body parsing,
+            // validation and rendering.
+            // The error map is the wrapper's: the domain `Work` arm keeps
+            // the driver's message; `Missing`/`Sqlx` fold exactly as the
+            // workpad core maps them.
+            let updated = crate::operations::core::issues::update(
                 txn,
+                &ctx,
                 &pool,
-                domain_issues::PartialIssue {
-                    m2m_audit: audit,
-                    sequence,
+                &crate::operations::core::issues::IssuePatch {
                     fields,
                     assignees: parsed.assignees.clone(),
                     labels: parsed.labels.clone(),
+                    m2m_audit: audit,
+                    sequence,
                     prev_state: prev_state_id,
-                    fire: domain_issues::FireSpec {
+                    fire: crate::domain::issues::FireSpec {
                         dispatch_immediate: true,
                         pod_once: options.pod_once,
                         created_by: Some(actor_id),
@@ -3893,7 +3900,7 @@ pub async fn update(
                         now: Utc::now(),
                     },
                     activity: if emit_activity {
-                        Some(domain_issues::UpdateActivity {
+                        Some(crate::domain::issues::UpdateActivity {
                             origin,
                             requested: requested_text,
                             current_instance,
@@ -3909,6 +3916,26 @@ pub async fn update(
                 },
             )
             .await
+            .map_err(|error| match error {
+                crate::operations::core::CoreError::Request(message) => {
+                    crate::domain::DomainError::Work(message)
+                }
+                crate::operations::core::CoreError::Missing(model) => {
+                    crate::domain::DomainError::Db(sea_orm::DbErr::RecordNotFound(model.to_owned()))
+                }
+                crate::operations::core::CoreError::Db(domain_error) => domain_error,
+                crate::operations::core::CoreError::Sqlx(sqlx_error) => {
+                    crate::domain::DomainError::Db(sea_orm::DbErr::Exec(
+                        sea_orm::RuntimeErr::SqlxError(sqlx_error),
+                    ))
+                }
+            })?;
+            // Recompute the outcome: the issue now lives on the `IssueUpdated`.
+            let legacy = domain_issues::SaveOutcome {
+                issue: updated.issue,
+                chain: updated.chain,
+            };
+            Ok(legacy)
         })
     })
     .await

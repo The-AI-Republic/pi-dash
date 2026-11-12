@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::dispatch::admission::DeferredConsume;
 use crate::dispatch::policy::UserFlags;
 use crate::domain::identity::AgentUserCollisionError;
-use crate::domain::issues::{self as domain_issues, ChainOutcome};
+use crate::domain::issues::{self as domain_issues, ChainOutcome, IssueFieldSet, UpdateActivity};
 use crate::domain::txn::WriteTxn;
 use crate::domain::TxnConn;
 use crate::domain::WriteCtx;
@@ -52,6 +52,7 @@ use crate::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_types::dispatch::AgentExecutorKind;
+use sea_orm::ActiveModelTrait;
 
 use super::CoreError;
 
@@ -990,11 +991,14 @@ mod tests {
         )
     }
 
+    #[allow(dead_code)]
     struct Seed {
         user_id: Uuid,
         issue_id: Uuid,
         from_state_id: Uuid,
         to_state_id: Uuid,
+        project_id: Uuid,
+        workspace_id: Uuid,
     }
 
     async fn seed_move(pool: &sqlx::PgPool, tag: &str) -> Seed {
@@ -1084,6 +1088,8 @@ mod tests {
             issue_id,
             from_state_id,
             to_state_id,
+            project_id,
+            workspace_id,
         }
     }
 
@@ -1445,6 +1451,7 @@ mod create_tests {
         issue_id: Uuid,
         state_id: Uuid,
         project_id: Uuid,
+        workspace_id: Uuid,
     }
 
     async fn seed_create(pool: &sqlx::PgPool, tag: &str) -> Seed {
@@ -1536,7 +1543,102 @@ mod create_tests {
             issue_id,
             state_id,
             project_id,
+            workspace_id,
         }
+    }
+
+    fn full_save_fields(seed: &Seed) -> crate::domain::issues::IssueFieldSet {
+        crate::domain::issues::IssueFieldSet {
+            id: seed.issue_id,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by_id: Some(seed.user_id),
+            updated_by_id: None,
+            deleted_at: None,
+            project_id: seed.project_id,
+            workspace_id: seed.workspace_id,
+            parent_id: None,
+            state_id: Some(seed.state_id),
+            point: None,
+            estimate_point_id: None,
+            name: "cn issue".to_owned(),
+            description_json: serde_json::Value::Object(serde_json::Map::new()),
+            description_html: "<p>cn</p>".to_owned(),
+            description_stripped: None,
+            description_binary: None,
+            priority: "none".to_owned(),
+            complexity_score: 0,
+            start_date: None,
+            target_date: None,
+            sequence_id: 21,
+            sort_order: 10000.0,
+            completed_at: None,
+            archived_at: None,
+            is_draft: false,
+            external_source: None,
+            external_id: None,
+            type_id: None,
+            git_work_branch: String::new(),
+            workpad: String::new(),
+            created_via: None,
+            assigned_pod_id: None,
+            assigned_runner_id: None,
+            agent_executor: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn core_update_patch_writes_full_save_and_chain() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let seed = seed_create(&pool, "patch").await;
+        let hook_state = Arc::new(Mutex::new(Recorder::default()));
+        let orm = sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(pool.clone());
+        let ctx = crate::domain::WriteCtx::new(crate::domain::WriteActor {
+            user_id: seed.user_id,
+            timezone: None,
+        });
+        let mut txn = crate::domain::WriteTxn::begin(&orm).await.expect("begin");
+        txn.hooks_mut()
+            .register::<dyn crate::domain::transition::IssueTransitionHook>(Arc::new(
+                RecordingHook {
+                    state: hook_state.clone(),
+                },
+            ));
+        txn.hooks_mut()
+            .register::<dyn crate::domain::activity::TaskEnqueueHook>(Arc::new(NoopEnqueue));
+        let patch = super::IssuePatch {
+            fields: full_save_fields(&seed),
+            assignees: None,
+            labels: None,
+            m2m_audit: (None, None),
+            sequence: None,
+            prev_state: Some(seed.state_id),
+            fire: crate::domain::issues::FireSpec {
+                dispatch_immediate: true,
+                pod_once: false,
+                created_by: Some(seed.user_id),
+                moved_by_run: None,
+                now: Utc::now(),
+            },
+            activity: None,
+        };
+        let updated = super::update(&mut txn, &ctx, &pool, &patch)
+            .await
+            .expect("core update patch");
+        txn.commit().await.expect("commit");
+        assert_eq!(updated.issue.state_id, Some(seed.state_id));
+        assert!(updated.chain.stopped().is_none());
+        let row = sqlx::query("SELECT state_id, sequence_id FROM issues WHERE id = $1")
+            .bind(seed.issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read patched issue");
+        assert_eq!(row.get::<Uuid, _>("state_id"), seed.state_id);
+        assert_eq!(row.get::<i32, _>("sequence_id"), 21);
+        let reads = hook_state.lock().expect("recorder");
+        assert_eq!(reads.fires.len(), 1);
     }
 
     #[tokio::test]
@@ -1690,4 +1792,159 @@ mod create_tests {
         assert_eq!(before.0, after.0);
         assert!(after.1 >= before.1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// core::issues::update
+// ---------------------------------------------------------------------------
+//
+// Mirrors the ops PATCH driver (`domain::issues::update_driver`) — the
+// full-column save plus the m2m legs ahead of the row write, the state arm
+// through the same `[CompletionIfChanged, FireTransition]` chain legs
+// `core::issues::set_state`'s InChain arm queues — so the agent and the
+// operations drivers converge on one update path (NEWPIDASH-190 §4.3).
+//
+// The ops handler (`operations::issues::update`) keeps body parsing,
+// validation and rendering; the `m2m_audit`, `sequence` coercion and
+// `UpdateActivity` arrive resolved from the wrapper, and the FireSpec
+// carries the request's `moved_by_run` (the v1 patch path). The
+// post-commit legs record into `IssueUpdated.chain`, which the wrapper
+// maps to `ServerError` on a recorded stop (`SaveOutcome.chain.stopped()`
+// shape).
+
+/// One PATCH write: the assembled row, its m2m plan, the fire spec and
+/// the updated-activity parts (`domain::issues::PartialIssue` shape).
+pub struct IssuePatch {
+    pub fields: IssueFieldSet,
+    pub assignees: Option<Vec<Uuid>>,
+    pub labels: Option<Vec<Uuid>>,
+    pub m2m_audit: (Option<Uuid>, Option<Uuid>),
+    pub sequence: Option<Result<i32, ()>>,
+    pub prev_state: Option<Uuid>,
+    pub fire: crate::domain::issues::FireSpec,
+    pub activity: Option<UpdateActivity>,
+}
+
+/// What one PATCH write did: the saved row plus the recorded chain
+/// outcome (post-commit). The caller checks `chain.stopped()` after the
+/// run commits, exactly like `SaveOutcome.chain.`
+#[derive(Debug, Clone)]
+pub struct IssueUpdated {
+    pub issue: pidash_db::entity::issues::Model,
+    pub chain: ChainOutcome,
+}
+
+/// `core::issues::update(txn, ctx, pool, patch)`.
+pub async fn update(
+    txn: &mut WriteTxn,
+    ctx: &WriteCtx,
+    pool: &PgPool,
+    patch: &IssuePatch,
+) -> Result<IssueUpdated, CoreError> {
+    use crate::domain::issues::{enqueue_hook, transition_hook, ChainEffect, M2mScope, M2mTable};
+
+    // The m2m legs run ahead of the row write (`update()` pops them
+    // first), on the pool: they persist even when the save fails, so
+    // they stay out of the transaction. Audit ids come from the
+    // pre-save row.
+    let scope = M2mScope {
+        issue_id: patch.fields.id,
+        project_id: patch.fields.project_id,
+        workspace_id: patch.fields.workspace_id,
+        created_by_id: patch.m2m_audit.0,
+        updated_by_id: patch.m2m_audit.1,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    if let Some(ids) = &patch.assignees {
+        crate::domain::issues::update_m2m_leg(&db, M2mTable::Assignees, ids, scope)
+            .await
+            .map_err(CoreError::Db)?;
+    }
+    if let Some(ids) = &patch.labels {
+        crate::domain::issues::update_m2m_leg(&db, M2mTable::Labels, ids, scope)
+            .await
+            .map_err(CoreError::Db)?;
+    }
+
+    // The save-time `sequence_id` int4 check (DRF never range-checks the
+    // integer — the `DataError` surfaces at save, past the m2m legs, as a
+    // 500). The driver pre-computes the coercion; `None` (key absent, or a
+    // driver that validated up front) keeps the assembled value.
+    let mut fields = patch.fields.clone();
+    if let Some(checked) = &patch.sequence {
+        fields.sequence_id = checked.map_err(|()| {
+            CoreError::Db(crate::domain::DomainError::Work(
+                "sequence_id out of int4 range".to_owned(),
+            ))
+        })?;
+    }
+    let transition = transition_hook(txn);
+    let enqueue = enqueue_hook(txn);
+    let actor = ctx.actor.user_id;
+    let model = fields
+        .into_full_save_active_model(crate::domain::issues::actor_or_none(ctx))
+        .update(&txn.connection())
+        .await
+        .map_err(|error| CoreError::Db(crate::domain::DomainError::Db(error)))?;
+    let chain = {
+        let mut chain = vec![
+            ChainEffect::CompletionIfChanged {
+                issue_id: model.id,
+                prev_state: patch.prev_state,
+                current_state: model.state_id,
+            },
+            ChainEffect::FireTransition {
+                issue_id: model.id,
+                prev_state: patch.prev_state,
+                current_state: model.state_id,
+                spec: patch.fire.clone(),
+                actor_id: actor,
+            },
+        ];
+        if let Some(activity) = &patch.activity {
+            chain.push(ChainEffect::IssueActivity(
+                crate::domain::issues::IssueActivitySpec {
+                    event: "issue.activity.updated".to_owned(),
+                    requested: serde_json::Value::String(activity.requested.clone()),
+                    actor,
+                    issue: model.id,
+                    project: model.project_id,
+                    current: serde_json::Value::String(activity.current_instance.clone()),
+                    notification: activity.notification,
+                    origin: activity.origin.clone(),
+                    require_origin: activity.require_origin,
+                    subscriber: None,
+                },
+            ));
+            chain.push(ChainEffect::ModelActivity(
+                crate::domain::issues::ModelActivitySpec {
+                    model: model.id,
+                    requested: activity.raw_body.clone(),
+                    current: serde_json::Value::String(activity.current_instance.clone()),
+                    actor,
+                    slug: activity.slug.clone(),
+                    origin: activity.origin.clone(),
+                },
+            ));
+            if activity.emit_version {
+                chain.push(ChainEffect::VersionTask {
+                    updated_issue: activity.current_instance.clone(),
+                    issue_id: model.id,
+                    user_id: actor,
+                    is_creating: None,
+                });
+            }
+        }
+        chain
+    };
+    let outcome = ChainOutcome::new();
+    let step = outcome.clone();
+    let pool_clone = pool.clone();
+    txn.on_commit(move || async move {
+        domain_issues::run_chain(&pool_clone, &transition, &enqueue, None, chain, &step).await;
+    });
+    Ok(IssueUpdated {
+        issue: model,
+        chain: outcome,
+    })
 }
