@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Writes to an existing :class:`SchedulerBinding`.
+"""Writes to :class:`SchedulerBinding` installs: install, edit, uninstall,
+run now.
 
 One implementation shared by the web app surface
 (``pi_dash/app/views/scheduler``) and the external ``/api/v1/`` surface
@@ -22,6 +23,32 @@ from pi_dash.runner.models import AgentRun
 
 #: Editing any of these changes when the binding fires next.
 CADENCE_FIELDS = ("dtstart", "rrule", "rdates", "exdates", "tzid")
+
+
+def install_binding(project, scheduler, data: Mapping, actor) -> SchedulerBinding:
+    """Install ``scheduler`` on ``project`` and return the new binding.
+
+    ``project`` goes into the serializer context so a chosen ``pod`` is
+    checked against it. ``next_run_at`` is set on first save so the scanner
+    picks the install up on its next tick and the response shows it.
+    Raises ``rest_framework.serializers.ValidationError`` on bad input.
+    """
+    from pi_dash.app.serializers.scheduler import SchedulerBindingSerializer
+    from pi_dash.bgtasks.scheduler import _next_fire_for_binding
+
+    serializer = SchedulerBindingSerializer(data=data, context={"project": project})
+    serializer.is_valid(raise_exception=True)
+    binding = serializer.save(
+        scheduler=scheduler,
+        project=project,
+        workspace=project.workspace,
+        actor=actor,
+    )
+    nxt = _next_fire_for_binding(binding, now=timezone.now())
+    if nxt is not None and binding.next_run_at != nxt:
+        binding.next_run_at = nxt
+        binding.save(update_fields=["next_run_at", "updated_at"])
+    return binding
 
 
 def update_binding(binding: SchedulerBinding, data: Mapping) -> SchedulerBinding:

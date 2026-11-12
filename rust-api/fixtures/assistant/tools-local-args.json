@@ -1,0 +1,1797 @@
+{
+  "cases": [
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": 123
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "query"
+          ],
+          "msg": "Input should be a valid string",
+          "input": 123,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": null
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "query"
+          ],
+          "msg": "Input should be a valid string",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "20"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "abc"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "abc",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 1.5
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_from_float",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, got a number with a fractional part",
+          "input": 1.5,
+          "url": "https://errors.pydantic.dev/2.14/v/int_from_float"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": true
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 1,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": null
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_type",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/int_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "project_id": 5
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "project_id"
+          ],
+          "msg": "Input should be a valid string",
+          "input": 5,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "offset": "3"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 3
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "extra": 1
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "extra_forbidden",
+          "loc": [
+            "extra"
+          ],
+          "msg": "Extra inputs are not permitted",
+          "input": 1,
+          "url": "https://errors.pydantic.dev/2.14/v/extra_forbidden"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {},
+      "ok": false,
+      "errors": [
+        {
+          "type": "missing",
+          "loc": [
+            "query"
+          ],
+          "msg": "Field required",
+          "input": {},
+          "url": "https://errors.pydantic.dev/2.14/v/missing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "false"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "yes"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": 1
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": null
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_type",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/bool_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": [
+          "x"
+        ]
+      },
+      "ok": true,
+      "value": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": [
+          "x"
+        ]
+      }
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": "x"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "list_type",
+          "loc": [
+            "related_issues"
+          ],
+          "msg": "Input should be a valid list",
+          "input": "x",
+          "url": "https://errors.pydantic.dev/2.14/v/list_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": [
+          1
+        ]
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "related_issues",
+            0
+          ],
+          "msg": "Input should be a valid string",
+          "input": 1,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": []
+      },
+      "ok": true,
+      "value": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": []
+      }
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "missing",
+          "loc": [
+            "related_issues"
+          ],
+          "msg": "Field required",
+          "input": {
+            "issue": "a",
+            "relation_type": "r"
+          },
+          "url": "https://errors.pydantic.dev/2.14/v/missing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_scope",
+      "input": {},
+      "ok": true,
+      "value": {
+        "scope": "all"
+      }
+    },
+    {
+      "tool": "probe_scope",
+      "input": {
+        "scope": null
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "scope"
+          ],
+          "msg": "Input should be a valid string",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_scope",
+      "input": {
+        "scope": 5
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "scope"
+          ],
+          "msg": "Input should be a valid string",
+          "input": 5,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": " 20"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "20 "
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "+20"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "-5"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": -5,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "2.0"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 2,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "0x14"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "0x14",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "1_0"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 10,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": ""
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": " "
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": " ",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "20\n"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "２"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "２",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 2.0
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 2,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": -0.0
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 0,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 20.0
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 20,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 1000.0
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "project_id": null,
+        "limit": 1000,
+        "offset": 0
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "true"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "True"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "TRUE"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "1"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "on"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "t"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "y"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "false"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "False"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "0"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "off"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "f"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "n"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "no"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": "maybe"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "maybe",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": ""
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": 2
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": 2,
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": 0
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": false
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": 1.0
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "body_md": "b",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "abc",
+        "offset": "def"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "abc",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        },
+        {
+          "type": "int_parsing",
+          "loc": [
+            "offset"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "def",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "limit": "abc"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "missing",
+          "loc": [
+            "query"
+          ],
+          "msg": "Field required",
+          "input": {
+            "limit": "abc"
+          },
+          "url": "https://errors.pydantic.dev/2.14/v/missing"
+        },
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "abc",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": 1,
+        "limit": "abc",
+        "zzz": 2
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "query"
+          ],
+          "msg": "Input should be a valid string",
+          "input": 1,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        },
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "abc",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        },
+        {
+          "type": "extra_forbidden",
+          "loc": [
+            "zzz"
+          ],
+          "msg": "Extra inputs are not permitted",
+          "input": 2,
+          "url": "https://errors.pydantic.dev/2.14/v/extra_forbidden"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "missing",
+          "loc": [
+            "body_md"
+          ],
+          "msg": "Field required",
+          "input": {
+            "issue_id": "i"
+          },
+          "url": "https://errors.pydantic.dev/2.14/v/missing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "2.5"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "2.5",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "1e3"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "1e3",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "nan"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "nan",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "inf"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "inf",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "-inf"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "-inf",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "0b101"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "0b101",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "0o17"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "0o17",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "0x14"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "0x14",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 1180591620717411303424
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "limit": 1180591620717411303424
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": -1180591620717411303424
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "limit": -1180591620717411303424
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 1e400
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "finite_number",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a finite number",
+          "input": 1e400,
+          "url": "https://errors.pydantic.dev/2.14/v/finite_number"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": 0.0
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "limit": 0
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "1_2_3"
+      },
+      "ok": true,
+      "value": {
+        "query": "x",
+        "limit": 123
+      }
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "__20__"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "__20__",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": "٢٠"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_parsing",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer, unable to parse string as an integer",
+          "input": "٢٠",
+          "url": "https://errors.pydantic.dev/2.14/v/int_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "tRuE"
+      },
+      "ok": true,
+      "value": {
+        "issue_id": "i",
+        "fold": true
+      }
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": " Yes"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": " Yes",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "yes "
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "yes ",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "ON "
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "ON ",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": " of"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": " of",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "2"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "2",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "-1"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "-1",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": 1.5
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_type",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean",
+          "input": 1.5,
+          "url": "https://errors.pydantic.dev/2.14/v/bool_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": 0.5
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_type",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean",
+          "input": 0.5,
+          "url": "https://errors.pydantic.dev/2.14/v/bool_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "1.0"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "1.0",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": "0.0"
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_parsing",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean, unable to interpret input",
+          "input": "0.0",
+          "url": "https://errors.pydantic.dev/2.14/v/bool_parsing"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": []
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_type",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean",
+          "input": [],
+          "url": "https://errors.pydantic.dev/2.14/v/bool_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_comment",
+      "input": {
+        "issue_id": "i",
+        "fold": {}
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "bool_type",
+          "loc": [
+            "fold"
+          ],
+          "msg": "Input should be a valid boolean",
+          "input": {},
+          "url": "https://errors.pydantic.dev/2.14/v/bool_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": []
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_type",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer",
+          "input": [],
+          "url": "https://errors.pydantic.dev/2.14/v/int_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "limit": {}
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "int_type",
+          "loc": [
+            "limit"
+          ],
+          "msg": "Input should be a valid integer",
+          "input": {},
+          "url": "https://errors.pydantic.dev/2.14/v/int_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": []
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "query"
+          ],
+          "msg": "Input should be a valid string",
+          "input": [],
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": {}
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "query"
+          ],
+          "msg": "Input should be a valid string",
+          "input": {},
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": true
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "query"
+          ],
+          "msg": "Input should be a valid string",
+          "input": true,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": [],
+      "ok": false,
+      "errors": [
+        {
+          "type": "dict_type",
+          "loc": [],
+          "msg": "Input should be a valid dictionary",
+          "input": [],
+          "url": "https://errors.pydantic.dev/2.14/v/dict_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": "x",
+      "ok": false,
+      "errors": [
+        {
+          "type": "dict_type",
+          "loc": [],
+          "msg": "Input should be a valid dictionary",
+          "input": "x",
+          "url": "https://errors.pydantic.dev/2.14/v/dict_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": null,
+      "ok": false,
+      "errors": [
+        {
+          "type": "dict_type",
+          "loc": [],
+          "msg": "Input should be a valid dictionary",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/dict_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_search",
+      "input": {
+        "query": "x",
+        "b": 1,
+        "a": 2
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "extra_forbidden",
+          "loc": [
+            "b"
+          ],
+          "msg": "Extra inputs are not permitted",
+          "input": 1,
+          "url": "https://errors.pydantic.dev/2.14/v/extra_forbidden"
+        },
+        {
+          "type": "extra_forbidden",
+          "loc": [
+            "a"
+          ],
+          "msg": "Extra inputs are not permitted",
+          "input": 2,
+          "url": "https://errors.pydantic.dev/2.14/v/extra_forbidden"
+        }
+      ]
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": [
+          null
+        ]
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "related_issues",
+            0
+          ],
+          "msg": "Input should be a valid string",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": [
+          [
+            "x"
+          ]
+        ]
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "related_issues",
+            0
+          ],
+          "msg": "Input should be a valid string",
+          "input": [
+            "x"
+          ],
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    },
+    {
+      "tool": "probe_relate",
+      "input": {
+        "issue": "a",
+        "relation_type": "r",
+        "related_issues": [
+          "x",
+          2,
+          null
+        ]
+      },
+      "ok": false,
+      "errors": [
+        {
+          "type": "string_type",
+          "loc": [
+            "related_issues",
+            1
+          ],
+          "msg": "Input should be a valid string",
+          "input": 2,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        },
+        {
+          "type": "string_type",
+          "loc": [
+            "related_issues",
+            2
+          ],
+          "msg": "Input should be a valid string",
+          "input": null,
+          "url": "https://errors.pydantic.dev/2.14/v/string_type"
+        }
+      ]
+    }
+  ]
+}

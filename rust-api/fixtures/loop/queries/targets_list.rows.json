@@ -1,0 +1,63 @@
+{
+ "invalid_filter_ignored": {
+  "count": 3
+ },
+ "method": "Ran LoopJobTargetsEndpoint GETs on pidash_loop_fx (unfiltered, skip_reason, workspace, invalid filter, status).",
+ "page_size": 50,
+ "skip_reason_min_role": {
+  "page": 1,
+  "results": [
+   {
+    "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+    "last_run": null,
+    "last_skip_reason": "min_role",
+    "last_skipped_at": "2026-09-28T04:23:09.657296+00:00",
+    "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+    "user_email": "fxloop-guest@e.com",
+    "workspace_slug": "fxloop-ws"
+   }
+  ]
+ },
+ "source": "apps/api/pi_dash/loop/admin_views.py:176-234",
+ "unfiltered": {
+  "page": 1,
+  "results": [
+   {
+    "id": "0d7f5a73-83cf-43bc-b451-13c8ee1a4294",
+    "last_run": {
+     "completed_at": "2026-09-28T03:28:09.657296+00:00",
+     "error_code": "",
+     "model_used": "gpt-test",
+     "status": "completed",
+     "total_tokens": 1234
+    },
+    "last_skip_reason": "",
+    "last_skipped_at": null,
+    "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+    "user_email": "fxloop-admin@e.com",
+    "workspace_slug": "fxloop-ws"
+   },
+   {
+    "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+    "last_run": null,
+    "last_skip_reason": "min_role",
+    "last_skipped_at": "2026-09-28T04:23:09.657296+00:00",
+    "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+    "user_email": "fxloop-guest@e.com",
+    "workspace_slug": "fxloop-ws"
+   },
+   {
+    "id": "49ba8fd1-f22f-4ca0-ae96-24d722c35934",
+    "last_run": null,
+    "last_skip_reason": "",
+    "last_skipped_at": null,
+    "next_run_at": "2026-09-28T04:27:09.657296+00:00",
+    "user_email": "fxloop-member@e.com",
+    "workspace_slug": "fxloop-ws"
+   }
+  ]
+ },
+ "workspace_filter": {
+  "count": 3
+ }
+}
