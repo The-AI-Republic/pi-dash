@@ -14,7 +14,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { engineActivityLabel } from "@/app/(all)/[workspaceSlug]/runners/chat/[runnerId]/page";
+import {
+  engineActivityLabel,
+  RUNNER_BUSY_MESSAGE,
+  runnerBusyMessage,
+} from "@/app/(all)/[workspaceSlug]/runners/chat/[runnerId]/page";
 import type { IAgentChatEvent } from "@pi-dash/types";
 
 function raw(method: string, params: Record<string, unknown> = {}): IAgentChatEvent {
@@ -78,5 +82,21 @@ describe("engineActivityLabel", () => {
 
   it("falls back to the method name rather than the word raw", () => {
     expect(engineActivityLabel(raw("something/new"))).toBe("something/new");
+  });
+
+  it("says a runner refused chat because an issue run is using its folder", () => {
+    const busy = {
+      ...raw(""),
+      kind: "chat_failed",
+      payload: { code: "runner_busy", detail: "runner has an active task" },
+    };
+    expect(engineActivityLabel(busy as IAgentChatEvent)).toBe("Runner busy with an issue run");
+    expect(runnerBusyMessage(busy as IAgentChatEvent)).toBe(RUNNER_BUSY_MESSAGE);
+  });
+
+  it("keeps other chat failures as plain failures", () => {
+    const failed = { ...raw(""), kind: "chat_failed", payload: { code: "dispatch_failed" } };
+    expect(engineActivityLabel(failed as IAgentChatEvent)).toBe("Failed");
+    expect(runnerBusyMessage(failed as IAgentChatEvent)).toBeNull();
   });
 });
