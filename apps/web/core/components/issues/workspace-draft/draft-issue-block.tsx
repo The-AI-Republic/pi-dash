@@ -10,6 +10,7 @@ import { observer } from "mobx-react";
 import { SquareStackIcon } from "lucide-react";
 import { CopyIcon, EditIcon, TrashIcon } from "@pi-dash/propel/icons";
 // pi dash utils
+import { useTranslation } from "@pi-dash/i18n";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import type { TWorkspaceDraftIssue } from "@pi-dash/types";
 import { EIssuesStoreType } from "@pi-dash/types";
@@ -43,6 +44,7 @@ export const DraftIssueBlock = observer(function DraftIssueBlock(props: Props) {
   const [issueToEdit, setIssueToEdit] = useState<TWorkspaceDraftIssue | undefined>(undefined);
   const [deleteIssueModal, setDeleteIssueModal] = useState(false);
   // hooks
+  const { t } = useTranslation();
   const { getIssueById, updateIssue, deleteIssue } = useWorkspaceDraftIssues();
   const { sidebarCollapsed: isSidebarCollapsed } = useAppTheme();
   const { getProjectIdentifierById } = useProject();
@@ -65,7 +67,7 @@ export const DraftIssueBlock = observer(function DraftIssueBlock(props: Props) {
   const MENU_ITEMS: TContextMenuItem[] = [
     {
       key: "edit",
-      title: "edit",
+      title: t("Edit"),
       icon: EditIcon,
       action: () => {
         setIssueToEdit(issue);
@@ -74,7 +76,7 @@ export const DraftIssueBlock = observer(function DraftIssueBlock(props: Props) {
     },
     {
       key: "make-a-copy",
-      title: "make_a_copy",
+      title: t("Make a copy"),
       icon: CopyIcon,
       action: () => {
         setCreateUpdateIssueModal(true);
@@ -82,7 +84,7 @@ export const DraftIssueBlock = observer(function DraftIssueBlock(props: Props) {
     },
     {
       key: "move-to-issues",
-      title: "move_to_project",
+      title: t("Move to project"),
       icon: SquareStackIcon,
       action: () => {
         setMoveToIssue(true);
@@ -92,7 +94,7 @@ export const DraftIssueBlock = observer(function DraftIssueBlock(props: Props) {
     },
     {
       key: "delete",
-      title: "delete",
+      title: t("Delete"),
       icon: TrashIcon,
       action: () => {
         setDeleteIssueModal(true);
@@ -183,11 +185,12 @@ export const DraftIssueBlock = observer(function DraftIssueBlock(props: Props) {
             <DraftIssueProperties
               className={`relative flex flex-wrap ${isSidebarCollapsed ? "md:flex-shrink-0 md:flex-grow" : "lg:flex-shrink-0 lg:flex-grow"} items-center gap-2 whitespace-nowrap`}
               issue={issue}
-              updateIssue={async (projectId, issueId, data) => {
-                await updateIssue(workspaceSlug, issueId, data);
+              updateIssue={async (projectId, draftIssueId, data) => {
+                await updateIssue(workspaceSlug, draftIssueId, data);
               }}
             />
             <div
+              role="presentation"
               className={cn("hidden", {
                 "md:flex": isSidebarCollapsed,
                 "lg:flex": !isSidebarCollapsed,

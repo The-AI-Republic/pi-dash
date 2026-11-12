@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="Pi Dash social card">
+  <rect x="0" y="0" width="1200" height="630" fill="#14232e"/>
+  <g transform="translate(120, 215)">
+    <rect x="0" y="0" width="200" height="200" rx="50" fill="#f5f7f8"/>
+    <rect x="40" y="92" width="120" height="21" rx="10.5" fill="#14232e"/>
+    <rect x="40" y="131" width="78" height="21" rx="10.5" fill="#1f7a6b"/>
+    <rect x="40" y="53" width="42" height="21" rx="10.5" fill="#1f7a6b"/>
+  </g>
+  <text x="380" y="300" font-family="system-ui, sans-serif" font-size="96" font-weight="700" fill="#f5f7f8">Pi Dash</text>
+  <text x="380" y="365" font-family="system-ui, sans-serif" font-size="40" fill="#8fd0c2">Projects, issues and agents in one place</text>
+</svg>

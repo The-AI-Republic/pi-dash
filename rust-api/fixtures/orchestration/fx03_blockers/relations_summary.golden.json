@@ -1,0 +1,76 @@
+{
+  "_trace": "orchestration/blockers.py:57 (SUMMARY_LIMIT), :163-181 (_summary_item/_summary_list: open-first Case/When + cap), :184-198 (relations_summary)",
+  "_method": "live relations_summary on pidash_524_scratch",
+  "summary_D": {
+    "relations_summary": {
+      "blocked_by": [
+        {
+          "identifier": "FX3A-2",
+          "state": "Todo",
+          "state_group": "unstarted"
+        },
+        {
+          "identifier": "FX3A-4",
+          "state": "In Review",
+          "state_group": "review"
+        },
+        {
+          "identifier": "FX3A-11",
+          "state": null,
+          "state_group": null
+        },
+        {
+          "identifier": "FX3B-1",
+          "state": "Todo",
+          "state_group": "unstarted"
+        },
+        {
+          "identifier": "FX3B-2",
+          "state": "In Test",
+          "state_group": "test"
+        },
+        {
+          "identifier": "FX3A-3",
+          "state": "Done",
+          "state_group": "completed"
+        },
+        {
+          "identifier": "FX3A-5",
+          "state": "Cancelled",
+          "state_group": "cancelled"
+        }
+      ],
+      "blocking": [
+        {
+          "identifier": "FX3A-12",
+          "state": "Todo",
+          "state_group": "unstarted"
+        },
+        {
+          "identifier": "FX3B-3",
+          "state": "Done",
+          "state_group": "completed"
+        }
+      ]
+    },
+    "has_open_blockers": true
+  },
+  "summary_D_sql_statements": 3,
+  "cap_case": {
+    "seed": "101 blockers (1 open + 100 completed)",
+    "blocked_by_len": 100,
+    "blocked_by_first": {
+      "identifier": "FX3A-17",
+      "state": "Todo",
+      "state_group": "unstarted"
+    },
+    "blocked_by_last": {
+      "identifier": "FX3A-116",
+      "state": "Done",
+      "state_group": "completed"
+    },
+    "n_open_in_list": 1,
+    "has_open_blockers": true,
+    "blocking": []
+  }
+}

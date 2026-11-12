@@ -32,6 +32,7 @@ from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
+    PinKind,
     Pod,
     Runner,
     RunnerProvisioning,
@@ -294,6 +295,22 @@ def test_pin_to_paused_runner_released_past_bound(db, create_user, workspace, po
     run.refresh_from_db()
     assert run.pinned_runner_id is None
     assert run.runner_id == healthy.id
+
+
+@pytest.mark.unit
+def test_dedicated_pin_never_cleared(db, create_user, workspace, pod):
+    """A dedicated pin belongs to the issue, not the queue: it is never
+    released to the pod, however long its runner stays away. The
+    dedicated-runner sweeps bound those runs instead."""
+    dead = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, heartbeat_age=STALE)
+    _make_runner(create_user, workspace, pod, "healthy", status=RunnerStatus.ONLINE)
+    run = _make_pinned_run(create_user, workspace, pod, dead, age=PAST_BOUND, pin_kind=PinKind.DEDICATED)
+
+    reconcile_unsatisfiable_pins_task()
+
+    run.refresh_from_db()
+    assert run.pinned_runner_id == dead.id
+    assert run.status == AgentRunStatus.QUEUED
 
 
 @pytest.mark.unit

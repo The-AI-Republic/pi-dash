@@ -1,0 +1,12 @@
+[package]
+name = "pidash-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pidash-db = { path = "../db" }
+hmac = "0.12.1"
+sha2 = "0.10.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"

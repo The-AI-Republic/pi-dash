@@ -1,0 +1,432 @@
+{
+  "_trace": "orchestration/scheduling.py:741-763 (WAIT_* + rearm set); :766-827 (wait_ticker); :830-852 (_record_wait_activity)",
+  "_method": "live wait_ticker on pidash_524_scratch; frozen clock + random.seed(52408) per call (re-arm jitter) + time.time frozen at 1780000000.0 for activity epochs; activity rows read back verbatim except the run pk, which is labeled",
+  "cases": {
+    "constants": {
+      "WAIT_GRANTED": "waited",
+      "WAIT_CAP_REACHED": "wait_cap_reached",
+      "WAIT_INFINITE_POOL": "infinite_pool",
+      "WAIT_NO_TICKER": "no_ticker",
+      "WAIT_ACTIVITY_FIELD": "agent_wait"
+    },
+    "W1_applied": {
+      "issue": "FX8-41",
+      "pool": 10,
+      "waited_before": 0,
+      "run": "run-W1",
+      "actor": "fx8-creator@example.com",
+      "before": {
+        "ticker": {
+          "used": 3,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 3,
+        "granted": 0,
+        "waited": 1,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "1",
+        "comment": "Waited on a blocker (1 of 10); run run-W1",
+        "actor": "fx8-creator@example.com",
+        "epoch": 1780000000.0
+      }
+    },
+    "W10_second_wait": {
+      "issue": "FX8-41",
+      "before": {
+        "ticker": {
+          "used": 3,
+          "granted": 0,
+          "waited": 1,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 3,
+        "granted": 0,
+        "waited": 2,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "2",
+        "comment": "Waited on a blocker (2 of 10); run run-W1",
+        "actor": "fx8-creator@example.com",
+        "epoch": 1780000000.0
+      }
+    },
+    "W2_cap_reached": {
+      "issue": "FX8-42",
+      "pool": 10,
+      "waited_before": 10,
+      "before": {
+        "ticker": {
+          "used": 3,
+          "granted": 0,
+          "waited": 10,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": false,
+      "reason": "wait_cap_reached",
+      "ticker_after": {
+        "used": 3,
+        "granted": 0,
+        "waited": 10,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": null
+    },
+    "W3_infinite_pool": {
+      "issue": "FX8I-2",
+      "pool": -1,
+      "before": {
+        "ticker": {
+          "used": 3,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": false,
+      "reason": "infinite_pool",
+      "ticker_after": {
+        "used": 3,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": null
+    },
+    "W4_no_ticker": {
+      "issue": "FX8-43",
+      "before": {
+        "ticker": null
+      },
+      "applied": false,
+      "reason": "no_ticker",
+      "ticker_after": null,
+      "activity": null
+    },
+    "W5_rearm_cap_hit": {
+      "issue": "FX8-44",
+      "pool": 10,
+      "used": 5,
+      "before": {
+        "ticker": {
+          "used": 5,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 5,
+        "granted": 0,
+        "waited": 1,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:14:06.322254+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "1",
+        "comment": "Waited on a blocker (1 of 10)",
+        "actor": "fx8-creator@example.com",
+        "epoch": 1780000000.0
+      }
+    },
+    "W6_no_rearm_user_disabled": {
+      "issue": "FX8-45",
+      "before": {
+        "ticker": {
+          "used": 5,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": true,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 5,
+        "granted": 0,
+        "waited": 1,
+        "user_disabled": true,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "1",
+        "comment": "Waited on a blocker (1 of 10)",
+        "actor": "fx8-creator@example.com",
+        "epoch": 1780000000.0
+      }
+    },
+    "W7_no_rearm_still_capped": {
+      "issue": "FX8-46",
+      "pool": 10,
+      "used": 20,
+      "before": {
+        "ticker": {
+          "used": 20,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 20,
+        "granted": 0,
+        "waited": 1,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "1",
+        "comment": "Waited on a blocker (1 of 10)",
+        "actor": "fx8-creator@example.com",
+        "epoch": 1780000000.0
+      }
+    },
+    "W8_no_rearm_left_state": {
+      "issue": "FX8-47",
+      "before": {
+        "ticker": {
+          "used": 5,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 5,
+        "granted": 0,
+        "waited": 1,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "left_ticking_state",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "1",
+        "comment": "Waited on a blocker (1 of 10)",
+        "actor": "fx8-creator@example.com",
+        "epoch": 1780000000.0
+      }
+    },
+    "W9_activity_no_run": {
+      "issue": "FX8-48",
+      "before": {
+        "ticker": {
+          "used": 3,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "applied": true,
+      "reason": "waited",
+      "ticker_after": {
+        "used": 3,
+        "granted": 0,
+        "waited": 1,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "activity": {
+        "verb": "updated",
+        "field": "agent_wait",
+        "old_value": "10",
+        "new_value": "1",
+        "comment": "Waited on a blocker (1 of 10)",
+        "actor": "agent@example.com",
+        "epoch": 1780000000.0
+      }
+    }
+  }
+}

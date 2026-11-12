@@ -59,7 +59,7 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
   }, [reset, data]);
 
   return (
-    <div className="flex flex-col gap-y-1">
+    <div data-testid="email-prefs-form" className="flex flex-col gap-y-1">
       <SettingsControlItem
         title={t("Property changes")}
         description={t("Notify me when work items' properties like assignees, priority, estimates or anything else changes.")}
@@ -100,7 +100,7 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
           />
         }
       />
-      <div className="border-l-3 border-subtle-1 pl-3">
+      <div data-testid="email-prefs-completed-nest" className="border-l-3 border-subtle-1 pl-3">
         <SettingsControlItem
           title={t("Work item completed")}
           description={t("Notify me only when a work item is completed")}
