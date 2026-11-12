@@ -82,9 +82,8 @@ use serde_json::{Map, Value};
 /// `@shared_task` — no bind, no autoretry. Body in D-08
 /// (`tasks_webhooks::webhook_fanout::WEBHOOK_ACTIVITY_TASK_NAME`, same string).
 pub const WEBHOOK_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.webhook_activity";
-/// `model_activity` (`webhook_task.py:462`): full Celery name. A plain
-/// `@shared_task`. Body in D-08 (`WEBHOOK_FANOUT_TASK_NAMES`, same string).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-export of the canonical [`crate::domain::activity::MODEL_ACTIVITY_TASK`].
+pub use crate::domain::activity::MODEL_ACTIVITY_TASK;
 /// `webhook_send_task` (`webhook_task.py:264-275`): full Celery name
 /// (`bind=True`, autoretry on `RequestException`, `retry_backoff=600`,
 /// `max_retries=5`, `retry_jitter=True`). Body in D-08

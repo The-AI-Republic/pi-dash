@@ -10,6 +10,8 @@ uppercase ids.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from _harness.http import bearer_client
@@ -268,6 +270,191 @@ def test_daemon_machine_session_delete_non_canonical_404s(
         assert revoked is None, "non-canonical delete revoked the session"
         client.delete(f"{DAEMON}/dev-machines/{mid}/sessions/{sid}/")
     seeder.db.execute("DELETE FROM machine_session WHERE dev_machine_id = %s", (mid,))
+
+
+# -- runner_runs UUID gating (PIDASHCONV-1484) --------------------------------
+# ``run_endpoints.rs`` / ``chat.rs`` / ``sse.rs`` parsed path ids with
+# ``Uuid::parse`` (uppercase / simple / braced / urn accepted) instead of
+# the ``<uuid:>`` converter, so they served — and wrote rows for —
+# spellings Django resolver-404s before auth. Each route must answer
+# Django's framework 404 for a non-canonical spelling and write nothing.
+
+
+def _bad_spellings(value: str) -> list[str]:
+    return [value.upper(), value.replace("-", ""), "{%s}" % value]
+
+
+def _idem() -> dict:
+    return {"Idempotency-Key": uuid.uuid4().hex}
+
+
+def test_daemon_run_routes_non_canonical_404s(
+    machine_client, anon_client, daemon_run, seeder
+):
+    """All 12 daemon run routes: framework 404, run row untouched."""
+    rid = daemon_run["id"]
+    routes = [
+        ("accept/", {}, False),
+        ("queued/", {}, False),
+        ("started/", {"thread_id": "thr-1", "model": "m"}, True),
+        ("events/", {"events": [{"seq": 1, "kind": "log", "payload": {}}]}, True),
+        (
+            "approvals/",
+            {"approval_id": str(uuid.uuid4()), "kind": "cmd", "reason": "x"},
+            True,
+        ),
+        ("awaiting-reauth/", {}, True),
+        ("complete/", {"done_payload": {"summary": "done"}}, True),
+        ("pause/", {"payload": {"question": "proceed?"}}, True),
+        ("fail/", {"detail": "boom"}, True),
+        ("cancelled/", {}, True),
+        ("resumed/", {}, True),
+        ("stream/upgrade/", {"stream": "events"}, True),
+    ]
+    for suffix, body, idem in routes:
+        for bad in _bad_spellings(rid):
+            url = f"{DAEMON}/runs/{bad}/{suffix}"
+            headers = _idem() if idem else {}
+            _assert_framework_404(machine_client.post(url, json=body, headers=headers))
+            _assert_framework_404(anon_client.post(url, json=body, headers=_idem()))
+    assert (
+        seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (rid,))
+        == "assigned"
+    )
+    assert (
+        seeder.db.fetchval(
+            "SELECT COUNT(*) FROM agent_run_event WHERE agent_run_id = %s", (rid,)
+        )
+        == 0
+    )
+    assert (
+        seeder.db.fetchval(
+            "SELECT COUNT(*) FROM run_message_dedupe WHERE run_id = %s", (rid,)
+        )
+        == 0
+    )
+    assert (
+        seeder.db.fetchval(
+            "SELECT COUNT(*) FROM agent_run_approval WHERE agent_run_id = %s", (rid,)
+        )
+        == 0
+    )
+
+
+def test_daemon_chat_routes_non_canonical_404s(
+    machine_client, anon_client, chat_world, seeder
+):
+    """All 7 daemon chat routes: framework 404, session row untouched."""
+    sid = chat_world["session"]["id"]
+    mid = chat_world["message"]["id"]
+    routes = [
+        ("started/", {"local_thread_id": "lt-1", "agent_kind": "t"}, True),
+        ("events/", {"kind": "raw", "payload": {"text": "ping"}}, True),
+        (
+            "approvals/",
+            {"local_approval_id": "la-1", "kind": "shell", "reason": "r"},
+            False,
+        ),
+        ("failed/", {"code": "boom", "detail": "crashed"}, True),
+        ("closed/", {"reason": "user_done"}, True),
+    ]
+    for suffix, body, idem in routes:
+        for bad in _bad_spellings(sid):
+            url = f"{DAEMON}/chat/sessions/{bad}/{suffix}"
+            headers = _idem() if idem else {}
+            _assert_framework_404(machine_client.post(url, json=body, headers=headers))
+            _assert_framework_404(anon_client.post(url, json=body, headers=_idem()))
+    for action, body in [
+        ("started/", {"turn_id": "turn-1"}),
+        ("complete/", {"assistant_message": "done", "status": "completed"}),
+    ]:
+        for bad in _bad_spellings(sid):
+            url = f"{DAEMON}/chat/sessions/{bad}/messages/{mid}/{action}"
+            _assert_framework_404(machine_client.post(url, json=body))
+            _assert_framework_404(anon_client.post(url, json=body))
+        for bad in _bad_spellings(mid):
+            url = f"{DAEMON}/chat/sessions/{sid}/messages/{bad}/{action}"
+            _assert_framework_404(machine_client.post(url, json=body))
+            _assert_framework_404(anon_client.post(url, json=body))
+    row = seeder.db.fetchone(
+        "SELECT status, local_thread_id FROM agent_chat_session WHERE id = %s", (sid,)
+    )
+    assert row["status"] == "open", row
+    assert row["local_thread_id"] == "", row
+    assert (
+        seeder.db.fetchval(
+            "SELECT COUNT(*) FROM agent_chat_event WHERE session_id = %s", (sid,)
+        )
+        == 0
+    )
+    assert (
+        seeder.db.fetchval(
+            "SELECT COUNT(*) FROM agent_chat_approval WHERE session_id = %s", (sid,)
+        )
+        == 0
+    )
+
+
+def test_web_chat_routes_non_canonical_404s(user_client, anon_client, chat_world, seeder):
+    """Web chat session/message/warm/cancel/close: framework 404, no writes."""
+    sid = chat_world["session"]["id"]
+    for bad in _bad_spellings(sid):
+        base = f"{WEB}/chat/sessions/{bad}"
+        _assert_framework_404(user_client.get(f"{base}/"))
+        _assert_framework_404(anon_client.get(f"{base}/"))
+        _assert_framework_404(web_post(user_client, f"{base}/warm/", {}))
+        _assert_framework_404(anon_client.post(f"{base}/warm/", json={}))
+        _assert_framework_404(user_client.get(f"{base}/messages/"))
+        _assert_framework_404(anon_client.get(f"{base}/messages/"))
+        _assert_framework_404(web_post(user_client, f"{base}/messages/", {"content": "hi"}))
+        _assert_framework_404(anon_client.post(f"{base}/messages/", json={"content": "hi"}))
+        _assert_framework_404(web_post(user_client, f"{base}/cancel/", {}))
+        _assert_framework_404(anon_client.post(f"{base}/cancel/", json={}))
+        _assert_framework_404(web_post(user_client, f"{base}/close/", {}))
+        _assert_framework_404(anon_client.post(f"{base}/close/", json={}))
+    row = seeder.db.fetchone(
+        "SELECT status, close_requested FROM agent_chat_session WHERE id = %s", (sid,)
+    )
+    assert row["status"] == "open", row
+    assert row["close_requested"] is False, row
+    assert (
+        seeder.db.fetchval(
+            "SELECT COUNT(*) FROM agent_chat_message WHERE session_id = %s", (sid,)
+        )
+        == 1
+    )
+
+
+def test_web_chat_approval_decide_non_canonical_404s(
+    user_client, anon_client, machine_client, chat_world, seeder
+):
+    """Approval decide with a non-canonical id: framework 404, still pending."""
+    sid = chat_world["session"]["id"]
+    seeded = machine_client.post(
+        f"{DAEMON}/chat/sessions/{sid}/approvals/",
+        json={"local_approval_id": "la-1484", "kind": "shell", "reason": "r"},
+    )
+    assert seeded.status_code == 200, seeded.text
+    aid = seeded.json()["approval"]["id"]
+    for bad in _bad_spellings(aid):
+        url = f"{WEB}/chat/approvals/{bad}/decide/"
+        _assert_framework_404(web_post(user_client, url, {"decision": "accept"}))
+        _assert_framework_404(anon_client.post(url, json={"decision": "accept"}))
+    assert (
+        seeder.db.fetchval(
+            "SELECT status FROM agent_chat_approval WHERE id = %s", (aid,)
+        )
+        == "pending"
+    )
+
+
+def test_web_chat_sse_non_canonical_404s(user_client, anon_client, chat_world):
+    """Chat SSE with a non-canonical id: framework 404, no stream."""
+    sid = chat_world["session"]["id"]
+    for bad in _bad_spellings(sid):
+        url = f"{WEB}/chat/sessions/{bad}/events/"
+        _assert_framework_404(user_client.get(url, timeout=10.0))
+        _assert_framework_404(anon_client.get(url, timeout=10.0))
 
 
 def test_daemon_machine_session_poll_non_canonical_404s(

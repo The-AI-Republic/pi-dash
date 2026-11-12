@@ -197,3 +197,39 @@ def test_state_id_in_blank_part_dropped(clients, seed):
         {"and": [{"state_id__in": f"{seed['state_backlog']},"}]})
     assert resp.status_code == 200, resp.text
     assert _ids(resp.json()) == {seed["issue1"], seed["issue2"]}
+
+
+def test_us_datetime_long_fraction_rejected(clients, seed):
+    """US datetimes with 7-9 digit fractions are a 400 on both backends
+    (PIDASHCONV-1479). Django's ``parse_datetime`` returns None for `/`
+    strings, and the ``strptime`` ``%f`` fallback takes at most 6 digits
+    (``unconverted data remains``); pre-fix Rust took up to 9 via
+    chrono ``%.f`` and truncated to micros (200)."""
+    member = clients["member"]
+    base = _base(seed["ws_slug"], seed["project"])
+    for raw in ("05/01/2026 08:00:00.1234567",
+                "05/01/2026 08:00:00.12345678",
+                "05/01/2026 08:00:00.123456789",
+                "05/01/26 08:00:00.1234567"):
+        resp = _filtered(member, base, {"and": [{"created_at": raw}]})
+        assert resp.status_code == 400, (raw, resp.text)
+        assert resp.json()["code"] == "invalid_filterset", (raw, resp.text)
+    # A long-fraction bound 400s a range too (same cleaning path).
+    resp = _filtered(
+        member, base,
+        {"and": [{
+            "created_at__range":
+                "05/01/2026 08:00:00.1234567,05/02/2026 08:00:00"}]})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["code"] == "invalid_filterset", resp.text
+
+
+def test_us_datetime_six_digit_fraction_accepted(clients, seed):
+    """The 6-digit boundary still cleans on both backends (PIDASHCONV-1479):
+    6 digits is exactly what Django's ``strptime`` ``%f`` accepts."""
+    member = clients["member"]
+    base = _base(seed["ws_slug"], seed["project"])
+    resp = _filtered(
+        member, base,
+        {"and": [{"created_at": "05/01/2026 08:00:00.123456"}]})
+    assert resp.status_code == 200, resp.text

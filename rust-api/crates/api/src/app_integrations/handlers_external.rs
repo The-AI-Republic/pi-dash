@@ -137,18 +137,11 @@ async fn workspace_role(
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// Active project role for `(user, project_id, slug)`, or `None`.
@@ -159,19 +152,11 @@ async fn project_role(
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 fn workspace_facts(slug: &str, role: Option<i32>) -> AllowFacts {
@@ -226,14 +211,19 @@ async fn config_value(
     key: &str,
     env_default: Option<String>,
 ) -> Result<Option<String>, Denial> {
-    let row: Option<(Option<String>, bool)> = sqlx::query_as(
-        r#"SELECT value, is_encrypted FROM instance_configurations
-           WHERE key = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::instance_configurations;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Option<String>, bool)> = instance_configurations::Entity::find()
+        .select_only()
+        .column(instance_configurations::Column::Value)
+        .column(instance_configurations::Column::IsEncrypted)
+        .filter(instance_configurations::Column::Key.eq(key))
+        .filter(instance_configurations::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match row {
         Some((Some(value), true)) => {
             let keyring = pidash_db::config::encryption::Keyring::from_secret(secret_key);
@@ -470,15 +460,32 @@ type ProjectRow = (Uuid, String, String, Value, Option<String>, bool);
 /// `Workspace.objects.get(slug=slug)` (`:170`) — 404 when missing
 /// (`handle_exception`: `{"error":"The required object does not exist."}`).
 async fn fetch_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<WorkspaceLite, Denial> {
-    let row: Option<WorkspaceRow> = sqlx::query_as(
-        r#"SELECT w.id, w.name, w.slug, w.logo, w.logo_asset_id, fa.entity_type
-               FROM workspaces w LEFT JOIN file_assets fa ON fa.id = w.logo_asset_id
-               WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{file_assets, workspaces};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<WorkspaceRow> = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::Logo,
+            workspaces::Column::LogoAssetId,
+        ])
+        .column_as(file_assets::Column::EntityType, "entity_type")
+        .join(
+            JoinType::LeftJoin,
+            workspaces::Entity::belongs_to(file_assets::Entity)
+                .from(workspaces::Column::LogoAssetId)
+                .to(file_assets::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let (id, name, slug, logo, logo_asset_id, logo_asset_entity) = row.ok_or(Denial::NotFound)?;
     Ok(WorkspaceLite {
         id,
@@ -492,17 +499,48 @@ async fn fetch_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<WorkspaceLit
 
 /// `Project.objects.get(pk=project_id)` (`:171`) — 404 when missing.
 async fn fetch_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<ProjectLite, Denial> {
-    let row: Option<ProjectRow> = sqlx::query_as(
-        r#"SELECT p.id, p.identifier, p.name, p.logo_props, p.description, p.is_default
-           FROM projects p
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (id, identifier, name, logo_props, description, is_default) =
-        row.ok_or(Denial::NotFound)?;
+    use pidash_db::entity::{file_assets, projects};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<ProjectRow> = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::CoverImageAssetId,
+        ])
+        .column_as(file_assets::Column::EntityType, "entity_type")
+        .columns([
+            projects::Column::LogoProps,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+        ])
+        .join(
+            JoinType::LeftJoin,
+            projects::Entity::belongs_to(file_assets::Entity)
+                .from(projects::Column::CoverImageAssetId)
+                .to(file_assets::Column::Id)
+                .into(),
+        )
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let (
+        id,
+        identifier,
+        name,
+        cover_image,
+        cover_asset_id,
+        cover_asset_entity,
+        logo_props,
+        description,
+        is_default,
+    ) = row.ok_or(Denial::NotFound)?;
     Ok(ProjectLite {
         id,
         identifier,
@@ -581,17 +619,11 @@ async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Resul
         return Ok(id);
     }
     let normalized = normalize_resolve_identifier(raw);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(normalized)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    row.map(|(id,)| id)
-        .ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = crate::app_issues::access::project_id_by_identifier(&db, slug, &normalized)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    row.ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +709,7 @@ async fn post_project_assistant(
     );
     map.insert("project_detail".to_owned(), project_detail(&project));
     map.insert("workspace_detail".to_owned(), workspace_detail(&workspace));
-    json_response(&Value::Object(map))
+    json_response(Value::Object(map))
 }
 
 /// `POST workspaces/<slug>/ai-assistant/`
@@ -742,7 +774,82 @@ async fn post_workspace_assistant(
         "response_html".to_owned(),
         Value::String(external::response_html(&text)),
     );
-    json_response(&Value::Object(map))
+    json_response(Value::Object(map))
+}
+
+/// `GET unsplash/` (`UnsplashEndpoint.get`, `base.py:215-243`): no
+/// decorator, so any authenticated caller reaches the body
+/// (FX-PERM-01: `Authenticated`). Without an access key the endpoint
+/// answers `[]` (`:226-227`); otherwise it proxies api.unsplash.com
+/// and relays the payload with the upstream status verbatim
+/// (`:242-243`).
+async fn get_unsplash(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    if let Err(denial) = actor(&state, &pool, extension).await {
+        return denial.into_response();
+    }
+    let row = gate_for("GET", "unsplash/").expect("unsplash gate");
+    debug_assert!(matches!(row.gate, super::gates::Gate::Authenticated));
+    let access_key = match config_value(
+        &pool,
+        &state.settings().secret_key,
+        "UNSPLASH_ACCESS_KEY",
+        env_default("UNSPLASH_ACCESS_KEY", None),
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(denial) => return denial.into_response(),
+    };
+    let access_key = access_key.unwrap_or_default();
+    if access_key.is_empty() {
+        return json_response(Vec::<Value>::new());
+    }
+    let url = external::unsplash_url(
+        &access_key,
+        params.get("query").map(String::as_str),
+        params.get("page").map(String::as_str),
+        params.get("per_page").map(String::as_str),
+    );
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let response = match client
+        .get(url)
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let payload: Value = match serde_json::from_slice(&bytes) {
+        Ok(payload) => payload,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let body = serde_json::to_string(&payload).expect("upstream payload serializes");
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+        .expect("unsplash relay")
 }
 
 #[cfg(test)]

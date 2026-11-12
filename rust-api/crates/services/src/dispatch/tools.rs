@@ -1381,44 +1381,8 @@ pub const PROJECT_STATES_SQL: &str = "SELECT id, name, states.group FROM states 
      WHERE project_id = $1 AND deleted_at IS NULL AND NOT (states.group = 'triage') \
      ORDER BY sequence ASC";
 
-/// `pidash_search_project_issues` (`tools.py:227-241`):
-/// `Issue.objects.filter(project_id).filter(Q(name__icontains=query) |
-/// Q(description_stripped__icontains=query)).select_related("project",
-/// "state").distinct()[:limit]`. Plain `Issue.objects` (soft-delete
-/// only — the triage/archived/draft excludes live on `issue_objects`,
-/// which this path does not use). Django compiles `icontains` to
-/// `UPPER(col::text) LIKE UPPER(pattern)` — no `ILIKE`, no `ESCAPE`
-/// clause (verified with the query compiler; a stable construct). `$1`
-/// project id, `$2` the `escape_icontains` output (assistant
-/// `tools_issues.rs`, same backslash escaping; `LIKE`'s default escape
-/// applies), `$3` the [`clamp_search_limit`] value. `ORDER BY
-/// issues.created_at DESC` from `Issue.Meta.ordering = ("-created_at",)`
-/// (`db/models/issue.py:253`): Python slices newest-first, so the limit
-/// keeps the newest matches. `issues.created_at` rides in the `SELECT`
-/// list only to satisfy `DISTINCT`'s order-by rule (every `ORDER BY`
-/// expression must appear in the select list); the caller ignores it —
-/// `_issue_data` consumes the other nine columns. `DISTINCT` never
-/// collapses rows (the PK is selected), as in Django's select-all.
-pub const SEARCH_ISSUES_SQL: &str =
-    "SELECT DISTINCT issues.id, issues.project_id, issues.state_id, \
-     issues.sequence_id, issues.name, issues.priority, states.name, states.group, \
-     projects.identifier, issues.created_at FROM issues \
-     INNER JOIN projects ON projects.id = issues.project_id \
-     LEFT OUTER JOIN states ON states.id = issues.state_id \
-     WHERE issues.project_id = $1 AND issues.deleted_at IS NULL \
-     AND (UPPER(issues.name::text) LIKE UPPER('%' || $2 || '%') \
-     OR UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')) \
-     ORDER BY issues.created_at DESC LIMIT $3";
-
-/// `pidash_get_project_issue` (`tools.py:243-251`):
-/// `Issue.objects.select_related("project", "state").get(pk=issue_id,
-/// project_id=project_id)`. `$1` issue id, `$2` project id.
-pub const GET_PROJECT_ISSUE_SQL: &str = "SELECT issues.id, issues.project_id, issues.state_id, \
-     issues.sequence_id, issues.name, issues.priority, issues.description_stripped, \
-     issues.workpad, states.name, states.group, projects.identifier FROM issues \
-     INNER JOIN projects ON projects.id = issues.project_id \
-     LEFT OUTER JOIN states ON states.id = issues.state_id \
-     WHERE issues.id = $1 AND issues.project_id = $2 AND issues.deleted_at IS NULL LIMIT 1";
+// `pidash_search_project_issues` and `pidash_get_project_issue` read through
+// SeaORM in `super::tool_issues` (every joined column under its own alias).
 
 /// `pidash_list_linked_code_reviews` (`tools.py:253-272`):
 /// `GitCodeReviewLink.objects.filter(issue_id,
@@ -1429,53 +1393,6 @@ pub const GET_PROJECT_ISSUE_SQL: &str = "SELECT issues.id, issues.project_id, is
 pub const LINKED_REVIEWS_SQL: &str = "SELECT id, provider, url, title, state, external_iid \
      FROM git_code_review_links WHERE issue_id = $1 AND deleted_at IS NULL \
      ORDER BY created_at DESC LIMIT 20";
-
-/// `pidash_add_current_issue_comment` row (`tools.py:279-292`):
-/// `IssueComment.objects.create(issue, project, workspace, actor,
-/// comment_html=to_safe_html(body), comment_json={}, speaker_type="agent",
-/// speaker_label="Pi Dash Cloud Agent", speaker_agent_run_id=run.id)`.
-/// Full column list with the Django-side defaults (`access`,
-/// `attachments`, `labels` have no DB default to fall back on). `$1`
-/// id, `$2` now (both audit timestamps), `$3` actor (also
-/// `created_by_id`: `impersonate(run.created_by)` makes the actor the
-/// current user; `updated_by_id` stays NULL on creation per
-/// `BaseModel.save`), `$4` workspace, `$5` project, `$6`
-/// `comment_stripped` (`strip_tags` of `$7`, Django-side), `$7` safe
-/// HTML (assistant-markdown seam), `$8` issue, `$9` run id. The custom
-/// `save()` also inserts the `Description` row
-/// ([`COMMENT_DESCRIPTION_INSERT_SQL`]) and links it
-/// ([`COMMENT_DESCRIPTION_LINK_SQL`]).
-pub const COMMENT_INSERT_SQL: &str = "INSERT INTO issue_comments \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, \
-     project_id, comment_stripped, comment_json, comment_html, description_id, attachments, \
-     labels, issue_id, actor_id, access, external_source, external_id, speaker_type, \
-     speaker_label, speaker_agent_run_id, edited_at, parent_id) \
-     VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, '{}', $7, NULL, '{}', '{}', $8, $3, \
-     'INTERNAL', NULL, NULL, 'agent', 'Pi Dash Cloud Agent', $9, NULL, NULL)";
-
-/// Comment `Description` side row (`db/models/issue.py:620-625`):
-/// `Description.objects.create(workspace, project, created_by,
-/// updated_by, description_stripped, description_json, description_html)`.
-/// `$1` id, `$2` now (both audit timestamps), `$3` actor
-/// (`created_by_id`; `updated_by_id` NULL on creation), `$4` workspace,
-/// `$5` project, `$6` safe HTML, `$7` stripped.
-pub const COMMENT_DESCRIPTION_INSERT_SQL: &str = "INSERT INTO descriptions \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, \
-     project_id, description_json, description_html, description_binary, description_stripped) \
-     VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, '{}', $6, NULL, $7)";
-
-/// Comment↔description link (`db/models/issue.py:623`):
-/// `save(update_fields=["description_id"])`. `$1` comment id, `$2`
-/// description id.
-pub const COMMENT_DESCRIPTION_LINK_SQL: &str =
-    "UPDATE issue_comments SET description_id = $2 WHERE id = $1";
-
-/// `pidash_update_current_issue_workpad` (`tools.py:300-307`):
-/// `Issue.objects.filter(pk, project_id).update(workpad, updated_at)`.
-/// `$1` issue id, `$2` project id, `$3` body, `$4` now.
-pub const WORKPAD_UPDATE_SQL: &str =
-    "UPDATE issues SET workpad = $3, updated_at = $4 WHERE id = $1 AND project_id = $2 \
-     AND deleted_at IS NULL";
 
 /// `pidash_transition_current_issue` target lookup (`tools.py:313`):
 /// `State.objects.get(pk=state_id, project_id)`. `$1` state id, `$2`
@@ -1492,17 +1409,6 @@ pub const TRANSITION_STATE_GET_SQL: &str = "SELECT states.id, states.name FROM s
 pub const TRANSITION_ISSUE_LOCK_SQL: &str = "SELECT issues.id, issues.state_id FROM issues \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE issues.id = $1 AND issues.deleted_at IS NULL FOR UPDATE OF issues";
-
-/// `pidash_transition_current_issue` save (`tools.py:334-335`):
-/// `locked.save(update_fields=["state", "updated_at", "updated_by"])`
-/// under `impersonate(run.created_by)`. `$1` issue, `$2` state, `$3`
-/// now, `$4` actor. The caller then routes through
-/// `orchestration.handle_issue_state_transition` (D-12 seam) with the
-/// run stamped as the mover (`MOVED_BY_RUN_ATTR`, `tools.py:331-340`):
-/// the ticker must treat it as an agent move, like the local runner's
-/// CLI header.
-pub const TRANSITION_ISSUE_SAVE_SQL: &str =
-    "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
 
 /// `pidash_create_project_issue` project lock (`tools.py:351`):
 /// `Project.objects.select_for_update().get(pk)`. `$1` project id.
@@ -1552,6 +1458,33 @@ pub const CREATE_SAVE_FALLBACK_STATE_SQL: &str = "SELECT id FROM states WHERE pr
      AND NOT is_triage AND deleted_at IS NULL AND NOT (states.group = 'triage') \
      ORDER BY sequence ASC LIMIT 1";
 
+/// SeaORM form of [`CREATE_SAVE_DEFAULT_STATE_SQL`] (`default = true`)
+/// and [`CREATE_SAVE_FALLBACK_STATE_SQL`] (`default = false`): the first
+/// live non-triage state of the project by `sequence`, projecting `id`.
+pub fn create_save_state_select(
+    project_id: Uuid,
+    default: bool,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::states;
+    use sea_orm::sea_query::{Expr, Order, Query};
+    let col = |column: states::Column| Expr::col((states::Entity, column));
+    let mut select = Query::select();
+    select
+        .column((states::Entity, states::Column::Id))
+        .from(states::Entity)
+        .and_where(col(states::Column::ProjectId).eq(project_id));
+    if default {
+        select.and_where(col(states::Column::Default).into());
+    }
+    select
+        .and_where(col(states::Column::IsTriage).not())
+        .and_where(col(states::Column::DeletedAt).is_null())
+        .and_where(col(states::Column::Group).eq("triage").not())
+        .order_by((states::Entity, states::Column::Sequence), Order::Asc)
+        .limit(1)
+        .to_owned()
+}
+
 /// `Issue.save()` per-project creation lock (`db/models/issue.py:315-320`):
 /// `SELECT pg_advisory_xact_lock(%s)` with
 /// [`advisory_lock_key`] of the project id. `$1` the lock key.
@@ -1570,6 +1503,26 @@ pub fn advisory_lock_key(project_id: &Uuid) -> i64 {
 /// `$1` project id.
 pub const CREATE_SEQ_SCAN_SQL: &str =
     "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL";
+
+/// SeaORM form of [`CREATE_SEQ_SCAN_SQL`]: the project's live
+/// `MAX(sequence)`, output name `max_sequence`.
+pub fn create_seq_scan_select(project_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::issue_sequences;
+    use sea_orm::sea_query::{Alias, Expr, Query};
+    Query::select()
+        .expr_as(
+            Expr::col((issue_sequences::Entity, issue_sequences::Column::Sequence)).max(),
+            Alias::new("max_sequence"),
+        )
+        .from(issue_sequences::Entity)
+        .and_where(
+            Expr::col((issue_sequences::Entity, issue_sequences::Column::ProjectId)).eq(project_id),
+        )
+        .and_where(
+            Expr::col((issue_sequences::Entity, issue_sequences::Column::DeletedAt)).is_null(),
+        )
+        .to_owned()
+}
 
 /// The effective `sequence_id` (`issue.py:327`):
 /// `last_sequence + 1 if last_sequence else 1`.
@@ -1610,44 +1563,6 @@ pub fn saved_sort_order(largest_sort_order: Option<f64>) -> f64 {
 /// soft-delete-excluding `PodManager`. `$1` project id.
 pub const CREATE_DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 \
      AND is_default AND deleted_at IS NULL ORDER BY is_default DESC, created_at ASC LIMIT 1";
-
-/// `pidash_create_project_issue` insert (`tools.py:357-368` through
-/// `Issue.save`, `db/models/issue.py:267-341`): `Issue.objects.create(
-/// workspace, project, state, name=title.strip(),
-/// description_html=to_safe_html(description), description_json={},
-/// sequence_id=seq, created_by, created_via="cloud_agent")`, then
-/// save-derived columns. Full column list with the Django-side defaults
-/// (`priority`, `complexity_score`, `git_work_branch`, `workpad` have no
-/// DB default to fall back on). `$1` id, `$2`/`$3` now, `$4` creator,
-/// `$5` project, `$6` workspace, `$7` state (tool-resolved, else the
-/// save repair), `$8` stripped title, `$9` safe HTML
-/// (assistant-markdown seam), `$10` `description_stripped`
-/// (`strip_tags` of `$9`, NULL when `$9` is empty — Django-side), `$11`
-/// the effective [`saved_sequence_id`] (the tool's `seq` is
-/// overwritten), `$12` `sort_order` ([`saved_sort_order`]), `$13`
-/// `completed_at` (now when a tool-supplied state has group
-/// `completed`, else NULL — a save-resolved state is never stamped),
-/// `$14` `assigned_pod_id` ([`CREATE_DEFAULT_POD_SQL`], NULL when none).
-pub const CREATE_ISSUE_INSERT_SQL: &str = "INSERT INTO issues \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, \
-     workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, \
-     description_html, description_stripped, description_binary, priority, complexity_score, \
-     start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, \
-     external_source, external_id, type_id, git_work_branch, workpad, created_via, \
-     assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, \
-     NULL, NULL, $8, '{}', $9, $10, NULL, 'none', 0, NULL, NULL, $11, $12, $13, NULL, FALSE, \
-     NULL, NULL, NULL, '', '', 'cloud_agent', $14, NULL)";
-
-/// `Issue.save()` sequence row (`db/models/issue.py:341`):
-/// `IssueSequence.objects.create(issue, sequence, project)` (workspace
-/// follows from the project via `ProjectBaseModel.save`; `created_by_id`
-/// is the actor — the create runs inside `impersonate`). `$1` id, `$2`
-/// now (both audit timestamps), `$3` actor, `$4` project, `$5`
-/// workspace, `$6` issue, `$7` the effective sequence.
-pub const CREATE_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, \
-     workspace_id, issue_id, sequence, deleted) \
-     VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, FALSE)";
 
 /// `_relation_scope` own-project narrowing (`tools.py:379-384`):
 /// `visible.filter(project_id=...)`, ANDed onto the visible pool. The
@@ -1994,6 +1909,7 @@ mod tests {
             writes_enabled: true,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 0,
             model_request_timeout_secs: 0,
             execution_timeout_secs: 0,
@@ -3076,14 +2992,7 @@ mod tests {
 
     #[test]
     fn sql_text() {
-        for sql in [
-            LEDGER_INSERT_WRITE_SQL,
-            LEDGER_INSERT_READ_SQL,
-            COMMENT_INSERT_SQL,
-            COMMENT_DESCRIPTION_INSERT_SQL,
-            CREATE_ISSUE_INSERT_SQL,
-            CREATE_ISSUE_SEQUENCE_INSERT_SQL,
-        ] {
+        for sql in [LEDGER_INSERT_WRITE_SQL, LEDGER_INSERT_READ_SQL] {
             assert_eq!(insert_arity(sql).0, insert_arity(sql).1, "{sql}");
         }
         for fragment in [
@@ -3127,27 +3036,10 @@ mod tests {
         assert!(CURRENT_ISSUE_COMMENTS_SQL.contains("ORDER BY created_at DESC LIMIT 50"));
         assert!(PROJECT_STATES_SQL.contains("ORDER BY sequence ASC"));
         assert!(PROJECT_STATES_SQL.contains("NOT (states.group = 'triage')"));
-        assert!(SEARCH_ISSUES_SQL.contains("SELECT DISTINCT"));
-        assert!(SEARCH_ISSUES_SQL.contains("UPPER(issues.name::text) LIKE UPPER('%' || $2 || '%')"));
-        assert!(SEARCH_ISSUES_SQL
-            .contains("UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')"));
-        assert!(!SEARCH_ISSUES_SQL.contains("ILIKE"));
-        assert!(SEARCH_ISSUES_SQL.contains("LIMIT $3"));
-        assert!(SEARCH_ISSUES_SQL.contains("ORDER BY issues.created_at DESC LIMIT $3"));
-        assert!(SEARCH_ISSUES_SQL.contains("projects.identifier, issues.created_at FROM issues"));
-        assert!(GET_PROJECT_ISSUE_SQL.contains("issues.id = $1 AND issues.project_id = $2"));
         assert!(LINKED_REVIEWS_SQL.contains("ORDER BY created_at DESC LIMIT 20"));
-        assert!(COMMENT_INSERT_SQL.contains("'Pi Dash Cloud Agent'"));
-        assert!(COMMENT_INSERT_SQL.contains("'INTERNAL'"));
-        assert!(COMMENT_INSERT_SQL.contains("attachments"));
-        assert!(COMMENT_DESCRIPTION_INSERT_SQL.contains("INSERT INTO descriptions"));
-        assert!(COMMENT_DESCRIPTION_INSERT_SQL.contains("description_binary"));
-        assert!(COMMENT_DESCRIPTION_LINK_SQL.contains("description_id = $2"));
-        assert!(WORKPAD_UPDATE_SQL.contains("SET workpad = $3"));
         assert!(TRANSITION_STATE_GET_SQL.contains("FROM states"));
         assert!(TRANSITION_ISSUE_LOCK_SQL.contains("FOR UPDATE OF issues"));
         assert!(!TRANSITION_ISSUE_LOCK_SQL.contains("LIMIT"));
-        assert!(TRANSITION_ISSUE_SAVE_SQL.contains("updated_by_id = $4"));
         assert!(CREATE_PROJECT_LOCK_SQL.contains("FOR UPDATE"));
         assert!(CREATE_DEFAULT_STATE_SQL.contains("\"default\""));
         assert!(CREATE_BACKLOG_STATE_SQL.contains("states.group = 'backlog'"));
@@ -3157,11 +3049,6 @@ mod tests {
         assert!(CREATE_SEQ_SCAN_SQL.contains("FROM issue_sequences"));
         assert!(!CREATE_SEQ_SCAN_SQL.contains("deleted ="));
         assert!(CREATE_SORT_ORDER_MAX_SQL.contains("state_id = $2"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("'cloud_agent'"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("'none', 0"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("agent_executor"));
-        assert!(CREATE_ISSUE_SEQUENCE_INSERT_SQL.contains("INSERT INTO issue_sequences"));
-        assert!(CREATE_ISSUE_SEQUENCE_INSERT_SQL.contains(", FALSE)"));
         assert!(GITHUB_BINDING_SQL.contains("git_repository_bindings AS b"));
         assert!(GITHUB_INSTALLATION_SQL.contains("ORDER BY created_at DESC LIMIT 1"));
         assert!(LINKED_PR_SQL.contains("namespace = $2 AND repo_name = $3"));

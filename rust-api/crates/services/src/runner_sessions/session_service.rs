@@ -17,6 +17,8 @@
 //!   [`LIVE_STATE_SELECT_SQL`], [`LIVE_STATE_INSERT_SQL`],
 //!   [`live_state_update_sql`]. (`normalize_usage` is
 //!   [`super::usage::normalize_usage`], re-exported from D-15 L1.)
+//! * `apply_hello` stale-busy reconcile (`:149-164`, PDASHOSS01-231)
+//!   → [`should_release_on_open`], [`release_on_open_log`].
 //! * `mark_runner_online` / `mark_runner_offline`
 //!   (`:454-459`) → [`MARK_RUNNER_ONLINE_SQL`],
 //!   [`MARK_RUNNER_OFFLINE_SQL`].
@@ -90,7 +92,7 @@
 //!   `capabilities` first (`:130-141`), and the live-state
 //!   `sorted(set(update_fields))` (`:448`) is cosmetic —
 //!   `observed_run_id` still leads. `.update()` instead preserves
-//!   call order (barrier: `status, ended_at, queue_position`).
+//!   call order (barrier: `status, ended_at`).
 //! * `pod_ids` is a `set`, so multi-pod drain order is arbitrary in
 //!   Python; Rust drains in first-seen order (reaped runs, then
 //!   stopped cancels), which is deterministic for the same rows.
@@ -110,6 +112,7 @@ use uuid::Uuid;
 use crate::runner_runs::finalization::{plan_finalize_values, FinalizeValues};
 use crate::runner_runs::{qualified_columns, SetClause, SetValue};
 use crate::runner_sessions::guards::BUSY_STATUSES;
+use pidash_compat::py::{py_repr, py_str, py_strip, py_truthy};
 
 // ---------------------------------------------------------------------------
 // Grace windows (`session_service.py:33-55`)
@@ -129,33 +132,6 @@ pub const ASSIGN_DELIVERY_GRACE_SECS: i64 = 60;
 // module-private and every services dir keeps its own copies)
 // ---------------------------------------------------------------------------
 
-/// Python truthiness for JSON frame values (`None`/`False`/`0`/`""`/
-/// `[]`/`{}` are falsy; everything else is truthy).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(u) = n.as_u64() {
-                u != 0
-            } else {
-                n.as_f64().map(|f| f != 0.0).unwrap_or(false)
-            }
-        }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
-/// Python `str.strip()`: Rust's `is_whitespace` set plus
-/// U+001C..=U+001F (same formula as the sibling twins).
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
-
 /// First `max` Unicode code points of `text` (`text[:max]`).
 /// Byte-slicing would panic on a UTF-8 boundary; `chars().take()`
 /// cannot. A string that fits needs no walk.
@@ -164,126 +140,6 @@ fn truncate_chars(text: &str, max: usize) -> String {
         return text.to_string();
     }
     text.chars().take(max).collect()
-}
-
-/// Python `str(value)` for JSON frame values: `None`/`True`/`False`
-/// spellings, integers verbatim, floats in CPython repr form,
-/// strings as-is, containers in single-quote repr form.
-fn py_str(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => py_num_str(n),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr` of a number: integers verbatim, floats via
-/// [`py_float_str`].
-fn py_num_str(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    n.as_f64()
-        .map(py_float_str)
-        .unwrap_or_else(|| n.to_string())
-}
-
-/// CPython `repr(float)`: Rust's `Debug` shortest round-trip with
-/// the exponent normalized to Python's `e±XX` form (`1e16` →
-/// `1e+16`, `1e-5` → `1e-05`). Same formula as the sibling twin;
-/// the two engines switch to exponent notation at different
-/// magnitudes in rare cases — frame floats are already absurd that
-/// far down.
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
-}
-
-/// Python `repr(value)` for a value nested in a container: identical
-/// to [`py_str`] except strings, which gain quotes.
-fn py_repr(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str(other),
-    }
-}
-
-/// Python `repr(str)`: single quotes unless the string contains
-/// `'` but not `"`, backslash escapes for quotes/backslash/
-/// whitespace, `\xNN` / `\uNNNN` / `\U00NNNNNN` for the rest of
-/// the non-printables. Same formula as the sibling twin.
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if py_printable(c) => out.push(c),
-                c if (c as u32) < 0x100 => {
-                    out.push_str(&format!("\\x{:02x}", c as u32));
-                }
-                c if (c as u32) < 0x1_0000 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => {
-                    out.push_str(&format!("\\U{:08x}", c as u32));
-                }
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
-
-/// Approximation of `str.isprintable` for [`py_repr_str`]:
-/// controls, DEL and U+2028/2029 are non-printable; everything
-/// else (including the exotic `Cf` format characters) prints raw.
-fn py_printable(c: char) -> bool {
-    !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}')
 }
 
 /// `UUID(str)` exactly as CPython's `uuid.UUID(hex)` parses it
@@ -774,6 +630,25 @@ pub fn parse_in_flight_id(in_flight: Option<&Value>) -> Option<String> {
     parse_uuid_arg(&text).map(|id| id.to_string())
 }
 
+/// The `apply_hello` stale-busy reconcile gate (`:149-164`,
+/// PDASHOSS01-231): `if not body.get("in_flight_run")` — Python
+/// truthiness of the raw value, so any truthy value (even an
+/// unparseable id) skips the release. When it passes, the open
+/// transaction runs
+/// [`release_runner_if_idle_stmt`](super::drain::release_runner_if_idle_stmt)
+/// after the reaper and logs [`release_on_open_log`] when a row
+/// flipped. No drain is scheduled: dispatch still waits for the
+/// session's first poll.
+pub fn should_release_on_open(in_flight: Option<&Value>) -> bool {
+    !in_flight.is_some_and(py_truthy)
+}
+
+/// The info line `apply_hello` logs when the reconcile flipped a
+/// stale `busy` runner back to `online`.
+pub fn release_on_open_log(runner_id: &uuid::Uuid) -> String {
+    format!("session open released stale busy runner {runner_id} back to online")
+}
+
 /// The statuses the reaper may reap (`:197-204`): [`BUSY_STATUSES`]
 /// in source-tuple order, minus `ASSIGNED` / `WAITING_FOR_WORKTREE`
 /// / `CANCEL_REQUESTED` on the session-open path
@@ -878,11 +753,12 @@ pub const CANCEL_REQUESTED_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"agent_ru
 pub const RUNNER_OFFLINE_ERROR_CODE: &str = "runner_offline";
 
 /// In-flight claim probe (`70d684af`): the reported run's `status`
-/// and `error_code` (`filter(id, runner).values("status",
-/// "error_code").first()`). `$1` in-flight id, `$2` runner id.
+/// and `error_details` (`filter(id, runner).values("status",
+/// "error_details").first()`; the caller reads its `code` key —
+/// PDASHOSS01-187). `$1` in-flight id, `$2` runner id.
 /// Replaces [`CANCEL_REQUESTED_EXISTS_SQL`] on the poll path so a
 /// daemon that returns to a sweep-finalized run is told to stop.
-pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
+pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
 
 /// The cancel reason for a claimed in-flight run (`70d684af`):
 /// `cancellation_pending` while the run is still
@@ -949,14 +825,14 @@ pub fn cancel_retry_error_line(run_id: &str, error: &str) -> String {
 
 /// Stopped-cancel barrier write (`:249-253`,
 /// `reap_cancel_barrier.sql[2]`): `.update()` preserves call order
-/// (`status, ended_at, queue_position`). `$1` is `now` (`ended_at`),
+/// (`status, ended_at`). `$1` is `now` (`ended_at`),
 /// `$2…` the stopped-cancel ids. Call only with a non-empty id
 /// list — the source guards the write with `if stopped_cancel_ids:`.
 pub fn cancel_barrier_update_sql(id_count: usize) -> String {
     debug_assert_ne!(id_count, 0, "barrier write needs stopped-cancel ids");
     let params: Vec<String> = (0..id_count).map(|i| format!("${}", i + 2)).collect();
     format!(
-        "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" IN ({})",
+        "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1 WHERE \"agent_run\".\"id\" IN ({})",
         params.join(", ")
     )
 }
@@ -2009,6 +1885,37 @@ mod tests {
     }
 
     #[test]
+    fn release_on_open_follows_python_truthiness() {
+        // Absent / falsy: release.
+        assert!(should_release_on_open(None));
+        for falsy in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(should_release_on_open(Some(&falsy)), "{falsy}");
+        }
+        // Truthy, parseable or not: keep busy.
+        for truthy in [
+            serde_json::json!("7f0a8e4c-2f0e-4a51-9c1e-3a3b2f1b9d10"),
+            serde_json::json!("bogus"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(["x"]),
+        ] {
+            assert!(!should_release_on_open(Some(&truthy)), "{truthy}");
+        }
+        let runner = uuid::Uuid::nil();
+        assert_eq!(
+            release_on_open_log(&runner),
+            "session open released stale busy runner 00000000-0000-0000-0000-000000000000 back to online"
+        );
+    }
+
+    #[test]
     fn in_flight_id_normalizes_or_ignores() {
         assert_eq!(parse_in_flight_id(None), None);
         assert_eq!(parse_in_flight_id(Some(&Value::Null)), None);
@@ -2336,7 +2243,6 @@ mod tests {
         let barrier = fx()["reap_cancel_barrier"].clone();
         assert_eq!(barrier["status_after"], "cancelled");
         assert_eq!(barrier["ended_at_set"], true);
-        assert_eq!(barrier["queue_position"], Value::Null);
     }
 
     #[test]
@@ -2433,21 +2339,22 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
-                "error",
-                "error_code"
+                "error_details"
             ]
         );
         assert_eq!(
             values.clauses[0].value,
             SetValue::Text("failed".to_string())
         );
-        assert_eq!(values.clauses[5].value, SetValue::Text(detail.clone()));
+        // `error` / `error_code` fold into one bag patch (PDASHOSS01-187).
         assert_eq!(
-            values.clauses[6].value,
-            SetValue::Text("heartbeat_reaped".to_string())
+            values.clauses[4].value,
+            SetValue::Json(serde_json::json!({
+                "message": detail.clone(),
+                "code": "heartbeat_reaped"
+            }))
         );
         // Lock text pins (the terminal IN-list binds $2..$6; Django
         // inlines the same five values in set-hash order — order-free
@@ -2473,16 +2380,19 @@ mod tests {
             .split(" WHERE ")
             .next()
             .unwrap();
-        let set_columns: Vec<&str> = set_part
-            .split(", ")
-            .map(|assign| assign.split(" = ").next().unwrap().trim_matches('"'))
+        // Each assignment's column is the quoted identifier right before
+        // its ` = ` (the jsonb literal carries `, ` of its own).
+        let segments: Vec<&str> = set_part.split(" = ").collect();
+        let set_columns: Vec<&str> = segments[..segments.len() - 1]
+            .iter()
+            .map(|segment| segment.trim_end_matches('"').rsplit('"').next().unwrap())
             .collect();
         assert_eq!(set_columns, columns);
         assert!(update.contains(&detail));
-        assert!(update.contains("'heartbeat_reaped'"));
+        assert!(update.contains("\"code\": \"heartbeat_reaped\""));
         // The rendered D-15 UPDATE binds one param per clause, id last.
         let rendered = finalize_update_sql(&values);
-        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $8"));
+        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $6"));
         // Lock predicate for the reaper call: expected runner, no status.
         assert!(finalize_lock_passes(
             AgentRunStatus::Running,
@@ -2538,7 +2448,7 @@ mod tests {
         assert_eq!(RUNNER_OFFLINE_ERROR_CODE, "runner_offline");
         assert_eq!(
             IN_FLIGHT_CLAIM_SQL,
-            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" \
+            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" \
              WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1",
         );

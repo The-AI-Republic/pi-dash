@@ -95,6 +95,30 @@ def test_post_size_clamped_to_limit(org):
     assert length_range_max(policy_conditions(body["upload_data"])) == row["size"]
 
 
+def test_post_empty_entity_identifier_stores_null_fk(org):
+    # NEWPIDASH-171 (workspace twin): "" stores NULL via the same
+    # ForeignKey rule. For WORKSPACE_LOGO the spread rewrites
+    # workspace_id, so "" clears it to NULL (BUG-workspace-id-overwrite
+    # still applies); for COMMENT_DESCRIPTION it fills comment_id NULL.
+    r = org.request(
+        "POST", ws_base(org), "admin",
+        json=ws_payload(org, entity_type="COMMENT_DESCRIPTION",
+                        entity_identifier=""),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == UPLOAD_KEYS
+    fk = org.conn.execute(
+        "SELECT comment_id, workspace_id FROM file_assets WHERE id = %s",
+        (body["asset_id"],),
+    ).fetchone()
+    assert fk[0] is None, "comment_id must be NULL for entity_identifier ''"
+    # WORKSPACE_LOGO is untouched here, so workspace_id keeps the
+    # slug-resolved id.
+    assert fk[1] is not None
+    assert str(fk[1]) == org.workspace["id"]
+
+
 def test_post_invalid_entity_type(org):
     r = org.request(
         "POST", ws_base(org), "admin", json=ws_payload(org, entity_type="NOPE")

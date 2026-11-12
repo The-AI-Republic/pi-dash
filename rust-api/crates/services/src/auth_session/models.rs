@@ -31,9 +31,10 @@
 //!
 //! Ported bugs (translate, don't redesign): this slice's semantics carry no
 //! recorded bug. The D-16 bug list (shared-mutable payload default, inverted
-//! `is_signup`, `ProjectMember` bulk_create missing `project_id`, magic
-//! 500s, redirect quirks, dead throttle view) lives in the other FX-AUTH
-//! files and is ported by the layer that owns each unit.
+//! `is_signup`, `ProjectMember` bulk_create `project_id` (PB-1008, retired
+//! by PIDASHCONV-1686), magic 500s, redirect quirks, dead throttle view)
+//! lives in the other FX-AUTH files and is ported by the layer that owns
+//! each unit.
 
 use serde_json::{Map, Value};
 

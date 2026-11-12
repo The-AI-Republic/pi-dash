@@ -256,7 +256,7 @@ async fn post_transcribe(
     if !pidash_services::assistant::seams::has_usable_stt_config(stt.has_api_key) {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
-            &serde_json::json!({
+            serde_json::json!({
                 "error": "stt_config_missing",
                 "detail": "Configure dictation in Settings.",
             }),
@@ -286,7 +286,7 @@ async fn post_transcribe(
     let Some(upload) = upload else {
         return error_response(
             StatusCode::BAD_REQUEST,
-            &serde_json::json!({
+            serde_json::json!({
                 "error": "no_audio",
                 "detail": "No audio file was uploaded.",
             }),
@@ -340,7 +340,7 @@ async fn post_transcribe(
             // Never echo the raw error — it may reveal an internal host.
             return error_response(
                 StatusCode::BAD_GATEWAY,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": "provider_unreachable",
                     "detail": "Could not reach the dictation provider.",
                 }),
@@ -353,7 +353,7 @@ async fn post_transcribe(
         Err(_) => {
             return error_response(
                 StatusCode::BAD_GATEWAY,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": "provider_unreachable",
                     "detail": "Could not reach the dictation provider.",
                 }),
@@ -363,12 +363,12 @@ async fn post_transcribe(
     if let Some((code, http_status, detail)) = classify_provider_status(status) {
         return error_response(
             http_status,
-            &serde_json::json!({"error": code, "detail": detail}),
+            serde_json::json!({"error": code, "detail": detail}),
         );
     }
     json_body(
         StatusCode::OK,
-        &serde_json::json!({
+        serde_json::json!({
             "text": extract_text_value(&payload, response_format.as_deref().unwrap_or("")),
         }),
     )
@@ -378,7 +378,7 @@ async fn post_transcribe(
 fn audio_too_large() -> Response {
     error_response(
         StatusCode::PAYLOAD_TOO_LARGE,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "audio_too_large",
             "detail": "Recording exceeds the 25 MB limit.",
         }),
@@ -396,24 +396,20 @@ struct SttRow {
 }
 
 async fn fetch_stt_row(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<SttRow, Denial> {
-    let row = sqlx::query(
-        "SELECT \"base_url\", \"model_name\", \"api_key_encrypted\" \
-         FROM \"assistant_user_stt_config\" WHERE \"user_id\" = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use sqlx::Row as _;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_user_stt_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(*user_id))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(match row {
         Some(row) => {
-            let api_key_encrypted: Option<Vec<u8>> =
-                row.try_get("api_key_encrypted").unwrap_or(None);
-            let has_api_key = pidash_db::assistant::models::has_secret(&api_key_encrypted);
+            let has_api_key = pidash_db::assistant::models::has_secret(&row.api_key_encrypted);
             SttRow {
-                base_url: row.try_get("base_url").unwrap_or_default(),
-                model_name: row.try_get("model_name").unwrap_or_default(),
-                api_key_encrypted,
+                base_url: row.base_url,
+                model_name: row.model_name,
+                api_key_encrypted: row.api_key_encrypted,
                 has_api_key,
             }
         }

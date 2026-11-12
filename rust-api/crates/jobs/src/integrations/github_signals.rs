@@ -30,6 +30,8 @@
 //! (the issue names it `tasks/signals.json`; the recorded behavior lives
 //! under the `completion_guards.golden.json` name).
 
+use pidash_db::entity::{git_issue_syncs, github_issue_syncs, issues, states};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Select};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -52,26 +54,52 @@ pub const COMPLETED_GROUP: &str = "completed";
 /// deliberately UNSCOPED: soft-deleted rows still resolve. A missing row
 /// (`DoesNotExist`) yields `None`, as does a `None` id (new rows take the
 /// `if not instance.pk` branch without touching the database).
-pub const PRIOR_STATE_SQL: &str = "SELECT state_id FROM issues WHERE id = $1";
+pub fn prior_state_query(issue_id: Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::StateId)
+        .filter(issues::Column::Id.eq(issue_id))
+        .limit(1)
+}
 
 /// The new state's group (`instance.state.group`,
 /// `github_signals.py:51`): live-row scoping only. No triage exclusion —
 /// attribute access on the saved instance carries no manager filter when
 /// cached, and the completed transitions this gate keeps are never triage.
-pub const STATE_GROUP_SQL: &str =
-    "SELECT \"group\" FROM states WHERE id = $1 AND deleted_at IS NULL";
+pub fn state_group_query(state_id: Uuid) -> Select<states::Entity> {
+    states::Entity::find()
+        .select_only()
+        .column(states::Column::Group)
+        .filter(states::Column::Id.eq(state_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// Provider-neutral mirror (`github_signals.py:61`):
 /// `GitIssueSync.objects.filter(issue=instance).first()` — default
 /// manager (live rows), database order, first row wins. `$1` the issue id.
-pub const GIT_SYNC_LOOKUP_SQL: &str =
-    "SELECT id, metadata FROM git_issue_syncs WHERE issue_id = $1 AND deleted_at IS NULL LIMIT 1";
+pub fn git_sync_lookup_query(issue_id: Uuid) -> Select<git_issue_syncs::Entity> {
+    git_issue_syncs::Entity::find()
+        .select_only()
+        .column(git_issue_syncs::Column::Id)
+        .column(git_issue_syncs::Column::Metadata)
+        .filter(git_issue_syncs::Column::IssueId.eq(issue_id))
+        .filter(git_issue_syncs::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// Legacy mirror (`github_signals.py:68`):
 /// `GithubIssueSync.objects.filter(issue=instance).first()` — same shape.
 /// `$1` the issue id.
-pub const GITHUB_SYNC_LOOKUP_SQL: &str =
-    "SELECT id, metadata FROM github_issue_syncs WHERE issue_id = $1 AND deleted_at IS NULL LIMIT 1";
+pub fn github_sync_lookup_query(issue_id: Uuid) -> Select<github_issue_syncs::Entity> {
+    github_issue_syncs::Entity::find()
+        .select_only()
+        .column(github_issue_syncs::Column::Id)
+        .column(github_issue_syncs::Column::Metadata)
+        .filter(github_issue_syncs::Column::IssueId.eq(issue_id))
+        .filter(github_issue_syncs::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 // ---------------------------------------------------------------------------
 // Pure decision
@@ -160,9 +188,10 @@ pub async fn capture_prior_state(
     let Some(issue_id) = issue_id else {
         return Ok(None);
     };
-    sqlx::query_scalar(PRIOR_STATE_SQL)
-        .bind(*issue_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    prior_state_query(*issue_id)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(|error| format!("capture prior issue state: {error}"))
         .map(|found: Option<Option<Uuid>>| found.flatten())
@@ -180,12 +209,13 @@ pub async fn dispatch_completion_comment(
     created: bool,
     prev_state_id: Option<&Uuid>,
 ) -> Result<DispatchOutcome, String> {
-    let db_error = |error: sqlx::Error| format!("completion dispatch lookup: {error}");
+    let db_error = |error: sea_orm::DbErr| format!("completion dispatch lookup: {error}");
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let current_group: Option<String> = match current_state_id {
         None => None,
-        Some(state_id) => sqlx::query_scalar(STATE_GROUP_SQL)
-            .bind(*state_id)
-            .fetch_optional(pool)
+        Some(state_id) => state_group_query(*state_id)
+            .into_tuple()
+            .one(&db)
             .await
             .map_err(db_error)?
             .flatten(),
@@ -200,9 +230,9 @@ pub async fn dispatch_completion_comment(
     }
     // Git family first (`github_signals.py:61-66`): a present mirror
     // ends the dispatch — the github branch is never consulted.
-    let git_mirror: Option<(Uuid, Value)> = sqlx::query_as(GIT_SYNC_LOOKUP_SQL)
-        .bind(*issue_id)
-        .fetch_optional(pool)
+    let git_mirror: Option<(Uuid, Value)> = git_sync_lookup_query(*issue_id)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(db_error)?;
     if let Some((sync_id, metadata)) = git_mirror {
@@ -213,9 +243,9 @@ pub async fn dispatch_completion_comment(
             DispatchTarget::GitPostCompletion(sync_id),
         ));
     }
-    let github_mirror: Option<(Uuid, Value)> = sqlx::query_as(GITHUB_SYNC_LOOKUP_SQL)
-        .bind(*issue_id)
-        .fetch_optional(pool)
+    let github_mirror: Option<(Uuid, Value)> = github_sync_lookup_query(*issue_id)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(db_error)?;
     let Some((sync_id, metadata)) = github_mirror else {
@@ -387,18 +417,23 @@ mod tests {
         assert_eq!(github.task, GITHUB_POST_COMMENT_TASK);
     }
 
-    // Every statement parses as Postgres.
+    fn built<E: sea_orm::EntityTrait>(query: sea_orm::Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        query.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    // Every built read parses as Postgres.
     #[test]
     fn all_statements_parse_as_postgres() {
         for sql in [
-            PRIOR_STATE_SQL,
-            STATE_GROUP_SQL,
-            GIT_SYNC_LOOKUP_SQL,
-            GITHUB_SYNC_LOOKUP_SQL,
+            built(prior_state_query(state_id(1))),
+            built(state_group_query(state_id(1))),
+            built(git_sync_lookup_query(state_id(1))),
+            built(github_sync_lookup_query(state_id(1))),
         ] {
             let mut stmts = sqlparser::parser::Parser::parse_sql(
                 &sqlparser::dialect::PostgreSqlDialect {},
-                sql,
+                &sql,
             )
             .unwrap_or_else(|e| panic!("SQL parses: {e}\n{sql}"));
             assert_eq!(stmts.len(), 1);
@@ -413,12 +448,12 @@ mod tests {
     // (`all_objects`), while the group and mirror lookups scope live rows.
     #[test]
     fn scoping_matches_manager_semantics() {
-        assert!(!PRIOR_STATE_SQL.contains("deleted_at"));
-        assert!(STATE_GROUP_SQL.contains("deleted_at IS NULL"));
-        assert!(GIT_SYNC_LOOKUP_SQL.contains("issue_id = $1"));
-        assert!(GIT_SYNC_LOOKUP_SQL.contains("deleted_at IS NULL"));
-        assert!(GITHUB_SYNC_LOOKUP_SQL.contains("issue_id = $1"));
-        assert!(GITHUB_SYNC_LOOKUP_SQL.contains("deleted_at IS NULL"));
+        assert!(!built(prior_state_query(state_id(1))).contains("deleted_at"));
+        assert!(built(state_group_query(state_id(1))).contains("\"deleted_at\" IS NULL"));
+        assert!(built(git_sync_lookup_query(state_id(1))).contains("issue_id"));
+        assert!(built(git_sync_lookup_query(state_id(1))).contains("\"deleted_at\" IS NULL"));
+        assert!(built(github_sync_lookup_query(state_id(1))).contains("issue_id"));
+        assert!(built(github_sync_lookup_query(state_id(1))).contains("\"deleted_at\" IS NULL"));
     }
 
     // Fixture coverage: every guard the fixture issue recorded maps to a

@@ -149,6 +149,7 @@ ISSUE_CREATE_KEYS = {
     "assignee_ids",
     "assignees",
     "assigned_pod_id",
+    "assigned_runner_id",
     "completed_at",
     "complexity_score",
     "created_at",
@@ -461,6 +462,209 @@ def test_user_issues_state_id_in_filter(user_api, space, world):
     assert {row["id"] for row in res.json()["results"]} == {issue_a, issue_b}
 
 
+def test_user_issues_assignees_filter_keeps_duplicate_rows(user_api, space, world):
+    # PIDASHCONV-1372: legacy ?assignees=A,B fans out over the m2m join and
+    # Django counts/returns every copy (no .distinct() on this endpoint), so
+    # an issue assigned to both A and B appears twice with total_count == 2.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        issue_id = seed.issue(ws_id, project_id, name="Dual assigned")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id = %s",
+                (uid, issue_id),
+            )
+        other_id, bot_id = world["other"]["id"], world["bot"]["id"]
+        seed.issue_assignee(ws_id, project_id, issue_id, other_id)
+        seed.issue_assignee(ws_id, project_id, issue_id, bot_id)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"assignees": f"{other_id},{bot_id}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 2
+    assert body["count"] == 2
+    assert body["total_results"] == 2
+    assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
+
+
+def test_user_issues_labels_filter_keeps_duplicate_rows(user_api, space, world):
+    # PIDASHCONV-1372: same fan-out for ?labels=L1,L2 on an issue carrying
+    # both labels.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        issue_id = seed.issue(ws_id, project_id, name="Dual labeled")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id = %s",
+                (uid, issue_id),
+            )
+        label_a = seed.label(ws_id, project_id, name="Dual A")
+        label_b = seed.label(ws_id, project_id, name="Dual B")
+        seed.issue_label(ws_id, project_id, issue_id, label_a)
+        seed.issue_label(ws_id, project_id, issue_id, label_b)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"labels": f"{label_a},{label_b}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 2
+    assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
+
+
+def test_user_issues_empty_relation_filter_returns_all(user_api, space, world):
+    # PIDASHCONV-1716: the profile-issues list runs the same rich-filter
+    # compiler; an empty relation leaf ({"assignee_id":""}) compiles to
+    # match-all and must not INNER JOIN the relation (both issues stay,
+    # total_count == 2). Before the fix the leaf promoted the join and
+    # the bare issue vanished.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        related = seed.issue(ws_id, project_id, name="EL related")
+        bare = seed.issue(ws_id, project_id, name="EL bare")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id IN (%s, %s)",
+                (uid, related, bare),
+            )
+        other_id = world["other"]["id"]
+        seed.issue_assignee(ws_id, project_id, related, other_id)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"filters": json.dumps({"assignee_id": ""})})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert {row["id"] for row in body["results"]} == {related, bare}
+    assert body["total_count"] == 2
+
+
+def test_user_issues_grouped_m2m_none_bucket_keeps_relation_less_issues(
+    user_api, space, world,
+):
+    # NEWPIDASH-152 (NEWPIDASH-131 twin): grouping the profile list by an
+    # m2m key keeps relation-less issues under the "None" bucket (Django's
+    # LEFT JOIN + deleted guard); the Rust INNER JOIN dropped them from
+    # results and total_count. Four issues, at most one link per relation
+    # per issue so Django's fanned count and Rust's distinct count agree.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        other_id = world["other"]["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        seed.project_member(project_id, ws_id, other_id, role=15)
+        state_id = seed.state(project_id, ws_id, name="152 state",
+                              group="unstarted")
+        label_a = seed.label(ws_id, project_id, name="152 alpha")
+        label_b = seed.label(ws_id, project_id, name="152 beta")
+        mod = seed.module(ws_id, project_id, name="152 mod")
+        i1 = seed.issue(ws_id, project_id, name="152 A", state_id=state_id)
+        i2 = seed.issue(ws_id, project_id, name="152 B", state_id=state_id)
+        i3 = seed.issue(ws_id, project_id, name="152 C", state_id=state_id)
+        i4 = seed.issue(ws_id, project_id, name="152 D", state_id=state_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id IN (%s, %s, %s, %s)",
+                (uid, i1, i2, i3, i4),
+            )
+        # A: alpha + assigned + module. B: beta + assigned. C: bare.
+        # D: bare + assigned (the None bucket under the assignees filter).
+        seed.issue_label(ws_id, project_id, i1, label_a)
+        seed.issue_label(ws_id, project_id, i2, label_b)
+        seed.issue_assignee(ws_id, project_id, i1, other_id)
+        seed.issue_assignee(ws_id, project_id, i2, other_id)
+        seed.issue_assignee(ws_id, project_id, i4, other_id)
+        seed.module_issue(ws_id, project_id, mod, i1)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    # Labels by creator: the Done-when case.
+    res = user_api.get(url, params={"group_by": "labels__id", "created_by": uid,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["grouped_by"] == "labels__id"
+    assert body["total_count"] == 4, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i3, i4}
+    assert groups["None"]["total_results"] == 2
+    assert {row["id"] for row in groups[label_a]["results"]} == {i1}
+    assert groups[label_a]["total_results"] == 1
+    assert {row["id"] for row in groups[label_b]["results"]} == {i2}
+    assert groups[label_b]["total_results"] == 1
+    for row in groups["None"]["results"]:
+        assert row["label_ids"] == []
+        assert row["labels__id"] is None
+    # Assignees by creator: the second Done-when case.
+    res = user_api.get(url, params={"group_by": "assignees__id", "created_by": uid,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["grouped_by"] == "assignees__id"
+    assert body["total_count"] == 4, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i3}
+    assert groups["None"]["total_results"] == 1
+    assert {row["id"] for row in groups[other_id]["results"]} == {i1, i2, i4}
+    assert groups[other_id]["total_results"] == 3
+    # Modules by creator: the third m2m alias.
+    res = user_api.get(url, params={"group_by": "issue_module__module_id",
+                                     "created_by": uid, "order_by": "-created_at",
+                                     "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["grouped_by"] == "issue_module__module_id"
+    assert body["total_count"] == 4, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i2, i3, i4}
+    assert groups["None"]["total_results"] == 3
+    assert {row["id"] for row in groups[mod]["results"]} == {i1}
+    assert groups[mod]["total_results"] == 1
+    # Labels with the assignees filter: the assigned-but-unlabeled issue
+    # stays under None.
+    res = user_api.get(url, params={"group_by": "labels__id", "assignees": other_id,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 3, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i4}
+    assert groups["None"]["total_results"] == 1
+    # State with sub-group labels: the None sub-bucket survives.
+    res = user_api.get(url, params={"group_by": "state_id", "sub_group_by": "labels__id",
+                                     "assignees": other_id,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 3, body
+    groups = body["results"]
+    cell = groups[state_id]["results"]
+    assert {row["id"] for row in cell["None"]["results"]} == {i4}
+    assert cell["None"]["total_results"] == 1
+    assert {row["id"] for row in cell[label_a]["results"]} == {i1}
+    assert {row["id"] for row in cell[label_b]["results"]} == {i2}
+
+
 def test_user_issues_non_member_denied(other_api, space, world):
     res = other_api.get(f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/")
     assert res.status_code == 403
@@ -720,7 +924,18 @@ def test_draft_to_issue_converts_with_project(user_api, space, world):
     # PIDASHCONV-904: converting a project-bearing draft 500'd on Rust
     # (the issue_sequences INSERT missed its deleted_at bind) while
     # Django 201s, deletes the draft and enqueues issue_activity.
+    # NEWPIDASH-185 (DIFF-14): the workspace admin is the creator; the
+    # Rust handler now requires an active project-membership row, so the
+    # fixture seeds it (Django ignores it and still 201s).
     proj = world["db"].make_project(space["id"], "RPJ")
+    db = world["db"]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at, created_at, updated_at, view_props, default_props, sort_order, preferences) VALUES (%s,%s,%s,%s,20,true,NULL,now(),now(),'{}','{}',65535,'{}')",
+                (str(uuid.uuid4()), space["id"], proj["id"], world["user"]["id"]),
+            )
+        conn.commit()
     did = user_api.post(
         f"/api/workspaces/{space['slug']}/draft-issues/",
         json={"name": "D2", "project_id": proj["id"]},
@@ -745,6 +960,251 @@ def test_draft_to_issue_converts_with_project(user_api, space, world):
     assert res.json() == {"error": "The required object does not exist."}
 
 
+def test_draft_create_with_module_ids(user_api, space, world):
+    # NEWPIDASH-182: every draft write carrying module_ids 500'd on Rust
+    # (deleted_at bound as uuid NULL on draft_issue_modules and
+    # module_issues) while Django 201/204/201s and writes the rows.
+    # The draft_issue_modules INSERT must bind deleted_at as timestamptz NULL.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
+        module_id = seed.module(space["id"], project_id, name="NE182 mod")
+    finally:
+        conn.close()
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={
+            "name": "NE182 create",
+            "project_id": project_id,
+            "module_ids": [module_id],
+        },
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert set(body.keys()) == DRAFT_KEYS
+    assert body["name"] == "NE182 create"
+    assert body["module_ids"] == [module_id], body
+    did = body["id"]
+    # Re-read shows the link.
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/")
+    assert res.status_code == 200, res.text
+    assert res.json()["module_ids"] == [module_id], res.json()
+    # The DB row exists (alive).
+    conn = env.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT module_id FROM draft_issue_modules"
+                " WHERE draft_issue_id = %s AND deleted_at IS NULL",
+                [did],
+            )
+            rows = [str(r[0]) for r in cur.fetchall()]
+            assert rows == [module_id], rows
+    finally:
+        conn.close()
+
+
+def test_draft_patch_module_ids(user_api, space, world):
+    # NEWPIDASH-182: PATCH replacing module_ids 500'd on Rust before the fix
+    # (same deleted_at uuid bind) after soft-deleting the old links.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
+        module_a = seed.module(space["id"], project_id, name="NE182 A")
+        module_b = seed.module(space["id"], project_id, name="NE182 B")
+    finally:
+        conn.close()
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "NE182 patch", "project_id": project_id},
+    ).json()["id"]
+    assert (
+        user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").json()[
+            "module_ids"
+        ]
+        == []
+    )
+    res = user_api.patch(
+        f"/api/workspaces/{space['slug']}/draft-issues/{did}/",
+        json={"module_ids": [module_a]},
+    )
+    assert res.status_code == 204, res.text
+    assert (
+        user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").json()[
+            "module_ids"
+        ]
+        == [module_a]
+    )
+    # Replace with a different module.
+    res = user_api.patch(
+        f"/api/workspaces/{space['slug']}/draft-issues/{did}/",
+        json={"module_ids": [module_b]},
+    )
+    assert res.status_code == 204, res.text
+    assert (
+        user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").json()[
+            "module_ids"
+        ]
+        == [module_b]
+    )
+    # The DB row for the current module exists alive; the old one is soft-deleted.
+    conn = env.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT module_id FROM draft_issue_modules"
+                " WHERE draft_issue_id = %s AND deleted_at IS NULL",
+                [did],
+            )
+            rows = [str(r[0]) for r in cur.fetchall()]
+            assert rows == [module_b], rows
+    finally:
+        conn.close()
+
+
+def test_draft_to_issue_with_module_ids(user_api, space, world):
+    # NEWPIDASH-182: draft-to-issue with module_ids 500'd on Rust before the fix
+    # (deleted_at uuid bind on module_issues), leaving the work item created,
+    # the modules unwritten and the draft live. Django 201s, writes
+    # module_issues and deletes the draft.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
+        module_id = seed.module(space["id"], project_id, name="NE182 conv mod")
+    finally:
+        conn.close()
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "NE182 convert", "project_id": project_id},
+    ).json()["id"]
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{did}/",
+        json={"name": "NE182 issue", "module_ids": [module_id]},
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert set(body.keys()) == ISSUE_CREATE_KEYS
+    assert body["name"] == "NE182 issue"
+    issue_id = body["id"]
+    # The convert deletes the draft.
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/")
+    assert res.status_code == 404
+    assert res.json() == {"error": "The required object does not exist."}
+    # The module_issues row exists alive.
+    conn = env.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT module_id FROM module_issues"
+                " WHERE issue_id = %s AND module_id = %s AND deleted_at IS NULL",
+                [issue_id, module_id],
+            )
+            assert cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_draft_to_issue_body_reports_stored_state(user_api, space, world):
+    """NEWPIDASH-184: draft-to-issue 201 must report the stored state.
+
+    A ticking-state issue with no eligible runner in its pod is bounced
+    back to the project's Backlog state via a post-save DB update.
+    Django renders `serializer.data` after the signal so it reports the
+    bounced (stored) state; the Rust body rendered from the pre-hook
+    row reported the requested Started state while the row was Backlog.
+    The pod is required: without one the orchestration short-circuits
+    (`no-pod-available`) and no bounce happens.
+    """
+    db = world["db"]
+    proj = db.make_project(space["id"], "DST1")
+    # NEWPIDASH-185 (DIFF-14): the Rust handler requires an active
+    # project-membership row for draft create/publish, so the fixture
+    # seeds it (Django ignores it and still 201s).
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at, created_at, updated_at, view_props, default_props, sort_order, preferences) VALUES (%s,%s,%s,%s,20,true,NULL,now(),now(),'{}','{}',65535,'{}')",
+                (str(uuid.uuid4()), space["id"], proj["id"], world["user"]["id"]),
+            )
+        conn.commit()
+    backlog_id = str(uuid.uuid4())
+    started_id = str(uuid.uuid4())
+    pod_id = str(uuid.uuid4())
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO states (id, name, description, color, slug,
+                   project_id, workspace_id, sequence, "group", "default",
+                   is_triage, created_at, updated_at)
+                   VALUES (%s, %s, '', '#808080', %s, %s, %s, %s, %s, %s,
+                   false, now(), now())""",
+                (backlog_id, "Backlog", "backlog", proj["id"], space["id"], 1.0, "backlog", True),
+            )
+            cur.execute(
+                """INSERT INTO states (id, name, description, color, slug,
+                   project_id, workspace_id, sequence, "group", "default",
+                   is_triage, created_at, updated_at)
+                   VALUES (%s, %s, '', '#808080', %s, %s, %s, %s, %s, %s,
+                   false, now(), now())""",
+                (started_id, "In Progress", "in-progress", proj["id"], space["id"], 2.0, "started", False),
+            )
+            cur.execute(
+                "UPDATE projects SET default_state_id=%s WHERE id=%s",
+                (backlog_id, proj["id"]),
+            )
+            cur.execute(
+                """INSERT INTO pod (id, name, description, is_default,
+                   workspace_id, project_id, created_at, updated_at)
+                   VALUES (%s, %s, '', true, %s, %s, now(), now())""",
+                (pod_id, "dst-pod", space["id"], proj["id"]),
+            )
+        conn.commit()
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "D-state", "project_id": proj["id"]},
+    ).json()["id"]
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{did}/",
+        json={"name": "DI-state", "state_id": started_id},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert set(body.keys()) == ISSUE_CREATE_KEYS
+    fetched = user_api.get(
+        f"/api/workspaces/{space['slug']}/projects/{proj['id']}/issues/{body['id']}/"
+    )
+    assert fetched.status_code == 200
+    stored = fetched.json()
+    # Body and row agree on the stored (bounced) state, not the requested one.
+    assert body["state_id"] == stored["state_id"]
+    assert body["state"] == body["state_id"]
+    assert stored["state_id"] == backlog_id
+    # Clean up the pod and the ticker this test minted: the domain
+    # `clean_db` fixture sweeps neither, and a leftover pod would block
+    # the next test's `DELETE FROM projects` on its FK while a leftover
+    # ticker would block `DELETE FROM issues` (the bounced issue left an
+    # armed ticker plus the skip comment).
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pod WHERE id=%s", (pod_id,))
+            cur.execute("DELETE FROM issue_agent_ticker WHERE issue_id=%s", (body["id"],))
+            cur.execute("DELETE FROM issue_comments WHERE issue_id=%s", (body["id"],))
+            cur.execute("DELETE FROM issue_sequences WHERE issue_id=%s", (body["id"],))
+            # The skip comment mints a descriptions row keyed by project
+            # (db/models/issue.py): the domain clean_db sweep deletes
+            # projects but not descriptions, so the next test's reset
+            # would hit the FK. Remove it here.
+            cur.execute("DELETE FROM descriptions WHERE project_id=%s", (proj["id"],))
+            cur.execute("DELETE FROM issues WHERE id=%s", (body["id"],))
+        conn.commit()
+
+
 def test_drafts_only_own_visible(user_api, member_api, space):
     member_api.post(f"/api/workspaces/{space['slug']}/draft-issues/", json={"name": "Other"})
     assert user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/").json()["results"] == []
@@ -759,6 +1219,126 @@ def test_drafts_non_member_denied(other_api, space):
 def test_drafts_anon(anon_api, space):
     res = anon_api.get(f"/api/workspaces/{space['slug']}/draft-issues/")
     assert res.status_code == 401
+
+
+def test_draft_create_with_null_dates(user_api, space):
+    # NEWPIDASH-183: both date keys present with a null accepts (Django
+    # draft.py:71-77 compares only when both values are non-null).
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    # Both null on create.
+    res = user_api.post(
+        base, json={"name": "N1", "start_date": None, "target_date": None}
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert set(body.keys()) == DRAFT_KEYS
+    assert body["start_date"] is None
+    assert body["target_date"] is None
+    did = body["id"]
+    # Start set, target null on PATCH (the web_new date-pick shape).
+    res = user_api.patch(
+        f"{base}{did}/", json={"start_date": "2026-11-10", "target_date": None}
+    )
+    assert res.status_code == 204
+    body = user_api.get(f"{base}{did}/").json()
+    assert body["start_date"] == "2026-11-10"
+    assert body["target_date"] is None
+    # Both null on PATCH clears the dates.
+    res = user_api.patch(
+        f"{base}{did}/", json={"start_date": None, "target_date": None}
+    )
+    assert res.status_code == 204
+    body = user_api.get(f"{base}{did}/").json()
+    assert body["start_date"] is None
+    assert body["target_date"] is None
+    # Null start with target set.
+    res = user_api.patch(
+        f"{base}{did}/", json={"start_date": None, "target_date": "2026-11-20"}
+    )
+    assert res.status_code == 204
+    body = user_api.get(f"{base}{did}/").json()
+    assert body["start_date"] is None
+    assert body["target_date"] == "2026-11-20"
+
+
+def test_draft_date_order_still_rejected(user_api, space):
+    # NEWPIDASH-183 regression pin: (Some, Some) with start > target
+    # still 400s (draft.py:71-77) — the fix only lets nulls through.
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={
+            "name": "INV",
+            "start_date": "2026-11-20",
+            "target_date": "2026-11-10",
+        },
+    )
+    assert res.status_code == 400
+    assert res.json() == {
+        "non_field_errors": ["Start date cannot exceed target date"]
+    }
+
+
+# --- draft creator bypass reads draft rows (PDASHOSS01-320, DRAFT-025) ---
+# Retrieve / partial_update / destroy allow an admin or the draft's creator
+# at any workspace role. Retrieve and partial_update used to look the draft
+# pk up in the Issue table, so owners below admin were refused 403.
+
+
+@pytest.fixture
+def guest_api(world, space):
+    """other@example.com as a role-5 guest of the space workspace."""
+    from _harness import user_client
+
+    world["db"].make_workspace_member(space["id"], world["other"]["id"], role=5)
+    with user_client(world["other_key"]) as client:
+        yield client
+
+
+def test_draft_creator_guest_patches_and_fetches_own(guest_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    created = guest_api.post(base, json={"name": "G1"})
+    assert created.status_code == 201
+    did = created.json()["id"]
+    res = guest_api.patch(f"{base}{did}/", json={"name": "G2"})
+    assert res.status_code == 204
+    res = guest_api.get(f"{base}{did}/")
+    assert res.status_code == 200
+    assert res.json()["name"] == "G2"
+    assert guest_api.delete(f"{base}{did}/").status_code == 204
+
+
+def test_draft_creator_member_fetches_own(member_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    did = member_api.post(base, json={"name": "M1"}).json()["id"]
+    res = member_api.get(f"{base}{did}/")
+    assert res.status_code == 200
+    assert res.json()["name"] == "M1"
+
+
+def test_draft_creator_guest_refused_on_others_draft(user_api, guest_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    did = user_api.post(base, json={"name": "A1"}).json()["id"]
+    denied = {"error": "You don't have the required permissions."}
+    for res in (
+        guest_api.get(f"{base}{did}/"),
+        guest_api.patch(f"{base}{did}/", json={"name": "X"}),
+        guest_api.delete(f"{base}{did}/"),
+    ):
+        assert res.status_code == 403
+        assert res.json() == denied
+    assert user_api.get(f"{base}{did}/").json()["name"] == "A1"
+
+
+def test_draft_creator_member_refused_on_others_draft(user_api, member_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    did = user_api.post(base, json={"name": "A1"}).json()["id"]
+    assert member_api.get(f"{base}{did}/").status_code == 403
+    # Members pass the PATCH role check; the own-drafts lookup then misses.
+    res = member_api.patch(f"{base}{did}/", json={"name": "X"})
+    assert res.status_code == 404
+    assert res.json() == {"error": "Issue not found"}
+    assert member_api.delete(f"{base}{did}/").status_code == 403
+    assert user_api.get(f"{base}{did}/").json()["name"] == "A1"
 
 
 # --- draft date filters follow the actor timezone (PIDASHCONV-1373) ---

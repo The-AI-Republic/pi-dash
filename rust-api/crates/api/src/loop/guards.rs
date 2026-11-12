@@ -51,6 +51,7 @@
 //!   `cleaned` (no coercion).
 
 use axum::http::StatusCode;
+use chrono::Utc;
 use serde_json::{json, Map, Value};
 
 use crate::permissions::DefaultPermissionDenied;
@@ -293,8 +294,12 @@ fn coerce_min_role(value: &Value) -> MinRoleCoerce {
 /// boundary, exactly as `str(e)` crosses it on the scheduler-binding path.
 /// The empty string is valid (single-shot); callers that require a rule
 /// reject it first with `rrule is required`.
+///
+/// The anchor is the request time: Django passes no dtstart here
+/// (`admin_views.py:92`), so the validator stamps `now(utc)` itself
+/// (`_rrule.py:238`).
 pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
-    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(rrule_str)
+    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(rrule_str, Utc::now())
         .map_err(|error| error.message().to_owned())
 }
 

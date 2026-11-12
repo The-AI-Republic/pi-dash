@@ -23,8 +23,12 @@
 
 use axum::http::header;
 use axum::response::Response;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::Value;
 use sqlx::PgPool;
+
+use pidash_db::entity::sessions;
+use pidash_services::domain::identity;
 
 use crate::middleware::SessionHandle;
 
@@ -40,24 +44,23 @@ const CSRF_COOKIE_NAME: &str = "csrftoken";
 const CSRF_COOKIE_MAX_AGE: i64 = 31_449_600;
 
 /// `user.get_session_auth_hash()`: `salted_hmac` over the `users.password`
-/// field with the `AbstractBaseUser.get_session_auth_hash` key salt. The
-/// canonical copy — the four providers previously carried their own
-/// identical implementations.
+/// field with the `AbstractBaseUser.get_session_auth_hash` key salt.
+/// Canonical impl is [`pidash_compat::http::session_auth_hash`]; this keeps
+/// the provider path stable.
 pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    const SALT: &[u8] = b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-    let key = Sha256::digest([SALT, secret_key].concat());
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
+    pidash_compat::http::session_auth_hash(password_field, secret_key)
+}
+
+/// Delete the abandoned session row (`flush()`/`cycle_key()` in
+/// `django.contrib.auth`: the old row is deleted, never kept).
+async fn delete_session_row(pool: &PgPool, key: &str) -> Result<(), sqlx::Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    sessions::Entity::delete_many()
+        .filter(sessions::Column::SessionKey.eq(key))
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(())
 }
 
 /// `django.contrib.auth.login()` (`auth/__init__.py:107-143`) for an OAuth
@@ -108,20 +111,14 @@ pub async fn login_session_keys(
     if flush {
         handle.lock().clear();
         if let Some(old) = old_key {
-            sqlx::query("DELETE FROM \"sessions\" WHERE \"session_key\" = $1")
-                .bind(&old)
-                .execute(pool)
-                .await?;
+            delete_session_row(pool, &old).await?;
         }
     } else if current_user.is_none() {
         // Anonymous `cycle_key()`: fresh key on save, data kept, the
         // pre-login row deleted.
         handle.lock().key = None;
         if let Some(old) = old_key {
-            sqlx::query("DELETE FROM \"sessions\" WHERE \"session_key\" = $1")
-                .bind(&old)
-                .execute(pool)
-                .await?;
+            delete_session_row(pool, &old).await?;
         }
     }
     {
@@ -135,17 +132,11 @@ pub async fn login_session_keys(
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user_id, now).await?;
     // `rotate_token` half (QUIRK-csrf-rotate): a fresh 32-char secret as
-    // the cookie value — Django 4.2 `_add_new_csrf_cookie` stores the
-    // masked token only when `CSRF_COOKIE_MASKED` is set, which this
-    // project never sets, so the pinned Django emits the raw secret (the
-    // `auth_session/email.rs` login port does the same; `magic.rs` masks,
-    // a deviation this helper does not repeat). Attributes follow
+    // the cookie value — `_add_new_csrf_cookie` stores the raw secret
+    // (the `auth_session/email.rs` and `auth_session/magic.rs` login
+    // ports do the same). Attributes follow
     // Django's cookie writer (secure/domain from settings, httponly per
     // the project override, `/` + `Lax` defaults).
     let secret = pidash_auth::csrf::new_secret();

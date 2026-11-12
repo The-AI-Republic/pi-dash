@@ -251,7 +251,10 @@ mod tests {
 
         assert!(matches!(outcome, Cleanup::Deleted));
         assert!(!path.exists(), "body file must be gone after a success");
-        assert!(warn_on_cleanup(outcome).is_none(), "delete emits no warning");
+        assert!(
+            warn_on_cleanup(outcome).is_none(),
+            "delete emits no warning"
+        );
     }
 
     #[test]

@@ -17,10 +17,11 @@ from _harness.seed import issue_subscriber
 from .conftest import session_headers
 
 GLOBAL_VIEW_KEYS = {
-    "access", "archived_at", "created_at", "created_by", "deleted_at",
-    "description", "display_filters", "display_properties", "filters", "id",
-    "is_locked", "logo_props", "name", "owned_by", "project", "query",
-    "rich_filters", "sort_order", "updated_at", "updated_by", "workspace",
+    "access", "anchor", "archived_at", "created_at", "created_by",
+    "deleted_at", "description", "display_filters", "display_properties",
+    "filters", "id", "is_locked", "logo_props", "name", "owned_by",
+    "project", "query", "rich_filters", "sort_order", "updated_at",
+    "updated_by", "workspace",
 }
 
 VIEW_ISSUE_KEYS = {
@@ -387,3 +388,139 @@ def test_global_tenant_isolation(api, seed, tenant_a, tenant_b, auth_b):
     r = api.get(_global_url(tenant_a), headers=auth_b)
     assert r.status_code == 403, r.text
     assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_view_issues_datetimes_render_utc_z(api, seed, db, secret):
+    """PIDASHCONV-1198: ``ViewIssueListSerializer.to_representation`` returns
+    the model's raw ``datetime`` objects (view.py:24-53), not DRF
+    ``DateTimeField``s, so DRF's ``JSONEncoder`` renders them as UTC with a
+    trailing ``Z`` no matter what zone the actor is in. The Rust port must not
+    shift these into the actor's ``user_timezone``.
+    """
+    user = seed.user(user_timezone="America/Los_Angeles")
+    ws = seed.workspace(user["id"])
+    seed.member(ws["id"], user["id"], role=20)
+    project_id = seed.project(ws["id"])
+    seed.project_member(project_id, ws["id"], user["id"], role=20)
+    issue_id = seed.issue(
+        ws["id"], project_id, name="TZ issue",
+        completed_at=datetime(2026, 10, 17, 12, 34, 56, 789012, tzinfo=timezone.utc),
+    )
+    headers = session_headers(seed, user, user["password"], secret)
+    r = api.get(
+        f"/api/workspaces/{ws['slug']}/issues/", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    entry = next((e for e in results if e["id"] == issue_id), None)
+    assert entry is not None, results
+
+    # Django's encoder is ``value.isoformat()`` with a trailing ``+00:00``
+    # rewritten to ``Z`` (rest_framework.utils.encoders.JSONEncoder).
+    def drf(dt):
+        if dt is None:
+            return None
+        text = dt.astimezone(timezone.utc).isoformat()
+        return text[:-6] + "Z" if text.endswith("+00:00") else text
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT created_at, updated_at, completed_at, archived_at "
+            "FROM issues WHERE id = %s",
+            (issue_id,),
+        )
+        created_at, updated_at, completed_at, archived_at = cur.fetchone()
+
+    assert entry["completed_at"] == "2026-10-17T12:34:56.789012Z", entry["completed_at"]
+    for field, db_value in (
+        ("created_at", created_at),
+        ("updated_at", updated_at),
+        ("completed_at", completed_at),
+    ):
+        expected = drf(db_value)
+        assert entry[field] == expected, (field, entry[field], expected)
+        assert entry[field].endswith("Z"), (field, entry[field])
+    # ``IssueManager`` excludes rows with ``archived_at IS NOT NULL``
+    # (db/models/issue.py:95-104), so a listed row always has a null
+    # ``archived_at`` — the other three fields carry the zone coverage.
+    assert drf(archived_at) is None and entry["archived_at"] is None, entry["archived_at"]
+
+
+def test_global_create_trims_name_and_description(api, seed, tenant_a, auth_a):
+    """DRF ``CharField(trim_whitespace=True)`` stores the stripped value;
+    ``max_length`` applies to it, so a 255-char name with trailing spaces
+    still passes (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "  x  ", "description": "notes\n", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "x", body["name"]
+        assert body["description"] == "notes", body["description"]
+        g = api.get(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+        assert g.status_code == 200, g.text
+        assert g.json()["name"] == "x"
+        assert g.json()["description"] == "notes"
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "y" * 255 + "   ", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "y" * 255, body["name"][:260]
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+
+
+def test_global_create_blank_name_rejected(api, seed, tenant_a, auth_a):
+    """A name blank after stripping is 400, not a blank-looking row
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "   ", "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["This field may not be blank."]}
+
+
+def test_global_create_numeric_name_coerced(api, seed, tenant_a, auth_a):
+    """DRF coerces int/float via ``str()``; booleans stay invalid
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": 123, "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "123", body["name"]
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": True, "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["Not a valid string."]}
+
+
+def test_global_patch_trims_description(api, seed, tenant_a, auth_a):
+    """PATCH trims the description the same way create does
+    (PIDASHCONV-1447)."""
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"], name="G-trim"
+    )
+    r = api.patch(
+        f"{_global_url(tenant_a)}{view_id}/", headers=auth_a,
+        json={"description": "d\n"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] == "d", r.json()["description"]
+    g = api.get(f"{_global_url(tenant_a)}{view_id}/", headers=auth_a)
+    assert g.status_code == 200, g.text
+    assert g.json()["description"] == "d"

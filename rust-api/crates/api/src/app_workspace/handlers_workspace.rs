@@ -94,17 +94,32 @@ use serde_json::{Map, Value};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::workspace::WorkspaceFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
-use pidash_services::app_workspace::{
-    models_workspace, queries_core, ser_invite, ser_workspace, tasks,
+use pidash_db::entity::{
+    file_assets, issue_activities, issues, project_members, projects, users, workspace_members,
+    workspace_themes, workspaces,
 };
+use pidash_services::app_workspace::{models_workspace, ser_invite, ser_workspace, tasks};
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::{self as domain_workspaces, members};
 use pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS;
 use pidash_types::WorkspaceId;
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::{
+    Alias, BinOper, Expr, Func, Order, Query as SqlQuery, SelectStatement, SimpleExpr,
+};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbBackend, DbErr, EntityTrait,
+    FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QueryResult, QuerySelect,
+    RelationTrait, Set,
+};
 
 use super::gates;
 use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_projects::tz_zones::PYTZ_COMMON_TIMEZONES;
+use pidash_compat::db::{is_integrity_error, is_unique_violation};
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `workspace-slug-check/` (`urls/workspace.py:45-49`, W01).
 pub const SLUG_CHECK_PATH: &str = "/api/workspace-slug-check/";
@@ -479,22 +494,6 @@ fn gate_for_export() -> &'static gates::Gate {
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
 
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
-
 /// `request.user` from the Django session: missing session, missing key,
 /// or a non-UUID id is anonymous → 401.
 pub(crate) fn actor_user_id(
@@ -516,19 +515,26 @@ pub(crate) fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// The SeaORM connection over a pool (a wrapper; no I/O).
+fn orm(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 /// `request.user.user_timezone` (`TimezoneMixin`): unknown zones 500
 /// through the same branch Django's `zoneinfo` activation raises into.
 pub(crate) async fn actor_timezone(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<Tz, Denial> {
-    let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+    let name: Option<String> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let name = name.ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -556,9 +562,17 @@ pub(crate) async fn enqueue_task(
 /// detail"}` (D-28 precedent for `<uuid:>` path params).
 pub(crate) const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 
-pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
-    raw.parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+/// Parse a `<uuid:...>` path segment the way Django's converter routes it:
+/// only the canonical lowercase hyphenated spelling reaches the view;
+/// anything else is the resolver 404 before auth (`UUIDConverter`
+/// matches `[0-9a-f]{8}-…` lowercase-only, PIDASHCONV-1713).
+pub(crate) fn parse_uuid_path(raw: &str) -> Result<uuid::Uuid, Denial> {
+    match crate::uuid_path::classify_uuid_segment(raw) {
+        crate::uuid_path::UuidSegment::Canonical(id) => Ok(id),
+        crate::uuid_path::UuidSegment::NonCanonical | crate::uuid_path::UuidSegment::Garbage => {
+            Err(Denial::PageNotFound)
+        }
+    }
 }
 
 /// The authenticated 403 of the `permission_classes` entries
@@ -590,27 +604,78 @@ pub(crate) fn apply_outcome(outcome: gates::GateOutcome) -> Result<(), Response>
 /// (Django never scopes join tables), the member rows are live-scoped,
 /// and the unfiltered Admin check drops `is_active` (the Owner
 /// omission, ported even though no gate on these routes reads it).
+fn membership_role_scalar(slug: &str, user_id: uuid::Uuid) -> SimpleExpr {
+    let wm = Alias::new("wm");
+    let w = Alias::new("w");
+    let stmt = SqlQuery::select()
+        .column((wm.clone(), workspace_members::Column::Role))
+        .from_as(workspace_members::Entity, wm.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            w.clone(),
+            Expr::col((w.clone(), workspaces::Column::Id))
+                .equals((wm.clone(), workspace_members::Column::WorkspaceId)),
+        )
+        .and_where(Expr::col((w.clone(), workspaces::Column::Slug)).eq(slug))
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::MemberId)).eq(user_id))
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::IsActive)).eq(true))
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::DeletedAt)).is_null())
+        .to_owned();
+    SimpleExpr::SubQuery(None, Box::new(stmt.into_sub_query_statement()))
+}
+
+fn membership_admin_exists(slug: &str, user_id: uuid::Uuid) -> SimpleExpr {
+    let wm = Alias::new("wm");
+    let w = Alias::new("w");
+    let stmt = SqlQuery::select()
+        .expr(Expr::val(1))
+        .from_as(workspace_members::Entity, wm.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            w.clone(),
+            Expr::col((w.clone(), workspaces::Column::Id))
+                .equals((wm.clone(), workspace_members::Column::WorkspaceId)),
+        )
+        .and_where(Expr::col((w.clone(), workspaces::Column::Slug)).eq(slug))
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::MemberId)).eq(user_id))
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::Role)).eq(20i16))
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::DeletedAt)).is_null())
+        .limit(1)
+        .to_owned();
+    Expr::exists(stmt)
+}
+
+#[derive(Debug, FromQueryResult)]
+struct MembershipFactsRow {
+    role: Option<i16>,
+    admin_unfiltered: bool,
+}
+
 async fn membership_facts(
     pool: &sqlx::PgPool,
     slug: &str,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i32>, bool), Denial> {
-    let row: Option<(Option<i16>, bool)> = sqlx::query_as(
-        r#"SELECT
-             (SELECT wm.role FROM workspace_members wm
-              INNER JOIN workspaces w ON w.id = wm.workspace_id
-              WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL),
-             EXISTS(SELECT 1 FROM workspace_members wm
-              INNER JOIN workspaces w ON w.id = wm.workspace_id
-              WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20 AND wm.deleted_at IS NULL)"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (role, admin_unfiltered) = row.unwrap_or((None, false));
-    Ok((role.map(i32::from), admin_unfiltered))
+    let db = orm(pool);
+    let outer = SqlQuery::select()
+        .expr_as(membership_role_scalar(slug, *user_id), Alias::new("role"))
+        .expr_as(
+            membership_admin_exists(slug, *user_id),
+            Alias::new("admin_unfiltered"),
+        )
+        .to_owned();
+    let row = db
+        .query_one(DbBackend::Postgres.build(&outer))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(row) = row else {
+        return Ok((None, false));
+    };
+    let decoded =
+        MembershipFactsRow::from_query_result(&row, "").map_err(|_| Denial::ServerError)?;
+    Ok((decoded.role.map(i32::from), decoded.admin_unfiltered))
 }
 
 fn allow_facts_for(slug: &str, role: Option<i32>, allowed: &[i32]) -> AllowFacts {
@@ -2118,15 +2183,16 @@ pub(crate) async fn validate_pk_field(
     };
     // Huge ints (past u64) parse as f64, so they take the `invalid` arm
     // above exactly like `UUID(int)` overflow.
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT fa.id FROM file_assets fa WHERE fa.id = $1 AND fa.deleted_at IS NULL"#,
-    )
-    .bind(candidate)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<uuid::Uuid> = file_assets::Entity::find_by_id(candidate)
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .column(file_assets::Column::Id)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match row {
-        Some((id,)) => Ok(PrimaryKeyOutcome::Value(Some(id))),
+        Some(id) => Ok(PrimaryKeyOutcome::Value(Some(id))),
         None => Ok(PrimaryKeyOutcome::Error(format!(
             "Invalid pk \"{}\" - object does not exist.",
             py_pk_display(value, &candidate)
@@ -2143,71 +2209,6 @@ fn py_pk_display(value: &Value, candidate: &uuid::Uuid) -> String {
         Value::String(text) => text.clone(),
         _ => candidate.to_string(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// SQL assembly (the services crate owns the text, this module only binds)
-// ---------------------------------------------------------------------------
-
-/// Rewrite `:name` placeholders to positional `$n` in first-appearance
-/// order, returning the rewritten SQL and the names. `::` casts and
-/// single-quoted literals pass through untouched.
-pub(crate) fn positional_placeholders(sql: &str) -> (String, Vec<String>) {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut names: Vec<String> = Vec::new();
-    let mut index = 0;
-    let mut in_string = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            out.push(byte as char);
-            if byte == b'\'' {
-                if bytes.get(index + 1) == Some(&b'\'') {
-                    out.push('\'');
-                    index += 1;
-                } else {
-                    in_string = false;
-                }
-            }
-            index += 1;
-            continue;
-        }
-        if byte == b'\'' {
-            in_string = true;
-            out.push('\'');
-            index += 1;
-            continue;
-        }
-        if byte == b':' {
-            if bytes.get(index + 1) == Some(&b':') {
-                out.push_str("::");
-                index += 2;
-                continue;
-            }
-            let mut end = index + 1;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
-            }
-            if end > index + 1 {
-                let name = sql[index + 1..end].to_owned();
-                let position = match names.iter().position(|known| *known == name) {
-                    Some(position) => position + 1,
-                    None => {
-                        names.push(name);
-                        names.len()
-                    }
-                };
-                out.push('$');
-                out.push_str(&position.to_string());
-                index = end;
-                continue;
-            }
-        }
-        out.push(byte as char);
-        index += 1;
-    }
-    (out, names)
 }
 
 // ---------------------------------------------------------------------------
@@ -2233,12 +2234,13 @@ pub(crate) async fn parse_list_filters(
         if !raw.is_empty() {
             match raw.parse::<uuid::Uuid>() {
                 Ok(parsed) => {
-                    let exists: Option<(i32,)> =
-                        sqlx::query_as("SELECT 1 FROM users WHERE id = $1")
-                            .bind(parsed)
-                            .fetch_optional(pool)
-                            .await
-                            .map_err(|_| Denial::ServerError.into_response())?;
+                    let exists: Option<uuid::Uuid> = users::Entity::find_by_id(parsed)
+                        .select_only()
+                        .column(users::Column::Id)
+                        .into_tuple()
+                        .one(&orm(pool))
+                        .await
+                        .map_err(|_| Denial::ServerError.into_response())?;
                     if exists.is_none() {
                         return Err(single_field_error(
                             "owner",
@@ -2396,117 +2398,180 @@ pub(crate) fn escape_like(term: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace rows + statements (R1/R2 over `queries_core`)
+// Workspace rows + SeaORM selects (R1/R2)
 // ---------------------------------------------------------------------------
 
-type WorkspaceRowTuple = (
-    uuid::Uuid,
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-    String,
-    String,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<i64>,
-    Option<i16>,
-);
+/// The outer row's `workspaces.id`, the correlation key of the
+/// `total_members`/`role` annotations.
+fn outer_workspace_id() -> SimpleExpr {
+    Expr::col((workspaces::Entity, workspaces::Column::Id)).into()
+}
 
-const WORKSPACE_COLUMNS: &str = "workspaces.id, workspaces.created_at, workspaces.updated_at, workspaces.deleted_at, workspaces.name, workspaces.logo, workspaces.slug, workspaces.organization_size, workspaces.timezone, workspaces.background_color, workspaces.created_by_id, workspaces.updated_by_id, workspaces.logo_asset_id, workspaces.owner_id";
+fn scalar_subquery(stmt: SelectStatement) -> SimpleExpr {
+    SimpleExpr::SubQuery(None, Box::new(stmt.into_sub_query_statement()))
+}
 
-/// Assemble the R1 detail statement (member scope, owner join,
-/// `total_members` annotation) plus optional search/owner/get filters.
-/// Extra search terms AND as indexed copies of the owned fragment.
-fn workspace_detail_sql(filters: &ListFilters, by_slug: bool) -> (String, Vec<String>) {
-    let mut sql = format!(
-        "SELECT {WORKSPACE_COLUMNS}, ({}) AS total_members, NULL::SMALLINT AS role FROM workspaces {} {} WHERE {}",
-        queries_core::member_count_sql(),
-        queries_core::OWNER_JOIN_SQL,
-        queries_core::MEMBERSHIP_JOIN_SQL,
-        queries_core::workspace_list_where_sql(
-            !filters.search_patterns.is_empty(),
-            filters.owner_id.is_some()
-        ),
+/// `total_members` count subquery (`base.py:66-71`): live, active,
+/// non-bot members of the outer workspace. No `GROUP BY`, so zero
+/// members is `0`, never `NULL`.
+fn workspace_member_count_expr() -> SimpleExpr {
+    let wm = Alias::new("wm");
+    let m = Alias::new("m");
+    let stmt = SqlQuery::select()
+        .expr(Func::count(Expr::col((
+            wm.clone(),
+            workspace_members::Column::Id,
+        ))))
+        .from_as(workspace_members::Entity, wm.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            users::Entity,
+            m.clone(),
+            Expr::col((m.clone(), users::Column::Id))
+                .equals((wm.clone(), workspace_members::Column::MemberId)),
+        )
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((wm.clone(), workspace_members::Column::IsActive)).eq(true))
+        .and_where(Expr::col((m.clone(), users::Column::IsBot)).eq(false))
+        .and_where(
+            Expr::col((wm.clone(), workspace_members::Column::WorkspaceId))
+                .eq(outer_workspace_id()),
+        )
+        .to_owned();
+    scalar_subquery(stmt)
+}
+
+/// `role` scalar subquery (`base.py:218-220`): the caller's live role
+/// on the outer workspace, `NULL` when they hold no live row. The dead
+/// `ORDER BY created_at DESC` is ported verbatim (no `LIMIT`).
+fn workspace_role_expr(user_id: uuid::Uuid) -> SimpleExpr {
+    let wm2 = Alias::new("wm2");
+    let stmt = SqlQuery::select()
+        .column((wm2.clone(), workspace_members::Column::Role))
+        .from_as(workspace_members::Entity, wm2.clone())
+        .and_where(Expr::col((wm2.clone(), workspace_members::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((wm2.clone(), workspace_members::Column::IsActive)).eq(true))
+        .and_where(Expr::col((wm2.clone(), workspace_members::Column::MemberId)).eq(user_id))
+        .and_where(
+            Expr::col((wm2.clone(), workspace_members::Column::WorkspaceId))
+                .eq(outer_workspace_id()),
+        )
+        .order_by(
+            (wm2.clone(), workspace_members::Column::CreatedAt),
+            Order::Desc,
+        )
+        .to_owned();
+    scalar_subquery(stmt)
+}
+
+/// `UPPER(workspaces.name::TEXT) LIKE UPPER(<pattern>)` (`SearchFilter`
+/// over `search_fields = ["name"]`: Django compiles `icontains` to
+/// `UPPER`-`LIKE`, not `ILIKE`).
+fn search_name_expr(pattern: &str) -> SimpleExpr {
+    let upper_col = Func::upper(
+        Expr::col((workspaces::Entity, workspaces::Column::Name)).cast_as(Alias::new("text")),
     );
-    for (index, _) in filters.search_patterns.iter().enumerate().skip(1) {
-        sql.push_str(&format!(
-            " AND {}",
-            queries_core::search_name_sql().replace(":search", &format!(":search{index}"))
-        ));
+    Expr::expr(upper_col).binary(
+        BinOper::Like,
+        SimpleExpr::from(Func::upper(Expr::val(pattern.to_owned()))),
+    )
+}
+
+/// One fetched workspace list row, decoded by name: the model plus the
+/// `total_members`/`role` annotations. `role` is absent on R1 (NULL
+/// `SkipField`); the `try_get(...).ok()` fallback decodes the missing
+/// column to `None` exactly like the old `NULL::SMALLINT` column.
+#[derive(Debug)]
+struct WorkspaceListRow {
+    workspace: workspaces::Model,
+    total_members: Option<i64>,
+    role: Option<i16>,
+}
+
+impl FromQueryResult for WorkspaceListRow {
+    fn from_query_result(res: &QueryResult, pre: &str) -> Result<Self, DbErr> {
+        Ok(Self {
+            workspace: workspaces::Model::from_query_result(res, pre)?,
+            total_members: res.try_get::<Option<i64>>(pre, "total_members")?,
+            role: res.try_get::<Option<i16>>(pre, "role").ok().flatten(),
+        })
+    }
+}
+
+/// The R1 select (`get_queryset` + `filter_queryset`): member scope,
+/// owner join, `total_members` annotation (no `role` — the `SkipField`
+/// key stays absent), name order. The membership join deliberately
+/// carries no `deleted_at` guard (Django never scopes join tables);
+/// extra search terms AND as additional conjuncts.
+fn workspace_detail_select(
+    filters: &ListFilters,
+    by_slug: bool,
+    user_id: uuid::Uuid,
+    slug: Option<&str>,
+) -> sea_orm::Select<workspaces::Entity> {
+    let mut select = workspaces::Entity::find();
+    select = select
+        .join(JoinType::InnerJoin, workspaces::Relation::Users2.def())
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .expr_as(workspace_member_count_expr(), "total_members")
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true));
+    for pattern in &filters.search_patterns {
+        select = select.filter(search_name_expr(pattern));
+    }
+    if let Some(owner_id) = filters.owner_id {
+        select = select.filter(workspaces::Column::OwnerId.eq(owner_id));
     }
     if by_slug {
-        sql.push_str(" AND workspaces.slug = :slug");
-    }
-    sql.push_str(" ORDER BY ");
-    sql.push_str(queries_core::WORKSPACE_NAME_ORDER_SQL);
-    positional_placeholders(&sql)
-}
-
-/// Assemble the R2 statement (member scope, role + total_members
-/// annotations, distinct, newest first).
-fn my_workspaces_sql(filters: &ListFilters) -> (String, Vec<String>) {
-    let mut sql = format!(
-        "SELECT DISTINCT {WORKSPACE_COLUMNS}, ({}) AS total_members, ({}) AS role FROM workspaces {} WHERE {}",
-        queries_core::member_count_sql(),
-        queries_core::workspace_role_sql(),
-        queries_core::MEMBERSHIP_JOIN_SQL,
-        queries_core::user_workspaces_where_sql(
-            !filters.search_patterns.is_empty(),
-            filters.owner_id.is_some()
-        ),
-    );
-    for (index, _) in filters.search_patterns.iter().enumerate().skip(1) {
-        sql.push_str(&format!(
-            " AND {}",
-            queries_core::search_name_sql().replace(":search", &format!(":search{index}"))
-        ));
-    }
-    sql.push_str(" ORDER BY ");
-    sql.push_str(queries_core::WORKSPACE_DEFAULT_ORDER_SQL);
-    positional_placeholders(&sql)
-}
-
-async fn run_workspace_query(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    names: &[String],
-    user_id: &uuid::Uuid,
-    slug: Option<&str>,
-    filters: &ListFilters,
-) -> Result<Vec<WorkspaceRowTuple>, Denial> {
-    let mut query = sqlx::query_as::<_, WorkspaceRowTuple>(sql);
-    for name in names {
-        if name == "user" {
-            query = query.bind(user_id);
-        } else if name == "slug" {
-            query = query.bind(slug.unwrap_or_default());
-        } else if name == "owner" {
-            query = query.bind(filters.owner_id);
-        } else if name == "search" || name.starts_with("search") {
-            // First term `:search`, extras `:search1..`.
-            let position: usize = if name == "search" {
-                0
-            } else {
-                name["search".len()..]
-                    .parse()
-                    .map_err(|_| Denial::ServerError)?
-            };
-            let pattern = filters
-                .search_patterns
-                .get(position)
-                .ok_or(Denial::ServerError)?;
-            query = query.bind(pattern);
-        } else {
-            return Err(Denial::ServerError);
+        if let Some(slug) = slug {
+            select = select.filter(workspaces::Column::Slug.eq(slug));
         }
     }
-    query.fetch_all(pool).await.map_err(|_| Denial::ServerError)
+    select.order_by_asc(workspaces::Column::Name)
+}
+
+/// The R2 select (`UserWorkSpacesEndpoint.get`): member scope,
+/// `role` + `total_members` annotations, `DISTINCT`, newest first.
+fn my_workspaces_select(
+    filters: &ListFilters,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<workspaces::Entity> {
+    let mut select = workspaces::Entity::find();
+    select = select
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .expr_as(workspace_member_count_expr(), "total_members")
+        .expr_as(workspace_role_expr(user_id), "role")
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true));
+    for pattern in &filters.search_patterns {
+        select = select.filter(search_name_expr(pattern));
+    }
+    if let Some(owner_id) = filters.owner_id {
+        select = select.filter(workspaces::Column::OwnerId.eq(owner_id));
+    }
+    select
+        .distinct()
+        .order_by_desc(workspaces::Column::CreatedAt)
+}
+
+async fn fetch_workspace_rows(
+    pool: &sqlx::PgPool,
+    select: sea_orm::Select<workspaces::Entity>,
+) -> Result<Vec<WorkspaceRowData>, Denial> {
+    let rows = select
+        .into_model::<WorkspaceListRow>()
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows.into_iter().map(workspace_list_row_data).collect())
 }
 
 /// One fetched workspace row with its annotations.
@@ -2529,42 +2594,27 @@ pub(crate) struct WorkspaceRowData {
     pub role: Option<i64>,
 }
 
-fn workspace_row_data(tuple: WorkspaceRowTuple) -> WorkspaceRowData {
-    let (
-        id,
-        created_at,
-        updated_at,
-        deleted_at,
-        name,
-        logo,
-        slug,
-        organization_size,
-        timezone,
-        background_color,
-        created_by_id,
-        updated_by_id,
-        logo_asset_id,
-        owner_id,
-        total_members,
-        role,
-    ) = tuple;
+fn workspace_list_row_data(row: WorkspaceListRow) -> WorkspaceRowData {
+    let model = row.workspace;
     WorkspaceRowData {
-        id,
-        created_at,
-        updated_at,
-        deleted_at,
-        name,
-        logo,
-        slug,
-        organization_size,
-        timezone,
-        background_color,
-        created_by_id,
-        updated_by_id,
-        logo_asset_id,
-        owner_id,
-        total_members,
-        role: role.map(i64::from),
+        id: model.id,
+        created_at: model.created_at.with_timezone(&chrono::Utc),
+        updated_at: model.updated_at.with_timezone(&chrono::Utc),
+        deleted_at: model
+            .deleted_at
+            .map(|instant| instant.with_timezone(&chrono::Utc)),
+        name: model.name,
+        logo: model.logo,
+        slug: model.slug,
+        organization_size: model.organization_size,
+        timezone: model.timezone,
+        background_color: model.background_color,
+        created_by_id: model.created_by_id,
+        updated_by_id: model.updated_by_id,
+        logo_asset_id: model.logo_asset_id,
+        owner_id: model.owner_id,
+        total_members: row.total_members,
+        role: row.role.map(i64::from),
     }
 }
 
@@ -2621,12 +2671,13 @@ fn render_workspace_data(
 }
 
 /// One `file_assets` scope row for logo resolution.
-type AssetScopeRow = (
-    Option<String>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-);
+#[derive(Debug, FromQueryResult)]
+struct AssetScopeRow {
+    entity_type: Option<String>,
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
 
 /// `logo_url`: the asset URL of `logo_asset_id` wins when set, else
 /// the truthy explicit `logo`, else null (forward FK derefs use the
@@ -2645,20 +2696,30 @@ async fn resolve_logo_url(
             _ => Ok(None),
         };
     };
-    let asset: Option<AssetScopeRow> = sqlx::query_as(
-        r#"SELECT fa.entity_type, fa.workspace_id, fa.project_id, fa.issue_id
-               FROM file_assets fa WHERE fa.id = $1"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((entity_type, workspace_id, project_id, issue_id)) = asset else {
+    let asset: Option<AssetScopeRow> = file_assets::Entity::find_by_id(asset_id)
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .into_model::<AssetScopeRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(asset) = asset else {
         // A dangling FK raises `DoesNotExist` into the 500 arm.
         return Err(Denial::ServerError);
     };
-    let entity_type = entity_type.unwrap_or_default();
-    if matches!(entity_type.as_str(), "WORKSPACE_LOGO" | "USER_AVATAR") {
+    let entity_type = asset.entity_type.unwrap_or_default();
+    let workspace_id = asset.workspace_id;
+    let project_id = asset.project_id;
+    let issue_id = asset.issue_id;
+    if matches!(
+        entity_type.as_str(),
+        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER"
+    ) {
         return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
     }
     if entity_type == "ISSUE_ATTACHMENT" {
@@ -2701,12 +2762,14 @@ async fn asset_workspace_slug(
     let Some(workspace_id) = workspace_id else {
         return Err(Denial::ServerError);
     };
-    let row: Option<(String,)> = sqlx::query_as("SELECT w.slug FROM workspaces w WHERE w.id = $1")
-        .bind(workspace_id)
-        .fetch_optional(pool)
+    let row: Option<String> = workspaces::Entity::find_by_id(workspace_id)
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|(slug,)| slug).ok_or(Denial::ServerError)
+    row.ok_or(Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -2894,20 +2957,20 @@ async fn validate_slug_field(
     if RESTRICTED_WORKSPACE_SLUGS.contains(&trimmed.as_str()) {
         return Ok(Err(ser_workspace::SlugError::Restricted.to_string()));
     }
-    let conflict: Option<(uuid::Uuid,)> = if let Some(exclude) = exclude_id {
-        sqlx::query_as("SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL AND w.id <> $2")
-            .bind(&trimmed)
-            .bind(exclude)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-    } else {
-        sqlx::query_as("SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL")
-            .bind(&trimmed)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-    };
+    let mut conflict_query = workspaces::Entity::find();
+    conflict_query = conflict_query
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(trimmed.as_str()))
+        .filter(workspaces::Column::DeletedAt.is_null());
+    if let Some(exclude) = exclude_id {
+        conflict_query = conflict_query.filter(workspaces::Column::Id.ne(*exclude));
+    }
+    let conflict: Option<uuid::Uuid> = conflict_query
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if conflict.is_some() {
         return Ok(Err("Workspace with this slug already exists.".to_owned()));
     }
@@ -3093,7 +3156,7 @@ fn json_floats_finite(value: &Value) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Theme rows + statements (T1/T2 over `queries_core`)
+// Theme rows + SeaORM selects (T1/T2)
 // ---------------------------------------------------------------------------
 
 type ThemeRowTuple = (
@@ -3109,46 +3172,51 @@ type ThemeRowTuple = (
     uuid::Uuid,
 );
 
-const THEME_COLUMNS: &str = "workspace_themes.id, workspace_themes.created_at, workspace_themes.updated_at, workspace_themes.deleted_at, workspace_themes.name, workspace_themes.colors, workspace_themes.created_by_id, workspace_themes.updated_by_id, workspace_themes.workspace_id, workspace_themes.actor_id";
-
-fn theme_list_sql() -> (String, Vec<String>) {
-    let sql = format!(
-        "SELECT {THEME_COLUMNS} FROM workspace_themes {} WHERE {} ORDER BY {}",
-        queries_core::THEME_JOIN_SQL,
-        queries_core::theme_where_sql(),
-        queries_core::THEME_DEFAULT_ORDER_SQL,
-    );
-    positional_placeholders(&sql)
-}
-
-fn theme_detail_sql() -> (String, Vec<String>) {
-    let sql = format!(
-        "SELECT {THEME_COLUMNS} FROM workspace_themes {} WHERE {} AND workspace_themes.id = :theme_id ORDER BY {}",
-        queries_core::THEME_JOIN_SQL,
-        queries_core::theme_where_sql(),
-        queries_core::THEME_DEFAULT_ORDER_SQL,
-    );
-    positional_placeholders(&sql)
-}
-
-async fn run_theme_query(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    names: &[String],
+fn theme_select(
     slug: &str,
-    theme_id: Option<&uuid::Uuid>,
-) -> Result<Vec<ThemeRowTuple>, Denial> {
-    let mut query = sqlx::query_as::<_, ThemeRowTuple>(sql);
-    for name in names {
-        if name == "slug" {
-            query = query.bind(slug);
-        } else if name == "theme_id" {
-            query = query.bind(theme_id);
-        } else {
-            return Err(Denial::ServerError);
-        }
+    theme_id: Option<uuid::Uuid>,
+) -> sea_orm::Select<workspace_themes::Entity> {
+    let mut select = workspace_themes::Entity::find();
+    select = select
+        .join(
+            JoinType::InnerJoin,
+            workspace_themes::Relation::Workspaces.def(),
+        )
+        .filter(workspace_themes::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug));
+    if let Some(theme_id) = theme_id {
+        select = select.filter(workspace_themes::Column::Id.eq(theme_id));
     }
-    query.fetch_all(pool).await.map_err(|_| Denial::ServerError)
+    select.order_by_desc(workspace_themes::Column::CreatedAt)
+}
+
+fn theme_model_to_tuple(model: workspace_themes::Model) -> ThemeRowTuple {
+    (
+        model.id,
+        model.created_at.with_timezone(&chrono::Utc),
+        model.updated_at.with_timezone(&chrono::Utc),
+        model
+            .deleted_at
+            .map(|instant| instant.with_timezone(&chrono::Utc)),
+        model.name,
+        model.colors,
+        model.created_by_id,
+        model.updated_by_id,
+        model.workspace_id,
+        model.actor_id,
+    )
+}
+
+async fn fetch_theme_rows(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    theme_id: Option<uuid::Uuid>,
+) -> Result<Vec<ThemeRowTuple>, Denial> {
+    let models = theme_select(slug, theme_id)
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(models.into_iter().map(theme_model_to_tuple).collect())
 }
 
 fn render_theme_row(tuple: &ThemeRowTuple, zone: &Tz) -> Result<Value, Denial> {
@@ -3189,7 +3257,7 @@ fn render_theme_row(tuple: &ThemeRowTuple, zone: &Tz) -> Result<Value, Denial> {
 }
 
 // ---------------------------------------------------------------------------
-// Export rows + CSV (R5 over `queries_core`)
+// Export rows + CSV (R5 over SeaORM)
 // ---------------------------------------------------------------------------
 
 type ExportRowTuple = (
@@ -3205,17 +3273,108 @@ type ExportRowTuple = (
     Option<String>,
 );
 
-const EXPORT_COLUMNS: &str = "users.display_name, projects.identifier, projects.name, issues.sequence_id, issue_activities.created_at, issue_activities.updated_at, issue_activities.verb, issue_activities.field, issue_activities.old_value, issue_activities.new_value";
+/// One export row, decoded by name: the activity columns plus the
+/// joined actor/project/issue aliases (unique output names by
+/// construction).
+#[derive(Debug, FromQueryResult)]
+struct ExportSeaRow {
+    display_name: String,
+    identifier: String,
+    project_name: String,
+    sequence_id: Option<i32>,
+    created_at: DateTimeWithTimeZone,
+    updated_at: DateTimeWithTimeZone,
+    verb: String,
+    field: Option<String>,
+    old_value: Option<String>,
+    new_value: Option<String>,
+}
 
-fn export_sql() -> (String, Vec<String>) {
-    let sql = format!(
-        "SELECT {EXPORT_COLUMNS} FROM issue_activities {} WHERE {} ORDER BY {} LIMIT {}",
-        queries_core::EXPORT_JOINS_SQL,
-        queries_core::export_where_sql(),
-        queries_core::ACTIVITY_DEFAULT_ORDER_SQL,
-        queries_core::EXPORT_LIMIT,
-    );
-    positional_placeholders(&sql)
+/// The export-date predicate: `(created_at AT TIME ZONE <zone>)::date
+/// = <date>` (Django `__date` under the activated actor zone).
+fn export_date_expr(zone_name: &str, date: chrono::NaiveDate) -> SimpleExpr {
+    let left = Expr::col((
+        issue_activities::Entity,
+        issue_activities::Column::CreatedAt,
+    ))
+    .binary(
+        BinOper::Custom("AT TIME ZONE"),
+        SimpleExpr::from(Expr::val(zone_name.to_owned())),
+    )
+    .cast_as(Alias::new("date"));
+    let right = Expr::val(date.to_string()).cast_as(Alias::new("date"));
+    left.eq(right)
+}
+
+/// The export select (R5): actor/project/members/workspace `INNER`,
+/// issue `LEFT OUTER` (nullable, unconstrained). No `deleted_at`
+/// guard on any joined table; `[:10000]` cap, model-default order.
+fn export_select(
+    slug: &str,
+    requester: uuid::Uuid,
+    target: uuid::Uuid,
+    zone_name: &str,
+    date: chrono::NaiveDate,
+) -> sea_orm::Select<issue_activities::Entity> {
+    let field_exclusion = Condition::all()
+        .add(issue_activities::Column::Field.is_in(["comment", "vote", "reaction", "draft"]))
+        .add(issue_activities::Column::Field.is_not_null())
+        .not();
+    issue_activities::Entity::find()
+        .select_only()
+        .columns([
+            issue_activities::Column::CreatedAt,
+            issue_activities::Column::UpdatedAt,
+            issue_activities::Column::Verb,
+            issue_activities::Column::Field,
+            issue_activities::Column::OldValue,
+            issue_activities::Column::NewValue,
+        ])
+        .column_as(users::Column::DisplayName, "display_name")
+        .column_as(projects::Column::Identifier, "identifier")
+        .column_as(projects::Column::Name, "project_name")
+        .column_as(issues::Column::SequenceId, "sequence_id")
+        .join(
+            JoinType::InnerJoin,
+            issue_activities::Relation::Users3.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            issue_activities::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            issue_activities::Relation::Workspaces.def(),
+        )
+        .join(JoinType::LeftJoin, issue_activities::Relation::Issues.def())
+        .filter(issue_activities::Column::DeletedAt.is_null())
+        .filter(field_exclusion)
+        .filter(issue_activities::Column::ActorId.eq(target))
+        .filter(export_date_expr(zone_name, date))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(requester))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(issue_activities::Column::CreatedAt)
+        .limit(10_000)
+}
+
+fn export_sea_to_tuple(row: ExportSeaRow) -> ExportRowTuple {
+    (
+        row.display_name,
+        row.identifier,
+        row.project_name,
+        row.sequence_id,
+        row.created_at.with_timezone(&chrono::Utc),
+        row.updated_at.with_timezone(&chrono::Utc),
+        row.verb,
+        row.field,
+        row.old_value,
+        row.new_value,
+    )
 }
 
 /// `parse_date` for the export `date` (every shape below probed
@@ -3395,29 +3554,6 @@ pub(crate) fn format_csv_datetime(instant: &chrono::DateTime<chrono::Utc>, _zone
 // Integrity mapping (`handle_exception`, create's own `except`)
 // ---------------------------------------------------------------------------
 
-/// Whether a sqlx failure is a Postgres integrity error (the
-/// `IntegrityError` umbrella: unique 23505, FK 23503, check 23514,
-/// not-null 23502).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505" | "23503" | "23514" | "23502")
-    )
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505")
-    )
-}
-
 /// Stock `get_object` miss: `get_object_or_404` raises `Http404("No <Model>
 /// matches the given query.")`, rewrapped by DRF as `NotFound` — 404
 /// `{"detail":"No <Model> matches the given query."}` (DRF `NotFound`).
@@ -3480,129 +3616,6 @@ pub async fn list_workspaces(
 const WORKSPACE_SKIP_BLANK: &[&str] = &["timezone", "background_color"];
 const THEME_SKIP_BLANK: &[&str] = &["colors"];
 const NO_SKIP_BLANK: &[&str] = &[];
-
-/// `RETURNING` stamps of the workspace/theme `INSERT`s.
-type InsertedStamps = Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>;
-
-/// One `ensure_select_sql` row: the seeder kernel's 14-column `SELECT`
-/// in order (`created_at`, `updated_at`, `created_by_id`,
-/// `updated_by_id`, `deleted_at`, `id`, `workspace_id`, `slug`, `name`,
-/// `description`, `prompt`, `source`, `is_enabled`, `color`).
-type SchedulerSeedRow = (
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-    uuid::Uuid,
-    String,
-    String,
-    String,
-    String,
-    String,
-    bool,
-    String,
-);
-
-/// `post_save` receiver `_seed_builtins_on_workspace_create`
-/// (`scheduler/signals.py:28-39`): `ensure_builtin_schedulers` runs on
-/// every workspace creation. The receiver swallows every exception
-/// (`logger.exception`), so this edge returns `()` and every error arm
-/// below is a silent stop — seeding can never block workspace creation.
-/// `created_by` is the requesting user (`BaseModel.save` stamps the crum
-/// user on the scheduler rows too). Shared by every workspace-create
-/// entry point (the Django signal fires regardless of entry point).
-pub(crate) async fn seed_builtin_schedulers(
-    pool: &sqlx::PgPool,
-    workspace_id: uuid::Uuid,
-    created_by: uuid::Uuid,
-) {
-    use pidash_services::scheduler::builtins as seeder;
-    use seeder::EnsureAction;
-    if !seeder::should_seed_on_workspace_create(true) {
-        return;
-    }
-    for builtin in seeder::BUILTINS {
-        let row: Result<Option<SchedulerSeedRow>, sqlx::Error> =
-            sqlx::query_as(seeder::ensure_select_sql())
-                .bind(workspace_id)
-                .bind(builtin.slug)
-                .fetch_optional(pool)
-                .await;
-        let row = match row {
-            Ok(row) => row,
-            Err(_) => return,
-        };
-        let view = row.as_ref().map(|row| seeder::SchedulerRowView {
-            name: row.8.clone(),
-            description: row.9.clone(),
-            prompt: row.10.clone(),
-            source: row.11.clone(),
-        });
-        match (row, seeder::decide_ensure(view.as_ref())) {
-            (Some(row), EnsureAction::Repaint) => {
-                if sqlx::query(seeder::builtin_repaint_sql())
-                    .bind(builtin.name)
-                    .bind(builtin.description)
-                    .bind(builtin.prompt)
-                    .bind(row.5)
-                    .execute(pool)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            (None, EnsureAction::Create) => {
-                match sqlx::query(seeder::builtin_insert_sql())
-                    .bind(uuid::Uuid::new_v4())
-                    .bind(workspace_id)
-                    .bind(builtin.slug)
-                    .bind(builtin.name)
-                    .bind(builtin.description)
-                    .bind(builtin.prompt)
-                    .bind(created_by)
-                    .execute(pool)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(error) if is_unique_violation(&error) => {
-                        // Lost the race: re-fetch and repaint the
-                        // winner (`builtins/__init__.py:177-186`).
-                        let winner: Result<Option<SchedulerSeedRow>, sqlx::Error> =
-                            sqlx::query_as(seeder::ensure_select_sql())
-                                .bind(workspace_id)
-                                .bind(builtin.slug)
-                                .fetch_optional(pool)
-                                .await;
-                        match winner {
-                            Ok(Some(winner)) => {
-                                if sqlx::query(seeder::builtin_repaint_sql())
-                                    .bind(builtin.name)
-                                    .bind(builtin.description)
-                                    .bind(builtin.prompt)
-                                    .bind(winner.5)
-                                    .execute(pool)
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(_) => return,
-                        }
-                    }
-                    Err(_) => return,
-                }
-            }
-            // Unreachable by `decide_ensure`'s contract (`Some` repaints,
-            // `None` creates); stop silently like any seeder failure.
-            _ => return,
-        }
-    }
-}
 
 /// POST `workspaces/` (`:83-166`).
 pub async fn create_workspace(
@@ -3691,28 +3704,28 @@ pub async fn create_workspace(
     let organization_size = validated.organization_size.flatten();
     let workspace_id = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
-    let insert: Result<InsertedStamps, sqlx::Error> =
-        sqlx::query_as(
-            r#"INSERT INTO workspaces
-               (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, name, logo, logo_asset_id, owner_id, slug, organization_size, timezone, background_color)
-               VALUES ($1, $2, $2, $3, NULL, $4, $5, $6, $7, $3, $8, $9, $10, $11)
-               RETURNING created_at, updated_at"#,
-        )
-        .bind(workspace_id)
-        .bind(now)
-        .bind(user_id)
-        .bind(validated.deleted_at.flatten())
-        .bind(&name)
-        .bind(logo.as_deref())
-        .bind(validated.logo_asset_id.flatten())
-        .bind(&slug)
-        .bind(organization_size.as_deref())
-        .bind(&timezone)
-        .bind(&background_color)
-        .fetch_optional(&pool)
-        .await;
+    let insert = domain_workspaces::create(
+        &pool,
+        &domain_workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &name,
+            slug: &slug,
+            owner_id: user_id,
+            created_by: Some(user_id),
+            logo: logo.as_deref(),
+            logo_asset_id: validated.logo_asset_id.flatten(),
+            organization_size: organization_size.as_deref(),
+            timezone: &timezone,
+            background_color: &background_color,
+            deleted_at: validated.deleted_at.flatten(),
+            created_at: now,
+            updated_at: now,
+            seed_created_by: Some(user_id),
+        },
+    )
+    .await;
     let (created_at, updated_at) = match insert {
-        Ok(Some(timestamps)) => timestamps,
+        Ok(Some(stamps)) => (stamps.created_at, stamps.updated_at),
         Ok(None) => return Err(Denial::ServerError),
         Err(error) if is_unique_violation(&error) => {
             return Ok(json_response(
@@ -3722,11 +3735,6 @@ pub async fn create_workspace(
         }
         Err(_) => return Err(Denial::ServerError),
     };
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the request.
-    seed_builtin_schedulers(&pool, workspace_id, user_id).await;
     // `WorkspaceMember.objects.create(...)` (`:126-132`): the `company_role`
     // echo (`:127`) renders through Python `str()` (null stays null).
     let company_role = match input.get("company_role") {
@@ -3735,33 +3743,30 @@ pub async fn create_workspace(
         InputValue::Value(Value::Null) => None,
         InputValue::Value(value) => Some(py_str(value)),
     };
-    let member_insert: Result<_, sqlx::Error> = sqlx::query(
-        r#"INSERT INTO workspace_members
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, member_id, role, company_role, view_props, default_props, issue_props, getting_started_checklist, tips, explored_features, is_active)
-           VALUES ($1, $2, $2, $3, NULL, NULL, $4, $3, 20, $5, $6, $7, $8, $9, $10, $11, TRUE)"#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(company_role)
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-    )?)
     // `default_props` shares `get_default_props` with `view_props`
     // (`workspace.py:207-208`), so the one ported default serves both.
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-    )?)
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON,
-    )?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .execute(&pool)
-    .await;
-    if let Err(error) = member_insert {
+    let view_props =
+        member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON)?;
+    let issue_props =
+        member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON)?;
+    if let Err(error) = members::add(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        &members::NewMember {
+            workspace_id,
+            user_id: Some(user_id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(user_id),
+            view_props: &view_props,
+            default_props: &view_props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
+    )
+    .await
+    {
         // Any unique violation (even the member row's) answers the 409:
         // Postgres renders every one with "already exists".
         if is_unique_violation(&error) {
@@ -3772,13 +3777,13 @@ pub async fn create_workspace(
         }
         return Err(Denial::ServerError);
     }
-    let total_members: (i64,) = sqlx::query_as(
-        "SELECT COUNT(wm.id) FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let total_members = workspace_members::Entity::find()
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let total_members = i64::try_from(total_members).unwrap_or(0);
     // The 201 envelope appends `total_members`/`role` AFTER `owner`
     // (dict insertion order — `:161-163`).
     let data = WorkspaceRowData {
@@ -3804,7 +3809,7 @@ pub async fn create_workspace(
     rendered
         .as_object_mut()
         .expect("workspace object")
-        .insert("total_members".to_owned(), Value::from(total_members.0));
+        .insert("total_members".to_owned(), Value::from(total_members));
     rendered
         .as_object_mut()
         .expect("workspace object")
@@ -3867,13 +3872,12 @@ async fn get_workspace_object(
     user_id: &uuid::Uuid,
     filters: &ListFilters,
 ) -> Result<WorkspaceRowData, Response> {
-    let (sql, names) = workspace_detail_sql(filters, true);
-    let rows = run_workspace_query(pool, &sql, &names, user_id, Some(slug), filters)
+    let select = workspace_detail_select(filters, true, *user_id, Some(slug));
+    let rows = fetch_workspace_rows(pool, select)
         .await
         .map_err(|denial| denial.into_response())?;
     rows.into_iter()
         .next()
-        .map(workspace_row_data)
         .ok_or_else(|| detail_not_found_response("Workspace"))
 }
 
@@ -4030,7 +4034,8 @@ async fn update_workspace_inner(
 }
 
 /// The stock `update()` write: validated columns plus the
-/// `updated_at`/`updated_by` re-stamp.
+/// `updated_at`/`updated_by` re-stamp
+/// (`domain::workspaces::patch` renders the statement).
 async fn apply_workspace_update(
     pool: &sqlx::PgPool,
     data: &WorkspaceRowData,
@@ -4038,39 +4043,26 @@ async fn apply_workspace_update(
     user_id: &uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
-    let mut assignments: Vec<String> = sets
-        .iter()
-        .enumerate()
-        .map(|(index, column)| format!("{column} = ${}", index + 1))
-        .collect();
-    assignments.push(format!("updated_at = ${}", sets.len() + 1));
-    assignments.push(format!("updated_by_id = ${}", sets.len() + 2));
-    let sql = format!(
-        "UPDATE workspaces SET {} WHERE id = ${}",
-        assignments.join(", "),
-        sets.len() + 3
-    );
-    let mut query = sqlx::query(&sql);
-    for column in sets {
-        query = match column.as_str() {
-            "deleted_at" => query.bind(data.deleted_at),
-            "name" => query.bind(&data.name),
-            "logo" => query.bind(data.logo.as_deref()),
-            "slug" => query.bind(&data.slug),
-            "organization_size" => query.bind(data.organization_size.as_deref()),
-            "timezone" => query.bind(&data.timezone),
-            "background_color" => query.bind(&data.background_color),
-            "logo_asset_id" => query.bind(data.logo_asset_id),
-            _ => query.bind(Option::<String>::None),
-        };
-    }
-    query
-        .bind(now)
-        .bind(user_id)
-        .bind(data.id)
-        .execute(pool)
-        .await?;
-    Ok(())
+    let cols: Vec<&str> = sets.iter().map(String::as_str).collect();
+    let patch = domain_workspaces::WorkspacePatch {
+        deleted_at: data.deleted_at,
+        name: &data.name,
+        logo: data.logo.as_deref(),
+        slug: &data.slug,
+        organization_size: data.organization_size.as_deref(),
+        timezone: &data.timezone,
+        background_color: &data.background_color,
+        logo_asset_id: data.logo_asset_id,
+    };
+    domain_workspaces::patch(
+        &pidash_db::pool::sea_orm_connection(pool),
+        data.id,
+        &cols,
+        &patch,
+        user_id,
+        now,
+    )
+    .await
 }
 
 /// DELETE `workspaces/<slug>/` (`:183-201`): profile-pointer cleanup,
@@ -4100,9 +4092,7 @@ pub async fn destroy_workspace(
         Err(response) => return Ok(response),
     };
     // `remove_last_workspace_ids_from_user_settings` (`:187`).
-    sqlx::query("UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1")
-        .bind(data.id)
-        .execute(&pool)
+    identity::clear_last_workspace(&pidash_db::pool::sea_orm_connection(&pool), data.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `str(timezone.now().isoformat())`: micros-truncated UTC, `+00:00`.
@@ -4120,14 +4110,13 @@ pub async fn destroy_workspace(
     // `super().destroy()` (`mixins.py:72-78` + `workspace.py:107-118`):
     // soft delete, slug tombstone, `updated_by` re-stamp, fan-out.
     let tombstone = models_workspace::workspace::soft_deleted_slug(&data.slug, now);
-    sqlx::query(
-        "UPDATE workspaces SET deleted_at = $1, updated_at = $1, updated_by_id = $2, slug = $3 WHERE id = $4",
+    domain_workspaces::soft_delete(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        data.id,
+        now,
+        user_id,
+        &tombstone,
     )
-    .bind(now)
-    .bind(user_id)
-    .bind(&tombstone)
-    .bind(data.id)
-    .execute(&pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     enqueue_soft_delete_related(&pool, "db", "workspace", &data.id).await;
@@ -4160,13 +4149,11 @@ pub async fn my_workspaces(
         Ok(filters) => filters,
         Err(response) => return Ok(response),
     };
-    let (sql, names) = my_workspaces_sql(&filters);
-    let rows = run_workspace_query(&pool, &sql, &names, &user_id, None, &filters).await?;
+    let rows = fetch_workspace_rows(&pool, my_workspaces_select(&filters, user_id)).await?;
     let zone = actor_timezone(&pool, &user_id).await?;
     let mut rendered = Vec::with_capacity(rows.len());
-    for tuple in &rows {
-        let data = workspace_row_data(tuple.clone());
-        rendered.push(render_workspace_row(&pool, &data, &zone).await?);
+    for data in &rows {
+        rendered.push(render_workspace_row(&pool, data, &zone).await?);
     }
     Ok(json_response(
         StatusCode::OK,
@@ -4199,12 +4186,15 @@ pub async fn slug_check(
             "{\"error\":\"Workspace Slug is required\"}".to_owned(),
         ));
     }
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL")
-            .bind(&slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let row: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let taken = row.is_some() || RESTRICTED_WORKSPACE_SLUGS.contains(&slug.as_str());
     Ok(json_response(
         StatusCode::OK,
@@ -4228,8 +4218,7 @@ pub async fn list_themes(
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
         return Ok(response);
     }
-    let (sql, names) = theme_list_sql();
-    let rows = run_theme_query(&pool, &sql, &names, &slug, None).await?;
+    let rows = fetch_theme_rows(&pool, &slug, None).await?;
     let zone = actor_timezone(&pool, &user_id).await?;
     let mut rendered = Vec::with_capacity(rows.len());
     for tuple in &rows {
@@ -4265,13 +4254,16 @@ pub async fn create_theme(
         let scalar = input.json_scalar().clone();
         return Ok(non_object_body_response(&scalar));
     }
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL")
-            .bind(&slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace_id else {
+    let workspace_id: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = workspace_id else {
         return Err(Denial::NotFound);
     };
     let zone = actor_timezone(&pool, &user_id).await?;
@@ -4287,26 +4279,26 @@ pub async fn create_theme(
         .unwrap_or_else(|| Value::Object(Map::new()));
     let theme_id = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
-    let insert: Result<InsertedStamps, sqlx::Error> =
-        sqlx::query_as(
-            r#"INSERT INTO workspace_themes
-               (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, actor_id, colors)
-               VALUES ($1, $2, $2, $3, NULL, $4, $5, $6, $3, $7)
-               RETURNING created_at, updated_at"#,
-        )
-        .bind(theme_id)
-        .bind(now)
-        .bind(user_id)
-        .bind(deleted_at)
-        .bind(workspace_id)
-        .bind(&name)
-        .bind(&colors)
-        .fetch_optional(&pool)
-        .await;
-    let (created_at, updated_at) = match insert {
-        Ok(Some(timestamps)) => timestamps,
-        Ok(None) => return Err(Denial::ServerError),
-        Err(error) if is_integrity_error(&error) => {
+    let now_aware: DateTimeWithTimeZone = now.into();
+    let active = workspace_themes::ActiveModel {
+        id: Set(theme_id),
+        created_at: Set(now_aware),
+        updated_at: Set(now_aware),
+        name: Set(name.clone()),
+        colors: Set(colors.clone()),
+        actor_id: Set(user_id),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(workspace_id),
+        deleted_at: Set(deleted_at.map(|instant| instant.into())),
+    };
+    let inserted = active.insert(&orm(&pool)).await;
+    let (created_at, updated_at) = match inserted {
+        Ok(model) => (
+            model.created_at.with_timezone(&chrono::Utc),
+            model.updated_at.with_timezone(&chrono::Utc),
+        ),
+        Err(error) if pidash_db::orm_tx::is_integrity_violation(&error) => {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 "{\"error\":\"The payload is not valid\"}".to_owned(),
@@ -4331,16 +4323,15 @@ pub async fn create_theme(
 }
 
 /// Fetch one slug-scoped theme (`get_object`): miss renders DRF's
-/// `NotFound`, a malformed `pk` the `ValidationError` 400.
+/// `NotFound`. The `pk` is already classified at the route boundary
+/// (PIDASHCONV-1713), so a malformed segment never reaches here.
 #[allow(clippy::result_large_err)]
 async fn get_theme_object(
     pool: &sqlx::PgPool,
     slug: &str,
-    pk: &str,
+    theme_id: uuid::Uuid,
 ) -> Result<ThemeRowTuple, Response> {
-    let theme_id = parse_uuid_or_invalid(pk).map_err(|denial| denial.into_response())?;
-    let (sql, names) = theme_detail_sql();
-    let rows = run_theme_query(pool, &sql, &names, slug, Some(&theme_id))
+    let rows = fetch_theme_rows(pool, slug, Some(theme_id))
         .await
         .map_err(|denial| denial.into_response())?;
     rows.into_iter()
@@ -4354,6 +4345,8 @@ pub async fn retrieve_theme(
     Path((slug, pk)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let theme_id = parse_uuid_path(&pk)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(
@@ -4363,7 +4356,7 @@ pub async fn retrieve_theme(
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
         return Ok(response);
     }
-    let tuple = match get_theme_object(&pool, &slug, &pk).await {
+    let tuple = match get_theme_object(&pool, &slug, theme_id).await {
         Ok(tuple) => tuple,
         Err(response) => return Ok(response),
     };
@@ -4381,6 +4374,8 @@ pub async fn partial_update_theme(
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let theme_id = parse_uuid_path(&pk)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(
@@ -4398,7 +4393,7 @@ pub async fn partial_update_theme(
         let scalar = input.json_scalar().clone();
         return Ok(non_object_body_response(&scalar));
     }
-    let mut tuple = match get_theme_object(&pool, &slug, &pk).await {
+    let mut tuple = match get_theme_object(&pool, &slug, theme_id).await {
         Ok(tuple) => tuple,
         Err(response) => return Ok(response),
     };
@@ -4410,7 +4405,7 @@ pub async fn partial_update_theme(
     let now = chrono::Utc::now();
     let outcome = apply_theme_update(&pool, &mut tuple, &validated, &user_id, now).await;
     if let Err(error) = outcome {
-        if is_integrity_error(&error) {
+        if pidash_db::orm_tx::is_integrity_violation(&error) {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 "{\"error\":\"The payload is not valid\"}".to_owned(),
@@ -4430,49 +4425,37 @@ async fn apply_theme_update(
     validated: &ValidatedTheme,
     user_id: &uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), sqlx::Error> {
-    let mut assignments: Vec<String> = Vec::new();
-    let mut index = 1;
+) -> Result<(), DbErr> {
     if let Some(deleted_at) = validated.deleted_at {
         tuple.3 = deleted_at;
-        assignments.push(format!("deleted_at = ${index}"));
-        index += 1;
     }
     if let Some(name) = validated.name.clone() {
         tuple.4 = name;
-        assignments.push(format!("name = ${index}"));
-        index += 1;
     }
     if let Some(colors) = validated.colors.clone() {
         tuple.5 = colors;
-        assignments.push(format!("colors = ${index}"));
-        index += 1;
     }
-    assignments.push(format!("updated_at = ${index}"));
-    index += 1;
-    assignments.push(format!("updated_by_id = ${index}"));
-    index += 1;
-    let sql = format!(
-        "UPDATE workspace_themes SET {} WHERE id = ${index}",
-        assignments.join(", ")
-    );
-    let mut query = sqlx::query(&sql);
+    let mut update = workspace_themes::Entity::update_many();
     if let Some(deleted_at) = validated.deleted_at {
-        query = query.bind(deleted_at);
+        update = update.col_expr(workspace_themes::Column::DeletedAt, Expr::value(deleted_at));
     }
     if let Some(name) = validated.name.as_deref() {
-        query = query.bind(name);
+        update = update.col_expr(workspace_themes::Column::Name, Expr::value(name));
     }
     if let Some(colors) = validated.colors.as_ref() {
-        query = query.bind(colors);
+        update = update.col_expr(
+            workspace_themes::Column::Colors,
+            Expr::value(colors.clone()),
+        );
     }
-    query
-        .bind(now)
-        .bind(user_id)
-        .bind(tuple.0)
-        .execute(pool)
-        .await?;
-    Ok(())
+    update = update
+        .col_expr(workspace_themes::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            workspace_themes::Column::UpdatedById,
+            Expr::value(Some(*user_id)),
+        )
+        .filter(workspace_themes::Column::Id.eq(tuple.0));
+    update.exec(&orm(pool)).await.map(|_| ())
 }
 
 /// DELETE `workspaces/<slug>/workspace-themes/<pk>/` (stock destroy):
@@ -4482,6 +4465,8 @@ pub async fn destroy_theme(
     Path((slug, pk)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let theme_id = parse_uuid_path(&pk)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(
@@ -4491,20 +4476,22 @@ pub async fn destroy_theme(
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
         return Ok(response);
     }
-    let tuple = match get_theme_object(&pool, &slug, &pk).await {
+    let tuple = match get_theme_object(&pool, &slug, theme_id).await {
         Ok(tuple) => tuple,
         Err(response) => return Ok(response),
     };
     let now = chrono::Utc::now();
-    sqlx::query(
-        "UPDATE workspace_themes SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(tuple.0)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    workspace_themes::Entity::update_many()
+        .col_expr(workspace_themes::Column::DeletedAt, Expr::value(now))
+        .col_expr(workspace_themes::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            workspace_themes::Column::UpdatedById,
+            Expr::value(Some(user_id)),
+        )
+        .filter(workspace_themes::Column::Id.eq(tuple.0))
+        .exec(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     enqueue_soft_delete_related(&pool, "db", "workspacetheme", &tuple.0).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
@@ -4522,6 +4509,8 @@ pub async fn export_activity(
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth.
+    let target_id = parse_uuid_path(&user_id_text)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(*gate_for_export(), gates::Gate::ClassEntity));
@@ -4556,30 +4545,14 @@ pub async fn export_activity(
     let Some(date) = parse_export_date(date_text) else {
         return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned()));
     };
-    let target_id = parse_uuid_or_invalid(&user_id_text)?;
     let zone = actor_timezone(&pool, &user_id).await?;
     let zone_name = zone.name().to_owned();
-    let (sql, names) = export_sql();
-    let mut query = sqlx::query_as::<_, ExportRowTuple>(&sql);
-    for name in &names {
-        if name == "slug" {
-            query = query.bind(&slug);
-        } else if name == "user" {
-            query = query.bind(user_id);
-        } else if name == "user_id" {
-            query = query.bind(target_id);
-        } else if name == "tzname" {
-            query = query.bind(&zone_name);
-        } else if name == "date" {
-            query = query.bind(date);
-        } else {
-            return Err(Denial::ServerError);
-        }
-    }
-    let rows = query
-        .fetch_all(&pool)
+    let sea_rows = export_select(&slug, user_id, target_id, &zone_name, date)
+        .into_model::<ExportSeaRow>()
+        .all(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
+    let rows: Vec<ExportRowTuple> = sea_rows.into_iter().map(export_sea_to_tuple).collect();
     let csv = render_export_csv(&rows, &zone);
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -4768,6 +4741,30 @@ mod tests {
             EXPORT_PATH,
             "/api/workspaces/{slug}/user-activity/{user_id}/export/"
         );
+    }
+
+    #[test]
+    fn uuid_spelling_follows_the_converter() {
+        // PIDASHCONV-1713: only the canonical lowercase hyphenated spelling
+        // routes; uppercase/simple/braced/urn/garbage 404 at resolution.
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert_eq!(
+            parse_uuid_path(canonical).unwrap(),
+            uuid::Uuid::parse_str(canonical).unwrap()
+        );
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "xyz",
+            "",
+        ] {
+            assert!(
+                matches!(parse_uuid_path(raw), Err(Denial::PageNotFound)),
+                "{raw}"
+            );
+        }
     }
 
     // -- gate rows + outcomes ------------------------------------------------
@@ -6054,18 +6051,120 @@ mod tests {
         assert_eq!(sanitize_csv_value("ok"), "ok");
     }
 
-    // -- SQL assembly ------------------------------------------------------------
+    // -- SeaORM statement shapes (no database) --------------------------------
+
+    fn sql_of<E: sea_orm::EntityTrait>(select: sea_orm::Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        select.build(DbBackend::Postgres).to_string()
+    }
 
     #[test]
-    fn placeholders_skip_casts_and_quotes() {
-        let (sql, names) = positional_placeholders(
-            "SELECT UPPER(name::TEXT) LIKE UPPER(:search) AND slug = :slug AND note = ':x' AND slug = :slug",
+    fn workspace_detail_select_keeps_joins_and_annotations() {
+        let user = uuid::Uuid::nil();
+        let filters = ListFilters {
+            search_patterns: vec!["%acme%".to_owned()],
+            owner_id: Some(user),
+        };
+        let sql = sql_of(workspace_detail_select(&filters, true, user, Some("acme")));
+        assert!(sql.contains(r#"INNER JOIN "users""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "workspace_members""#), "{sql}");
+        assert!(sql.contains(r#""total_members""#), "{sql}");
+        assert!(sql.contains("UPPER("), "{sql}");
+        assert!(sql.contains("LIKE"), "{sql}");
+        // No DISTINCT on R1; the membership join carries no
+        // `deleted_at` guard (Django never scopes join tables).
+        assert!(!sql.contains("DISTINCT"), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug""#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."name" ASC"#), "{sql}");
+        assert!(sql.contains(r#""workspace_members"."is_active""#), "{sql}");
+        assert!(
+            !sql.contains(r#""workspace_members"."deleted_at" IS NULL"#),
+            "{sql}"
         );
-        assert_eq!(
-            sql,
-            "SELECT UPPER(name::TEXT) LIKE UPPER($1) AND slug = $2 AND note = ':x' AND slug = $2"
+    }
+
+    #[test]
+    fn my_workspaces_select_keeps_distinct_and_role() {
+        let user = uuid::Uuid::nil();
+        let filters = ListFilters {
+            search_patterns: Vec::new(),
+            owner_id: None,
+        };
+        let sql = sql_of(my_workspaces_select(&filters, user));
+        assert!(sql.contains("DISTINCT"), "{sql}");
+        assert!(sql.contains(r#""total_members""#), "{sql}");
+        assert!(sql.contains(r#""role""#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."created_at" DESC"#), "{sql}");
+        // R2 has no owner join.
+        assert!(
+            !sql.contains(r#"INNER JOIN "users" ON "workspaces"."owner_id""#),
+            "{sql}"
         );
-        assert_eq!(names, vec!["search".to_owned(), "slug".to_owned()]);
+    }
+
+    #[test]
+    fn theme_select_keeps_slug_join_and_order() {
+        let list = sql_of(theme_select("acme", None));
+        assert!(list.contains(r#"INNER JOIN "workspaces""#), "{list}");
+        assert!(
+            list.contains(r#""workspace_themes"."deleted_at" IS NULL"#),
+            "{list}"
+        );
+        assert!(list.contains(r#""workspaces"."slug""#), "{list}");
+        assert!(
+            list.contains(r#""workspace_themes"."created_at" DESC"#),
+            "{list}"
+        );
+        let detail = sql_of(theme_select("acme", Some(uuid::Uuid::nil())));
+        assert!(detail.contains(r#""workspace_themes"."id""#), "{detail}");
+    }
+
+    #[test]
+    fn export_select_keeps_joins_aliases_and_cap() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 24).unwrap();
+        let sql = sql_of(export_select(
+            "acme",
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            "UTC",
+            date,
+        ));
+        for needle in [
+            r#"INNER JOIN "users""#,
+            r#"INNER JOIN "projects""#,
+            r#"INNER JOIN "project_members""#,
+            r#"INNER JOIN "workspaces""#,
+            r#"LEFT JOIN "issues""#,
+            r#""display_name""#,
+            r#""identifier""#,
+            r#""project_name""#,
+            r#""sequence_id""#,
+            "AT TIME ZONE",
+            r#""issue_activities"."deleted_at" IS NULL"#,
+            r#""issue_activities"."created_at" DESC"#,
+            "LIMIT 10000",
+        ] {
+            assert!(sql.contains(needle), "{needle} in {sql}");
+        }
+    }
+
+    #[test]
+    fn membership_scalars_keep_live_scope() {
+        let user = uuid::Uuid::nil();
+        let outer = SqlQuery::select()
+            .expr_as(membership_role_scalar("acme", user), Alias::new("role"))
+            .expr_as(
+                membership_admin_exists("acme", user),
+                Alias::new("admin_unfiltered"),
+            )
+            .to_owned();
+        let sql = DbBackend::Postgres.build(&outer).to_string();
+        assert!(sql.contains(r#""workspace_members""#), "{sql}");
+        assert!(sql.contains(r#""workspaces""#), "{sql}");
+        assert!(sql.contains(r#""is_active""#), "{sql}");
+        assert!(sql.contains("EXISTS"), "{sql}");
+        assert!(sql.contains(r#""role""#), "{sql}");
+        assert!(sql.contains(r#""admin_unfiltered""#), "{sql}");
     }
 
     #[test]
@@ -6169,5 +6268,248 @@ mod tests {
         let object = rendered.as_object().expect("object");
         assert_eq!(object["total_members"], serde_json::json!(3));
         assert!(!object.contains_key("role"));
+    }
+
+    // -- Live SeaORM queries (temp tables on a one-connection pool) -----------
+
+    async fn exec(pool: &sqlx::PgPool, sql: &str) {
+        sqlx::query(sql).execute(pool).await.expect("exec");
+    }
+
+    /// Every migrated read/write on one-connection-pool temp copies.
+    #[tokio::test]
+    async fn live_workspace_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "users",
+            "workspaces",
+            "workspace_members",
+            "workspace_themes",
+            "file_assets",
+            "projects",
+            "project_members",
+            "issues",
+            "issue_activities",
+        ] {
+            exec(
+                &pool,
+                &format!("CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"),
+            )
+            .await;
+        }
+        let (ws, owner, member, bot, ghost, dead) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let (project, issue, theme_live, theme_dead) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let asset_logo = uuid::Uuid::new_v4();
+        // Seed users: owner/member/bot/ghost/dead; ghost is inactive,
+        // dead is soft-deleted-but-active, bot is excluded from counts.
+        for sql in [
+            format!("INSERT INTO users (id, user_timezone, is_bot, display_name) VALUES ('{owner}', 'UTC', false, 'Owner'), ('{member}', 'Asia/Tokyo', false, 'Member'), ('{bot}', 'UTC', true, 'Bot')"),
+            format!("INSERT INTO workspaces (id, created_at, updated_at, name, logo, slug, organization_size, timezone, background_color, created_by_id, owner_id, updated_by_id) VALUES ('{ws}', now(), now(), 'Acme', NULL, 'acme', NULL, 'UTC', '#FF0000', '{owner}', '{owner}', NULL), (gen_random_uuid(), now(), now(), 'Gone', NULL, 'gone', NULL, 'UTC', '#000000', '{owner}', '{owner}', NULL)"),
+        ] {
+            exec(&pool, &sql).await;
+        }
+        // Memberships: owner (20 live), member (15 live), bot (20 live
+        // but bot), ghost (20 inactive -> role miss, admin hit via the
+        // `is_active`-dropping EXISTS), dead (20 active but
+        // soft-deleted -> both miss).
+        for sql in [
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{owner}', 20, true, NULL), (gen_random_uuid(), '{ws}', '{member}', 15, true, NULL), (gen_random_uuid(), '{ws}', '{bot}', 20, true, NULL), (gen_random_uuid(), '{ws}', '{ghost}', 20, false, NULL), (gen_random_uuid(), '{ws}', '{dead}', 20, true, now())"),
+            format!("INSERT INTO file_assets (id, entity_type, workspace_id, project_id, issue_id, deleted_at) VALUES ('{asset_logo}', 'WORKSPACE_LOGO', '{ws}', NULL, NULL, NULL)"),
+            format!("INSERT INTO workspace_themes (id, created_at, updated_at, name, colors, actor_id, created_by_id, updated_by_id, workspace_id, deleted_at) VALUES ('{theme_live}', now(), now(), 'Live', '{{}}'::jsonb, '{owner}', '{owner}', NULL, '{ws}', NULL), ('{theme_dead}', now(), now(), 'Dead', '{{}}'::jsonb, '{owner}', '{owner}', NULL, '{ws}', now())"),
+            format!("INSERT INTO projects (id, identifier, name, workspace_id) VALUES ('{project}', 'ENG', 'Eng', '{ws}')"),
+            format!("INSERT INTO project_members (id, project_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{project}', '{member}', true, NULL)"),
+            format!("INSERT INTO issues (id, sequence_id) VALUES ('{issue}', 7)"),
+            format!("INSERT INTO issue_activities (id, created_at, updated_at, verb, field, old_value, new_value, project_id, workspace_id, actor_id, issue_id, deleted_at) VALUES (gen_random_uuid(), '2026-09-24T12:00:00Z', now(), 'created', 'state', 'a', 'b', '{project}', '{ws}', '{member}', '{issue}', NULL), (gen_random_uuid(), '2026-09-24T12:00:00Z', now(), 'created', 'comment', NULL, NULL, '{project}', '{ws}', '{member}', '{issue}', NULL), (gen_random_uuid(), '2026-08-01T12:00:00Z', now(), 'created', NULL, NULL, NULL, '{project}', '{ws}', '{member}', '{issue}', NULL)"),
+        ] {
+            exec(&pool, &sql).await;
+        }
+        // Timezone + membership gates.
+        assert_eq!(
+            actor_timezone(&pool, &member).await.expect("tz").name(),
+            "Asia/Tokyo"
+        );
+        assert_eq!(
+            membership_facts(&pool, "acme", &member)
+                .await
+                .expect("facts"),
+            (Some(15), false)
+        );
+        assert_eq!(
+            membership_facts(&pool, "acme", &ghost)
+                .await
+                .expect("facts"),
+            (None, true)
+        );
+        assert_eq!(
+            membership_facts(&pool, "acme", &dead).await.expect("facts"),
+            (None, false)
+        );
+        assert!(actor_timezone(&pool, &uuid::Uuid::new_v4()).await.is_err());
+        // R1 detail: one row, count excludes bot/inactive/soft-deleted
+        // (owner + member only), role key absent (None).
+        let bare = ListFilters {
+            search_patterns: Vec::new(),
+            owner_id: None,
+        };
+        let detail = fetch_workspace_rows(
+            &pool,
+            workspace_detail_select(&bare, true, member, Some("acme")),
+        )
+        .await
+        .expect("detail");
+        assert_eq!(detail.len(), 1);
+        assert_eq!(detail[0].slug, "acme");
+        assert_eq!(detail[0].total_members, Some(2));
+        assert_eq!(detail[0].role, None);
+        // R2: distinct newest-first with role annotation.
+        let mine = fetch_workspace_rows(&pool, my_workspaces_select(&bare, member))
+            .await
+            .expect("mine");
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].role, Some(15));
+        // `?search=` upper-LIKE + `?owner=` filters via parse.
+        let mut search_q = QueryMap::new();
+        search_q.insert(
+            "search".to_owned(),
+            pidash_compat::http::OneOrMany::One("acm".to_owned()),
+        );
+        let filters = parse_list_filters(&pool, &search_q).await.expect("search");
+        assert_eq!(filters.search_patterns.len(), 1);
+        let hit = fetch_workspace_rows(
+            &pool,
+            workspace_detail_select(&filters, true, member, Some("acme")),
+        )
+        .await
+        .expect("search hit");
+        assert_eq!(hit.len(), 1);
+        let mut miss_q = QueryMap::new();
+        miss_q.insert(
+            "search".to_owned(),
+            pidash_compat::http::OneOrMany::One("zzz".to_owned()),
+        );
+        let filters = parse_list_filters(&pool, &miss_q).await.expect("search");
+        let miss = fetch_workspace_rows(
+            &pool,
+            workspace_detail_select(&filters, true, member, Some("acme")),
+        )
+        .await
+        .expect("search miss");
+        assert!(miss.is_empty());
+        let mut owner_q = QueryMap::new();
+        owner_q.insert(
+            "owner".to_owned(),
+            pidash_compat::http::OneOrMany::One(owner.to_string()),
+        );
+        let filters = parse_list_filters(&pool, &owner_q).await.expect("owner");
+        assert_eq!(filters.owner_id, Some(owner));
+        let mut bad_owner = QueryMap::new();
+        bad_owner.insert(
+            "owner".to_owned(),
+            pidash_compat::http::OneOrMany::One(uuid::Uuid::new_v4().to_string()),
+        );
+        assert!(parse_list_filters(&pool, &bad_owner).await.is_err());
+        // Themes: live only, slug join, detail by id.
+        let themes = fetch_theme_rows(&pool, "acme", None).await.expect("themes");
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].4, "Live");
+        let det = fetch_theme_rows(&pool, "acme", Some(theme_live))
+            .await
+            .expect("theme");
+        assert_eq!(det.len(), 1);
+        assert!(fetch_theme_rows(&pool, "acme", Some(theme_dead))
+            .await
+            .expect("dead")
+            .is_empty());
+        // Export: 2026-09-24 UTC keeps the `state` row only (the
+        // `comment` field drops, the August row is out of date).
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 24).unwrap();
+        let exported = export_select("acme", member, member, "UTC", date)
+            .into_model::<ExportSeaRow>()
+            .all(&orm(&pool))
+            .await
+            .expect("export");
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].identifier, "ENG");
+        assert_eq!(exported[0].project_name, "Eng");
+        assert_eq!(exported[0].sequence_id, Some(7));
+        // Logo: asset wins; dangling FK 500s.
+        assert_eq!(
+            resolve_logo_url(&pool, None, Some(asset_logo))
+                .await
+                .expect("logo"),
+            Some(format!("/api/assets/v2/static/{asset_logo}/"))
+        );
+        assert!(resolve_logo_url(&pool, None, Some(uuid::Uuid::new_v4()))
+            .await
+            .is_err());
+        // FK validation: live asset resolves, missing misses.
+        let ok = validate_pk_field(
+            &pool,
+            InputValue::Value(&Value::String(asset_logo.to_string())),
+            false,
+        )
+        .await
+        .expect("pk");
+        assert!(matches!(ok, PrimaryKeyOutcome::Value(Some(id)) if id == asset_logo));
+        // Theme write round-trip via the entity (create already
+        // covered by handlers; update/delete run here).
+        let now = chrono::Utc::now();
+        let mut tuple = det[0].clone();
+        let validated = ValidatedTheme {
+            deleted_at: Some(None),
+            name: Some("Renamed".to_owned()),
+            colors: None,
+        };
+        apply_theme_update(&pool, &mut tuple, &validated, &member, now)
+            .await
+            .expect("theme update");
+        assert_eq!(tuple.4, "Renamed");
+        // Soft-delete the theme via update_many, then it disappears.
+        workspace_themes::Entity::update_many()
+            .col_expr(workspace_themes::Column::DeletedAt, Expr::value(now))
+            .col_expr(workspace_themes::Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                workspace_themes::Column::UpdatedById,
+                Expr::value(Some(member)),
+            )
+            .filter(workspace_themes::Column::Id.eq(theme_live))
+            .exec(&orm(&pool))
+            .await
+            .expect("theme delete");
+        assert!(fetch_theme_rows(&pool, "acme", Some(theme_live))
+            .await
+            .expect("gone")
+            .is_empty());
+        // Slug uniqueness probe (validate_slug_field inner shape).
+        let taken: Option<uuid::Uuid> = workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&orm(&pool))
+            .await
+            .expect("slug");
+        assert_eq!(taken, Some(ws));
     }
 }

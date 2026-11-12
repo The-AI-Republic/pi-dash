@@ -168,3 +168,38 @@ def test_destroy(api, seed, tenant_a, project_a, auth_a, module_a):
 def test_requires_auth(api, tenant_a, project_a, module_a):
     r = api.get(_links_url(tenant_a, project_a, module_a))
     assert r.status_code == 401, r.text
+
+
+def test_create_url_with_at_in_query_or_fragment_accepted(api, tenant_a, project_a, auth_a, module_a):
+    # PIDASHCONV-1425: an `@` past the netloc is not userinfo — urlsplit
+    # ends the authority at the first `/`, `?` or `#`, and Django's
+    # URLValidator userinfo group backtracks to the no-userinfo reading.
+    cases = [
+        "https://example.com?email=user@gmail.com&ref=x",
+        "https://example.com#user@gmail.com",
+        "http://example.com:8080?x=a@b",
+    ]
+    for url in cases:
+        r = api.post(
+            _links_url(tenant_a, project_a, module_a), headers=auth_a,
+            json={"title": "Tracked", "url": url},
+        )
+        assert r.status_code == 201, (url, r.text)
+        assert r.json()["url"] == url, url
+
+
+def test_create_nfkc_lookalike_netloc_rejected(api, tenant_a, project_a, auth_a, module_a):
+    # PIDASHCONV-1425: urlsplit raises ValueError when NFKC maps a netloc
+    # char onto a delimiter (fullwidth solidus U+FF0F, fullwidth
+    # commercial at U+FF20), so Django rejects these.
+    cases = [
+        "https://example\uff0fevil.com",
+        "https://a.com\uff20b.com",
+    ]
+    for url in cases:
+        r = api.post(
+            _links_url(tenant_a, project_a, module_a), headers=auth_a,
+            json={"title": "Lookalike", "url": url},
+        )
+        assert r.status_code == 400, (url, r.text)
+        assert r.json() == {"url": ["Enter a valid URL."]}, url

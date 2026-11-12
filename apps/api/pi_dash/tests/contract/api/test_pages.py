@@ -8,6 +8,10 @@ These are the only way an agent (``pidash page …``, the MCP page tool) can
 read a project wiki, so the contract under test is the *caller's* view:
 who can see which page, what a list row carries, and what a detail payload
 carries.
+
+``TestAppPageDetailSnapshot`` is the one exception: it pins the ``/api/``
+(session) detail read the page canvas itself uses, which additionally
+carries the stored ``description_json`` snapshot (NEWFRONT-932).
 """
 
 import pytest
@@ -38,10 +42,13 @@ def other_user(db):
     )
 
 
-def _make_page(project, owner, *, name="A page", html="<p>body</p>", access=0, archived_at=None, parent=None):
+def _make_page(
+    project, owner, *, name="A page", html="<p>body</p>", json=None, access=0, archived_at=None, parent=None
+):
     page = Page.objects.create(
         name=name,
         description_html=html,
+        description_json={} if json is None else json,
         owned_by=owner,
         access=access,
         archived_at=archived_at,
@@ -278,3 +285,47 @@ class TestPageDetail:
         )
 
         assert response.status_code == http_status.HTTP_404_NOT_FOUND
+
+
+def _app_detail_url(slug, project_id, page_id):
+    return f"/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/"
+
+
+@pytest.mark.contract
+@pytest.mark.django_db
+class TestAppPageDetailSnapshot:
+    """The session detail read carries the structured snapshot (NEWFRONT-932)."""
+
+    def test_detail_carries_the_stored_snapshot(self, session_client, workspace, page_project, create_user):
+        snapshot = {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "before embed"}]},
+                {"type": "issue-embed-component", "attrs": {"entity_identifier": "ISS-1"}},
+            ],
+        }
+        page = _make_page(page_project, create_user, html="<p>before embed</p>", json=snapshot)
+
+        response = session_client.get(
+            _app_detail_url(workspace.slug, page_project.id, page.id), {"track_visit": "false"}
+        )
+
+        assert response.status_code == http_status.HTTP_200_OK
+        assert response.data["description_html"] == "<p>before embed</p>"
+        assert response.data["description_json"] == snapshot
+
+    def test_record_patch_cannot_overwrite_the_snapshot(
+        self, session_client, workspace, page_project, create_user
+    ):
+        page = _make_page(page_project, create_user, json={"type": "doc", "content": []})
+
+        response = session_client.patch(
+            _app_detail_url(workspace.slug, page_project.id, page.id),
+            {"name": "Renamed", "description_json": {"type": "doc", "content": [{"type": "paragraph"}]}},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_200_OK
+        assert response.data["name"] == "Renamed"
+        page.refresh_from_db()
+        assert page.description_json == {"type": "doc", "content": []}

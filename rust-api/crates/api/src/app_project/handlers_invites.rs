@@ -32,8 +32,9 @@
 //!   (401), the `project_id` rewrite for authenticated callers only (404
 //!   `{"Detail":"Project not found"}` on a miss — the rewrite runs even on
 //!   the `AllowAny` join routes, where authentication still runs), then the
-//!   L7 gate (403), then body parsing (415 / axum rejection; empty body is
-//!   `{}` per the cycles live probe), then the handler.
+//!   L7 gate (403), then body parsing (JSON / form / multipart via the
+//!   shared DRF negotiation, 415 / axum rejection; empty body is `{}` per
+//!   the cycles live probe), then the handler.
 //! * Reads render through the L2/L1 kernels
 //!   (`ser_member::invite_to_representation`, `ser_project::DeployBoardRead`)
 //!   with datetimes in the caller's zone (`crate::serializer`, `Z` rewrite)
@@ -65,8 +66,10 @@
 //!   requested role (yes, 200, ported as-is), then bulk-creates the
 //!   invites and enqueues `project_invitation.delay(email, project_id,
 //!   token, current_site, inviter)` once per row.
-//! * Favorites list 500s: the viewset has no `serializer_class`, so the
-//!   DRF-default list raises `AssertionError` (FX-APROJ-06/08).
+//! * Favorites list (re-synced to the PDASHOSS01-293 Django fix — PB-0500
+//!   retired): the pre-fix port always 500ed (no `serializer_class`,
+//!   FX-APROJ-06/08 are the pre-fix probe records); the fixed viewset
+//!   lists through `UserFavoriteSerializer`, 200.
 //! * Board retrieve / partial_update / destroy look the row up globally:
 //!   `DeployBoardViewSet` defines no `get_queryset`, so any live board UUID
 //!   resolves regardless of workspace or project.
@@ -100,20 +103,32 @@ use axum::routing::{delete, get};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, FromQueryResult, JoinType,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
-use sqlx::Row;
 
 use crate::app_project::gates::{
     decide_gate, decide_project_member_gate, gate_for, tenant_context, GateOutcome, ANON_BODY,
     CLASS_DENIED_BODY, FORBIDDEN_BODY,
 };
 use crate::license::{resolve_actor, Actor};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::project::ProjectFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::{empty_response, json_response};
+use pidash_db::entity::{
+    deploy_boards as db_entity, file_assets as fa_entity, project_member_invites as pmi_entity,
+    project_members as pm_entity, project_user_properties as pup_entity, projects as proj_entity,
+    user_favorites as uf_entity, users as user_entity, workspace_members as wm_entity,
+    workspaces as ws_entity,
+};
 use pidash_services::app_project::ser_member::{
     invite_to_representation, project_lite_to_representation, resolve_workspace_logo_url,
     workspace_lite_to_representation, ProjectLiteRow, ProjectMemberInviteRow, WorkspaceLiteRow,
@@ -123,6 +138,7 @@ use pidash_services::app_project::tasks::{
     invite_token, INTEGRITY_ERROR_BODY, OBJECT_NOT_FOUND_BODY, SERVER_ERROR_BODY,
     VALIDATION_ERROR_BODY,
 };
+use pidash_services::domain::workspaces::members;
 use pidash_types::{ProjectId, WorkspaceId};
 
 // ---------------------------------------------------------------------------
@@ -262,7 +278,7 @@ const SECRET_JOIN_BODY: &str = r#"{"error":"Only workspace admins can join priva
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
-enum Denial {
+pub(crate) enum Denial {
     /// 401, DRF `NotAuthenticated`.
     Unauthorized,
     /// 403, `@allow_permission` body.
@@ -320,22 +336,6 @@ impl IntoResponse for Denial {
     }
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("invite response")
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::empty())
-        .expect("empty invite response")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
@@ -356,17 +356,6 @@ fn gate_denial(outcome: GateOutcome, class_gate: bool) -> Denial {
     }
 }
 
-/// Whether a sqlx failure is an integrity-constraint (`23xxx`) failure.
-fn is_integrity_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db) => db
-            .code()
-            .as_deref()
-            .is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
-}
-
 /// `handle_exception` `IntegrityError` → 400 `The payload is not valid`:
 /// any `23xxx` database failure on a write. Anything else is the generic
 /// 500 (Django's `DataError` included).
@@ -376,6 +365,17 @@ fn integrity_denial(err: sqlx::Error) -> Denial {
     } else {
         Denial::ServerError
     }
+}
+
+/// The shared SeaORM connection over an sqlx pool (no I/O — it wraps the
+/// pool).
+fn sea_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// [`integrity_denial`] over a SeaORM failure.
+fn orm_integrity_denial(err: sea_orm::DbErr) -> Denial {
+    integrity_denial(pidash_db::orm_tx::into_sqlx(err))
 }
 
 // ---------------------------------------------------------------------------
@@ -448,17 +448,19 @@ async fn resolve_project_id(
     // match on the upper-cased input uses the plain btree
     // (`db/models/project.py:200-212`); no `__iexact`, same as Python.
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL
-           ORDER BY p.created_at DESC LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ResolveNotFound)
+    let row = proj_entity::Entity::find()
+        .select_only()
+        .column(proj_entity::Column::Id)
+        .join(JoinType::InnerJoin, proj_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(proj_entity::Column::Identifier.eq(upper))
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .order_by_desc(proj_entity::Column::CreatedAt)
+        .into_tuple::<uuid::Uuid>()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ResolveNotFound)
 }
 
 /// Membership roles for one `(slug, user)`: the workspace role plus every
@@ -471,31 +473,23 @@ async fn membership(
     slug: &str,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i16>, Vec<(uuid::Uuid, i16)>), Denial> {
-    let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let project_roles: Vec<(uuid::Uuid, Option<i16>)> = sqlx::query_as(
-        r#"SELECT pm.project_id, pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let project_roles = project_roles
-        .into_iter()
-        .filter_map(|(id, role)| role.map(|role| (id, role)))
-        .collect();
-    Ok((workspace_role.and_then(|row| row.0), project_roles))
+    let db = sea_conn(pool);
+    let workspace_role = crate::app_issues::access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_roles = pm_entity::Entity::find()
+        .select_only()
+        .columns([pm_entity::Column::ProjectId, pm_entity::Column::Role])
+        .join(JoinType::InnerJoin, pm_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(pm_entity::Column::MemberId.eq(*user_id))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(pm_entity::Column::DeletedAt.is_null())
+        .into_tuple::<(uuid::Uuid, i16)>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok((workspace_role, project_roles))
 }
 
 /// Build the [`AllowFacts`] for one decorator gate from the membership rows.
@@ -593,47 +587,144 @@ async fn check_board_gate(
     }
 }
 
+/// HTML-input shape for the five invite handlers that read
+/// `request.data` directly (`invite.py`, `base.py` favorites +
+/// board-create): DRF applies no serializer `get_value` rules there —
+/// `QueryDict.get` returns the last value verbatim — so no field is a
+/// list and no blank is skipped (PIDASHCONV-1508).
+const INVITE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &[],
+    };
+
+/// HTML-input shape for the board PATCH (serializer-validated): a blank
+/// boolean behaves as absent (DRF `Field.get_value` — not required, no
+/// `allow_blank`, no `allow_null`), and so does a blank `updated_by`
+/// (the PATCH always re-stamps it to the caller, so absent and `None`
+/// converge — verified live, PIDASHCONV-1508).
+const BOARD_PATCH_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &[
+            "is_comments_enabled",
+            "is_reactions_enabled",
+            "is_votes_enabled",
+            "is_activity_enabled",
+            "is_disabled",
+            "updated_by",
+        ],
+    };
+
+/// Parse a form/multipart body through the shared DRF negotiation
+/// (PIDASHCONV-1508): the text map with the domain's HTML-input
+/// semantics. Uploaded files are dropped — no invite field is a file
+/// field (same convention as PIDASHCONV-1391).
+#[allow(clippy::result_large_err)]
+fn parse_html_body(
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<Value, Response> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, spec) {
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(Value::Object(map)),
+        // Content-Length says empty (a header/body mismatch — the divert
+        // only runs on non-empty bytes): `{}` like the empty arm below.
+        Ok(NegotiatedBody::Empty) => Ok(Value::Object(Map::new())),
+        // Unreachable by selection (the divert only runs on the HTML
+        // mimes): decode defensively, 500 when the text is not JSON.
+        Ok(NegotiatedBody::JsonText { text, .. }) => {
+            serde_json::from_str(&text).map_err(|_| Denial::ServerError.into_response())
+        }
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::Raw(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("{{\"detail\":{}}}", json_string(&detail)),
+        )
+        .into_response()),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            format!("{{\"detail\":{}}}", json_string(&detail)),
+        )
+        .into_response()),
+        Err(BodyError::ServerError) => Err(Denial::ServerError.into_response()),
+    }
+}
+
 /// Bodies parse after the gate (the handler builds on `request.data`):
 /// an empty body is `{}` (DRF never raises `ParseError` on it — the
-/// cycles live probe); a non-empty body without a JSON content type
-/// answers the `UnsupportedMediaType` 415 naming the content type
-/// (`text/plain` when missing); otherwise axum's `Json` rejection bytes
-/// apply (malformed JSON stays DRF-unmatched — its messages carry parser
-/// positions serde cannot reproduce — documented, never hit by the suite).
+/// cycles live probe); form and multipart bodies parse through the
+/// shared DRF negotiation (PIDASHCONV-1508); a non-empty body whose
+/// content type the JSON parser does not satisfy answers the
+/// `UnsupportedMediaType` 415 naming the content type verbatim (empty
+/// when the header is missing — uvicorn/prod; runserver's `text/plain`
+/// there is a wsgiref artifact the port does not reproduce); otherwise
+/// axum's `Json` rejection bytes apply (malformed JSON stays
+/// DRF-unmatched — its messages carry parser positions serde cannot
+/// reproduce — documented, never hit by the suite). The flag reports
+/// HTML (form/multipart) input so the board PATCH can apply the
+/// serializer's HTML-only rules.
 #[allow(clippy::result_large_err)]
-async fn parse_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
+async fn parse_body(
+    state: &AppState,
+    req: axum::extract::Request,
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<(Value, bool), Response> {
     use axum::extract::FromRequest;
-    let (parts, body) = req.into_parts();
-    // Same default limit as axum's `Json` (2 MiB).
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let (mut parts, body) = req.into_parts();
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Ok((Value::Object(Map::new()), false));
     }
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+    // Latin-1, like `negotiate_body`'s read: obs-text bytes name verbatim
+    // in the 415 (PIDASHCONV-1537); `to_str().ok()` blanked them to "".
+    let content_type = crate::v1_cycles_modules::body::header_str(&parts.headers, "content-type");
     let mime = content_type.split(';').next().unwrap_or("").trim();
-    if !mime.eq_ignore_ascii_case("application/json") {
-        let named = if content_type.is_empty() {
-            "text/plain"
-        } else {
-            content_type
-        };
+    if mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data")
+    {
+        return parse_html_body(&parts.headers, &bytes, spec).map(|body| (body, true));
+    }
+    if !matches_json_parser(&content_type) {
         // DRF `UnsupportedMediaType` (`detail`, lowercase; the media
         // type quotes are part of the message — live probe 2026-10-03).
-        let message = format!("Unsupported media type \"{named}\" in request.");
+        let message = format!("Unsupported media type \"{content_type}\" in request.");
         let body = format!("{{\"detail\":{}}}", json_string(&message));
         return Err(Denial::Raw(StatusCode::UNSUPPORTED_MEDIA_TYPE, body).into_response());
     }
+    // A wildcard content type selects the JSON parser (DRF `select_parser`
+    // first-match): normalize the header so axum's `Json` extractor takes
+    // the same path — and renders the same rejection bytes — as a plain
+    // `application/json` request.
+    if !mime.eq_ignore_ascii_case("application/json") {
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
+    }
     let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
     match axum::Json::<Value>::from_request(req, state).await {
-        Ok(axum::Json(body)) => Ok(body),
+        Ok(axum::Json(body)) => Ok((body, false)),
         Err(rejection) => Err(rejection.into_response()),
     }
+}
+
+/// DRF `media_type_matches('application/json', content_type)`
+/// (`rest_framework/utils/mediatypes.py:_MediaType.match` with the parser
+/// side holding no params and no wildcards): the JSON parser is first in
+/// `DEFAULT_PARSER_CLASSES` (no override in `settings/common.py`), so any
+/// content type it satisfies parses as JSON — `application/json` in any
+/// case with any params, plus the `*/*`, `application/*` (and `*/json`)
+/// request-side wildcards. The `v1_cycles_modules::body` `select_parser`
+/// precedent (PIDASHCONV-627); form/multipart divert to `parse_html_body`
+/// above (PIDASHCONV-1508), never reach this check.
+fn matches_json_parser(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    let Some((main, sub)) = base.split_once('/') else {
+        return false;
+    };
+    (main == "*" || main.eq_ignore_ascii_case("application"))
+        && (sub == "*" || sub.eq_ignore_ascii_case("json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -754,32 +845,43 @@ async fn fetch_asset_urls(
     if asset_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders: Vec<String> = (1..=asset_ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT a.id, a.entity_type, w.slug AS workspace_slug, a.project_id, a.issue_id
-         FROM file_assets a LEFT JOIN workspaces w ON w.id = a.workspace_id
-         WHERE a.id IN ({}) AND a.deleted_at IS NULL",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query(&sql);
-    for id in asset_ids {
-        query = query.bind(*id);
+    #[derive(Debug, FromQueryResult)]
+    struct AssetFetched {
+        id: uuid::Uuid,
+        entity_type: Option<String>,
+        workspace_slug: Option<String>,
+        project_id: Option<uuid::Uuid>,
+        issue_id: Option<uuid::Uuid>,
     }
-    let rows = query
-        .fetch_all(pool)
+    let rows = fa_entity::Entity::find()
+        .select_only()
+        .columns([
+            fa_entity::Column::Id,
+            fa_entity::Column::EntityType,
+            fa_entity::Column::ProjectId,
+            fa_entity::Column::IssueId,
+        ])
+        .column_as(ws_entity::Column::Slug, "workspace_slug")
+        .join(
+            JoinType::LeftJoin,
+            fa_entity::Entity::belongs_to(ws_entity::Entity)
+                .from(fa_entity::Column::WorkspaceId)
+                .to(ws_entity::Column::Id)
+                .into(),
+        )
+        .filter(fa_entity::Column::Id.is_in(asset_ids.to_vec()))
+        .filter(fa_entity::Column::DeletedAt.is_null())
+        .into_model::<AssetFetched>()
+        .all(&sea_conn(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     for row in rows {
         let asset = AssetRef {
-            id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-            entity_type: row
-                .try_get("entity_type")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_slug: row
-                .try_get("workspace_slug")
-                .map_err(|_| Denial::ServerError)?,
-            project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-            issue_id: row.try_get("issue_id").map_err(|_| Denial::ServerError)?,
+            id: row.id,
+            entity_type: row.entity_type,
+            workspace_slug: row.workspace_slug,
+            project_id: row.project_id,
+            issue_id: row.issue_id,
         };
         if let Some(url) = render_asset_url(&asset) {
             out.insert(asset.id, url);
@@ -796,16 +898,17 @@ async fn fetch_asset_urls(
 /// `select_related("project", "workspace")` half of the invite querysets
 /// (`invite.py:49-50,125`). Forward-FK joins carry no related-manager
 /// filter — a soft-deleted project or workspace still renders.
+#[derive(Debug, Clone, FromQueryResult)]
 struct InviteRow {
     id: uuid::Uuid,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     email: String,
     accepted: bool,
     token: String,
     message: Option<String>,
-    responded_at: Option<chrono::DateTime<chrono::Utc>>,
+    responded_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     role: i16,
     created_by_id: Option<uuid::Uuid>,
     updated_by_id: Option<uuid::Uuid>,
@@ -822,69 +925,41 @@ struct InviteRow {
     workspace_logo_asset_id: Option<uuid::Uuid>,
 }
 
-const INVITE_SELECT: &str = "i.id, i.created_at, i.updated_at, i.deleted_at, i.email, i.accepted, \
-     i.token, i.message, i.responded_at, i.role, i.created_by_id, i.updated_by_id, \
-     p.id AS project_id, p.identifier AS project_identifier, p.name AS project_name, \
-     p.logo_props AS project_logo_props, p.description AS project_description, \
-     p.is_default AS project_is_default, \
-     w.id AS workspace_id, w.name AS workspace_name, w.slug AS workspace_slug, \
-     w.logo AS workspace_logo, w.logo_asset_id AS workspace_logo_asset_id \
-     FROM project_member_invites i \
-     JOIN projects p ON p.id = i.project_id \
-     JOIN workspaces w ON w.id = i.workspace_id";
-
-fn invite_row(row: &sqlx::postgres::PgRow) -> Result<InviteRow, Denial> {
-    Ok(InviteRow {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-        deleted_at: row.try_get("deleted_at").map_err(|_| Denial::ServerError)?,
-        email: row.try_get("email").map_err(|_| Denial::ServerError)?,
-        accepted: row.try_get("accepted").map_err(|_| Denial::ServerError)?,
-        token: row.try_get("token").map_err(|_| Denial::ServerError)?,
-        message: row.try_get("message").map_err(|_| Denial::ServerError)?,
-        responded_at: row
-            .try_get("responded_at")
-            .map_err(|_| Denial::ServerError)?,
-        role: row.try_get("role").map_err(|_| Denial::ServerError)?,
-        created_by_id: row
-            .try_get("created_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        updated_by_id: row
-            .try_get("updated_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-        project_identifier: row
-            .try_get("project_identifier")
-            .map_err(|_| Denial::ServerError)?,
-        project_name: row
-            .try_get("project_name")
-            .map_err(|_| Denial::ServerError)?,
-        project_logo_props: row
-            .try_get("project_logo_props")
-            .map_err(|_| Denial::ServerError)?,
-        project_description: row
-            .try_get("project_description")
-            .map_err(|_| Denial::ServerError)?,
-        project_is_default: row
-            .try_get("project_is_default")
-            .map_err(|_| Denial::ServerError)?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|_| Denial::ServerError)?,
-        workspace_name: row
-            .try_get("workspace_name")
-            .map_err(|_| Denial::ServerError)?,
-        workspace_slug: row
-            .try_get("workspace_slug")
-            .map_err(|_| Denial::ServerError)?,
-        workspace_logo: row
-            .try_get("workspace_logo")
-            .map_err(|_| Denial::ServerError)?,
-        workspace_logo_asset_id: row
-            .try_get("workspace_logo_asset_id")
-            .map_err(|_| Denial::ServerError)?,
-    })
+fn invite_select() -> sea_orm::Select<pmi_entity::Entity> {
+    pmi_entity::Entity::find()
+        .select_only()
+        .columns([
+            pmi_entity::Column::Id,
+            pmi_entity::Column::CreatedAt,
+            pmi_entity::Column::UpdatedAt,
+            pmi_entity::Column::DeletedAt,
+            pmi_entity::Column::Email,
+            pmi_entity::Column::Accepted,
+            pmi_entity::Column::Token,
+            pmi_entity::Column::Message,
+            pmi_entity::Column::RespondedAt,
+            pmi_entity::Column::Role,
+            pmi_entity::Column::CreatedById,
+            pmi_entity::Column::UpdatedById,
+        ])
+        .column_as(proj_entity::Column::Id, "project_id")
+        .column_as(proj_entity::Column::Identifier, "project_identifier")
+        .column_as(proj_entity::Column::Name, "project_name")
+        .column_as(proj_entity::Column::CoverImage, "project_cover_image")
+        .column_as(
+            proj_entity::Column::CoverImageAssetId,
+            "project_cover_asset_id",
+        )
+        .column_as(proj_entity::Column::LogoProps, "project_logo_props")
+        .column_as(proj_entity::Column::Description, "project_description")
+        .column_as(proj_entity::Column::IsDefault, "project_is_default")
+        .column_as(ws_entity::Column::Id, "workspace_id")
+        .column_as(ws_entity::Column::Name, "workspace_name")
+        .column_as(ws_entity::Column::Slug, "workspace_slug")
+        .column_as(ws_entity::Column::Logo, "workspace_logo")
+        .column_as(ws_entity::Column::LogoAssetId, "workspace_logo_asset_id")
+        .join(JoinType::InnerJoin, pmi_entity::Relation::Projects.def())
+        .join(JoinType::InnerJoin, pmi_entity::Relation::Workspaces.def())
 }
 
 /// `ProjectInvitationsViewset.get_queryset` (`invite.py:43-51`): live
@@ -896,17 +971,15 @@ async fn fetch_invites(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<Vec<InviteRow>, Denial> {
-    let sql = format!(
-        "SELECT {INVITE_SELECT} WHERE i.deleted_at IS NULL AND w.slug = $1 AND i.project_id = $2 \
-         ORDER BY i.created_at DESC"
-    );
-    let rows = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .fetch_all(pool)
+    invite_select()
+        .filter(pmi_entity::Column::DeletedAt.is_null())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(pmi_entity::Column::ProjectId.eq(*project_id))
+        .order_by_desc(pmi_entity::Column::CreatedAt)
+        .into_model::<InviteRow>()
+        .all(&sea_conn(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(invite_row).collect()
+        .map_err(|_| Denial::ServerError)
 }
 
 /// One invite over the scoped queryset (DRF-default `get_object()`:
@@ -917,20 +990,15 @@ async fn fetch_invite_one(
     project_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<InviteRow, Denial> {
-    let sql = format!(
-        "SELECT {INVITE_SELECT} WHERE i.deleted_at IS NULL AND w.slug = $1 AND i.project_id = $2 \
-         AND i.id = $3"
-    );
-    let row = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(pk)
-        .fetch_optional(pool)
+    invite_select()
+        .filter(pmi_entity::Column::DeletedAt.is_null())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(pmi_entity::Column::ProjectId.eq(*project_id))
+        .filter(pmi_entity::Column::Id.eq(*pk))
+        .into_model::<InviteRow>()
+        .one(&sea_conn(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.as_ref()
-        .map(invite_row)
-        .transpose()?
+        .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::InviteNotFound)
 }
 
@@ -941,26 +1009,18 @@ async fn fetch_user_invites(
     pool: &sqlx::PgPool,
     email: Option<&str>,
 ) -> Result<Vec<InviteRow>, Denial> {
-    let sql = if email.is_some() {
-        format!(
-            "SELECT {INVITE_SELECT} WHERE i.deleted_at IS NULL AND i.email = $1 \
-             ORDER BY i.created_at DESC"
-        )
-    } else {
-        format!(
-            "SELECT {INVITE_SELECT} WHERE i.deleted_at IS NULL AND i.email IS NULL \
-             ORDER BY i.created_at DESC"
-        )
+    let mut select = invite_select()
+        .filter(pmi_entity::Column::DeletedAt.is_null())
+        .order_by_desc(pmi_entity::Column::CreatedAt);
+    select = match email {
+        Some(email) => select.filter(pmi_entity::Column::Email.eq(email)),
+        None => select.filter(pmi_entity::Column::Email.is_null()),
     };
-    let mut query = sqlx::query(&sql);
-    if let Some(email) = email {
-        query = query.bind(email);
-    }
-    let rows = query
-        .fetch_all(pool)
+    select
+        .into_model::<InviteRow>()
+        .all(&sea_conn(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(invite_row).collect()
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `ProjectJoinEndpoint.get` / `.post` lookup (`invite.py:187,252`):
@@ -973,24 +1033,19 @@ async fn fetch_join_invite(
     project_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<InviteRow, Denial> {
-    let sql = format!(
-        "SELECT {INVITE_SELECT} WHERE i.deleted_at IS NULL AND w.slug = $1 AND i.project_id = $2 \
-         AND i.id = $3"
-    );
-    let rows = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(pk)
-        .fetch_all(pool)
+    let rows = invite_select()
+        .filter(pmi_entity::Column::DeletedAt.is_null())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(pmi_entity::Column::ProjectId.eq(*project_id))
+        .filter(pmi_entity::Column::Id.eq(*pk))
+        .into_model::<InviteRow>()
+        .all(&sea_conn(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     if rows.len() > 1 {
         return Err(Denial::ServerError);
     }
-    rows.first()
-        .map(invite_row)
-        .transpose()?
-        .ok_or(Denial::ObjectNotFound)
+    rows.into_iter().next().ok_or(Denial::ObjectNotFound)
 }
 
 /// Rendered strings owned by the caller so the borrowed L2 views can
@@ -1013,20 +1068,17 @@ fn render_invite(
     tz: &Tz,
     assets: &HashMap<uuid::Uuid, String>,
 ) -> (RenderedInvite, Value) {
+    let render_dt = |value: &sea_orm::prelude::DateTimeWithTimeZone| {
+        crate::serializer::render_datetime_in(&value.with_timezone(&chrono::Utc), tz)
+    };
     let rendered = RenderedInvite {
         id: row.id.to_string(),
         project_id: row.project_id.to_string(),
         workspace_id: row.workspace_id.to_string(),
-        created_at: crate::serializer::render_datetime_in(&row.created_at, tz),
-        updated_at: crate::serializer::render_datetime_in(&row.updated_at, tz),
-        deleted_at: row
-            .deleted_at
-            .as_ref()
-            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
-        responded_at: row
-            .responded_at
-            .as_ref()
-            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
+        created_at: render_dt(&row.created_at),
+        updated_at: render_dt(&row.updated_at),
+        deleted_at: row.deleted_at.as_ref().map(render_dt),
+        responded_at: row.responded_at.as_ref().map(render_dt),
         created_by: row.created_by_id.map(|id| id.to_string()),
         updated_by: row.updated_by_id.map(|id| id.to_string()),
         logo_url: resolve_workspace_logo_url(
@@ -1110,95 +1162,110 @@ struct BoardRow {
     project_is_default: Option<bool>,
 }
 
-const BOARD_SELECT: &str = "b.id, b.created_at, b.updated_at, b.deleted_at, b.entity_identifier, \
-     b.entity_name, b.anchor, b.is_comments_enabled, b.is_reactions_enabled, b.is_votes_enabled, \
-     b.view_props, b.is_activity_enabled, b.is_disabled, b.created_by_id, b.updated_by_id, \
-     b.workspace_id, w.name AS workspace_name, w.slug AS workspace_slug, \
-     w.logo AS workspace_logo, w.logo_asset_id AS workspace_logo_asset_id, \
-     p.id AS project_id, p.identifier AS project_identifier, p.name AS project_name, \
-     p.logo_props AS project_logo_props, p.description AS project_description, \
-     p.is_default AS project_is_default, b.project_id AS board_project_id, b.intake_id AS intake_id \
-     FROM deploy_boards b \
-     JOIN workspaces w ON w.id = b.workspace_id \
-     LEFT JOIN projects p ON p.id = b.project_id";
+#[derive(Debug, FromQueryResult)]
+struct BoardFull {
+    id: uuid::Uuid,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    entity_identifier: Option<uuid::Uuid>,
+    entity_name: Option<String>,
+    anchor: String,
+    is_comments_enabled: bool,
+    is_reactions_enabled: bool,
+    is_votes_enabled: bool,
+    view_props: Value,
+    is_activity_enabled: bool,
+    is_disabled: bool,
+    created_by_id: Option<uuid::Uuid>,
+    updated_by_id: Option<uuid::Uuid>,
+    workspace_id: uuid::Uuid,
+    workspace_name: String,
+    workspace_slug: String,
+    workspace_logo: Option<String>,
+    workspace_logo_asset_id: Option<uuid::Uuid>,
+    project_identifier: Option<String>,
+    project_name: Option<String>,
+    project_cover_image: Option<String>,
+    project_cover_asset_id: Option<uuid::Uuid>,
+    project_logo_props: Option<Value>,
+    project_description: Option<String>,
+    project_is_default: Option<bool>,
+    board_project_id: Option<uuid::Uuid>,
+    intake_id: Option<uuid::Uuid>,
+}
 
-fn board_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<(BoardRow, Option<uuid::Uuid>, Option<uuid::Uuid>), Denial> {
-    let board_project_id: Option<uuid::Uuid> = row
-        .try_get("board_project_id")
-        .map_err(|_| Denial::ServerError)?;
-    let intake_id: Option<uuid::Uuid> =
-        row.try_get("intake_id").map_err(|_| Denial::ServerError)?;
-    Ok((
-        BoardRow {
-            id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-            created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-            updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-            deleted_at: row.try_get("deleted_at").map_err(|_| Denial::ServerError)?,
-            entity_identifier: row
-                .try_get("entity_identifier")
-                .map_err(|_| Denial::ServerError)?,
-            entity_name: row
-                .try_get("entity_name")
-                .map_err(|_| Denial::ServerError)?,
-            anchor: row.try_get("anchor").map_err(|_| Denial::ServerError)?,
-            is_comments_enabled: row
-                .try_get("is_comments_enabled")
-                .map_err(|_| Denial::ServerError)?,
-            is_reactions_enabled: row
-                .try_get("is_reactions_enabled")
-                .map_err(|_| Denial::ServerError)?,
-            is_votes_enabled: row
-                .try_get("is_votes_enabled")
-                .map_err(|_| Denial::ServerError)?,
-            view_props: row.try_get("view_props").map_err(|_| Denial::ServerError)?,
-            is_activity_enabled: row
-                .try_get("is_activity_enabled")
-                .map_err(|_| Denial::ServerError)?,
-            is_disabled: row
-                .try_get("is_disabled")
-                .map_err(|_| Denial::ServerError)?,
-            created_by_id: row
-                .try_get("created_by_id")
-                .map_err(|_| Denial::ServerError)?,
-            updated_by_id: row
-                .try_get("updated_by_id")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_id: row
-                .try_get("workspace_id")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_name: row
-                .try_get("workspace_name")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_slug: row
-                .try_get("workspace_slug")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_logo: row
-                .try_get("workspace_logo")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_logo_asset_id: row
-                .try_get("workspace_logo_asset_id")
-                .map_err(|_| Denial::ServerError)?,
-            project_identifier: row
-                .try_get("project_identifier")
-                .map_err(|_| Denial::ServerError)?,
-            project_name: row
-                .try_get("project_name")
-                .map_err(|_| Denial::ServerError)?,
-            project_logo_props: row
-                .try_get("project_logo_props")
-                .map_err(|_| Denial::ServerError)?,
-            project_description: row
-                .try_get("project_description")
-                .map_err(|_| Denial::ServerError)?,
-            project_is_default: row
-                .try_get("project_is_default")
-                .map_err(|_| Denial::ServerError)?,
-        },
-        board_project_id,
-        intake_id,
-    ))
+fn board_select() -> sea_orm::Select<db_entity::Entity> {
+    db_entity::Entity::find()
+        .select_only()
+        .columns([
+            db_entity::Column::Id,
+            db_entity::Column::CreatedAt,
+            db_entity::Column::UpdatedAt,
+            db_entity::Column::DeletedAt,
+            db_entity::Column::EntityIdentifier,
+            db_entity::Column::EntityName,
+            db_entity::Column::Anchor,
+            db_entity::Column::IsCommentsEnabled,
+            db_entity::Column::IsReactionsEnabled,
+            db_entity::Column::IsVotesEnabled,
+            db_entity::Column::ViewProps,
+            db_entity::Column::IsActivityEnabled,
+            db_entity::Column::IsDisabled,
+            db_entity::Column::CreatedById,
+            db_entity::Column::UpdatedById,
+            db_entity::Column::WorkspaceId,
+        ])
+        .column_as(ws_entity::Column::Name, "workspace_name")
+        .column_as(ws_entity::Column::Slug, "workspace_slug")
+        .column_as(ws_entity::Column::Logo, "workspace_logo")
+        .column_as(ws_entity::Column::LogoAssetId, "workspace_logo_asset_id")
+        .column_as(proj_entity::Column::Identifier, "project_identifier")
+        .column_as(proj_entity::Column::Name, "project_name")
+        .column_as(proj_entity::Column::CoverImage, "project_cover_image")
+        .column_as(
+            proj_entity::Column::CoverImageAssetId,
+            "project_cover_asset_id",
+        )
+        .column_as(proj_entity::Column::LogoProps, "project_logo_props")
+        .column_as(proj_entity::Column::Description, "project_description")
+        .column_as(proj_entity::Column::IsDefault, "project_is_default")
+        .column_as(db_entity::Column::ProjectId, "board_project_id")
+        .column_as(db_entity::Column::IntakeId, "intake_id")
+        .join(JoinType::InnerJoin, db_entity::Relation::Workspaces.def())
+        .join(JoinType::LeftJoin, db_entity::Relation::Projects.def())
+}
+
+fn board_from_full(full: BoardFull) -> BoardRow {
+    BoardRow {
+        id: full.id,
+        created_at: full.created_at.with_timezone(&chrono::Utc),
+        updated_at: full.updated_at.with_timezone(&chrono::Utc),
+        deleted_at: full.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+        entity_identifier: full.entity_identifier,
+        entity_name: full.entity_name,
+        anchor: full.anchor,
+        is_comments_enabled: full.is_comments_enabled,
+        is_reactions_enabled: full.is_reactions_enabled,
+        is_votes_enabled: full.is_votes_enabled,
+        view_props: full.view_props,
+        is_activity_enabled: full.is_activity_enabled,
+        is_disabled: full.is_disabled,
+        created_by_id: full.created_by_id,
+        updated_by_id: full.updated_by_id,
+        workspace_id: full.workspace_id,
+        workspace_name: full.workspace_name,
+        workspace_slug: full.workspace_slug,
+        workspace_logo: full.workspace_logo,
+        workspace_logo_asset_id: full.workspace_logo_asset_id,
+        project_identifier: full.project_identifier,
+        project_name: full.project_name,
+        project_cover_image: full.project_cover_image,
+        project_cover_asset_id: full.project_cover_asset_id,
+        project_logo_props: full.project_logo_props,
+        project_description: full.project_description,
+        project_is_default: full.project_is_default,
+    }
 }
 
 /// `DeployBoardViewSet.list` (`base.py:544-551`): the latest live
@@ -1210,17 +1277,21 @@ async fn fetch_board_first(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<Option<(BoardRow, Option<uuid::Uuid>, Option<uuid::Uuid>)>, Denial> {
-    let sql = format!(
-        "SELECT {BOARD_SELECT} WHERE b.deleted_at IS NULL AND b.entity_name = 'project' \
-         AND b.entity_identifier = $1 AND w.slug = $2 ORDER BY b.created_at DESC LIMIT 1"
-    );
-    let row = sqlx::query(&sql)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let row = board_select()
+        .filter(db_entity::Column::DeletedAt.is_null())
+        .filter(db_entity::Column::EntityName.eq("project"))
+        .filter(db_entity::Column::EntityIdentifier.eq(*project_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .order_by_desc(db_entity::Column::CreatedAt)
+        .into_model::<BoardFull>()
+        .one(&sea_conn(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.as_ref().map(board_row).transpose()
+    Ok(row.map(|full| {
+        let project = full.board_project_id;
+        let intake = full.intake_id;
+        (board_from_full(full), project, intake)
+    }))
 }
 
 /// Re-read for the PATCH response render: the PATCH may have *set*
@@ -1230,16 +1301,16 @@ async fn fetch_board_for_patch_render(
     pool: &sqlx::PgPool,
     pk: &uuid::Uuid,
 ) -> Result<(BoardRow, Option<uuid::Uuid>, Option<uuid::Uuid>), Denial> {
-    let sql = format!("SELECT {BOARD_SELECT} WHERE b.id = $1");
-    let row = sqlx::query(&sql)
-        .bind(pk)
-        .fetch_optional(pool)
+    let row = board_select()
+        .filter(db_entity::Column::Id.eq(*pk))
+        .into_model::<BoardFull>()
+        .one(&sea_conn(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.as_ref()
-        .map(board_row)
-        .transpose()?
-        .ok_or(Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let project = row.board_project_id;
+    let intake = row.intake_id;
+    Ok((board_from_full(row), project, intake))
 }
 
 /// `DeployBoardViewSet` retrieve / partial_update / destroy lookup: the
@@ -1250,16 +1321,17 @@ async fn fetch_board_global(
     pool: &sqlx::PgPool,
     pk: &uuid::Uuid,
 ) -> Result<(BoardRow, Option<uuid::Uuid>, Option<uuid::Uuid>), Denial> {
-    let sql = format!("SELECT {BOARD_SELECT} WHERE b.deleted_at IS NULL AND b.id = $1");
-    let row = sqlx::query(&sql)
-        .bind(pk)
-        .fetch_optional(pool)
+    let row = board_select()
+        .filter(db_entity::Column::DeletedAt.is_null())
+        .filter(db_entity::Column::Id.eq(*pk))
+        .into_model::<BoardFull>()
+        .one(&sea_conn(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.as_ref()
-        .map(board_row)
-        .transpose()?
-        .ok_or(Denial::BoardNotFound)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::BoardNotFound)?;
+    let project = row.board_project_id;
+    let intake = row.intake_id;
+    Ok((board_from_full(row), project, intake))
 }
 
 /// Render one board row. `views_override` carries the just-assigned
@@ -1496,72 +1568,91 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage)
 /// minimum workspace sort order minus 10000 (65535 when none), and only
 /// then does the member row insert. `created_by` is the crum user (`None`
 /// for anonymous joins); `updated_by` stays `NULL`.
-async fn create_project_member(
+pub(crate) async fn create_project_member(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     member_id: Option<uuid::Uuid>,
     role: i16,
     created_by: Option<uuid::Uuid>,
 ) -> Result<(), Denial> {
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace_id else {
-        return Err(Denial::ObjectNotFound);
-    };
-    if let Some(member_id) = member_id {
-        let min_sort: Option<f64> = sqlx::query_scalar(
-            "SELECT MIN(sort_order) FROM project_user_properties
-             WHERE workspace_id = $1 AND user_id = $2 AND deleted_at IS NULL",
-        )
-        .bind(workspace_id)
-        .bind(member_id)
-        .fetch_one(pool)
+    let db = sea_conn(pool);
+    let workspace_id = proj_entity::Entity::find_by_id(*project_id)
+        .select_only()
+        .column(proj_entity::Column::WorkspaceId)
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ObjectNotFound)?;
+    if let Some(member_id) = member_id {
+        #[derive(Debug, FromQueryResult)]
+        struct SortMin {
+            sort_min: Option<f64>,
+        }
+        let min_sort = pup_entity::Entity::find()
+            .select_only()
+            .column_as(
+                sea_orm::sea_query::Expr::col(pup_entity::Column::SortOrder).min(),
+                "sort_min",
+            )
+            .filter(pup_entity::Column::WorkspaceId.eq(workspace_id))
+            .filter(pup_entity::Column::UserId.eq(member_id))
+            .filter(pup_entity::Column::DeletedAt.is_null())
+            .into_model::<SortMin>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .and_then(|row| row.sort_min);
         let sort_order = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-        sqlx::query(
-            "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-                filters, display_filters, display_properties, rich_filters, preferences,
-                sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-             VALUES ($1, $2, $3, $4,
-                $5::jsonb, $6::jsonb, $7::jsonb, '{}', $8::jsonb,
-                $9, $10, NULL, now(), now(), NULL)",
+        let filters: Value =
+            serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+        let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+            .map_err(|_| Denial::ServerError)?;
+        let display_properties: Value =
+            serde_json::from_str(&default_issue_display_properties_json())
+                .map_err(|_| Denial::ServerError)?;
+        let prefs: Value =
+            serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+        pidash_services::domain::projects::members::add_property_db_now(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &pidash_services::domain::projects::members::NewMemberProperty {
+                workspace_id,
+                project_id: *project_id,
+                user_id: member_id,
+                filters: &filters,
+                display_filters: &display_filters,
+                display_properties: &display_properties,
+                rich_filters: &serde_json::json!({}),
+                preferences: &prefs,
+                sort_order,
+                created_by,
+                now: chrono::Utc::now(),
+            },
         )
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(member_id)
-        .bind(default_issue_filters_json())
-        .bind(default_issue_display_filters_json())
-        .bind(default_issue_display_properties_json())
-        .bind(default_preferences_json())
-        .bind(sort_order)
-        .bind(created_by)
-        .execute(pool)
         .await
         .map_err(integrity_denial)?;
     }
-    sqlx::query(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5,
-            NULL, $6::jsonb, $6::jsonb, $7::jsonb, 65535,
-            true, $8, NULL, now(), now(), NULL)",
+    let props: Value =
+        serde_json::from_str(&default_member_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &pidash_services::domain::projects::members::NewProjectMember {
+            workspace_id,
+            project_id: Some(*project_id),
+            user_id: member_id,
+            role,
+            created_by,
+            view_props: &props,
+            default_props: &props,
+            preferences: &prefs,
+            now: chrono::Utc::now(),
+            ignore_conflicts: false,
+            db_now: true,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(role)
-    .bind(default_member_props_json())
-    .bind(default_preferences_json())
-    .bind(created_by)
-    .execute(pool)
     .await
     .map_err(integrity_denial)?;
     Ok(())
@@ -1982,19 +2073,26 @@ async fn fetch_invitee_workspace_role(
     slug: &str,
     email: &str,
 ) -> Result<Option<i16>, Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           JOIN users u ON u.id = wm.member_id
-           WHERE w.slug = $1 AND u.email = $2 AND wm.is_active AND wm.deleted_at IS NULL
-           ORDER BY wm.id LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0))
+    wm_entity::Entity::find()
+        .select_only()
+        .column(wm_entity::Column::Role)
+        .join(JoinType::InnerJoin, wm_entity::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            wm_entity::Entity::belongs_to(user_entity::Entity)
+                .from(wm_entity::Column::MemberId)
+                .to(user_entity::Column::Id)
+                .into(),
+        )
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(user_entity::Column::Email.eq(email))
+        .filter(wm_entity::Column::IsActive.eq(true))
+        .filter(wm_entity::Column::DeletedAt.is_null())
+        .order_by_asc(wm_entity::Column::Id)
+        .into_tuple::<i16>()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `Workspace.objects.get(slug=slug)` (`invite.py:69`): the live-only
@@ -2002,13 +2100,16 @@ async fn fetch_invitee_workspace_role(
 /// `ObjectDoesNotExist` 404 (unreachable past the gate in practice —
 /// a missing slug denies first — but mapped all the same).
 async fn fetch_workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ObjectNotFound)
+    ws_entity::Entity::find()
+        .select_only()
+        .column(ws_entity::Column::Id)
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(ws_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ObjectNotFound)
 }
 
 /// One validated invite-create row: the stored address, the raw
@@ -2107,8 +2208,8 @@ async fn invite_create(
         "workspaces/<slug>/projects/<project_id>/invitations/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("emails", [])` — a non-dict body has no `.get`
@@ -2200,23 +2301,32 @@ async fn invite_create(
             token,
         });
     }
-    // `bulk_create(batch_size=10, ignore_conflicts=True)` (`:98-100`):
-    // one INSERT per 10 rows, each committed separately in autocommit —
-    // so the per-batch role/length prep runs against the CURRENT batch
-    // only (a bad row in batch 2 leaves batch 1 persisted, exactly like
-    // Django). `bulk_create` skips `save()`: no audit stamp beyond the
-    // explicit `created_by`, `accepted` false, `message`/`responded_at`
-    // NULL. The table carries no unique constraint besides the pk, so
-    // `ON CONFLICT DO NOTHING` only ever meets uuid collisions.
+    // `bulk_create(batch_size=10, ignore_conflicts=True)` (`:101-103`):
+    // Django wraps the WHOLE bulk in one `transaction.atomic`
+    // (`query.py:785`) and prepares each batch's values just before
+    // inserting that batch (`_batched_insert` → `_insert`), so an error
+    // in any batch — a role `int()` failure or a failed INSERT — rolls
+    // back every batch: all invitations or none. The per-batch
+    // conversion below is load-bearing order, not an accident: a
+    // batch-1 INSERT failure (400) wins over a batch-2 conversion
+    // failure (500), exactly like Django. `bulk_create` skips `save()`:
+    // no audit stamp beyond the explicit `created_by`, `accepted`
+    // false, `message`/`responded_at` NULL. The table carries no unique
+    // constraint besides the pk, so `ON CONFLICT DO NOTHING` only ever
+    // meets uuid collisions. Dropping `tx` uncommitted on any `return`
+    // below rolls the batches back.
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+    let now_ts: sea_orm::prelude::DateTimeWithTimeZone = now.into();
     for batch in pending.chunks(INVITE_BULK_BATCH_SIZE) {
-        let mut roles: Vec<Option<i16>> = Vec::with_capacity(batch.len());
+        let mut models: Vec<pmi_entity::ActiveModel> = Vec::with_capacity(batch.len());
         for invite in batch.iter() {
             let role = match invite.role.as_ref() {
                 // Missing key: `email.get("role", 5)`.
                 None => Some(5),
                 // Explicit null: `get_prep_value` passes NULL through and
                 // the NOT NULL column raises `IntegrityError` (400) —
-                // bind NULL and let the bulk raise it.
+                // insert NULL and let the bulk raise it.
                 Some(Value::Null) => None,
                 Some(value) => match py_int(value) {
                     Ok(role) if (i128::from(i16::MIN)..=i128::from(i16::MAX)).contains(&role) => {
@@ -2225,48 +2335,35 @@ async fn invite_create(
                     _ => return Err(Denial::ServerError),
                 },
             };
-            roles.push(role);
+            models.push(pmi_entity::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(now_ts),
+                updated_at: Set(now_ts),
+                created_by_id: Set(Some(resolved.id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                project_id: Set(project_id),
+                workspace_id: Set(workspace_id),
+                email: Set(invite.email.clone()),
+                accepted: Set(false),
+                token: Set(invite.token.clone()),
+                message: Set(None),
+                responded_at: Set(None),
+                role: match role {
+                    Some(role) => Set(role),
+                    None => sea_orm::ActiveValue::NotSet,
+                },
+            });
         }
-        let mut values: Vec<String> = Vec::with_capacity(batch.len());
-        for index in 0..batch.len() {
-            let base = index * 9;
-            values.push(format!(
-                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, ${}, ${}, FALSE, ${}, NULL, NULL, ${})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO project_member_invites \
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-             project_id, workspace_id, email, accepted, token, message, responded_at, role) \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        let mut query = sqlx::query(&sql);
-        for (invite, role) in batch.iter().zip(roles.iter()) {
-            query = query
-                .bind(uuid::Uuid::new_v4())
-                .bind(now)
-                .bind(now)
-                .bind(resolved.id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(&invite.email)
-                .bind(&invite.token)
-                .bind(*role);
-        }
-        if let Err(error) = query.execute(&pool).await {
-            return Err(integrity_denial(error));
+        if let Err(error) = pmi_entity::Entity::insert_many(models)
+            .on_conflict_do_nothing()
+            .exec(&conn)
+            .await
+        {
+            return Err(orm_integrity_denial(error));
         }
     }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     // Per-row enqueues (`:104-111`): one `project_invitation` job per
     // invitation, best-effort (without the queue the response stands).
     let current_site = crate::v1_projects::handlers_project::app_origin(&state);
@@ -2348,15 +2445,26 @@ async fn invite_destroy(
     .await?;
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     fetch_invite_one(&pool, &slug, &project_id, &pk).await?;
-    sqlx::query(
-        "UPDATE project_member_invites SET deleted_at = now(), updated_at = now(), updated_by_id = $1
-         WHERE id = $2 AND deleted_at IS NULL",
-    )
-    .bind(resolved.id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let conn = sea_conn(&pool);
+    let now_ts: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    pmi_entity::Entity::update_many()
+        .col_expr(
+            pmi_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now_ts),
+        )
+        .col_expr(
+            pmi_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_ts),
+        )
+        .col_expr(
+            pmi_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(resolved.id),
+        )
+        .filter(pmi_entity::Column::Id.eq(pk))
+        .filter(pmi_entity::Column::DeletedAt.is_null())
+        .exec(&conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     enqueue_message(&pool, soft_delete_message("projectmemberinvite", &pk)).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
@@ -2379,47 +2487,33 @@ async fn bulk_insert_members(
     if project_ids.is_empty() {
         return Ok(());
     }
-    let props = default_member_props_json();
-    let prefs = default_preferences_json();
-    let mut sql = String::from(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ",
-    );
-    for (index, _) in project_ids.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        let base = index * 8;
-        sql.push_str(&format!(
-            "(${}, ${}, ${}, ${}, ${}, NULL, ${}::jsonb, ${}::jsonb, ${}::jsonb, \
-             65535, true, ${}, NULL, now(), now(), NULL)",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 6,
-            base + 7,
-            base + 8,
-        ));
-    }
-    sql.push_str(" ON CONFLICT DO NOTHING");
-    let mut query = sqlx::query(&sql);
-    for project_id in project_ids {
-        query = query
-            .bind(uuid::Uuid::new_v4())
-            .bind(*workspace_id)
-            .bind(*project_id)
-            .bind(*user_id)
-            .bind(role)
-            .bind(props.clone())
-            .bind(prefs.clone())
-            .bind(*user_id);
-    }
-    query.execute(pool).await.map_err(integrity_denial)?;
+    let props: Value =
+        serde_json::from_str(&default_member_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let rows: Vec<pidash_services::domain::projects::members::BulkRow> = project_ids
+        .iter()
+        .map(
+            |project_id| pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                project_id: Some(*project_id),
+                user_id: *user_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(role)),
+                created_by: Some(*user_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &rows,
+        &props,
+        &prefs,
+        true,
+    )
+    .await
+    .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2435,50 +2529,41 @@ async fn bulk_insert_user_properties(
     if project_ids.is_empty() {
         return Ok(());
     }
-    let filters = default_issue_filters_json();
-    let display_filters = default_issue_display_filters_json();
-    let display_properties = default_issue_display_properties_json();
-    let prefs = default_preferences_json();
-    let mut sql = String::from(
-        "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-            filters, display_filters, display_properties, rich_filters, preferences,
-            sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ",
-    );
-    for (index, _) in project_ids.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        let base = index * 9;
-        sql.push_str(&format!(
-            "(${}, ${}, ${}, ${}, ${}::jsonb, ${}::jsonb, ${}::jsonb, '{{}}', ${}::jsonb, \
-             65535, ${}, NULL, now(), now(), NULL)",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 7,
-            base + 8,
-            base + 9,
-        ));
-    }
-    sql.push_str(" ON CONFLICT DO NOTHING");
-    let mut query = sqlx::query(&sql);
-    for project_id in project_ids {
-        query = query
-            .bind(uuid::Uuid::new_v4())
-            .bind(*workspace_id)
-            .bind(*project_id)
-            .bind(*user_id)
-            .bind(filters.clone())
-            .bind(display_filters.clone())
-            .bind(display_properties.clone())
-            .bind(prefs.clone())
-            .bind(*user_id);
-    }
-    query.execute(pool).await.map_err(integrity_denial)?;
+    let filters: Value =
+        serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+    let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+        .map_err(|_| Denial::ServerError)?;
+    let display_properties: Value = serde_json::from_str(&default_issue_display_properties_json())
+        .map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let rich = serde_json::json!({});
+    let rows: Vec<pidash_services::domain::projects::members::BulkProperty<'_>> = project_ids
+        .iter()
+        .map(
+            |project_id| pidash_services::domain::projects::members::BulkProperty {
+                workspace_id: *workspace_id,
+                project_id: *project_id,
+                user_id: *user_id,
+                filters: &filters,
+                display_filters: &display_filters,
+                display_properties: &display_properties,
+                rich_filters: &rich,
+                preferences: &prefs,
+                sort_order: 65535.0,
+                created_by: Some(*user_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add_properties(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &rows,
+        true,
+    )
+    .await
+    .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2543,8 +2628,8 @@ async fn user_invite_create(
         "users/me/workspaces/<slug>/projects/invitations/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("project_ids", [])` — a non-dict body has no
@@ -2557,16 +2642,19 @@ async fn user_invite_create(
     // before the `id__in` list is ever prepped (`:136` is lazy): a miss
     // 404s ahead of any 400. The gate passed, so the row exists; a miss
     // is a race, answering the `.get()` 404 like Python.
-    let member: Option<(uuid::Uuid, i16)> = sqlx::query_as(
-        r#"SELECT wm.workspace_id, wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(resolved.id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = sea_conn(&pool);
+    let member = wm_entity::Entity::find()
+        .select_only()
+        .columns([wm_entity::Column::WorkspaceId, wm_entity::Column::Role])
+        .join(JoinType::InnerJoin, wm_entity::Relation::Workspaces.def())
+        .filter(wm_entity::Column::MemberId.eq(resolved.id))
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .filter(wm_entity::Column::IsActive.eq(true))
+        .filter(wm_entity::Column::DeletedAt.is_null())
+        .into_tuple::<(uuid::Uuid, i16)>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((workspace_id, workspace_role)) = member else {
         return Err(Denial::ObjectNotFound);
     };
@@ -2609,16 +2697,17 @@ async fn user_invite_create(
     let projects: Vec<(uuid::Uuid, i16)> = if project_ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as(
-            r#"SELECT p.id, p.network FROM projects p
-               JOIN workspaces w ON w.id = p.workspace_id
-               WHERE p.id = ANY($1) AND w.slug = $2 AND p.deleted_at IS NULL"#,
-        )
-        .bind(&project_ids)
-        .bind(&slug)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
+        proj_entity::Entity::find()
+            .select_only()
+            .columns([proj_entity::Column::Id, proj_entity::Column::Network])
+            .join(JoinType::InnerJoin, proj_entity::Relation::Workspaces.def())
+            .filter(proj_entity::Column::Id.is_in(project_ids.clone()))
+            .filter(ws_entity::Column::Slug.eq(slug.clone()))
+            .filter(proj_entity::Column::DeletedAt.is_null())
+            .into_tuple::<(uuid::Uuid, i16)>()
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
     };
     for (_, network) in &projects {
         if *network == 0 && i32::from(workspace_role) != ROLE_ADMIN {
@@ -2630,16 +2719,12 @@ async fn user_invite_create(
     }
     if !project_ids.is_empty() {
         // Reactivate live rows (`QuerySet.update` stamps no `updated_at`).
-        sqlx::query(
-            r#"UPDATE project_members pm SET is_active = true
-               FROM workspaces w
-               WHERE pm.workspace_id = w.id AND w.slug = $1 AND pm.project_id = ANY($2)
-                 AND pm.member_id = $3 AND pm.deleted_at IS NULL"#,
+        pidash_services::domain::projects::members::reactivate_slug(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            &slug,
+            &project_ids,
+            resolved.id,
         )
-        .bind(&slug)
-        .bind(&project_ids)
-        .bind(resolved.id)
-        .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
         // `bulk_create(..., ignore_conflicts=True)` — ONE statement
@@ -2734,8 +2819,8 @@ async fn join_post(
     // 415 / malformed-body / non-dict failure.
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     let invite = fetch_join_invite(&pool, &slug, &project_id, &pk).await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get(...)` — a non-dict body has no `.get`.
@@ -2758,46 +2843,74 @@ async fn join_post(
             ALREADY_RESPONDED_BODY.to_owned(),
         ));
     }
-    let accepted = prep_bool(data.get("accepted").unwrap_or(&Value::Bool(false)))?;
+    // `accepted = request.data.get("accepted", False)` runs through
+    // `BooleanField.to_python` on `save()` (`invite.py:201-203`): the
+    // stored bool is the prepped value, but the accept/decline branch
+    // tests the in-memory raw value (`:205`), so `"False"`/`"f"`/`"0"`
+    // accept while storing `false` (the workspace join keeps this too).
+    let missing = Value::Bool(false);
+    let raw = data.get("accepted").unwrap_or(&missing);
+    let accepted = prep_bool(raw)?;
+    let accept = py_truthy(raw);
     let created_by = caller.as_ref().map(|actor| actor.id);
     // Record the response (`responded_at` + `accepted`, `updated_by` via
     // crum — `NULL` for anonymous joins). An explicit-null `accepted`
     // falls to the NOT NULL column: the `IntegrityError` 400.
-    sqlx::query(
-        "UPDATE project_member_invites
-         SET accepted = $1, responded_at = now(), updated_at = now(), updated_by_id = $2
-         WHERE id = $3",
-    )
-    .bind(accepted)
-    .bind(created_by)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(integrity_denial)?;
-    if accepted != Some(true) {
+    let db = sea_conn(&pool);
+    let now_ts: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    let mut update = pmi_entity::Entity::update_many();
+    update = update.col_expr(
+        pmi_entity::Column::Accepted,
+        sea_orm::sea_query::Expr::value(accepted),
+    );
+    update = update.col_expr(
+        pmi_entity::Column::RespondedAt,
+        sea_orm::sea_query::Expr::value(now_ts),
+    );
+    update = update.col_expr(
+        pmi_entity::Column::UpdatedAt,
+        sea_orm::sea_query::Expr::value(now_ts),
+    );
+    update = update.col_expr(
+        pmi_entity::Column::UpdatedById,
+        sea_orm::sea_query::Expr::value(created_by),
+    );
+    update
+        .filter(pmi_entity::Column::Id.eq(pk))
+        .exec(&db)
+        .await
+        .map_err(orm_integrity_denial)?;
+    if !accept {
         return Ok(json_response(StatusCode::OK, JOIN_DECLINED_BODY.to_owned()));
     }
     // The account lookup: `User.objects.filter(email=...)` (no
     // soft-delete manager on users), `-created_at` first. A missing user
     // flows into the workspace insert as `NULL` and 400s there.
-    let user: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM users WHERE email = $1 ORDER BY created_at DESC LIMIT 1")
-            .bind(email)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let user_id = user.map(|row| row.0);
-    let ws_member: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id IS NOT DISTINCT FROM $2 AND wm.deleted_at IS NULL
-           ORDER BY wm.created_at DESC LIMIT 1"#,
-    )
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let user_id = user_entity::Entity::find()
+        .select_only()
+        .column(user_entity::Column::Id)
+        .filter(user_entity::Column::Email.eq(email))
+        .order_by_desc(user_entity::Column::CreatedAt)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let db = sea_conn(&pool);
+    let ws_member = wm_entity::Entity::find()
+        .select_only()
+        .column(wm_entity::Column::Id)
+        .join(JoinType::InnerJoin, wm_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(match user_id {
+            Some(id) => wm_entity::Column::MemberId.eq(id),
+            None => wm_entity::Column::MemberId.is_null(),
+        })
+        .filter(wm_entity::Column::DeletedAt.is_null())
+        .order_by_desc(wm_entity::Column::CreatedAt)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match ws_member {
         None => {
             let role = if i32::from(invite.role) >= 15 {
@@ -2805,65 +2918,69 @@ async fn join_post(
             } else {
                 invite.role
             };
-            sqlx::query(
-                "INSERT INTO workspace_members (id, workspace_id, member_id, role,
-                    company_role, view_props, default_props, issue_props, is_active,
-                    getting_started_checklist, tips, explored_features,
-                    created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-                 VALUES ($1, $2, $3, $4,
-                    NULL, $5::jsonb, $5::jsonb, $6::jsonb, true,
-                    '{}', '{}', '{}',
-                    $7, NULL, now(), now(), NULL)",
+            // The model defaults serialize from fixed `json!` values;
+            // reparse for the domain input (jsonb storage normalizes
+            // key order either way, so the committed bytes match).
+            let view_props: Value = serde_json::from_str(&default_workspace_props_json())
+                .map_err(|_| Denial::ServerError)?;
+            let issue_props: Value = serde_json::from_str(&default_issue_props_json())
+                .map_err(|_| Denial::ServerError)?;
+            members::add(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                &members::NewMember {
+                    workspace_id: invite.workspace_id,
+                    user_id,
+                    role,
+                    company_role: None,
+                    created_by,
+                    view_props: &view_props,
+                    default_props: &view_props,
+                    issue_props: &issue_props,
+                    now: chrono::Utc::now(),
+                    ignore_conflicts: false,
+                    db_now: true,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(invite.workspace_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(default_workspace_props_json())
-            .bind(default_issue_props_json())
-            .bind(created_by)
-            .execute(&pool)
             .await
             .map_err(integrity_denial)?;
         }
-        Some((id,)) => {
-            sqlx::query(
-                "UPDATE workspace_members SET is_active = true, updated_at = now(), updated_by_id = $1
-                 WHERE id = $2",
-            )
-            .bind(created_by)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        Some(id) => {
+            // `ws_member` is a SeaORM `Option<Uuid>` (not the old sqlx
+            // tuple); the connection follows the main-side convention
+            // (`sea_orm_connection`), as in the `members::add` call above.
+            members::activate_by_id(&pidash_db::pool::sea_orm_connection(&pool), id, created_by)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
     }
     // The existing project membership is looked up by workspace only —
     // no project predicate (`invite.py:221-223`).
-    let project_member: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM project_members
-         WHERE workspace_id = $1 AND member_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(invite.workspace_id)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let project_member = pm_entity::Entity::find()
+        .select_only()
+        .column(pm_entity::Column::Id)
+        .filter(pm_entity::Column::WorkspaceId.eq(invite.workspace_id))
+        .filter(match user_id {
+            Some(id) => pm_entity::Column::MemberId.eq(id),
+            None => pm_entity::Column::MemberId.is_null(),
+        })
+        .filter(pm_entity::Column::DeletedAt.is_null())
+        .order_by_desc(pm_entity::Column::CreatedAt)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match project_member {
         None => {
             create_project_member(&pool, &project_id, user_id, invite.role, created_by).await?;
         }
-        Some((id,)) => {
+        Some(id) => {
             // `project_member.role = project_member.role`: the role
             // re-saves unchanged (ported quirk).
-            sqlx::query(
-                "UPDATE project_members SET is_active = true, updated_at = now(), updated_by_id = $1
-                 WHERE id = $2",
+            pidash_services::domain::projects::members::reactivate_by_id(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                id,
+                created_by,
             )
-            .bind(created_by)
-            .bind(id)
-            .execute(&pool)
             .await
             .map_err(|_| Denial::ServerError)?;
         }
@@ -2875,15 +2992,75 @@ async fn join_post(
 // Handlers: favorites
 // ---------------------------------------------------------------------------
 
+/// The favorite list-row: the shared 10-key `UserFavoriteSerializer`
+/// shape over SeaORM-decoded columns (byte-identical to the sibling
+/// renderer, which decodes only from `sqlx` rows).
+#[derive(Debug, FromQueryResult)]
+struct FavoriteListRow {
+    id: uuid::Uuid,
+    entity_type: String,
+    entity_identifier: Option<uuid::Uuid>,
+    name: Option<String>,
+    is_folder: bool,
+    sequence: f64,
+    parent_id: Option<uuid::Uuid>,
+    workspace_id: uuid::Uuid,
+    project_id: Option<uuid::Uuid>,
+}
+
+fn favorite_json_float(value: f64) -> String {
+    if !value.is_finite() {
+        return match value {
+            f64::INFINITY => "Infinity".to_owned(),
+            f64::NEG_INFINITY => "-Infinity".to_owned(),
+            _ => "NaN".to_owned(),
+        };
+    }
+    crate::paginator::py_float_str(value)
+}
+
+fn render_project_favorite(row: &FavoriteListRow, entity: Option<&Value>) -> String {
+    let json_string =
+        |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned());
+    let opt_string = |value: Option<&str>| match value {
+        Some(text) => json_string(text),
+        None => "null".to_owned(),
+    };
+    let opt_uuid = |value: Option<uuid::Uuid>| match value {
+        Some(id) => json_string(&id.to_string()),
+        None => "null".to_owned(),
+    };
+    let entity_json = entity.map(|value| value.to_string());
+    format!(
+        "{{\"id\":{},\"entity_type\":{},\"entity_identifier\":{},\"entity_data\":{},\"name\":{},\"is_folder\":{},\"sequence\":{},\"parent\":{},\"workspace_id\":{},\"project_id\":{}}}",
+        json_string(&row.id.to_string()),
+        json_string(&row.entity_type),
+        opt_uuid(row.entity_identifier),
+        entity_json.unwrap_or_else(|| "null".to_owned()),
+        opt_string(row.name.as_deref()),
+        row.is_folder,
+        favorite_json_float(row.sequence),
+        opt_uuid(row.parent_id),
+        json_string(&row.workspace_id.to_string()),
+        opt_uuid(row.project_id),
+    )
+}
+
 /// `GET .../user-favorite-projects/` (`base.py:503-514`): the DRF-default
-/// list raises `AssertionError` — the viewset inherits
-/// `serializer_class = None` — so the endpoint always answers the generic
-/// 500 (FX-APROJ-06/08), after the auth-only gate.
+/// list over `UserFavoriteSerializer` (PDASHOSS01-293 — the viewset used
+/// to inherit `serializer_class = None` and 500, PB-0500 retired). After
+/// the auth-only gate, the caller's live favorites in the slug's
+/// workspace — every entity type, folders and children included (the
+/// queryset filters neither) — `-created_at` first (`Meta.ordering`), as
+/// an unpaginated JSON array (no default pagination class). Each row
+/// renders the shared 10-key `UserFavoriteSerializer` shape, the same
+/// renderer as the workspace `user-favorites/` list.
 async fn fav_list(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     extension: Option<axum::Extension<SessionHandle>>,
 ) -> Result<Response, Denial> {
+    use crate::app_workspace::handlers_favorites_drafts::fetch_favorite_entity;
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     check_gate(
@@ -2895,7 +3072,51 @@ async fn fav_list(
         "workspaces/<slug>/user-favorite-projects/",
     )
     .await?;
-    Err(Denial::ServerError)
+    // `.filter(workspace__slug=)` joins the workspace row without its
+    // manager's `deleted_at` scope; `select_related` adds no filter (the
+    // inner joins follow non-null FKs).
+    let rows = uf_entity::Entity::find()
+        .select_only()
+        .columns([
+            uf_entity::Column::Id,
+            uf_entity::Column::EntityType,
+            uf_entity::Column::EntityIdentifier,
+            uf_entity::Column::Name,
+            uf_entity::Column::IsFolder,
+            uf_entity::Column::Sequence,
+            uf_entity::Column::ParentId,
+            uf_entity::Column::WorkspaceId,
+            uf_entity::Column::ProjectId,
+        ])
+        .join(JoinType::InnerJoin, uf_entity::Relation::Workspaces.def())
+        .filter(uf_entity::Column::DeletedAt.is_null())
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .filter(uf_entity::Column::UserId.eq(resolved.id))
+        .order_by_desc(uf_entity::Column::CreatedAt)
+        .into_model::<FavoriteListRow>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut rendered = Vec::with_capacity(rows.len());
+    for row in &rows {
+        // The shared helpers fail with the app_issues `Denial`; every
+        // failure there is a server error.
+        let entity = fetch_favorite_entity(
+            &pool,
+            &row.entity_type,
+            row.entity_identifier
+                .as_ref()
+                .map(|id| id.to_string())
+                .as_deref(),
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        rendered.push(render_project_favorite(row, entity.as_ref()));
+    }
+    Ok(json_response(
+        StatusCode::OK,
+        format!("[{}]", rendered.join(",")),
+    ))
 }
 
 /// `POST .../user-favorite-projects/` (`base.py:519-526`): create the
@@ -2922,8 +3143,8 @@ async fn fav_create(
         "workspaces/<slug>/user-favorite-projects/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("project")` — a non-dict body has no `.get`.
@@ -2942,42 +3163,57 @@ async fn fav_create(
     // 404), then the live-workspace max sequence decides the insert's
     // `sequence`; `WorkspaceBaseModel.save` backfills the workspace from
     // the project.
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = row else {
+    let db = sea_conn(&pool);
+    let row = proj_entity::Entity::find_by_id(project_id)
+        .select_only()
+        .column(proj_entity::Column::WorkspaceId)
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = row else {
         return Err(Denial::ObjectNotFound);
     };
-    let largest: Option<f64> = sqlx::query_scalar(
-        "SELECT MAX(sequence) FROM user_favorites
-         WHERE workspace_id IS NOT DISTINCT FROM $1 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    #[derive(Debug, FromQueryResult)]
+    struct SequenceMax {
+        sequence_max: Option<f64>,
+    }
+    let largest = uf_entity::Entity::find()
+        .select_only()
+        .column_as(
+            sea_orm::sea_query::Expr::col(uf_entity::Column::Sequence).max(),
+            "sequence_max",
+        )
+        .filter(uf_entity::Column::WorkspaceId.eq(workspace_id))
+        .filter(uf_entity::Column::DeletedAt.is_null())
+        .into_model::<SequenceMax>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .and_then(|row| row.sequence_max);
     let sequence = largest.map(|max| max + 10000.0).unwrap_or(65535.0);
-    sqlx::query(
-        "INSERT INTO user_favorites (id, workspace_id, project_id, user_id, entity_type,
-            entity_identifier, name, is_folder, sequence, parent_id,
-            created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, 'project',
-            $5, NULL, false, $6, NULL,
-            $7, NULL, now(), now(), NULL)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(resolved.id)
-    .bind(project_id)
-    .bind(sequence)
-    .bind(resolved.id)
-    .execute(&pool)
+    let now_ts: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    uf_entity::ActiveModel {
+        id: Set(uuid::Uuid::new_v4()),
+        workspace_id: Set(workspace_id),
+        project_id: Set(Some(project_id)),
+        user_id: Set(resolved.id),
+        entity_type: Set("project".to_owned()),
+        entity_identifier: Set(Some(project_id)),
+        name: Set(None),
+        is_folder: Set(false),
+        sequence: Set(sequence),
+        parent_id: Set(None),
+        created_by_id: Set(Some(resolved.id)),
+        updated_by_id: Set(None),
+        created_at: Set(now_ts),
+        updated_at: Set(now_ts),
+        deleted_at: Set(None),
+    }
+    .insert(&db)
     .await
-    .map_err(integrity_denial)?;
+    .map_err(orm_integrity_denial)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -3002,22 +3238,24 @@ async fn fav_destroy(
         "workspaces/<slug>/user-favorite-projects/<project_id>/",
     )
     .await?;
-    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT f.id FROM user_favorites f
-           JOIN workspaces w ON w.id = f.workspace_id
-           WHERE f.entity_identifier = $1 AND f.entity_type = 'project' AND f.project_id = $1
-             AND f.user_id = $2 AND w.slug = $3 AND f.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(resolved.id)
-    .bind(&slug)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows = uf_entity::Entity::find()
+        .select_only()
+        .column(uf_entity::Column::Id)
+        .join(JoinType::InnerJoin, uf_entity::Relation::Workspaces.def())
+        .filter(uf_entity::Column::EntityIdentifier.eq(project_id))
+        .filter(uf_entity::Column::EntityType.eq("project"))
+        .filter(uf_entity::Column::ProjectId.eq(project_id))
+        .filter(uf_entity::Column::UserId.eq(resolved.id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(uf_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if rows.len() > 1 {
         return Err(Denial::ServerError);
     }
-    let Some((id,)) = rows.first() else {
+    let Some(id) = rows.first().copied() else {
         return Err(Denial::ObjectNotFound);
     };
     // Hard delete cascades through the self-FK (`parent`,
@@ -3025,6 +3263,7 @@ async fn fav_destroy(
     // the unfiltered base manager, so children in any `deleted_at`
     // state go with the row — one statement, `NO ACTION` checks at
     // statement end. No signals hang off the model.
+    // raw-sql: recursive CTE subtree delete cannot be built with the entity API.
     sqlx::query(
         "WITH RECURSIVE subtree AS (
              SELECT id FROM user_favorites WHERE id = $1
@@ -3103,8 +3342,8 @@ async fn board_create(
     let pool = pool_of(&state)?.clone();
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "POST").await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get(...)` — a non-dict body has no `.get`.
@@ -3121,70 +3360,79 @@ async fn board_create(
     // runs before anything else touches the database: when it hits, no
     // project row is ever read (a deleted project under a live board
     // still answers 200).
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM deploy_boards
-         WHERE entity_name = 'project' AND entity_identifier = $1 AND project_id = $2
-           AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = sea_conn(&pool);
+    let existing = db_entity::Entity::find()
+        .select_only()
+        .column(db_entity::Column::Id)
+        .filter(db_entity::Column::EntityName.eq("project"))
+        .filter(db_entity::Column::EntityIdentifier.eq(project_id))
+        .filter(db_entity::Column::ProjectId.eq(project_id))
+        .filter(db_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let board_id = match existing {
-        Some((id,)) => id,
+        Some(id) => id,
         None => {
             // The create path's workspace backfill
             // (`WorkspaceBaseModel.save`) fetches the project: a miss is
             // the 404, before the row is inserted.
-            let workspace: Option<(uuid::Uuid,)> = sqlx::query_as(
-                "SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let Some((workspace_id,)) = workspace else {
+            let workspace = proj_entity::Entity::find_by_id(project_id)
+                .select_only()
+                .column(proj_entity::Column::WorkspaceId)
+                .filter(proj_entity::Column::DeletedAt.is_null())
+                .into_tuple::<uuid::Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            let Some(workspace_id) = workspace else {
                 return Err(Denial::ObjectNotFound);
             };
             let id = uuid::Uuid::new_v4();
-            let insert = sqlx::query(
-                "INSERT INTO deploy_boards (id, workspace_id, project_id, entity_identifier,
-                    entity_name, anchor, is_comments_enabled, is_reactions_enabled, intake_id,
-                    is_votes_enabled, view_props, is_activity_enabled, is_disabled,
-                    created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-                 VALUES ($1, $2, $3, $4,
-                    'project', $5, false, false, NULL,
-                    false, '{}', true, false,
-                    $6, NULL, now(), now(), NULL)",
-            )
-            .bind(id)
-            .bind(workspace_id)
-            .bind(project_id)
-            .bind(project_id)
-            .bind(uuid::Uuid::new_v4().simple().to_string())
-            .bind(resolved.id)
-            .execute(&pool)
+            let now_ts: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+            let insert = db_entity::ActiveModel {
+                id: Set(id),
+                workspace_id: Set(workspace_id),
+                project_id: Set(Some(project_id)),
+                entity_identifier: Set(Some(project_id)),
+                entity_name: Set(Some("project".to_owned())),
+                anchor: Set(uuid::Uuid::new_v4().simple().to_string()),
+                is_comments_enabled: Set(false),
+                is_reactions_enabled: Set(false),
+                intake_id: Set(None),
+                is_votes_enabled: Set(false),
+                view_props: Set(serde_json::Map::new().into()),
+                is_activity_enabled: Set(true),
+                is_disabled: Set(false),
+                created_by_id: Set(Some(resolved.id)),
+                updated_by_id: Set(None),
+                created_at: Set(now_ts),
+                updated_at: Set(now_ts),
+                deleted_at: Set(None),
+            }
+            .insert(&db)
             .await;
             match insert {
                 Ok(_) => id,
                 Err(err) => {
-                    if !is_integrity_error(&err) {
+                    if !is_integrity_error(&pidash_db::orm_tx::into_sqlx(err)) {
                         return Err(Denial::ServerError);
                     }
                     // The `get_or_create` retry: one more `get`, whose
                     // miss raises like the first.
-                    let retry: Option<(uuid::Uuid,)> = sqlx::query_as(
-                        "SELECT id FROM deploy_boards
-                         WHERE entity_name = 'project' AND entity_identifier = $1 AND project_id = $2
-                           AND deleted_at IS NULL",
-                    )
-                    .bind(project_id)
-                    .bind(project_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(|_| Denial::ServerError)?;
-                    let Some((id,)) = retry else {
+                    let retry = db_entity::Entity::find()
+                        .select_only()
+                        .column(db_entity::Column::Id)
+                        .filter(db_entity::Column::EntityName.eq("project"))
+                        .filter(db_entity::Column::EntityIdentifier.eq(project_id))
+                        .filter(db_entity::Column::ProjectId.eq(project_id))
+                        .filter(db_entity::Column::DeletedAt.is_null())
+                        .into_tuple::<uuid::Uuid>()
+                        .one(&db)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                    let Some(id) = retry else {
                         return Err(Denial::ObjectNotFound);
                     };
                     id
@@ -3212,27 +3460,44 @@ async fn board_create(
     // `updated_by`/`updated_at` stamp on both the created and the found
     // path.
     let views_text = serde_json::to_string(&views).expect("views serialize");
-    sqlx::query(
-        "UPDATE deploy_boards
-         SET intake_id = $1, view_props = $2::jsonb, is_votes_enabled = $3,
-             is_comments_enabled = $4, is_reactions_enabled = $5,
-             updated_at = now(), updated_by_id = $6
-         WHERE id = $7",
-    )
-    .bind(None::<uuid::Uuid>)
-    .bind(if views.is_null() {
-        None
-    } else {
-        Some(views_text)
-    })
-    .bind(votes)
-    .bind(comments)
-    .bind(reactions)
-    .bind(resolved.id)
-    .bind(board_id)
-    .execute(&pool)
-    .await
-    .map_err(integrity_denial)?;
+    let now_ts: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    db_entity::Entity::update_many()
+        .col_expr(
+            db_entity::Column::IntakeId,
+            sea_orm::sea_query::Expr::value(None::<uuid::Uuid>),
+        )
+        .col_expr(
+            db_entity::Column::ViewProps,
+            sea_orm::sea_query::Expr::value(if views.is_null() {
+                None
+            } else {
+                Some(serde_json::from_str::<serde_json::Value>(&views_text).expect("views parse"))
+            }),
+        )
+        .col_expr(
+            db_entity::Column::IsVotesEnabled,
+            sea_orm::sea_query::Expr::value(votes),
+        )
+        .col_expr(
+            db_entity::Column::IsCommentsEnabled,
+            sea_orm::sea_query::Expr::value(comments),
+        )
+        .col_expr(
+            db_entity::Column::IsReactionsEnabled,
+            sea_orm::sea_query::Expr::value(reactions),
+        )
+        .col_expr(
+            db_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_ts),
+        )
+        .col_expr(
+            db_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(resolved.id),
+        )
+        .filter(db_entity::Column::Id.eq(board_id))
+        .exec(&db)
+        .await
+        .map_err(orm_integrity_denial)?;
     let (row, board_project_id, intake_id) = fetch_board_global(&pool, &board_id).await?;
     let mut asset_ids = Vec::new();
     board_asset_ids(&row, &mut asset_ids);
@@ -3313,15 +3578,25 @@ async fn board_destroy(
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "DELETE").await?;
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     fetch_board_global(&pool, &pk).await?;
-    sqlx::query(
-        "UPDATE deploy_boards SET deleted_at = now(), updated_at = now(), updated_by_id = $1
-         WHERE id = $2 AND deleted_at IS NULL",
-    )
-    .bind(resolved.id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let now_ts: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    db_entity::Entity::update_many()
+        .col_expr(
+            db_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now_ts),
+        )
+        .col_expr(
+            db_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_ts),
+        )
+        .col_expr(
+            db_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(resolved.id),
+        )
+        .filter(db_entity::Column::Id.eq(pk))
+        .filter(db_entity::Column::DeletedAt.is_null())
+        .exec(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     enqueue_message(&pool, soft_delete_message("deployboard", &pk)).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
@@ -3645,9 +3920,12 @@ fn python_type_name(value: &Value) -> &'static str {
 
 /// `PrimaryKeyRelatedField.to_internal_value` for the `created_by` /
 /// `updated_by` / `intake` PATCH keys: `None` stays (all three allow
-/// null); bools fail `incorrect_type` outright (DRF raises `TypeError`
-/// before the lookup); strings and ints prep as UUIDs — a prep failure
-/// is Django's curly-quote `invalid` message *as a field error* (DRF
+/// null), and so does the exact empty string (DRF
+/// `RelatedField.run_validation` forces `''` to `None` on every input,
+/// JSON included — PIDASHCONV-1518); bools fail `incorrect_type`
+/// outright (DRF raises `TypeError` before the lookup); strings and
+/// ints prep as UUIDs — a prep failure is Django's curly-quote
+/// `invalid` message *as a field error* (DRF
 /// converts the escaped `ValidationError` via `get_error_detail`, live
 /// probe 2026-10-03), and a prep success must exist in the queryset or
 /// fail `does_not_exist` (the `users` table has no soft-delete column;
@@ -3667,6 +3945,9 @@ async fn validate_patch_pk(
     if value.is_null() {
         return Ok(PkValidation::Null);
     }
+    if matches!(value, Value::String(text) if text.is_empty()) {
+        return Ok(PkValidation::Null);
+    }
     if value.is_boolean() {
         return Ok(PkValidation::FieldError(
             "Incorrect type. Expected pk value, received bool.".to_owned(),
@@ -3676,16 +3957,25 @@ async fn validate_patch_pk(
         Some(id) => id,
         None => return Ok(PkValidation::FieldError(uuid_invalid_message(value))),
     };
-    let sql = if live_only {
-        format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
-    } else {
-        format!("SELECT id FROM {table} WHERE id = $1")
+    let db = sea_conn(pool);
+    let row = match (table, live_only) {
+        ("users", false) => user_entity::Entity::find_by_id(id)
+            .select_only()
+            .column(user_entity::Column::Id)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?,
+        ("intakes", true) => pidash_db::entity::intakes::Entity::find_by_id(id)
+            .select_only()
+            .column(pidash_db::entity::intakes::Column::Id)
+            .filter(pidash_db::entity::intakes::Column::DeletedAt.is_null())
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?,
+        _ => None,
     };
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
     match row {
         Some(_) => Ok(PkValidation::Id(id)),
         None => Ok(PkValidation::FieldError(format!(
@@ -3733,8 +4023,8 @@ async fn board_partial_update(
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "PATCH").await?;
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     let (current, _, _) = fetch_board_global(&pool, &pk).await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let (body, from_form) = match parse_body(&state, req, &BOARD_PATCH_BODY_SPEC).await {
+        Ok(parsed) => parsed,
         Err(response) => return Ok(response),
     };
     // `Serializer.to_internal_value` on a non-dict: `non_field_errors`
@@ -3751,6 +4041,34 @@ async fn board_partial_update(
             return Err(Denial::Raw(StatusCode::BAD_REQUEST, errors.body()));
         }
     };
+    // HTML-only input rules (DRF `Field.get_value`, `fields.py:407-429` +
+    // `JSONField.get_value`, verified live — PIDASHCONV-1508): a blank
+    // `allow_null` scalar arrives as `None` (the blank-skips in
+    // `BOARD_PATCH_BODY_SPEC` already dropped the bools and
+    // `updated_by`), and an HTML `view_props` string JSON-decodes (the
+    // `JSONString` mark) — or fails the field below. The JSON arm skips
+    // all of this: `""` runs `to_internal_value` there, except on the
+    // PK keys, where the `RelatedField` rule maps it to null first
+    // (PIDASHCONV-1518).
+    let mut data = data.clone();
+    let mut view_props_json_failed = false;
+    let mut view_props_decoded_null = false;
+    if from_form {
+        for key in ["entity_identifier", "deleted_at", "created_by", "intake"] {
+            if matches!(data.get(key), Some(Value::String(text)) if text.is_empty()) {
+                data.insert(key.to_owned(), Value::Null);
+            }
+        }
+        if let Some(Value::String(text)) = data.remove("view_props") {
+            match serde_json::from_str(&text) {
+                Ok(Value::Null) => view_props_decoded_null = true,
+                Ok(parsed) => {
+                    data.insert("view_props".to_owned(), parsed);
+                }
+                Err(_) => view_props_json_failed = true,
+            }
+        }
+    }
     let mut errors = BoardPatchErrors::new();
     let mut sets: Vec<(&'static str, PatchValue)> = Vec::new();
     // The just-assigned views render in-memory (user key order), like Django.
@@ -3803,7 +4121,16 @@ async fn board_partial_update(
             }
         }
     }
-    if let Some(value) = data.get("view_props") {
+    if view_props_json_failed {
+        errors.push("view_props", "Value must be valid JSON.".to_owned());
+    } else if view_props_decoded_null {
+        // HTML `view_props=null` decodes to None after
+        // `validate_empty_values` ran (the `JSONString` is non-empty, so
+        // the null check never fires): it validates, then dies at save
+        // with the not-null `IntegrityError` 400. The NULL set below
+        // reproduces that write; sibling field errors still win first.
+        sets.push(("view_props", PatchValue::Null));
+    } else if let Some(value) = data.get("view_props") {
         if value.is_null() {
             errors.push("view_props", "This field may not be null.".to_owned());
         } else {
@@ -3831,8 +4158,23 @@ async fn board_partial_update(
     ] {
         if let Some(value) = data.get(field) {
             match validate_patch_pk(&pool, table, live_only, value).await? {
-                PkValidation::Null => sets.push((column, PatchValue::Null)),
-                PkValidation::Id(id) => sets.push((column, PatchValue::Uuid(id))),
+                // `updated_by` validates (a bad value still 400s) but
+                // never writes: `BaseModel.save()` re-stamps
+                // `updated_by` to the current user on every update
+                // (`db/models/base.py`, via crum), overwriting the
+                // validated value — so the audit stamp below always
+                // wins, and emitting both would double-SET the column
+                // (Postgres 42601, PIDASHCONV-1518).
+                PkValidation::Null => {
+                    if field != "updated_by" {
+                        sets.push((column, PatchValue::Null));
+                    }
+                }
+                PkValidation::Id(id) => {
+                    if field != "updated_by" {
+                        sets.push((column, PatchValue::Uuid(id)));
+                    }
+                }
                 PkValidation::FieldError(message) => errors.push(field, message),
             }
         }
@@ -3879,19 +4221,24 @@ async fn board_partial_update(
         changed_null |= new_deleted_at.is_none();
     }
     if any_changed && !changed_null && new_deleted_at.is_none() {
-        let clash: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM deploy_boards
-             WHERE entity_name IS NOT DISTINCT FROM $1
-               AND entity_identifier IS NOT DISTINCT FROM $2
-               AND deleted_at IS NULL AND id <> $3)",
-        )
-        .bind(new_name)
-        .bind(new_identifier)
-        .bind(pk)
-        .fetch_one(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if clash {
+        let clash = db_entity::Entity::find()
+            .select_only()
+            .column(db_entity::Column::Id)
+            .filter(match new_name {
+                Some(name) => db_entity::Column::EntityName.eq(name),
+                None => db_entity::Column::EntityName.is_null(),
+            })
+            .filter(match new_identifier {
+                Some(id) => db_entity::Column::EntityIdentifier.eq(id),
+                None => db_entity::Column::EntityIdentifier.is_null(),
+            })
+            .filter(db_entity::Column::DeletedAt.is_null())
+            .filter(db_entity::Column::Id.ne(pk))
+            .into_tuple::<uuid::Uuid>()
+            .one(&sea_conn(&pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        if clash.is_some() {
             errors.push(
                 "non_field_errors",
                 "The fields entity_name, entity_identifier, deleted_at must make a unique set."
@@ -3904,48 +4251,116 @@ async fn board_partial_update(
     }
     // `ModelSerializer.update`: one `save()` — the assignments plus the
     // audit stamp (an empty PATCH stamps too).
-    let mut sql = String::from("UPDATE deploy_boards SET ");
-    let mut position = 1usize;
-    let mut fragments: Vec<String> = Vec::with_capacity(sets.len());
+    let mut update = db_entity::Entity::update_many();
     for (column, value) in &sets {
-        let fragment = match value {
-            PatchValue::Null => format!("{column} = NULL"),
-            PatchValue::Bool(_) | PatchValue::Uuid(_) | PatchValue::Text(_) => {
-                let out = format!("{column} = ${position}");
-                position += 1;
-                out
-            }
-            PatchValue::Json(_) => {
-                let out = format!("{column} = ${position}::jsonb");
-                position += 1;
-                out
-            }
-            PatchValue::Timestamp(_) => {
-                let out = format!("{column} = ${position}");
-                position += 1;
-                out
-            }
+        update = match (*column, value) {
+            ("entity_name", PatchValue::Text(text)) => update.col_expr(
+                db_entity::Column::EntityName,
+                sea_orm::sea_query::Expr::value(text.clone()),
+            ),
+            ("entity_name", PatchValue::Null) => update.col_expr(
+                db_entity::Column::EntityName,
+                sea_orm::sea_query::Expr::value(None::<String>),
+            ),
+            ("entity_identifier", PatchValue::Uuid(id)) => update.col_expr(
+                db_entity::Column::EntityIdentifier,
+                sea_orm::sea_query::Expr::value(*id),
+            ),
+            ("entity_identifier", PatchValue::Null) => update.col_expr(
+                db_entity::Column::EntityIdentifier,
+                sea_orm::sea_query::Expr::value(None::<uuid::Uuid>),
+            ),
+            ("deleted_at", PatchValue::Timestamp(dt)) => update.col_expr(
+                db_entity::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(*dt),
+            ),
+            ("deleted_at", PatchValue::Null) => update.col_expr(
+                db_entity::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(None::<chrono::DateTime<chrono::Utc>>),
+            ),
+            ("is_comments_enabled", PatchValue::Bool(flag)) => update.col_expr(
+                db_entity::Column::IsCommentsEnabled,
+                sea_orm::sea_query::Expr::value(*flag),
+            ),
+            ("is_comments_enabled", PatchValue::Null) => update.col_expr(
+                db_entity::Column::IsCommentsEnabled,
+                sea_orm::sea_query::Expr::value(None::<bool>),
+            ),
+            ("is_reactions_enabled", PatchValue::Bool(flag)) => update.col_expr(
+                db_entity::Column::IsReactionsEnabled,
+                sea_orm::sea_query::Expr::value(*flag),
+            ),
+            ("is_reactions_enabled", PatchValue::Null) => update.col_expr(
+                db_entity::Column::IsReactionsEnabled,
+                sea_orm::sea_query::Expr::value(None::<bool>),
+            ),
+            ("is_votes_enabled", PatchValue::Bool(flag)) => update.col_expr(
+                db_entity::Column::IsVotesEnabled,
+                sea_orm::sea_query::Expr::value(*flag),
+            ),
+            ("is_votes_enabled", PatchValue::Null) => update.col_expr(
+                db_entity::Column::IsVotesEnabled,
+                sea_orm::sea_query::Expr::value(None::<bool>),
+            ),
+            ("is_activity_enabled", PatchValue::Bool(flag)) => update.col_expr(
+                db_entity::Column::IsActivityEnabled,
+                sea_orm::sea_query::Expr::value(*flag),
+            ),
+            ("is_activity_enabled", PatchValue::Null) => update.col_expr(
+                db_entity::Column::IsActivityEnabled,
+                sea_orm::sea_query::Expr::value(None::<bool>),
+            ),
+            ("is_disabled", PatchValue::Bool(flag)) => update.col_expr(
+                db_entity::Column::IsDisabled,
+                sea_orm::sea_query::Expr::value(*flag),
+            ),
+            ("is_disabled", PatchValue::Null) => update.col_expr(
+                db_entity::Column::IsDisabled,
+                sea_orm::sea_query::Expr::value(None::<bool>),
+            ),
+            ("view_props", PatchValue::Json(text)) => update.col_expr(
+                db_entity::Column::ViewProps,
+                sea_orm::sea_query::Expr::value(
+                    serde_json::from_str::<serde_json::Value>(text).expect("view_props parse"),
+                ),
+            ),
+            ("view_props", PatchValue::Null) => update.col_expr(
+                db_entity::Column::ViewProps,
+                sea_orm::sea_query::Expr::value(None::<serde_json::Value>),
+            ),
+            ("created_by_id", PatchValue::Uuid(id)) => update.col_expr(
+                db_entity::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(*id),
+            ),
+            ("created_by_id", PatchValue::Null) => update.col_expr(
+                db_entity::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(None::<uuid::Uuid>),
+            ),
+            ("intake_id", PatchValue::Uuid(id)) => update.col_expr(
+                db_entity::Column::IntakeId,
+                sea_orm::sea_query::Expr::value(*id),
+            ),
+            ("intake_id", PatchValue::Null) => update.col_expr(
+                db_entity::Column::IntakeId,
+                sea_orm::sea_query::Expr::value(None::<uuid::Uuid>),
+            ),
+            _ => update,
         };
-        fragments.push(fragment);
     }
-    fragments.push("updated_at = now()".to_owned());
-    fragments.push(format!("updated_by_id = ${position}"));
-    position += 1;
-    sql.push_str(&fragments.join(", "));
-    sql.push_str(&format!(" WHERE id = ${position}"));
-    let mut query = sqlx::query(&sql);
-    for (_, value) in &sets {
-        query = match value {
-            PatchValue::Null => query,
-            PatchValue::Bool(flag) => query.bind(*flag),
-            PatchValue::Uuid(id) => query.bind(*id),
-            PatchValue::Text(text) => query.bind(text.clone()),
-            PatchValue::Json(text) => query.bind(text.clone()),
-            PatchValue::Timestamp(dt) => query.bind(*dt),
-        };
-    }
-    query = query.bind(resolved.id).bind(pk);
-    query.execute(&pool).await.map_err(integrity_denial)?;
+    update = update
+        .col_expr(
+            db_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(chrono::Utc::now()),
+        )
+        .col_expr(
+            db_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(resolved.id),
+        );
+    update
+        .filter(db_entity::Column::Id.eq(pk))
+        .exec(&sea_conn(&pool))
+        .await
+        .map_err(orm_integrity_denial)?;
     let (row, board_project_id, intake_id) = fetch_board_for_patch_render(&pool, &pk).await?;
     let mut asset_ids = Vec::new();
     board_asset_ids(&row, &mut asset_ids);
@@ -4020,6 +4435,39 @@ mod tests {
         );
     }
 
+    /// `matches_json_parser` truth table, mirroring DRF
+    /// `media_type_matches('application/json', content_type)`
+    /// (`rest_framework/utils/mediatypes.py`), verified against the
+    /// installed DRF (PIDASHCONV-1517).
+    #[test]
+    fn json_parser_match_table() {
+        let cases: &[(&str, bool)] = &[
+            ("application/json", true),
+            ("Application/JSON", true),
+            ("application/json; charset=utf-8", true),
+            ("*/*", true),
+            ("application/*", true),
+            ("*/json", true),
+            ("text/plain", false),
+            ("", false),
+            ("foo", false),
+            ("application/json-patch", false),
+            ("text/*", false),
+            ("multipart/*", false),
+            ("*", false),
+            ("application/xml", false),
+            ("application / json", false),
+            ("* /*", false),
+        ];
+        for (content_type, want) in cases {
+            assert_eq!(
+                matches_json_parser(content_type),
+                *want,
+                "content type {content_type:?}"
+            );
+        }
+    }
+
     #[test]
     fn denial_statuses() {
         let cases: &[(Denial, u16)] = &[
@@ -4079,13 +4527,12 @@ mod tests {
             parse(SECRET_JOIN_BODY),
             fx["user_invites"]["user_invite_join_secret_403"]["body"]
         );
-        // The remaining ported 500 (favorites list) renders the generic
-        // FX-APROJ-08 body. (Invite create no longer 500s since the
-        // `d656243d` re-sync, PIDASHCONV-1085; the `invite_create_500`
-        // fixture entry is the pre-fix probe record.)
+        // The generic FX-APROJ-08 500 body. (Neither invite create nor the
+        // favorites list 500s any more — the `d656243d` re-sync,
+        // PIDASHCONV-1085, and PDASHOSS01-293; the `invite_create_500` and
+        // `favorites_list_500` fixture entries are pre-fix probe records.)
         let fx08 = fixture("FX-APROJ-08.tasks.json");
         assert_eq!(parse(SERVER_ERROR_BODY), fx08["generic_500_body"]);
-        assert_eq!(parse(SERVER_ERROR_BODY), fx08["favorites_list_500"]["body"]);
         // The fixed invite-create bodies (no fixture entry — pinned here).
         assert_eq!(
             parse(ROLE_MISMATCH_BODY),
@@ -4587,6 +5034,51 @@ mod tests {
         );
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
     }
+
+    #[test]
+    fn html_body_negotiates() {
+        // PIDASHCONV-1508: form/multipart parse through the shared DRF
+        // negotiation (last value wins; blanks kept or skipped per spec).
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Raw-`.get` handlers: blanks stay in the map, last value wins.
+        let body = b"email=x%40example.com&accepted=0&accepted=1";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("form");
+        assert_eq!(value["email"], Value::String("x@example.com".to_owned()));
+        assert_eq!(value["accepted"], Value::String("1".to_owned()));
+        let body = b"emails=";
+        let headers = headers_for(
+            "application/x-www-form-urlencoded; charset=utf-8",
+            body.len(),
+        );
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("blank form");
+        assert_eq!(value["emails"], Value::String(String::new()));
+        // Board PATCH: blank bools and `updated_by` behave as absent;
+        // other blanks stay for the handler's blank-to-null rules.
+        let body = b"is_votes_enabled=&updated_by=&entity_name=&intake=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let value = parse_html_body(&headers, body, &BOARD_PATCH_BODY_SPEC).expect("patch form");
+        let map = value.as_object().expect("object");
+        assert!(!map.contains_key("is_votes_enabled"));
+        assert!(!map.contains_key("updated_by"));
+        assert_eq!(map["entity_name"], Value::String(String::new()));
+        assert_eq!(map["intake"], Value::String(String::new()));
+        // Text-only multipart decodes like the equivalent form body.
+        let body = b"--BOUND\r\nContent-Disposition: form-data; name=\"accepted\"\r\n\r\n0\r\n--BOUND--\r\n";
+        let headers = headers_for("multipart/form-data; boundary=BOUND", body.len());
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("multipart");
+        assert_eq!(value["accepted"], Value::String("0".to_owned()));
+        // Multipart without a boundary is DRF's `ParseError` 400.
+        let body = b"not multipart";
+        let headers = headers_for("multipart/form-data", body.len());
+        let response = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect_err("400");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[cfg(test)]
@@ -4610,5 +5102,121 @@ mod pidashconv_736_tests {
         // TAB and U+0085 padding already matched Django; pin the behavior.
         assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
         assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}
+
+/// Invite reads against constraint-free temp tables on a one-connection
+/// pool: the `project_member_invites` JOIN `projects` JOIN `workspaces`
+/// queryset keeps its soft-delete scope, slug+project filters and
+/// `-created_at` order, and the single-row fetch keeps its 404 miss.
+#[cfg(test)]
+mod live_invite_reads {
+    use super::*;
+    use uuid::Uuid;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in ["workspaces", "projects", "project_member_invites"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        Some(pool)
+    }
+
+    async fn seed(pool: &sqlx::PgPool, ws: Uuid, proj: Uuid) {
+        for sql in [
+            format!(
+                "INSERT INTO workspaces (id, name, slug) VALUES ('{ws}', 'Acme', 'acme')"
+            ),
+            format!(
+                "INSERT INTO projects (id, identifier, name, description, logo_props, is_default, workspace_id) \
+                 VALUES ('{proj}', 'ENG', 'Engine', '', '{{}}', false, '{ws}')"
+            ),
+        ] {
+            sqlx::query(&sql).execute(pool).await.expect("seed");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_fetch_invites() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (ws, proj, other_proj, older, newer, gone) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        seed(&pool, ws, proj).await;
+        sqlx::query(&format!(
+            "INSERT INTO projects (id, identifier, name, description, logo_props, is_default, workspace_id) \
+             VALUES ('{other_proj}', 'OTS', 'Other', '', '{{}}', false, '{ws}')"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed");
+        for sql in [
+            format!(
+                "INSERT INTO project_member_invites (id, email, accepted, token, role, project_id, workspace_id, created_at, updated_at, deleted_at) \
+                 VALUES ('{older}', 'old@x.io', false, 't-old', 1, '{proj}', '{ws}', now() - interval '1 day', now(), NULL), \
+                        ('{newer}', 'new@x.io', false, 't-new', 2, '{proj}', '{ws}', now(), now(), NULL), \
+                        ('{gone}', 'gone@x.io', false, 't-gone', 1, '{proj}', '{ws}', now(), now(), now()), \
+                        (gen_random_uuid(), 'other@x.io', false, 't-other', 1, '{other_proj}', '{ws}', now(), now(), NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let rows = fetch_invites(&pool, "acme", &proj).await.expect("read");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.email.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new@x.io", "old@x.io"],
+            "live only, newest first"
+        );
+        assert_eq!(rows[0].project_identifier, "ENG");
+        assert_eq!(rows[0].workspace_slug, "acme");
+
+        let one = fetch_invite_one(&pool, "acme", &proj, &older)
+            .await
+            .expect("one");
+        assert_eq!(one.email, "old@x.io");
+        assert!(matches!(
+            fetch_invite_one(&pool, "acme", &proj, &gone).await,
+            Err(Denial::InviteNotFound)
+        ));
+        assert!(matches!(
+            fetch_invite_one(&pool, "missing-slug", &proj, &older).await,
+            Err(Denial::InviteNotFound)
+        ));
+
+        let mine = fetch_user_invites(&pool, Some("old@x.io"))
+            .await
+            .expect("user invites");
+        assert_eq!(
+            mine.iter()
+                .map(|row| row.email.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old@x.io"]
+        );
+        let none = fetch_user_invites(&pool, Some("nobody@x.io"))
+            .await
+            .expect("user invites miss");
+        assert!(none.is_empty());
     }
 }

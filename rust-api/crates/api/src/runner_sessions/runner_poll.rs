@@ -60,8 +60,9 @@
 //! * BUG-poll-single-trigger-drain (`:441-445`): one trigger —
 //!   stale-heartbeat recovery, became-available, or first poll — so a
 //!   first poll with no prior heartbeat does not double-dispatch.
-//! * BUG-poll-free-worktrees-ignored (`:391-395`): the reported
-//!   `free_worktrees` hint is never persisted (retired pool).
+//! * BUG-poll-free-worktrees-ignored (`:391-395`): the
+//!   `free_worktrees` wire key a pre-retirement daemon still reports
+//!   is never persisted (retired pool; the column is dropped).
 //! * BUG-poll-live-state-swallow (`:420-426`): the live-state upsert
 //!   swallows every failure (log only) so a malformed snapshot never
 //!   breaks the poll.
@@ -121,32 +122,41 @@ use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use pidash_db::entity::runner_live_state;
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_BUSY, RUNNER_STATUS_ONLINE};
-use pidash_db::runner_sessions::models::runner_session::{self, runner_session_from_row};
+use pidash_db::runner_sessions::models::runner_session::{self, runner_session_from_model};
 use pidash_db::runner_sessions::outbox as session_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError as SessionOutboxError;
 use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
+use pidash_services::runner_enroll::revoke as finalize_orm;
 use pidash_services::runner_enroll::tokens::build_key_ring;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, SetValue};
-use pidash_services::runner_sessions::drain as drain_kernel;
-use pidash_services::runner_sessions::guards::{alive_threshold, heartbeat_grace};
+use pidash_services::runner_sessions::guards::heartbeat_grace;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
+use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::keys::runner as runner_keys;
 use pidash_types::runner_sessions::{
     json_parse_error_poll, poll_200, runner_id_mismatch_poll, runner_state_locked_poll,
     session_evicted_poll, unauthorized_poll, DecodedMessage, HttpResponse,
 };
+use sea_orm::sea_query::{Expr, Keyword, SimpleExpr};
+use sea_orm::EntityTrait;
 
 use crate::runner_enroll::auth::{authenticate_access_token, ALLOW_POST};
 use crate::runner_enroll::now_micros;
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
 use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error, LivePorts};
 use crate::state::AppState;
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::py::py_truthy;
+
+use super::statements;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `sessions.py:42`).
 const POLL_SLICE_MS: u64 = 1000;
@@ -158,19 +168,9 @@ const POLL_READ_COUNT: i64 = 100;
 /// `bound_txn_waits` capture verbatim.
 const SET_LOCAL_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5000ms'";
 const SET_LOCAL_STATEMENT_TIMEOUT_SQL: &str = "SET LOCAL statement_timeout = '20000ms'";
-/// Prior-heartbeat snapshot (`:375-377`):
-/// `.select_for_update().filter(pk).values("last_heartbeat_at",
-/// "status").get()` — the `.get()` carries `LIMIT 21`. No provider
-/// const exists (D-13 owns the table, not this read), so the Django
-/// queryset shape is spelled here, verified against the FX-RSES-02
-/// `bookkeeping_happy.sql[5]` capture.
-const HEARTBEAT_SNAPSHOT_SQL: &str = "SELECT \"runner\".\"last_heartbeat_at\", \"runner\".\"status\" FROM \"runner\" WHERE \"runner\".\"id\" = $1 LIMIT 21 FOR UPDATE";
-/// Heartbeat write (`:387-396`): `.filter(pk).update(...)` preserves
-/// call order (`last_heartbeat_at`, `status`); the enum literal binds
-/// as a param (the planner interpolated-literals convention).
-/// Verified against `bookkeeping_happy.sql[6]`.
-const HEARTBEAT_UPDATE_SQL: &str =
-    "UPDATE \"runner\" SET \"last_heartbeat_at\" = $1, \"status\" = $2 WHERE \"runner\".\"id\" = $3";
+// The prior-heartbeat snapshot (`:375-377`) and the heartbeat write
+// (`:387-396`) are SeaORM statements in `super::statements`
+// (`heartbeat_snapshot_select`, `heartbeat_update_statement`).
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -199,42 +199,6 @@ fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
 /// microsecond-truncated stamps (Django renders at most 6 digits).
 fn django_isoformat(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` / `async_redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
-}
-
-/// Python truthiness for JSON values (`None`/`False`/`0`/`""`/`[]`/`{}`
-/// are falsy; everything else is truthy) — the `or []` half of
-/// `body.get("ack") or []` (`:354`) and the `in_flight_run` gate
-/// (`:444`).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int != 0
-            } else if let Some(uint) = number.as_u64() {
-                uint != 0
-            } else {
-                number.as_f64().is_some_and(|float| float != 0.0)
-            }
-        }
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
 }
 
 /// One ack-list item to its `XACK` id: strings verbatim, numbers via
@@ -438,24 +402,10 @@ fn heartbeat_error(error: sqlx::Error) -> Response {
     }
 }
 
-/// Bind one finalize `SET` clause, in values order. `Now` is the
-/// statement's single timestamp; `Null` binds the column's typed
-/// null (the reap path nulls the queue position and the two
-/// markers); `Text`/`Json` carry the bound value (the
-/// `run_endpoints::bind_finalize_value` twin).
-fn bind_finalize_value<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    column: &str,
-    value: &SetValue,
-    now: &DateTime<Utc>,
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    match (column, value) {
-        (_, SetValue::Now) => query.bind(*now),
-        (_, SetValue::Text(text)) => query.bind(text.clone()),
-        (_, SetValue::Json(payload)) => query.bind(payload.clone()),
-        ("queue_position", SetValue::Null) => query.bind(None::<i16>),
-        (_, SetValue::Null) => query.bind(None::<DateTime<Utc>>),
-    }
+/// [`heartbeat_error`] for a SeaORM failure: the wrapped sqlx error
+/// keeps its SQLSTATE, so the convoy guard classifies it the same.
+fn heartbeat_db_error(error: sea_orm::DbErr) -> Response {
+    heartbeat_error(into_sqlx(error))
 }
 
 /// One reaped run's `finalize_agent_run` (`reap_stale_busy_runs`
@@ -472,64 +422,29 @@ async fn finalize_reaped_run(
     detail: &str,
 ) -> Result<Option<[LifecycleEffect; 2]>, Response> {
     let values = session_kernel::plan_reap_finalize(detail);
-    let lock_sql = finalize_kernel::lock_run_for_finalize_sql(true, false);
-    let mut lock = sqlx::query(&lock_sql).bind(run_id);
-    for status in TERMINAL_RUN_STATUSES {
-        lock = lock.bind(status.value());
-    }
-    let row: Option<sqlx::postgres::PgRow> = lock
-        .bind(runner_id)
-        .fetch_optional(&mut **tx)
+    let conn = TxConn::new(tx);
+    let Some(locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
         .await
-        .map_err(heartbeat_error)?;
-    let Some(row) = row else {
+        .map_err(heartbeat_db_error)?
+    else {
         return Ok(None);
     };
-    let update_sql = finalize_kernel::finalize_update_sql(&values);
-    let mut update = sqlx::query(&update_sql);
-    let now = now_micros();
-    for clause in &values.clauses {
-        update = bind_finalize_value(update, clause.column, &clause.value, &now);
-    }
-    update
-        .bind(run_id)
-        .execute(&mut **tx)
+    finalize_orm::finalize_update(&conn, &values, run_id, now_micros())
         .await
-        .map_err(heartbeat_error)?;
+        .map_err(heartbeat_db_error)?;
     // Cloud-only terminal event (`finalization.py:72-84`): the
     // executor kind reads tolerant (an unparseable stored value is
     // simply not cloud, as Django's `==` comparison is).
-    let executor_kind: String =
-        sqlx::Row::try_get(&row, "executor_kind").map_err(|_| server_error())?;
-    if AgentExecutorKind::from_value(&executor_kind) == Some(AgentExecutorKind::CloudAgent) {
-        let exists = sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_exists_sql())
-            .bind(run_id)
-            .bind("terminal")
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(heartbeat_error)?;
-        if exists.is_none() {
-            let max_seq =
-                sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_max_seq_sql())
-                    .bind(run_id)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(heartbeat_error)?;
-            let plan = finalize_kernel::plan_terminal_event(
-                max_seq,
-                AgentRunStatus::Failed,
-                &finalize_kernel::finalize_error_code(&values),
-            );
-            sqlx::query(&finalize_kernel::terminal_event_insert_sql())
-                .bind(run_id)
-                .bind(plan.seq)
-                .bind("terminal")
-                .bind(plan.payload)
-                .bind(now_micros())
-                .execute(&mut **tx)
-                .await
-                .map_err(heartbeat_error)?;
-        }
+    if AgentExecutorKind::from_value(&locked.executor_kind) == Some(AgentExecutorKind::CloudAgent) {
+        finalize_orm::append_terminal_event_once(
+            &conn,
+            run_id,
+            AgentRunStatus::Failed,
+            &finalize_kernel::finalize_error_code(&values),
+            now_micros(),
+        )
+        .await
+        .map_err(heartbeat_db_error)?;
     }
     Ok(Some(finalize_kernel::plan_publish_effects(run_id)))
 }
@@ -580,15 +495,19 @@ async fn reap_stale_busy_runs(
     // reaps. The claim probe reads the reported run's status +
     // error code: `cancellation_pending` while still pending, else
     // `run_already_<status>` when the offline sweep finalized it.
+    let conn = TxConn::new(tx);
     let mut retry_cancel = None;
     if let Some(in_flight) = in_flight_id {
-        let claimed: Option<(String, String)> = sqlx::query_as(session_kernel::IN_FLIGHT_CLAIM_SQL)
-            .bind(in_flight)
-            .bind(runner_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(heartbeat_error)?;
-        if let Some((status, error_code)) = claimed.as_ref() {
+        let claimed: Option<(String, serde_json::Value)> =
+            statements::in_flight_claim_select(in_flight, runner_id)
+                .one(&conn)
+                .await
+                .map_err(heartbeat_db_error)?;
+        if let Some((status, error_details)) = claimed.as_ref() {
+            let error_code = pidash_db::runner_runs::agent_run::error_details_text(
+                error_details,
+                pidash_db::runner_runs::agent_run::ERROR_DETAILS_CODE,
+            );
             if let Some(reason) = session_kernel::cancel_reason_for_claim(status, error_code) {
                 retry_cancel = Some(SessionEffect::RetryCancelDelivery {
                     runner_id,
@@ -603,55 +522,34 @@ async fn reap_stale_busy_runs(
 
     // `:246-254`: the stopped-cancel barrier (ids + pod ids, then
     // the guarded write).
-    let cancel_ids_sql = session_kernel::stale_cancel_ids_sql(&statuses, in_flight_id.is_some());
-    let mut cancel_ids = sqlx::query_scalar::<_, Uuid>(&cancel_ids_sql)
-        .bind(cutoff)
-        .bind(runner_id);
-    if let Some(in_flight) = in_flight_id {
-        cancel_ids = cancel_ids.bind(in_flight);
-    }
-    let stopped_cancel_ids: Vec<Uuid> = cancel_ids
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(heartbeat_error)?;
-    let cancel_pods_sql =
-        session_kernel::stale_cancel_pod_ids_sql(&statuses, in_flight_id.is_some());
-    let mut cancel_pods = sqlx::query_scalar::<_, Option<Uuid>>(&cancel_pods_sql)
-        .bind(cutoff)
-        .bind(runner_id);
-    if let Some(in_flight) = in_flight_id {
-        cancel_pods = cancel_pods.bind(in_flight);
-    }
-    let stopped_pod_ids: Vec<Option<Uuid>> = cancel_pods
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(heartbeat_error)?;
+    let stopped_cancel_ids: Vec<Uuid> =
+        statements::stale_cancel_ids_select(cutoff, runner_id, &statuses, in_flight_id)
+            .all(&conn)
+            .await
+            .map_err(heartbeat_db_error)?;
+    let stopped_pod_ids: Vec<Option<Uuid>> =
+        statements::stale_cancel_pod_ids_select(cutoff, runner_id, &statuses, in_flight_id)
+            .all(&conn)
+            .await
+            .map_err(heartbeat_db_error)?;
     if !stopped_cancel_ids.is_empty() {
-        let barrier_sql = session_kernel::cancel_barrier_update_sql(stopped_cancel_ids.len());
-        let mut barrier = sqlx::query(&barrier_sql).bind(now);
-        for id in &stopped_cancel_ids {
-            barrier = barrier.bind(*id);
-        }
-        barrier.execute(&mut **tx).await.map_err(heartbeat_error)?;
+        statements::cancel_barrier_update_statement(now, &stopped_cancel_ids)
+            .exec(&conn)
+            .await
+            .map_err(heartbeat_db_error)?;
     }
 
     // `:256`: the reap candidate scan, minus barriered ids.
-    let pairs_sql = session_kernel::stale_pairs_sql(
+    let reaped: Vec<(Uuid, Option<Uuid>)> = statements::stale_pairs_select(
+        cutoff,
+        runner_id,
         &statuses,
-        in_flight_id.is_some(),
-        stopped_cancel_ids.len(),
-    );
-    let mut pairs = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(&pairs_sql)
-        .bind(cutoff)
-        .bind(runner_id);
-    if let Some(in_flight) = in_flight_id {
-        pairs = pairs.bind(in_flight);
-    }
-    for id in &stopped_cancel_ids {
-        pairs = pairs.bind(*id);
-    }
-    let reaped: Vec<(Uuid, Option<Uuid>)> =
-        pairs.fetch_all(&mut **tx).await.map_err(heartbeat_error)?;
+        in_flight_id,
+        &stopped_cancel_ids,
+    )
+    .all(&conn)
+    .await
+    .map_err(heartbeat_db_error)?;
     if reaped.is_empty() && stopped_cancel_ids.is_empty() {
         return Ok(ReapOutcome {
             retry_cancel,
@@ -682,12 +580,6 @@ async fn reap_stale_busy_runs(
 // ---------------------------------------------------------------------------
 // Live-state upsert (`_poll_bookkeeping`, `:413-426`)
 // ---------------------------------------------------------------------------
-
-/// Whether an insert failure is a lost `get_or_create` race
-/// (Django retries on `IntegrityError` only): SQLSTATE `23505`.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.as_ref() == "23505"))
-}
 
 /// Whether the entry carries any observability key (the `:400-404`
 /// `has_snapshot` gate): `observed_run_id`, a snapshot field,
@@ -838,89 +730,82 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Bind one live-state `SET` value (`:430-438` — `Null` renders
-/// inline, so only `Text`/`Json` arrive here): Django field
-/// adaptation per column. Text columns take `str()` (strings bind
-/// verbatim; numbers/bools render; nested values render compact —
-/// documented residual); integer columns take `int()`; the boolean
-/// column takes `BooleanField.to_python` (nullable: `""` is `NULL`);
-/// datetimes parse ISO (naive assumed UTC); uuids bind native;
-/// `usage` binds JSON. `None` means Django raised
-/// (`ValueError`/`TypeError`) — the caller swallows the upsert.
-/// Typed columns must bind native values: Postgres has no `text`
-/// assignment cast for `uuid`/`timestamptz`, so binding the raw
-/// string fails the `UPDATE` where Django's `save()` stores it.
-/// `agent_health` rides the default text arm (`CharField`; the
-/// planner already skipped unknown labels).
-fn bind_live_state_value<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+/// One live-state `SET` clause as a typed expression, in plan
+/// order: `observed_run_id` parses as a uuid, the two timestamps
+/// through [`parse_live_datetime`], the counters through
+/// [`parse_live_int`] (JSON numbers truncate, bools count), the alive
+/// flag through the tolerant bool parsers (a recognised "unknown"
+/// writes NULL), `usage` binds the JSON, every other column stores
+/// CPython `str()` of the value. `None` means the value cannot be
+/// typed for its column — the caller skips the whole update, as the
+/// sqlx driver did when a bind had no shape.
+fn live_state_set_expr(
     column: &str,
     value: &SetValue,
-) -> Option<sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>> {
-    match column {
+) -> Option<(runner_live_state::Column, SimpleExpr)> {
+    let target: runner_live_state::Column = column.parse().ok()?;
+    let expr: SimpleExpr = match column {
         "observed_run_id" => match value {
             SetValue::Text(text) | SetValue::Json(Value::String(text)) => {
-                Uuid::parse_str(text).ok().map(|id| query.bind(id))
+                Expr::val(Uuid::parse_str(text).ok()?).into()
             }
-            _ => None,
+            _ => return None,
         },
         "last_event_at" | "agent_last_activity_at" => match value {
             SetValue::Text(text) | SetValue::Json(Value::String(text)) => {
-                parse_live_datetime(text).map(|dt| query.bind(dt))
+                Expr::val(parse_live_datetime(text)?).into()
             }
-            _ => None,
+            _ => return None,
         },
         "agent_pid" | "approvals_pending" | "turn_count" => match value {
             SetValue::Text(text) | SetValue::Json(Value::String(text)) => {
-                parse_live_int(text).map(|int| query.bind(int))
+                Expr::val(parse_live_int(text)?).into()
             }
             SetValue::Json(Value::Number(number)) => {
-                if let Some(int) = number.as_i64() {
-                    Some(query.bind(int))
+                let int: i64 = if let Some(int) = number.as_i64() {
+                    int
                 } else if let Some(uint) = number.as_u64() {
-                    uint.try_into().ok().map(|int: i64| query.bind(int))
+                    uint.try_into().ok()?
                 } else {
-                    number
-                        .as_f64()
-                        .map(|float| query.bind(float.trunc() as i64))
-                }
+                    number.as_f64()?.trunc() as i64
+                };
+                Expr::val(int).into()
             }
-            SetValue::Json(Value::Bool(flag)) => Some(query.bind(i64::from(*flag))),
-            _ => None,
+            SetValue::Json(Value::Bool(flag)) => Expr::val(i64::from(*flag)).into(),
+            _ => return None,
         },
-        "agent_subprocess_alive" => match value {
-            SetValue::Text(text) => match live_bool_from_text(text) {
-                Some(Some(flag)) => Some(query.bind(flag)),
-                Some(None) => Some(query.bind(None::<bool>)),
-                None => None,
-            },
-            SetValue::Json(payload) => match live_bool_from_json(payload) {
-                Some(Some(flag)) => Some(query.bind(flag)),
-                Some(None) => Some(query.bind(None::<bool>)),
-                None => None,
-            },
-            _ => None,
-        },
+        "agent_subprocess_alive" => {
+            let parsed = match value {
+                SetValue::Text(text) => live_bool_from_text(text)?,
+                SetValue::Json(payload) => live_bool_from_json(payload)?,
+                _ => return None,
+            };
+            match parsed {
+                Some(flag) => Expr::val(flag).into(),
+                None => SimpleExpr::Keyword(Keyword::Null),
+            }
+        }
         "usage" => match value {
-            SetValue::Json(payload) => Some(query.bind(payload.clone())),
-            _ => None,
+            SetValue::Json(payload) => Expr::val(payload.clone()).into(),
+            _ => return None,
         },
         _ => match value {
-            SetValue::Text(text) => Some(query.bind(text.clone())),
+            SetValue::Text(text) => Expr::val(text.clone()).into(),
             SetValue::Json(payload) => match payload {
-                Value::String(text) => Some(query.bind(text.clone())),
-                Value::Number(number) => Some(query.bind(number.to_string())),
-                Value::Bool(true) => Some(query.bind("True".to_owned())),
-                Value::Bool(false) => Some(query.bind("False".to_owned())),
+                Value::String(text) => Expr::val(text.clone()).into(),
+                Value::Number(number) => Expr::val(number.to_string()).into(),
+                Value::Bool(true) => Expr::val("True".to_owned()).into(),
+                Value::Bool(false) => Expr::val("False".to_owned()).into(),
                 // CPython `str()` of a nested value (single quotes,
                 // `True`/`False`, `', '` separators) — the compact
                 // JSON rendering is a documented residual.
-                Value::Array(_) | Value::Object(_) => Some(query.bind(payload.to_string())),
-                Value::Null => None,
+                Value::Array(_) | Value::Object(_) => Expr::val(payload.to_string()).into(),
+                Value::Null => return None,
             },
-            SetValue::Null | SetValue::Now => None,
+            SetValue::Null | SetValue::Now => return None,
         },
-    }
+    };
+    Some((target, expr))
 }
 
 /// `upsert_runner_live_state(runner, status_entry)`
@@ -938,38 +823,36 @@ async fn upsert_runner_live_state(
     if status_entry.is_empty() || !has_live_state_snapshot(status_entry) {
         return;
     }
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let outcome: Result<(), ()> = async {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(session_kernel::LIVE_STATE_SELECT_SQL)
-            .bind(runner_id)
-            .fetch_optional(pool)
+        let row: Option<Option<Uuid>> = statements::live_state_observed_select(runner_id)
+            .one(&db)
             .await
             .map_err(|_| ())?;
         let observed: Option<Uuid> = match row {
-            Some(row) => sqlx::Row::try_get(&row, "observed_run_id").map_err(|_| ())?,
+            Some(observed) => observed,
             None => {
-                match sqlx::query(session_kernel::LIVE_STATE_INSERT_SQL)
-                    .bind(runner_id)
-                    .bind(now_micros())
-                    .execute(pool)
-                    .await
+                match runner_live_state::Entity::insert(statements::live_state_insert_row(
+                    runner_id,
+                    now_micros(),
+                ))
+                .exec_without_returning(&db)
+                .await
                 {
                     Ok(_) => None,
-                    Err(error) if is_unique_violation(&error) => {
+                    Err(error) => {
+                        if !is_unique_violation(&into_sqlx(error)) {
+                            return Err(());
+                        }
                         // Lost `get_or_create` race: re-select the
                         // winner's row (a second miss swallows, as
                         // Django's `DoesNotExist` does).
-                        let row: Option<sqlx::postgres::PgRow> =
-                            sqlx::query(session_kernel::LIVE_STATE_SELECT_SQL)
-                                .bind(runner_id)
-                                .fetch_optional(pool)
-                                .await
-                                .map_err(|_| ())?;
-                        let Some(row) = row else {
-                            return Err(());
-                        };
-                        sqlx::Row::try_get(&row, "observed_run_id").map_err(|_| ())?
+                        statements::live_state_observed_select(runner_id)
+                            .one(&db)
+                            .await
+                            .map_err(|_| ())?
+                            .ok_or(())?
                     }
-                    Err(_) => return Err(()),
                 }
             }
         };
@@ -982,19 +865,18 @@ async fn upsert_runner_live_state(
                 tracing::warn!("{warning}");
             }
             session_kernel::LiveStatePlan::Update { set_clauses } => {
-                let update_sql = session_kernel::live_state_update_sql(&set_clauses);
-                let mut update = sqlx::query(&update_sql);
+                let mut sets = Vec::with_capacity(set_clauses.len());
                 for clause in &set_clauses {
                     if matches!(clause.value, SetValue::Null) {
+                        let column: runner_live_state::Column =
+                            clause.column.parse().map_err(|_| ())?;
+                        sets.push((column, SimpleExpr::Keyword(Keyword::Null)));
                         continue;
                     }
-                    update =
-                        bind_live_state_value(update, clause.column, &clause.value).ok_or(())?;
+                    sets.push(live_state_set_expr(clause.column, &clause.value).ok_or(())?);
                 }
-                update
-                    .bind(now_micros())
-                    .bind(runner_id)
-                    .execute(pool)
+                statements::live_state_update_statement(sets, runner_id, now_micros())
+                    .exec(&db)
                     .await
                     .map_err(|_| ())?;
             }
@@ -1032,7 +914,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -1049,7 +931,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -1064,15 +946,12 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<DbRunnerSession>, SessionOutboxError> {
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
-        rows.iter()
-            .map(runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SessionOutboxError::Db)
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| SessionOutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -1080,18 +959,19 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -1101,7 +981,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -1114,220 +994,70 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
     }
 }
 
-/// Dispatch one [`drain_kernel::DrainEffect`] after commit, logging
-/// the swallowed-failure lines. Only the offline error propagates —
-/// the row stays `ASSIGNED` while the caller observes the failure,
-/// exactly as Python (TRACE bug 2).
-async fn dispatch_assign(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    effect: &drain_kernel::DrainEffect,
-) -> Result<(), ()> {
-    let pubsub = PollPubsubStore::new(pool, state);
-    let drain_kernel::DrainEffect::SendAssign { runner_id, message } = effect;
-    let outcome = pubsub_kernel::send_to_runner(&pubsub, *runner_id, message)
-        .await
-        .map_err(|_| ())?;
-    for warning in &outcome.warnings {
-        tracing::warn!("{warning}");
-    }
-    Ok(())
-}
-
-/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
-/// (miss ⇒ `Ok(false)`), else the locked drain. Runner-row indices
-/// follow the 32-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
-/// `provisioning` 7, `visibility` 8); run-row indices the 41-column
-/// image (`id` 0, `work_item_id` 7, `prompt` 19, `run_config` 23).
-async fn drain_for_runner_by_id(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    runner_id: Uuid,
-) -> Result<bool, ()> {
-    use sqlx::Row;
-    let found: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-            .bind(runner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| ())?;
-    if found.is_none() {
-        return Ok(false);
-    }
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let locked: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-            .bind(threshold)
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-    let Some(locked) = locked else {
-        return Ok(false);
-    };
-    let locked_runner_id: Uuid = locked.try_get(0).map_err(|_| ())?;
-    let owner_id: Uuid = locked.try_get(1).map_err(|_| ())?;
-    let pod_id: Uuid = locked.try_get(4).map_err(|_| ())?;
-    let provisioning: String = locked.try_get(7).map_err(|_| ())?;
-    let visibility: i16 = locked.try_get(8).map_err(|_| ())?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        return Ok(false);
-    };
-    let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(locked_runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let Some(run) = run else {
-        return Ok(false);
-    };
-    let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-    let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-    let prompt: String = run.try_get(19).map_err(|_| ())?;
-    let run_config: Value = run.try_get(23).map_err(|_| ())?;
-    let Value::Object(run_config) = run_config else {
-        return Err(());
-    };
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(locked_runner_id)
-        .bind(now_micros())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
-        run_id,
-        runner_id: locked_runner_id,
-        owner_id,
-        work_item_id,
-        prompt,
-        run_config,
-    });
-    tx.commit().await.map_err(|_| ())?;
-    // The `on_commit` send fires before the `:294` log line (the
-    // registration runs immediately with no active transaction).
-    dispatch_assign(pool, state, &plan.after_commit).await?;
-    tracing::info!(
-        "{}",
-        drain_kernel::drain_for_runner_log(&locked_runner_id, &run_id)
-    );
-    Ok(true)
-}
-
-/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
-/// no tx), else the drain loop. A dispatch failure propagates — the
-/// row stays `ASSIGNED` while the caller observes the failure.
-pub(crate) async fn drain_pod_by_id(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    pod_id: Uuid,
-) -> Result<(), ()> {
-    let pod: Option<sqlx::postgres::PgRow> = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ())?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`matcher.py:194-239`): lock the idle list, then per
-/// runner in list order take the next queued run, write the
-/// assignment, and plan the frame; commit once; then dispatch each
-/// frame in assignment order. The `:237` log line runs after the
-/// sends (the `on_commit` registrations fire immediately).
-async fn drain_pod(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    pod_id: Uuid,
-) -> Result<(), ()> {
-    use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get(0).map_err(|_| ())?;
-        let owner_id: Uuid = runner.try_get(1).map_err(|_| ())?;
-        let provisioning: String = runner.try_get(7).map_err(|_| ())?;
-        let visibility: i16 = runner.try_get(8).map_err(|_| ())?;
-        // Non-private runners issue no query (the `qs.none()` arm).
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-        let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-        let prompt: String = run.try_get(19).map_err(|_| ())?;
-        let run_config: Value = run.try_get(23).map_err(|_| ())?;
-        let Value::Object(run_config) = run_config else {
-            return Err(());
-        };
-        // `$3` is a fresh `timezone.now()` per assignment (`:233`).
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        plans.push(drain_kernel::plan_assignment(
-            &drain_kernel::AssignmentFacts {
-                run_id,
-                runner_id,
-                owner_id,
-                work_item_id,
-                prompt,
-                run_config,
-            },
-        ));
-    }
-    tx.commit().await.map_err(|_| ())?;
-    for plan in &plans {
-        dispatch_assign(pool, state, &plan.after_commit).await?;
-    }
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    Ok(())
+/// Log a drain-path cause before it erases into `()` (PIDASHCONV-1563):
+/// the transition fire maps `()` to a 500 with no other trace, so the
+/// storage error must land here while it is still in hand. The dispatch
+/// itself moved to the public `live_drains` executor (OVL-06), so the
+/// per-step sites collapse into the thin caller's single erasure and
+/// the [`DrainError`][pidash_services::runner_sessions::live_drains::DrainError]
+/// `Display` carries the cause.
+fn drain_error<E: std::fmt::Display>(error: E, site: &str, pod_id: &Uuid) {
+    tracing::error!(%error, site, %pod_id, "runner drain failure");
 }
 
 // ---------------------------------------------------------------------------
 // Post-commit firing (the `on_commit` registrations, in order)
 // ---------------------------------------------------------------------------
 
+/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
+/// (miss ⇒ `Ok(false)`), else the locked drain. Thin caller of the
+/// public executor (OVL-06); the local copy is deleted.
+async fn drain_for_runner_by_id(
+    pool: &sqlx::postgres::PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+) -> Result<bool, ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await
+    .map_err(|_| ())
+}
+
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
+/// no tx), else the drain loop. A dispatch failure propagates — the
+/// row stays `ASSIGNED` while the caller observes the failure. Thin
+/// caller of the public executor (OVL-06); the local copy is deleted.
+pub(crate) async fn drain_pod_by_id(
+    pool: &sqlx::postgres::PgPool,
+    state: &AppState,
+    pod_id: Uuid,
+) -> Result<(), ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| drain_error(error, "drain-pod", &pod_id))
+}
 /// Drain one finalized run's publish pair, each effect isolated with
 /// its failure log (`agent_run_finalization.py` `_publish_effects`:
 /// the emit and the inline apply sit in separate `try` blocks).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn drain_publish_pair(
     pool: &sqlx::postgres::PgPool,
     ports: &LivePorts,
     pair: [LifecycleEffect; 2],
+    terminal_created_by: Option<Uuid>,
 ) {
     for effect in pair {
         let label = match &effect {
@@ -1339,7 +1069,7 @@ async fn drain_publish_pair(
             }
             unexpected => format!("failed to drain unexpected terminal effect: {unexpected:?}"),
         };
-        if drain_lifecycle_effects(pool, ports, vec![effect])
+        if drain_lifecycle_effects(pool, ports, vec![effect], terminal_created_by)
             .await
             .is_err()
         {
@@ -1352,10 +1082,13 @@ async fn drain_publish_pair(
 /// through the D-12 provider, drains through [`drain_kernel`] — all
 /// unguarded, so any failure propagates to the poll (TRACE bug 2).
 /// The cancel retry is the isolated twin (`:223-241`, one log line).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn fire_session_effect(
     pool: &sqlx::postgres::PgPool,
     state: &AppState,
     effect: session_kernel::SessionEffect,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), ()> {
     use session_kernel::SessionEffect;
     match effect {
@@ -1385,9 +1118,14 @@ async fn fire_session_effect(
             .map(|_| ()),
         SessionEffect::DrainPod { pod_id } => drain_pod_by_id(pool, state, pod_id).await,
         SessionEffect::CompleteProjectMoveHandoff { run_id } => {
-            crate::project_move_handoff::complete_project_move_handoff(pool, state, run_id)
-                .await
-                .map(|_| ())
+            crate::project_move_handoff::complete_project_move_handoff(
+                pool,
+                state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -1625,10 +1363,8 @@ pub async fn runner_session_poll(
     };
 
     // Bookkeeping (`_poll_bookkeeping`, `:330-459`).
-    let row = match sqlx::query(runner_session::POLL_GET_SQL)
-        .bind(sid)
-        .bind(runner_id)
-        .fetch_optional(&pool)
+    let row = match runner_session::poll_get_select(sid, runner_id)
+        .one(&pidash_db::pool::sea_orm_connection(&pool))
         .await
     {
         Ok(row) => row,
@@ -1637,10 +1373,7 @@ pub async fn runner_session_poll(
     let Some(row) = row else {
         return render(session_evicted_poll(None));
     };
-    let session = match runner_session_from_row(&row) {
-        Ok(session) => session,
-        Err(_) => return server_error(),
-    };
+    let session = runner_session_from_model(row);
     if session.revoked_at.is_some() {
         return render(session_evicted_poll(Some(&session.revoked_reason)));
     }
@@ -1653,12 +1386,13 @@ pub async fn runner_session_poll(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if sqlx::query(runner_session::TOUCH_SQL)
-        .bind(now_micros())
-        .bind(sid)
-        .execute(&pool)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::touch_runner_session(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        sid,
+        now_micros(),
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -1671,12 +1405,14 @@ pub async fn runner_session_poll(
         Ok(tx) => tx,
         Err(error) => return heartbeat_error(error),
     };
+    // raw-sql: `SET LOCAL` is a session setting, not a statement sea-query builds.
     if let Err(error) = sqlx::query(SET_LOCAL_LOCK_TIMEOUT_SQL)
         .execute(&mut *tx)
         .await
     {
         return heartbeat_error(error);
     }
+    // raw-sql: `SET LOCAL` is a session setting, not a statement sea-query builds.
     if let Err(error) = sqlx::query(SET_LOCAL_STATEMENT_TIMEOUT_SQL)
         .execute(&mut *tx)
         .await
@@ -1684,13 +1420,12 @@ pub async fn runner_session_poll(
         return heartbeat_error(error);
     }
     let snapshot: Option<(Option<DateTime<Utc>>, String)> =
-        match sqlx::query_as(HEARTBEAT_SNAPSHOT_SQL)
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
+        match statements::heartbeat_snapshot_select(runner_id)
+            .one(&TxConn::new(&mut tx))
             .await
         {
             Ok(snapshot) => snapshot,
-            Err(error) => return heartbeat_error(error),
+            Err(error) => return heartbeat_db_error(error),
         };
     let Some((prior_hb, prior_status)) = snapshot else {
         // The runner vanished between auth and bookkeeping: the
@@ -1706,14 +1441,12 @@ pub async fn runner_session_poll(
         reported_status,
         status_entry.is_empty(),
     );
-    if let Err(error) = sqlx::query(HEARTBEAT_UPDATE_SQL)
-        .bind(hb_now)
-        .bind(decision.new_status)
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
+    if let Err(error) =
+        statements::heartbeat_update_statement(runner_id, hb_now, decision.new_status)
+            .exec(&TxConn::new(&mut tx))
+            .await
     {
-        return heartbeat_error(error);
+        return heartbeat_db_error(error);
     }
     let mut reap = ReapOutcome {
         retry_cancel: None,
@@ -1732,20 +1465,28 @@ pub async fn runner_session_poll(
     // The heartbeat commit fires the reap registrations in order:
     // the cancel retry, then one publish pair per finalized run in
     // reap order, then the drain effects. Only the drain effects
-    // propagate (TRACE bug 2).
+    // propagate (TRACE bug 2). Daemon request: the crum user is the
+    // runner owner.
+    let terminal_created_by = Some(auth.runner.owner_id);
     if let Some(retry) = reap.retry_cancel {
-        if fire_session_effect(&pool, &state, retry).await.is_err() {
+        if fire_session_effect(&pool, &state, retry, terminal_created_by)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
     if !reap.publish_pairs.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
         for pair in reap.publish_pairs {
-            drain_publish_pair(&pool, &ports, pair).await;
+            drain_publish_pair(&pool, &ports, pair, terminal_created_by).await;
         }
     }
     for effect in reap.drain_effects {
-        if fire_session_effect(&pool, &state, effect).await.is_err() {
+        if fire_session_effect(&pool, &state, effect, terminal_created_by)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
@@ -1756,7 +1497,7 @@ pub async fn runner_session_poll(
     }
 
     // XACK explicit ids (`:428-430`).
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
         && session_outbox::ack_for_session(redis.as_ref(), &rid, &ack_ids)
             .await
@@ -2143,14 +1884,6 @@ mod tests {
         assert_eq!(
             SET_LOCAL_STATEMENT_TIMEOUT_SQL,
             "SET LOCAL statement_timeout = '20000ms'"
-        );
-        assert_eq!(
-            HEARTBEAT_SNAPSHOT_SQL,
-            "SELECT \"runner\".\"last_heartbeat_at\", \"runner\".\"status\" FROM \"runner\" WHERE \"runner\".\"id\" = $1 LIMIT 21 FOR UPDATE"
-        );
-        assert_eq!(
-            HEARTBEAT_UPDATE_SQL,
-            "UPDATE \"runner\" SET \"last_heartbeat_at\" = $1, \"status\" = $2 WHERE \"runner\".\"id\" = $3"
         );
     }
 

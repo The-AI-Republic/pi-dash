@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 import secrets
 import uuid
@@ -116,6 +117,33 @@ class Seed:
                     (users, workspaces),
                 )
                 cur.execute(
+                    "DELETE FROM engine_credential WHERE user_id = ANY(%s)",
+                    (users,),
+                )
+                # Bound dev machines (runner.dev_machine_id) and live
+                # state (runner_live_state.runner_id) reference rows the
+                # tracked deletes below remove later; sweep every table
+                # keyed on runner (or on issues/runner joins) for owned
+                # runners first so neither the dev_machine nor the runner
+                # delete can hit foreign keys.
+                for table, col in (
+                    ("runner_live_state", "runner_id"),
+                    ("runner_session", "runner_id"),
+                    ("runner_force_refresh", "runner_id"),
+                    ("agent_run", "runner_id"),
+                    ("agent_run", "pinned_runner_id"),
+                    ("agent_chat_session", "runner_id"),
+                    ("issues", "assigned_runner_id"),
+                ):
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE {col} IN "
+                        "(SELECT id FROM runner WHERE owner_id = ANY(%s))",
+                        (users,),
+                    )
+                cur.execute(
+                    "DELETE FROM runner WHERE owner_id = ANY(%s)", (users,)
+                )
+                cur.execute(
                     "DELETE FROM dev_machine WHERE owner_id = ANY(%s)",
                     (users,),
                 )
@@ -189,7 +217,8 @@ class Seed:
         self._rows.clear()
 
     # -- identity ------------------------------------------------------
-    def user(self, *, email=None, password="contract-pw-80", suffix=None):
+    def user(self, *, email=None, password="contract-pw-80", suffix=None,
+             user_timezone="UTC"):
         sfx = suffix or uuid.uuid4().hex[:8]
         email = email or f"ct80-{sfx}@example.com"
         return {
@@ -214,7 +243,7 @@ class Seed:
                 is_email_verified=True,
                 is_password_autoset=False,
                 token=uuid.uuid4().hex,
-                user_timezone="UTC",
+                user_timezone=user_timezone,
                 last_login_ip="127.0.0.1",
                 last_logout_ip="",
                 last_login_medium="",
@@ -306,8 +335,13 @@ class Seed:
         return {cookie_name: key}
 
     def machine_token(self, user_id, workspace_id, dev_machine_id,
-                      secret, *, host_label="ct80-host", raw=None):
+                      secret, *, host_label="ct80-host", raw=None,
+                      expires_in_days=60, revoked_at=None):
         raw = raw or ("mt_" + secrets.token_urlsafe(32))
+        if expires_in_days is None:
+            expires_at = None
+        else:
+            expires_at = _now() + timedelta(days=expires_in_days)
         self._insert(
             "machine_token",
             user_id=user_id,
@@ -319,13 +353,39 @@ class Seed:
             label=f"machine: {host_label[:96]}",
             is_service=True,
             created_at=_now(),
+            expires_at=expires_at,
+            revoked_at=revoked_at,
+            last_used_at=None,
+        )
+        return raw
+
+    def engine_credential(self, user_id, dev_machine_id, secret,
+                          *, expires_in_days=14, revoked_at=None,
+                          revoked_reason=""):
+        """Seed an engine credential row (hash via stdlib HMAC)."""
+        raw = "ec_" + secrets.token_urlsafe(32)
+        token_hash = hash_token(raw, secret)
+        expires_at = _now() + timedelta(days=expires_in_days)
+        self._insert(
+            "engine_credential",
+            user_id=user_id,
+            dev_machine_id=dev_machine_id,
+            token_hash=token_hash,
+            fingerprint=token_fingerprint(raw),
+            created_at=_now(),
+            expires_at=expires_at,
+            last_used_at=None,
+            revoked_at=revoked_at,
+            revoked_reason=revoked_reason,
         )
         return raw
 
     # -- device codes ----------------------------------------------------
     def device_code(self, *, device_code=None, user_code=None, user_id=None,
                     workspace_id=None, approved=False, denied=False,
-                    consumed=False, expires_in_seconds=600):
+                    consumed=False, expires_in_seconds=600,
+                    scope="cli", dev_machine_id=None,
+                    interactive_approval=False, api_token_id=None):
         device_code = device_code or secrets.token_urlsafe(32)[:48]
         user_code = user_code or (
             "".join(secrets.choice("BCDFGHJKLMNPQRSTVWXZ23456789")
@@ -349,6 +409,10 @@ class Seed:
             expires_at=expire,
             created_at=_now(),
             updated_at=_now(),
+            scope=scope,
+            dev_machine_id=dev_machine_id,
+            interactive_approval=interactive_approval,
+            api_token_id=api_token_id,
         )
         return {"device_code": device_code, "user_code": user_code}
 
@@ -383,6 +447,7 @@ class Seed:
             is_default=False,
             agent_review_default_interval_seconds=0,
             default_agent_executor="",
+            dedicated_runner_lost_action="fail_to_backlog",
             agent_test_default_interval_seconds=0,
             created_at=_now(),
             updated_at=_now(),
@@ -400,7 +465,10 @@ class Seed:
             updated_at=_now(),
         )
 
-    def dev_machine(self, owner_id, *, host_label="ct80-host"):
+    def dev_machine(self, owner_id, *, host_label="ct80-host",
+                    engine_sign_in_state="never",
+                    engine_credential_expires_at=None,
+                    engine_auto_pause_reason="", revoked_at=None):
         return self._insert(
             "dev_machine",
             host_label=host_label,
@@ -410,6 +478,17 @@ class Seed:
             provisioning="manual",
             created_at=_now(),
             updated_at=_now(),
+            engine_paused_by_owner=False,
+            engine_auto_pause_reason=engine_auto_pause_reason,
+            engine_team_runs=False,
+            engine_sign_in_state=engine_sign_in_state,
+            engine_credential_expires_at=engine_credential_expires_at,
+            engine_state="{}",
+            engine_state_reported_at=None,
+            merged_into_id=None,
+            merge_result="{}",
+            revoked_at=revoked_at,
+            last_seen_at=None,
         )
 
     def runner(self, owner_id, workspace_id, pod_id, *, name=None,
@@ -489,10 +568,10 @@ class Seed:
         )
 
     def issue(self, workspace_id, project_id, *, name=None,
-              description="", sequence_id=None, state_id=None):
+              description="", sequence_id=None, state_id=None,
+              completed_at=None, archived_at=None):
         """A minimal issue row with FTS-visible text columns set."""
-        return self._insert(
-            "issues",
+        cols = dict(
             name=name or f"CT87 issue {uuid.uuid4().hex[:6]}",
             description_json="{}",
             description_html=f"<p>{description}</p>" if description else "<p></p>",
@@ -510,6 +589,11 @@ class Seed:
             created_at=_now(),
             updated_at=_now(),
         )
+        if completed_at is not None:
+            cols["completed_at"] = completed_at
+        if archived_at is not None:
+            cols["archived_at"] = archived_at
+        return self._insert("issues", **cols)
 
     def favorite_view(self, workspace_id, user_id, view_id, *,
                       project_id=None):
@@ -875,12 +959,13 @@ def create_project(
             repo_url, base_branch, agent_default_interval_seconds,
             agent_default_max_ticks, agent_ticking_enabled, is_default,
             agent_review_default_interval_seconds, default_agent_executor,
+            dedicated_runner_lost_action,
             agent_test_default_interval_seconds, created_at, updated_at,
             created_by_id)
         VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
-            60,'local_runner',60,%s,%s,%s)""",
+            60,'local_runner','fail_to_backlog',60,%s,%s,%s)""",
         (pid, name, identifier, workspace_id, now, now, created_by_id),
     )
     return {"id": pid, "identifier": identifier}
@@ -1124,6 +1209,7 @@ class Seeder:
                 agent_default_interval_seconds, agent_default_max_ticks,
                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
                 agent_ticking_enabled, default_agent_executor,
+                dedicated_runner_lost_action,
                 created_at, updated_at)
                VALUES (%s,%s,'',2,%s,%s,
                        false,false,false,true,false,
@@ -1131,7 +1217,7 @@ class Seeder:
                        false,true,
                        0,0,'{}','UTC','','main',
                        10800,10,10800,10800,
-                       true,'local_runner',
+                       true,'local_runner','fail_to_backlog',
                        now(),now())""",
             (
                 project_id,
@@ -1274,6 +1360,25 @@ class Seeder:
         self._put("cycles", cycle_id)
         return {"id": cycle_id}
 
+    def create_cycle_issue(
+        self,
+        workspace_id: str,
+        project_id: str,
+        cycle_id: str,
+        issue_id: str,
+        *,
+        created_at: str = "2024-01-01T00:00:00+00:00",
+    ) -> dict[str, Any]:
+        link_id = _uid()
+        self.db.execute(
+            """INSERT INTO cycle_issues
+               (id, workspace_id, project_id, cycle_id, issue_id, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)""",
+            (link_id, workspace_id, project_id, cycle_id, issue_id, created_at, created_at),
+        )
+        self._put("cycle_issues", link_id)
+        return {"id": link_id}
+
     def create_module(self, workspace_id: str, project_id: str, *, name: str = "Contract module") -> dict[str, Any]:
         module_id = _uid()
         self.db.execute(
@@ -1399,6 +1504,7 @@ class Seeder:
         parent_id: str | None = None,
         description_html: str = "<p></p>",
         description_binary: bytes | None = None,
+        description_json: dict | None = None,
         archived: bool = False,
         locked: bool = False,
     ) -> dict[str, Any]:
@@ -1413,11 +1519,12 @@ class Seeder:
                 owned_by_id, access, workspace_id, color, parent_id, archived_at,
                 is_locked, view_props, logo_props, is_global, sort_order,
                 created_by_id, created_at, updated_at)
-               VALUES (%s,%s,'{}',%s,%s,%s,%s,%s,'',%s,
+               VALUES (%s,%s,CAST(%s AS jsonb),%s,%s,%s,%s,%s,'',%s,
                        CASE WHEN %s THEN CURRENT_DATE ELSE NULL END,
                        %s,'{"full_width": false}','{}',false,65535,%s,now(),now())""",
             (
-                page_id, name, description_binary, description_html,
+                page_id, name, json.dumps({} if description_json is None else description_json),
+                description_binary, description_html,
                 owner_id, access, workspace_id, parent_id,
                 archived, locked, owner_id,
             ),
@@ -1673,6 +1780,49 @@ class Seeder:
             "name": name,
             "url": f"https://github.com/{owner}/{name}",
         }
+
+    def create_git_repository_binding(
+        self,
+        workspace_id: str,
+        project_id: str,
+        account_id: str,
+        actor_id: str,
+        *,
+        last_synced_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Seed a ``git_repositories`` + ``git_repository_bindings`` pair."""
+        repo_id = _uid()
+        full = f"contract-owner-{self.tag[:6]}/contract-repo-{self._n + 1}"
+        self.db.execute(
+            """INSERT INTO git_repositories
+               (id, provider, host_url, external_id, namespace, name, full_name,
+                web_url, clone_url_http, clone_url_ssh, default_branch,
+                is_private, metadata, created_at, updated_at)
+               VALUES (%s,'github','https://github.com',%s,%s,%s,%s,
+                       %s,%s,%s,'main',false,'{}',now(),now())""",
+            (
+                repo_id,
+                f"contract:{repo_id[:8]}",
+                f"contract-owner-{self.tag[:6]}",
+                f"contract-repo-{self._n + 1}",
+                full,
+                f"https://github.com/{full}",
+                f"https://github.com/{full}.git",
+                f"git@github.com:{full}.git",
+            ),
+        )
+        self._put("git_repositories", repo_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_repository_bindings
+               (id, project_id, workspace_id, repository_id, provider_account_id,
+                actor_id, is_sync_enabled, clone_auth_mode, last_synced_at,
+                last_sync_error, metadata, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,false,'runner_managed',%s,'','{}',now(),now())""",
+            (binding_id, project_id, workspace_id, repo_id, account_id, actor_id, last_synced_at),
+        )
+        self._put("git_repository_bindings", binding_id)
+        return {"id": binding_id, "repository_id": repo_id}
 
     def create_github_app_installation(self, wi_id: str) -> dict[str, Any]:
         """Seed a ``github_app_installations`` row with a unique install id."""
@@ -1994,25 +2144,60 @@ class Seeder:
         workspace_id: str,
         created_by_id: str,
         pod_id: str,
-        work_item_id: str,
+        work_item_id: str | None,
         *,
         status: str = "running",
+        # A scheduler run (PDASHOSS01-276) passes work_item_id=None plus
+        # its binding; trigger follows, as dispatch_scheduler_run sets it.
+        scheduler_binding_id: str | None = None,
     ) -> dict[str, Any]:
         run_id = _uid()
+        trigger = "scheduler" if scheduler_binding_id else "human"
         self.db.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
-                refusal_category, trigger, executor_kind, dispatch_attempts,
-                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
-               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
-                       %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
-            (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
+                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                trigger, executor_kind, dispatch_attempts,
+                cancel_reason, tool_plan, phase_kind, agent_metadata,
+                usage, pin_kind, scheduler_binding_id, created_at)
+               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}',
+                       %s,%s,%s,%s,'contract-model', %s, 'local_runner', 0,
+                       '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality',
+                       %s, now())""",
+            (
+                run_id, status, workspace_id, work_item_id, pod_id, created_by_id,
+                trigger, scheduler_binding_id,
+            ),
         )
         self._put("agent_run", run_id)
         return {"id": run_id}
+
+    def create_scheduler_binding(
+        self, workspace_id: str, project_id: str, actor_id: str
+    ) -> dict[str, Any]:
+        """A workspace scheduler installed (enabled) on the project."""
+        scheduler_id = _uid()
+        self.db.execute(
+            """INSERT INTO schedulers
+               (id, workspace_id, slug, name, description, prompt, source,
+                is_enabled, color, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'contract scheduler','Scan the project.',
+                       'manifest', true, '#3b82f6', now(), now())""",
+            (scheduler_id, workspace_id, self._slug("ct-sched"), "Contract scheduler"),
+        )
+        self._put("schedulers", scheduler_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO scheduler_bindings
+               (id, workspace_id, project_id, scheduler_id, actor_id, dtstart,
+                tzid, rrule, rdates, exdates, extra_context, enabled, last_error,
+                outcome_mode, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,now(),'UTC','FREQ=HOURLY','[]','[]','',
+                       true,'','create_issue',now(),now())""",
+            (binding_id, workspace_id, project_id, scheduler_id, actor_id),
+        )
+        self._put("scheduler_bindings", binding_id)
+        return {"id": binding_id, "scheduler_id": scheduler_id}
 
     # -- runner daemon domain (PIDASHCONV-97) --------------------------------
     # Factories for the daemon-facing runner API (``/api/v1/runner/``):
@@ -2142,14 +2327,14 @@ class Seeder:
                (id, workspace_id, owner_id, created_by_id, pod_id, runner_id,
                 status, prompt, trigger, executor_kind, run_config,
                 required_capabilities, thread_id, agent_metadata, tool_plan,
-                usage, dispatch_attempts, error, refusal_category, llm_model,
-                cancel_reason, error_code, phase_kind,
+                usage, dispatch_attempts, error_details, llm_model,
+                cancel_reason, phase_kind, pin_kind,
                 created_at)
                VALUES (%s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
-                       '{}',0,'','','',
-                       '','','',
+                       '{}',0,'{}','',
+                       '','','locality',
                        now())""",
             (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),
         )
@@ -2326,6 +2511,7 @@ def issue_chain(conn, slug: str) -> dict:
             "agent_test_default_interval_seconds": 10800,
             "agent_ticking_enabled": True,
             "default_agent_executor": "local_runner",
+            "dedicated_runner_lost_action": "fail_to_backlog",
         },
     )
     state = insert_row(
@@ -2585,6 +2771,7 @@ def project(conn, workspace_id, name: str = "Contract Project", **over) -> dict:
         "is_default": False,
         "agent_review_default_interval_seconds": 0,
         "default_agent_executor": "",
+        "dedicated_runner_lost_action": "fail_to_backlog",
         "agent_test_default_interval_seconds": 0,
     }
     values.update(over)

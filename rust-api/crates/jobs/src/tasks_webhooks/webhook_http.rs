@@ -356,57 +356,139 @@ pub fn parse_status_and_headers(bytes: &[u8]) -> Result<StatusAndHeaders, String
     Ok((status, headers, end + 4))
 }
 
+/// Parse one chunk-size line (hex size, `;` extensions ignored).
+fn parse_chunk_size(line: &[u8]) -> Result<usize, String> {
+    let size_text = latin1(line);
+    let size_text = size_text
+        .split_once(';')
+        .map_or(size_text.as_str(), |(n, _)| n)
+        .trim();
+    usize::from_str_radix(size_text, 16).map_err(|_| "Invalid chunked body".to_owned())
+}
+
+/// What the incremental chunked decoder expects next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkedStage {
+    /// A chunk-size line.
+    Size,
+    /// `remaining` more data bytes of the current chunk.
+    Data { remaining: usize },
+    /// The CRLF ending the current chunk's data.
+    DataEnd,
+    /// The bytes after the terminal zero-size line (trailers through the
+    /// blank line, or a bare CRLF).
+    Terminal,
+}
+
+/// Incremental `Transfer-Encoding: chunked` decoder (PIDASHCONV-1673).
+///
+/// The read loop feeds the cumulative buffer after every socket read and
+/// the decoder resumes where it left off, so each byte is parsed and each
+/// completed chunk is copied exactly once: linear in the body size.
+/// Semantics and error strings match the old batch decoder, which now
+/// delegates here (`decode_chunked`).
+struct ChunkedDecoder {
+    body: Vec<u8>,
+    stage: ChunkedStage,
+    /// Offset of the first unconsumed byte in the cumulative buffer.
+    consumed: usize,
+    /// Offset up to which the tail was already scanned for a line ending
+    /// in the current stage; resuming the scan here (with an overlap for
+    /// straddled endings) keeps framing linear as well.
+    scanned: usize,
+}
+
+impl ChunkedDecoder {
+    fn new() -> Self {
+        ChunkedDecoder {
+            body: Vec::new(),
+            stage: ChunkedStage::Size,
+            consumed: 0,
+            scanned: 0,
+        }
+    }
+
+    fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+
+    /// Feed the cumulative buffer; returns the offset just past the
+    /// terminal chunk once the framing is complete, `None` while more
+    /// bytes are needed.
+    fn feed(&mut self, buf: &[u8]) -> Result<Option<usize>, String> {
+        loop {
+            match self.stage {
+                ChunkedStage::Size => {
+                    let from = self.scanned.saturating_sub(1).max(self.consumed);
+                    let Some(rel) = buf[from..].windows(2).position(|w| w == b"\r\n") else {
+                        self.scanned = buf.len();
+                        return Ok(None);
+                    };
+                    let line_end = from + rel;
+                    let size = parse_chunk_size(&buf[self.consumed..line_end])?;
+                    self.consumed = line_end + 2;
+                    self.scanned = self.consumed;
+                    self.stage = if size == 0 {
+                        ChunkedStage::Terminal
+                    } else {
+                        ChunkedStage::Data { remaining: size }
+                    };
+                }
+                ChunkedStage::Data { mut remaining } => {
+                    let take = remaining.min(buf.len().saturating_sub(self.consumed));
+                    self.body
+                        .extend_from_slice(&buf[self.consumed..self.consumed + take]);
+                    self.consumed += take;
+                    remaining -= take;
+                    if remaining > 0 {
+                        self.stage = ChunkedStage::Data { remaining };
+                        return Ok(None);
+                    }
+                    self.scanned = self.consumed;
+                    self.stage = ChunkedStage::DataEnd;
+                }
+                ChunkedStage::DataEnd => {
+                    // A segment may end at the chunk-data edge: missing
+                    // bytes mean truncated (keep reading), present-but-wrong
+                    // bytes mean invalid.
+                    let Some(trailer) = buf.get(self.consumed..self.consumed + 2) else {
+                        return Ok(None);
+                    };
+                    if trailer != b"\r\n" {
+                        return Err("Invalid chunked body".to_owned());
+                    }
+                    self.consumed += 2;
+                    self.scanned = self.consumed;
+                    self.stage = ChunkedStage::Size;
+                }
+                ChunkedStage::Terminal => {
+                    // Consume trailers through the blank line, else a bare
+                    // final CRLF with no trailers — same two searches as
+                    // the old batch decoder, resumed at `scanned`.
+                    let from4 = self.scanned.saturating_sub(3).max(self.consumed);
+                    if let Some(rel) = buf[from4..].windows(4).position(|w| w == b"\r\n\r\n") {
+                        return Ok(Some(from4 + rel + 4));
+                    }
+                    let from2 = self.scanned.saturating_sub(1).max(self.consumed);
+                    if let Some(rel) = buf[from2..].windows(2).position(|w| w == b"\r\n") {
+                        return Ok(Some(from2 + rel + 2));
+                    }
+                    self.scanned = buf.len();
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
 /// Decode one chunked body (extensions and trailers ignored, like
 /// `urllib3`'s reader). Returns the joined bytes and the offset just
 /// past the terminal chunk.
 pub fn decode_chunked(bytes: &[u8]) -> Result<(Vec<u8>, usize), String> {
-    let mut body = Vec::new();
-    let mut at = 0;
-    loop {
-        let line_end = bytes[at..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or_else(|| "Truncated chunked body".to_owned())?
-            + at;
-        let size_text = latin1(&bytes[at..line_end]);
-        let size_text = size_text
-            .split_once(';')
-            .map_or(size_text.as_str(), |(n, _)| n)
-            .trim();
-        let size =
-            usize::from_str_radix(size_text, 16).map_err(|_| "Invalid chunked body".to_owned())?;
-        at = line_end + 2;
-        if size == 0 {
-            // Consume trailers through the blank line.
-            let trailer_end = bytes[at..]
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .map(|p| p + at + 4)
-                .or_else(|| {
-                    // Bare final CRLF with no trailers.
-                    bytes[at..]
-                        .windows(2)
-                        .position(|w| w == b"\r\n")
-                        .map(|p| p + at + 2)
-                })
-                .ok_or_else(|| "Truncated chunked body".to_owned())?;
-            return Ok((body, trailer_end));
-        }
-        let chunk_end = at
-            .checked_add(size)
-            .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| "Truncated chunked body".to_owned())?;
-        body.extend_from_slice(&bytes[at..chunk_end]);
-        at = chunk_end;
-        // A segment may end at the chunk-data edge: missing bytes mean
-        // truncated (keep reading), present-but-wrong bytes mean invalid.
-        let Some(trailer) = bytes.get(at..at + 2) else {
-            return Err("Truncated chunked body".to_owned());
-        };
-        if trailer != b"\r\n" {
-            return Err("Invalid chunked body".to_owned());
-        }
-        at += 2;
+    let mut decoder = ChunkedDecoder::new();
+    match decoder.feed(bytes)? {
+        Some(end) => Ok((decoder.into_body(), end)),
+        None => Err("Truncated chunked body".to_owned()),
     }
 }
 
@@ -938,13 +1020,15 @@ async fn read_body(
     if chunked {
         // Chunked framing is complete at the terminal chunk; a keep-alive
         // peer leaves the socket open, so decode incrementally instead of
-        // waiting for EOF.
+        // waiting for EOF. The decoder keeps its position between reads:
+        // each byte is parsed and each completed chunk copied once.
         let mut buf = already;
         let mut chunk = [0u8; 8192];
+        let mut decoder = ChunkedDecoder::new();
         loop {
-            match decode_chunked(&buf) {
-                Ok((body, _)) => return Ok(body),
-                Err(detail) if detail == "Truncated chunked body" => {}
+            match decoder.feed(&buf) {
+                Ok(Some(_)) => return Ok(decoder.into_body()),
+                Ok(None) => {}
                 Err(detail) => return Err(format!("Chunked encoding error: {detail}")),
             }
             let step = async {
@@ -1274,6 +1358,85 @@ mod tests {
             let err = decode_chunked(&full[..end]).unwrap_err();
             assert_eq!(err, "Truncated chunked body", "prefix len {end}");
         }
+    }
+
+    /// The incremental decoder agrees with the batch entry point no
+    /// matter where the socket reads split the body — byte-at-a-time
+    /// included. This is what the read loop relies on.
+    #[test]
+    fn chunked_decoder_matches_batch_at_every_split() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n", b"Wikipedia"),
+            (b"4;ext=1\r\nWiki\r\n0\r\n\r\n", b"Wiki"),
+            (b"0\r\n\r\n", b""),
+            (b"1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n", b"abc"),
+            // Terminal trailers need no blank line (batch parity).
+            (b"2\r\nok\r\n0\r\nX-T: v\r\n", b"ok"),
+        ];
+        for (raw, expected) in cases.iter() {
+            let raw: &[u8] = raw;
+            let expected: &[u8] = expected;
+            // Whole buffer at once.
+            let (batch_body, end) = decode_chunked(raw).unwrap();
+            assert_eq!(batch_body.as_slice(), expected);
+            assert_eq!(end, raw.len());
+            // Every two-part split, as the read loop feeds them.
+            for k in 1..raw.len() {
+                let mut decoder = ChunkedDecoder::new();
+                assert_eq!(decoder.feed(&raw[..k]).unwrap(), None, "split {k}");
+                assert_eq!(decoder.feed(raw).unwrap(), Some(raw.len()), "split {k}");
+                assert_eq!(decoder.into_body().as_slice(), expected, "split {k}");
+            }
+            // Byte at a time.
+            let mut decoder = ChunkedDecoder::new();
+            for k in 1..raw.len() {
+                assert_eq!(decoder.feed(&raw[..k]).unwrap(), None, "byte {k}");
+            }
+            assert_eq!(decoder.feed(raw).unwrap(), Some(raw.len()));
+            assert_eq!(decoder.into_body().as_slice(), expected);
+        }
+        // Trailers through the blank line consume the whole section.
+        let raw = b"0\r\nA: 1\r\nB: 2\r\n\r\n";
+        let (body, end) = decode_chunked(raw).unwrap();
+        assert_eq!(body.as_slice(), b"");
+        assert_eq!(end, raw.len());
+        // ...while a lone trailer line ends at its own CRLF, ignoring
+        // whatever trails it.
+        let (body, end) = decode_chunked(b"0\r\nA: 1\r\nZZ").unwrap();
+        assert_eq!(body.as_slice(), b"");
+        assert_eq!(end, 9);
+    }
+
+    #[test]
+    fn chunked_decoder_reports_invalid_only_on_present_bytes() {
+        // Bad size line: truncated until the line completes, invalid after.
+        for k in 1..4 {
+            let mut decoder = ChunkedDecoder::new();
+            assert_eq!(decoder.feed(&b"ZZ\r\n"[..k]).unwrap(), None);
+            assert_eq!(decoder.feed(b"ZZ\r\n").unwrap_err(), "Invalid chunked body");
+        }
+        assert_eq!(
+            decode_chunked(b"ZZ\r\n").unwrap_err(),
+            "Invalid chunked body"
+        );
+        // Wrong CRLF after chunk data: one byte present is truncated,
+        // two wrong bytes are invalid.
+        let mut decoder = ChunkedDecoder::new();
+        assert_eq!(decoder.feed(b"5\r\nhelloX").unwrap(), None);
+        assert_eq!(
+            decoder.feed(b"5\r\nhelloXX").unwrap_err(),
+            "Invalid chunked body"
+        );
+        assert_eq!(
+            decode_chunked(b"5\r\nhelloXX").unwrap_err(),
+            "Invalid chunked body"
+        );
+        // Empty and short buffers are truncated, never invalid.
+        assert_eq!(decode_chunked(b"").unwrap_err(), "Truncated chunked body");
+        assert_eq!(
+            decode_chunked(b"5\r\nhel").unwrap_err(),
+            "Truncated chunked body"
+        );
     }
 
     #[test]

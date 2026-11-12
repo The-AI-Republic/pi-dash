@@ -65,9 +65,13 @@ use axum::Router;
 use serde_json::Value;
 
 use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
+use pidash_services::domain::identity;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::auth_session::render::disallowed_redirect;
+use crate::auth_session::throttle_ident;
 use crate::state::AppState;
+use pidash_compat::response::{empty_response_no_content_type, json_response};
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
 /// stay unmatched and proxy to Django.
@@ -134,14 +138,6 @@ fn owned_post(
 // Responses (exact bytes)
 // ---------------------------------------------------------------------------
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("password response")
-}
-
 fn json_400(pairs: &[(String, Value)]) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
@@ -155,7 +151,7 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
 /// 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
     let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
@@ -194,14 +190,15 @@ fn csrf_denied(reason: &str) -> Response {
 /// Live 429: `auth_exception_handler` rewrites DRF's default throttled
 /// response to the 5900 error dict (`adapter/exception.py:26-31`); the
 /// `Retry-After` header from `exception_handler` survives the rewrite
-/// (`views.py:90-91`, `'%d' % wait`, truncated).
+/// (`views.py:90-91`, `'%d' % wait`, ceiled — see
+/// `guards::retry_after_secs`).
 fn throttled(wait: Option<f64>) -> Response {
     let mut response = json_response(
         StatusCode::TOO_MANY_REQUESTS,
         pidash_services::auth_session::throttle_denied_json(),
     );
-    if let Some(wait) = wait {
-        if let Ok(value) = header::HeaderValue::from_str(&format!("{}", wait.trunc() as u64)) {
+    if let Some(secs) = pidash_services::auth_session::retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
             response.headers_mut().insert(header::RETRY_AFTER, value);
         }
     }
@@ -211,10 +208,7 @@ fn throttled(wait: Option<f64>) -> Response {
 /// Empty 500. Django's production 500 page is deployment-specific HTML;
 /// only the status is contractual here (the 500 vectors assert status).
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(axum::body::Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Custom `csrf_failure` page (`common.py:38-44`): `render()` with the
@@ -601,18 +595,6 @@ fn now_float() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// DRF `get_ident` (`throttling.py:23-40`, `NUM_PROXIES` unset): the
-/// `X-Forwarded-For` header with all whitespace stripped, else the peer
-/// address.
-fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.map(|p| p.ip().to_string()).unwrap_or_default()
-}
-
 /// `get_client_ip` (`utils/ip_address.py`): first `X-Forwarded-For`
 /// token (no stripping), else the peer address.
 fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Option<String> {
@@ -721,9 +703,10 @@ fn header_source_name(source: &str) -> String {
     }
 }
 
-/// `CsrfViewMiddleware._check_token` (Django 4.2): `Ok(())` or the
-/// rejection reason. Origin/Referer checks only apply to HTTPS; the
-/// reason never reaches the response body here (the failure page only
+/// `CsrfViewMiddleware.process_view` + `_check_token` (Django 4.2):
+/// `Ok(())` or the rejection reason. The Origin (or, on HTTPS without
+/// one, Referer) check runs first (NEWPIDASH-12); the reason never
+/// reaches the response body on the plain Views (the failure page only
 /// reads `root_url`), but the DRF denial echoes it.
 ///
 /// The check runs in two phases because DRF's `SessionAuthentication`
@@ -732,7 +715,11 @@ fn header_source_name(source: &str) -> String {
 /// body-parse failure (400/415) surfaces between the cookie check and
 /// the token comparison: cookie-check → parse → token-check. Anonymous
 /// callers skip both phases (no `enforce_csrf` without a user).
-fn check_csrf_cookie(headers: &HeaderMap) -> Result<String, String> {
+fn check_csrf_cookie(
+    settings: &pidash_db::config::Settings,
+    headers: &HeaderMap,
+) -> Result<String, String> {
+    super::csrf_origin_gate(settings, headers)?;
     let secret = match csrf_cookie_secret(headers) {
         None => return Err("CSRF cookie not set.".to_owned()),
         Some(Err(error)) => return Err(format!("CSRF cookie {}.", error.reason())),
@@ -816,7 +803,7 @@ async fn get_csrf_token(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         actor.is_some(),
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -852,6 +839,7 @@ async fn get_csrf_token(
         &secret,
         &pidash_auth::session::http_date(now + pw::CSRF_COOKIE_AGE_SECS),
         secure,
+        state.settings().session.cookie_domain.as_deref(),
     );
     let mut response = json_response(
         StatusCode::OK,
@@ -864,30 +852,7 @@ async fn get_csrf_token(
     response
 }
 
-/// Session-auth hash for `login()`: `salted_hmac(
-/// "...AbstractBaseUser.get_session_auth_hash", password_field,
-/// SECRET_KEY).hexdigest()` — the same construction `resolve_actor`
-/// verifies.
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash");
-        hasher.update(secret_key);
-        hasher.finalize()
-    };
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
+use pidash_compat::http::session_auth_hash;
 
 /// `user_login(user, request, is_app=True)` (`utils/login.py:14-28`) over
 /// the request session: Django `login()` re-keys the session, writes
@@ -933,12 +898,9 @@ async fn relogin(
         session.key.take()
     };
     if let Some(old) = old {
-        if sqlx::query("DELETE FROM sessions WHERE session_key = $1")
-            .bind(&old)
-            .execute(pool)
-            .await
-            .is_err()
-        {
+        use pidash_db::entity::sessions;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        if sessions::Entity::delete_by_id(old).exec(&db).await.is_err() {
             return None;
         }
     }
@@ -947,11 +909,18 @@ async fn relogin(
 
 /// Append the rotated `csrftoken` cookie (`login()` calls
 /// `rotate_token()`, so the browser's secret changes on every re-login).
-fn push_csrf_cookie(response: &mut Response, secret: &str, secure: bool, now: i64) {
+fn push_csrf_cookie(
+    response: &mut Response,
+    secret: &str,
+    secure: bool,
+    now: i64,
+    domain: Option<&str>,
+) {
     let cookie = pw::csrf_set_cookie_value(
         secret,
         &pidash_auth::session::http_date(now + pw::CSRF_COOKIE_AGE_SECS),
         secure,
+        domain,
     );
     if let Ok(value) = header::HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
@@ -974,20 +943,45 @@ fn user_agent_of(headers: &HeaderMap) -> String {
 async fn password_row(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<(String, bool)>, sqlx::Error> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT password, is_password_autoset FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>((
-            row.try_get("password")?,
-            row.try_get("is_password_autoset")?,
-        ))
-    })
-    .transpose()
+) -> Result<Option<(String, bool, bool)>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id)
+        .select_only()
+        .columns([
+            users::Column::Password,
+            users::Column::IsPasswordAutoset,
+            users::Column::TokenUpdatedAt,
+        ])
+        .into_tuple::<(String, bool, Option<chrono::DateTime<chrono::FixedOffset>>)>()
+        .one(&db)
+        .await?;
+    Ok(user.map(|(password, autoset, token_at)| (password, autoset, token_at.is_some())))
+}
+
+/// Change/set/reset-password write: the encoded password plus the
+/// `User.save()` column effects
+/// (`domain::identity::write_password_with_save_effects`), with a
+/// caller-generated rotation token. `stamp_last_login` selects the
+/// change/set-password twin over reset-password.
+async fn write_password(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    encoded: &str,
+    stamp_last_login: bool,
+) -> Result<(), sqlx::Error> {
+    let token = crate::auth_session::email::fresh_user_token();
+    identity::write_password_with_save_effects(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user_id,
+        &identity::PasswordSave {
+            encoded,
+            fresh_token: &token,
+            rotated_at: chrono::Utc::now(),
+            stamp_last_login,
+        },
+    )
+    .await
 }
 
 /// `POST /auth/change-password/` (`ChangePasswordEndpoint`,
@@ -1010,7 +1004,7 @@ async fn change_password(
         Ok(actor) => actor,
         Err(fail) => return actor_fail(fail),
     };
-    if let Err(reason) = check_csrf_cookie(&headers) {
+    if let Err(reason) = check_csrf_cookie(state.settings(), &headers) {
         return csrf_denied(&reason);
     }
     let data = match read_body(&headers, &body) {
@@ -1026,7 +1020,7 @@ async fn change_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1055,7 +1049,7 @@ async fn change_password(
         Ok(Some(row)) => row,
         _ => return server_error(),
     };
-    let (stored, is_autoset) = row;
+    let (stored, is_autoset, _) = row;
     let old_matches = match &old {
         Field::Text(candidate) => {
             match pidash_auth::password::verify_password(candidate, &stored) {
@@ -1065,6 +1059,31 @@ async fn change_password(
         }
         _ => false,
     };
+    // Django's `check_password` setter (`common.py:74`,
+    // `base_user.py:111-123`): a correct old password on an outdated hash
+    // re-encodes with the default hasher at once — after the
+    // missing-field gates (`:52-71`) but before the zxcvbn gate
+    // (`:82-89`), so a weak-new 400 still persists the upgrade.
+    // `save(update_fields=["password"])` writes only that column (no
+    // `updated_at` bump). Autoset accounts never reach `check_password`
+    // (`:74` short-circuits), and on the success path the new-password
+    // save below overwrites this either way.
+    if !is_autoset && old_present && new_present && old_matches {
+        if let Field::Text(candidate) = &old {
+            if let Some(new_hash) = pidash_auth::password::rehash_if_outdated(candidate, &stored) {
+                if identity::rehash_password(
+                    &pidash_db::pool::sea_orm_connection(&pool),
+                    actor.id,
+                    &new_hash,
+                )
+                .await
+                .is_err()
+                {
+                    return server_error();
+                }
+            }
+        }
+    }
     let new_weak = new_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
@@ -1089,14 +1108,9 @@ async fn change_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if sqlx::query(
-        "UPDATE users SET password = $1, is_password_autoset = false, last_login = now() WHERE id = $2",
-    )
-    .bind(&encoded)
-    .bind(actor.id)
-    .execute(&pool)
-    .await
-    .is_err()
+    if write_password(&pool, actor.id, &encoded, true)
+        .await
+        .is_err()
     {
         return server_error();
     }
@@ -1122,7 +1136,13 @@ async fn change_password(
         else {
             return server_error();
         };
-        push_csrf_cookie(&mut response, &csrf_secret, secure, now);
+        push_csrf_cookie(
+            &mut response,
+            &csrf_secret,
+            secure,
+            now,
+            state.settings().session.cookie_domain.as_deref(),
+        );
     }
     response
 }
@@ -1145,7 +1165,7 @@ async fn set_password(
     };
     // Cookie-check → parse → token-check → throttle (skipped), mirroring
     // the `request.POST`-parsing CSRF check (see `check_csrf_cookie`).
-    if let Err(reason) = check_csrf_cookie(&headers) {
+    if let Err(reason) = check_csrf_cookie(state.settings(), &headers) {
         return csrf_denied(&reason);
     }
     let data = match read_body(&headers, &body) {
@@ -1161,7 +1181,7 @@ async fn set_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1179,7 +1199,7 @@ async fn set_password(
         Ok(Some(row)) => row,
         _ => return server_error(),
     };
-    let (_, is_autoset) = row;
+    let (_, is_autoset, token_set) = row;
     let password_weak = password_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
@@ -1208,24 +1228,32 @@ async fn set_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if sqlx::query(
-        "UPDATE users SET password = $1, is_password_autoset = false, last_login = now() WHERE id = $2",
-    )
-    .bind(&encoded)
-    .bind(actor.id)
-    .execute(&pool)
-    .await
-    .is_err()
+    // `set_password` + `is_password_autoset = False` + `save()`; the
+    // `user_logged_in` signal bumps `last_login` (`update_last_login`).
+    if write_password(&pool, actor.id, &encoded, true)
+        .await
+        .is_err()
     {
         return server_error();
     }
     // `invalidate_cache("/api/users/me/")` deletes a key no reader ever
     // sets (`cache_response` never wraps a users/me view), so there is no
     // cache I/O to port — the observable behavior is identical.
-    let snapshot = match user_snapshot(&pool, actor.id).await {
+    let mut snapshot = match user_snapshot(&pool, actor.id).await {
         Ok(Some(snapshot)) => snapshot,
         _ => return server_error(),
     };
+    // `user_login` fires `update_last_login`, whose
+    // `save(update_fields=["last_login"])` runs the overridden `save()`
+    // body in memory: a second token rotation that is never persisted,
+    // but `UserSerializer(user)` reads the in-memory user — so the body
+    // shows a phantom token/timestamp (`body.token != row.token` on
+    // Django; phantom only when a token was already in use).
+    if token_set {
+        let now = chrono::Utc::now();
+        snapshot.token = crate::auth_session::email::fresh_user_token();
+        snapshot.token_updated_at = Some((now.timestamp(), now.timestamp_subsec_micros()));
+    }
     let pairs = pw::user_serializer_pairs(&snapshot);
     let body = crate::auth_session::json_error_string(&pairs);
     let now = now_unix();
@@ -1248,7 +1276,13 @@ async fn set_password(
         else {
             return server_error();
         };
-        push_csrf_cookie(&mut response, &csrf_secret, secure, now);
+        push_csrf_cookie(
+            &mut response,
+            &csrf_secret,
+            secure,
+            now,
+            state.settings().session.cookie_domain.as_deref(),
+        );
     }
     response
 }
@@ -1270,32 +1304,40 @@ struct ForgotUser {
 async fn forgot_user_by_email(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Option<ForgotUser>, sqlx::Error> {
+) -> Result<Option<ForgotUser>, sea_orm::DbErr> {
     // `User.objects.filter(email=email).first()` (exact match, default
     // `-created_at` ordering).
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, first_name, email, password, last_login FROM users WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::Email,
+            users::Column::Password,
+            users::Column::LastLogin,
+        ])
+        .into_tuple::<(
+            uuid::Uuid,
+            String,
+            Option<String>,
+            String,
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+        )>()
+        .one(&db)
+        .await?;
+    Ok(
+        user.map(|(id, first_name, email, password, last_login)| ForgotUser {
+            id,
+            first_name,
+            email: email.unwrap_or_default(),
+            password,
+            last_login_unix: last_login.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+        }),
     )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>(ForgotUser {
-            id: row.try_get("id")?,
-            first_name: row
-                .try_get::<Option<String>, _>("first_name")?
-                .unwrap_or_default(),
-            email: row
-                .try_get::<Option<String>, _>("email")?
-                .unwrap_or_default(),
-            password: row.try_get("password")?,
-            last_login_unix: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login")?
-                .map(|dt| dt.timestamp()),
-        })
-    })
-    .transpose()
 }
 
 /// `EMAIL_HOST` through the legacy resolver
@@ -1384,7 +1426,7 @@ async fn forgot_password(
     // the throttle first and parse in the handler below.
     let authed = actor.is_some();
     if authed {
-        if let Err(reason) = check_csrf_cookie(&headers) {
+        if let Err(reason) = check_csrf_cookie(state.settings(), &headers) {
             return csrf_denied(&reason);
         }
     } else if let Err(wait) = throttle_gate(
@@ -1392,7 +1434,7 @@ async fn forgot_password(
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_SCOPE,
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_RATE,
         false,
-        &throttle_ident(&headers, peer),
+        &throttle_ident(&headers, peer.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1521,26 +1563,29 @@ struct ResetUser {
 async fn reset_user_by_id(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<ResetUser>, sqlx::Error> {
+) -> Result<Option<ResetUser>, sea_orm::DbErr> {
     // `User.objects.get(id=id)`.
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT password, last_login, email FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>(ResetUser {
-            password: row.try_get("password")?,
-            last_login_unix: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login")?
-                .map(|dt| dt.timestamp()),
-            email: row
-                .try_get::<Option<String>, _>("email")?
-                .unwrap_or_default(),
-        })
-    })
-    .transpose()
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id)
+        .select_only()
+        .columns([
+            users::Column::Password,
+            users::Column::LastLogin,
+            users::Column::Email,
+        ])
+        .into_tuple::<(
+            String,
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+            Option<String>,
+        )>()
+        .one(&db)
+        .await?;
+    Ok(user.map(|(password, last_login, email)| ResetUser {
+        password,
+        last_login_unix: last_login.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+        email: email.unwrap_or_default(),
+    }))
 }
 
 /// Shared reset-password flow; `is_space` selects the view twin. Plain
@@ -1557,6 +1602,11 @@ async fn reset_password(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
+    // `CsrfViewMiddleware.process_view`: Origin/Referer first, before
+    // `_check_token` reads `request.POST` (NEWPIDASH-12).
+    if super::csrf_origin_gate(state.settings(), &headers).is_err() {
+        return csrf_failure_page(&base_host_for(&state, false, false));
+    }
     // Form only: `request.POST` fills only under a form media type —
     // a JSON body, a missing content-type, or any other media type
     // reads as a missing password below — while multipart text fields
@@ -1610,8 +1660,9 @@ async fn reset_password(
         }
     };
     // Lookup (`User.objects.get(id=id)`): a non-UUID pk raises
-    // `ValidationError` (500 on both twins); an unknown id raises
-    // `DoesNotExist` (INVALID on app, 500 on space).
+    // `ValidationError` (500 on both twins, kept); an unknown id raises
+    // `DoesNotExist` (INVALID on app; DIFF-4: the space 500 was an old
+    // bug, fixed here to the same INVALID redirect).
     let user_id = match pk.parse::<uuid::Uuid>() {
         Ok(id) => id,
         Err(_) => return server_error(),
@@ -1621,12 +1672,13 @@ async fn reset_password(
         Err(_) => return server_error(),
     };
     let Some(user) = user else {
-        if !is_space {
-            let (code, message) = pw::reset_app_failure_params(pw::ResetAppFailure::InvalidToken);
-            let base = base_host_for(&state, true, false);
-            return redirect_302(pw::reset_app_error_location(&base, code, message));
-        }
-        return server_error();
+        // DIFF-4 (NEWPIDASH-21; old bug fix for PB-1044 and the
+        // unknown-id half of PB-1055): Django answers 500 here on the
+        // space twin because `DoesNotExist` escapes
+        // `ResetPasswordSpaceEndpoint.post`. The new system answers the
+        // same INVALID_PASSWORD_TOKEN redirect the token-check failure
+        // below produces on the calling twin.
+        return reset_invalid_redirect(&state, is_space);
     };
     // Token check: false answers INVALID_PASSWORD_TOKEN on both twins.
     if !pw::check_password_token(
@@ -1660,10 +1712,7 @@ async fn reset_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if sqlx::query("UPDATE users SET password = $1, is_password_autoset = false WHERE id = $2")
-        .bind(&encoded)
-        .bind(user_id)
-        .execute(&pool)
+    if write_password(&pool, user_id, &encoded, false)
         .await
         .is_err()
     {
@@ -1751,104 +1800,60 @@ async fn reset_password_space(
 async fn user_snapshot(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<pw::UserSnapshot>, sqlx::Error> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT last_login, id, username, mobile_number, email, display_name, first_name, \
-         last_name, avatar, avatar_asset_id, date_joined, \
-         created_at, updated_at, last_location, created_location, is_superuser, is_managed, \
-         is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, \
-         is_password_reset_required, token, last_active, last_login_time, last_logout_time, \
-         last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, token_updated_at, \
-         is_bot, bot_type, user_timezone, is_email_valid, masked_at \
-         FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| {
-        let dt = |value: chrono::DateTime<chrono::Utc>| {
-            (value.timestamp(), value.timestamp_subsec_micros())
-        };
-        Ok::<_, sqlx::Error>(pw::UserSnapshot {
-            last_login: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login")?
-                .map(dt),
-            id: row.try_get::<uuid::Uuid, _>("id")?.to_string(),
-            username: row.try_get("username")?,
-            mobile_number: row.try_get("mobile_number")?,
-            email: row.try_get("email")?,
-            display_name: row
-                .try_get::<Option<String>, _>("display_name")?
-                .unwrap_or_default(),
-            first_name: row
-                .try_get::<Option<String>, _>("first_name")?
-                .unwrap_or_default(),
-            last_name: row
-                .try_get::<Option<String>, _>("last_name")?
-                .unwrap_or_default(),
-            avatar: row
-                .try_get::<Option<String>, _>("avatar")?
-                .unwrap_or_default(),
-            avatar_asset: row
-                .try_get::<Option<uuid::Uuid>, _>("avatar_asset_id")?
-                .map(|id| id.to_string()),
-            date_joined: dt(row.try_get("date_joined")?),
-            created_at: dt(row.try_get("created_at")?),
-            updated_at: dt(row.try_get("updated_at")?),
-            last_location: row
-                .try_get::<Option<String>, _>("last_location")?
-                .unwrap_or_default(),
-            created_location: row
-                .try_get::<Option<String>, _>("created_location")?
-                .unwrap_or_default(),
-            is_superuser: row.try_get("is_superuser")?,
-            is_managed: row.try_get("is_managed")?,
-            is_password_expired: row.try_get("is_password_expired")?,
-            is_active: row.try_get("is_active")?,
-            is_staff: row.try_get("is_staff")?,
-            is_email_verified: row.try_get("is_email_verified")?,
-            is_password_autoset: row.try_get("is_password_autoset")?,
-            is_password_reset_required: row.try_get("is_password_reset_required")?,
-            token: row
-                .try_get::<Option<String>, _>("token")?
-                .unwrap_or_default(),
-            last_active: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_active")?
-                .map(dt),
-            last_login_time: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login_time")?
-                .map(dt),
-            last_logout_time: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_logout_time")?
-                .map(dt),
-            last_login_ip: row
-                .try_get::<Option<String>, _>("last_login_ip")?
-                .unwrap_or_default(),
-            last_logout_ip: row
-                .try_get::<Option<String>, _>("last_logout_ip")?
-                .unwrap_or_default(),
-            last_login_medium: row
-                .try_get::<Option<String>, _>("last_login_medium")?
-                .unwrap_or_else(|| "email".to_owned()),
-            last_login_uagent: row
-                .try_get::<Option<String>, _>("last_login_uagent")?
-                .unwrap_or_default(),
-            token_updated_at: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("token_updated_at")?
-                .map(dt),
-            is_bot: row.try_get("is_bot")?,
-            bot_type: row.try_get("bot_type")?,
-            user_timezone: row
-                .try_get::<Option<String>, _>("user_timezone")?
-                .unwrap_or_else(|| "UTC".to_owned()),
-            is_email_valid: row.try_get("is_email_valid")?,
-            masked_at: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("masked_at")?
-                .map(dt),
-        })
-    })
-    .transpose()
+) -> Result<Option<pw::UserSnapshot>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id).one(&db).await?;
+    Ok(user.map(|model| {
+        fn dt(value: &chrono::DateTime<chrono::FixedOffset>) -> (i64, u32) {
+            let utc = value.with_timezone(&chrono::Utc);
+            (utc.timestamp(), utc.timestamp_subsec_micros())
+        }
+        fn opt_dt(value: &Option<chrono::DateTime<chrono::FixedOffset>>) -> Option<(i64, u32)> {
+            value.as_ref().map(dt)
+        }
+        pw::UserSnapshot {
+            last_login: opt_dt(&model.last_login),
+            id: model.id.to_string(),
+            username: model.username,
+            mobile_number: model.mobile_number,
+            email: model.email,
+            display_name: model.display_name,
+            first_name: model.first_name,
+            last_name: model.last_name,
+            avatar: model.avatar,
+            avatar_asset: model.avatar_asset_id.map(|id| id.to_string()),
+            cover_image: model.cover_image,
+            cover_image_asset: model.cover_image_asset_id.map(|id| id.to_string()),
+            date_joined: dt(&model.date_joined),
+            created_at: dt(&model.created_at),
+            updated_at: dt(&model.updated_at),
+            last_location: model.last_location,
+            created_location: model.created_location,
+            is_superuser: model.is_superuser,
+            is_managed: model.is_managed,
+            is_password_expired: model.is_password_expired,
+            is_active: model.is_active,
+            is_staff: model.is_staff,
+            is_email_verified: model.is_email_verified,
+            is_password_autoset: model.is_password_autoset,
+            is_password_reset_required: model.is_password_reset_required,
+            token: model.token,
+            last_active: opt_dt(&model.last_active),
+            last_login_time: opt_dt(&model.last_login_time),
+            last_logout_time: opt_dt(&model.last_logout_time),
+            last_login_ip: model.last_login_ip,
+            last_logout_ip: model.last_logout_ip,
+            last_login_medium: model.last_login_medium,
+            last_login_uagent: model.last_login_uagent,
+            token_updated_at: opt_dt(&model.token_updated_at),
+            is_bot: model.is_bot,
+            bot_type: model.bot_type,
+            user_timezone: model.user_timezone,
+            is_email_valid: model.is_email_valid,
+            masked_at: opt_dt(&model.masked_at),
+        }
+    }))
 }
 
 /// `base_host(request, ...)` over the process settings.
@@ -1872,6 +1877,14 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
+    fn peerless_throttle_ident_is_drf_none() {
+        // PIDASHCONV-1419: with no XFF and no peer, DRF's `cache_format
+        // % {'ident': None}` renders "None", never "".
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(throttle_ident(&headers, None), "None");
+    }
+
+    #[test]
     fn overlong_redirect_location_answers_400() {
         let long = format!("http://app.test/?{}", "a".repeat(17_000));
         assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
@@ -1885,6 +1898,83 @@ mod tests {
         // No pools: every handler answers 500 through `pool_of`, which
         // proves the failure is closed, never a panic.
         AppState::new("0.1.0")
+    }
+
+    #[test]
+    fn migrated_user_read_shapes() {
+        // Pin the SeaORM statement shapes for the migrated reads (no DB,
+        // per orm-migration.md §3.2): columns, filters and ordering must
+        // stay byte-identical to the Django lookups they replaced.
+        use pidash_db::entity::users;
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let id = uuid::Uuid::nil();
+        let password_row = users::Entity::find_by_id(id)
+            .select_only()
+            .columns([
+                users::Column::Password,
+                users::Column::IsPasswordAutoset,
+                users::Column::TokenUpdatedAt,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            password_row.contains("\"users\".\"password\"")
+                && password_row.contains("\"users\".\"is_password_autoset\"")
+                && password_row.contains("\"users\".\"token_updated_at\"")
+                && password_row.contains("\"users\".\"id\" = "),
+            "password_row shape: {password_row}"
+        );
+        let forgot = users::Entity::find()
+            .filter(users::Column::Email.eq("a@b.c"))
+            .order_by_desc(users::Column::CreatedAt)
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::FirstName,
+                users::Column::Email,
+                users::Column::Password,
+                users::Column::LastLogin,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            forgot.contains("\"users\".\"email\" = 'a@b.c'")
+                && forgot.contains("ORDER BY \"users\".\"created_at\" DESC"),
+            "forgot shape: {forgot}"
+        );
+        let reset = users::Entity::find_by_id(id)
+            .select_only()
+            .columns([
+                users::Column::Password,
+                users::Column::LastLogin,
+                users::Column::Email,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            reset.contains("\"users\".\"password\"")
+                && reset.contains("\"users\".\"last_login\"")
+                && reset.contains("\"users\".\"email\""),
+            "reset shape: {reset}"
+        );
+    }
+
+    #[test]
+    fn migrated_session_delete_shape() {
+        // `relogin` deletes the abandoned row by primary key
+        // (`DELETE FROM sessions WHERE session_key = $1`).
+        use pidash_db::entity::sessions;
+        use sea_orm::sea_query::{DeleteStatement, Expr, PostgresQueryBuilder};
+        let stmt = DeleteStatement::new()
+            .from_table(sessions::Entity)
+            .and_where(Expr::col((sessions::Entity, sessions::Column::SessionKey)).eq("k"))
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            stmt.contains("DELETE FROM \"sessions\"") && stmt.contains("\"session_key\""),
+            "session delete shape: {stmt}"
+        );
     }
 
     #[test]

@@ -79,27 +79,23 @@
 //!
 //! [`AdmissionCache`][pidash_services]: pidash_services::dispatch::AdmissionCache
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use sea_orm::sea_query::{Expr, LockBehavior, LockType};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, DbErr, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Select, Set, UpdateMany,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::CloudAgentSettings;
 use pidash_db::dispatch::event::KIND_MAX_LENGTH;
+use pidash_db::entity::{agent_run, agent_run_event};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::HEARTBEAT_GRACE_SECS;
-use pidash_services::dispatch::{
-    build_tool_plan, enforce_creation_rate, managed_runner_availability, managed_runner_is_enabled,
-    resolve_executor_kind, user_has_llm_config, AdmissionCache, CloudAgentAdmissionError,
-    CloudAgentUnavailable, CloudCapabilityUnavailable, DeferredConsume, LlmProfile,
-    ResolveExecutorError, UserFlags, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
-    ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL, GITHUB_BINDING_EXISTS_SQL,
-    ONLINE_MANAGED_RUNNER_SQL,
-};
-use pidash_services::extensions::CloudAgentToolsetsSeam;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
+use pidash_types::dispatch::AgentExecutorKind;
 
 use crate::queue::{enqueue_exec, NewJob};
 use crate::task_message::TaskMessage;
@@ -131,13 +127,41 @@ pub fn run_cloud_agent_message(run_id: &str) -> TaskMessage {
 /// Retry policy is the [`NewJob::new`] default (`max_retries = 3`, 180s
 /// delay): the row budget governs *delivery* to a worker, while the task's
 /// own `max_retries=0` (`tasks.py:78`) governs the Python body after delivery.
+/// Phase 2 (2.1): the queue is `CLOUD_AGENT_JOB_QUEUE` via
+/// [`run_cloud_agent_job_with_queue`] and `CloudAgentSettings.job_queue`.
+/// This wrapper is kept for the poll-free single-id path in tests; it pins
+/// the default `celery` so it cannot disagree with resolved settings
+/// (Finding 10 review — the previous env-reading helper could).
 pub fn run_cloud_agent_job(run_id: &str) -> NewJob {
+    run_cloud_agent_job_with_queue(run_id, crate::queue::DEFAULT_QUEUE)
+}
+
+/// Queue label validation (Finding 8 review): `CLOUD_AGENT_JOB_QUEUE` is
+/// read through `Settings` as a plain string, so a blank, space-padded,
+/// or stale SSM value would otherwise enqueue on a label no worker claims
+/// and strand runs `queued` with no error. `dispatch_waiting` and the job
+/// wrapper both collapse blank/whitespace-only to the default.
+fn validated_job_queue(raw: &str) -> String {
+    let trimmed = raw.trim().to_owned();
+    if trimmed.is_empty() {
+        crate::queue::DEFAULT_QUEUE.to_owned()
+    } else {
+        trimmed
+    }
+}
+
+/// Queue at an explicit label (Phase 2 D3). `dispatch_waiting` routes
+/// through `CloudAgentSettings.job_queue` (validated) so the label follows
+/// the resolved settings rather than a second env read; this wrapper keeps
+/// the free-function surface identical for the poll-free path.
+pub fn run_cloud_agent_job_with_queue(run_id: &str, queue: impl Into<String>) -> NewJob {
     let message = run_cloud_agent_message(run_id);
     NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
         Value::Object(message.kwargs.clone()),
     )
+    .with_queue(validated_job_queue(&queue.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -221,690 +245,130 @@ pub fn event_cap_decision(count: i64, max_events: i64, marker_exists: bool) -> E
 /// The single `events_truncated` marker kind (`events.py:20-21`).
 pub const EVENTS_TRUNCATED_KIND: &str = "events_truncated";
 
-/// `_MANAGED_REFUSAL_DETAIL` (`creation.py:135-147`, `09738d222` adds
-/// the paused row) with the `.get(reason, ...)` default (`creation.py:132`).
-pub fn managed_refusal_detail(reason: &str) -> &'static str {
-    match reason {
-        "managed_runner_disabled" => "Pi Dash Agent is not enabled on this instance.",
-        "desktop_not_connected" => "Open the Pi Dash desktop app on the machine you want this to run on.",
-        "llm_config_missing" => {
-            "The run creator has no AI provider configured. Configure one in Pi Dash AI settings."
-        }
-        "gateway_scopes_missing" => "Sign in to Pi Dash again to refresh your AI access.",
-        "byok_not_supported_on_desktop" => {
-            "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; \
-             Pi Dash AI and the Cloud Agent keep using your own key."
-        }
-        "no_managed_runner_for_project" => "This project has no Pi Dash Agent on your desktop yet.",
-        "managed_runner_paused" => {
-            "Your Pi Dash Agent for this project is paused. Resume it to run here."
-        }
-        _ => "Pi Dash Agent is not available",
-    }
-}
-
-/// The pinned-runner + waiting-marker half of `_managed_execution_fields`
-/// (`creation.py:115-131`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ManagedFields {
-    /// The selected runner id, if the re-query found one (a lost race pins
-    /// nothing — Python assigns the `None` too).
-    pub pinned_runner_id: Option<Uuid>,
-    /// `desktop_not_connected` on the automatic-waiting path only.
-    pub error_code: Option<&'static str>,
-}
-
-/// Pure branch core of `_managed_execution_fields` (`creation.py:114-132`).
-///
-/// `available` / `reason` are the `managed_runner_availability` verdict;
-/// `enrolled_exists` is the re-queried transient check (`creation.py:123`,
-/// evaluated only for `desktop_not_connected`); `online_id` /
-/// `latest_enrolled_id` are the re-queried pins (`creation.py:117,125`).
-pub fn managed_execution_decision(
-    available: bool,
-    reason: &str,
-    enrolled_exists: bool,
-    online_id: Option<Uuid>,
-    latest_enrolled_id: Option<Uuid>,
-    automatic: bool,
-) -> Result<ManagedFields, ManagedRunnerUnavailable> {
-    if available {
-        return Ok(ManagedFields {
-            pinned_runner_id: online_id,
-            error_code: None,
-        });
-    }
-    // "Offline right now" is the only transient failure (`creation.py:120-123`).
-    let transient = reason == ManagedRunnerReason::NOT_CONNECTED && enrolled_exists;
-    if automatic && transient {
-        return Ok(ManagedFields {
-            pinned_runner_id: latest_enrolled_id,
-            error_code: Some(ManagedRunnerReason::NOT_CONNECTED),
-        });
-    }
-    Err(ManagedRunnerUnavailable::new(
-        reason,
-        managed_refusal_detail(reason),
-    ))
-}
-
-/// The captured quota shape (`creation.py:70,175`): `{code, detail}` — the
-/// `retry_after_seconds` the raised error carries is dropped on capture.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeferredAdmissionError {
-    pub code: String,
-    pub detail: String,
-}
-
-/// Capture an admission refusal the way the automatic paths do
-/// (`creation.py:51,70,175`): code + `str(exc)`, no retry-after.
-pub fn defer_admission_error(exc: &CloudAgentAdmissionError) -> DeferredAdmissionError {
-    DeferredAdmissionError {
-        code: exc.code().to_owned(),
-        detail: exc.detail().to_owned(),
-    }
-}
-
-/// Pure verdict core of the workspace queue-cap gate (`creation.py:62-70,
-/// 163-176`): `Ok(None)` admits, `Ok(Some(_))` defers for automatic runs,
-/// `Err(_)` raises for manual ones.
-pub fn quota_verdict(
-    queued: i64,
-    max_queued_per_workspace: i64,
-    dispatch_scan_interval_secs: i64,
-    automatic: bool,
-) -> Result<Option<DeferredAdmissionError>, CloudAgentAdmissionError> {
-    if queued < max_queued_per_workspace {
-        return Ok(None);
-    }
-    let error = CloudAgentAdmissionError::new(
-        CloudAgentAdmissionError::RUN_QUOTA_EXCEEDED,
-        "Cloud Agent queue is full for this workspace",
-        Some(dispatch_scan_interval_secs),
-    );
-    if automatic {
-        return Ok(Some(defer_admission_error(&error)));
-    }
-    Err(error)
-}
+/// The executor resolve + creation-capacity closure
+/// (`managed_refusal_detail` … `lock_cloud_creation_capacity`) now lives in
+/// `pidash_services::dispatch::execution` so the SeaORM-backed creation seam
+/// (domain move path) can call it; this re-export keeps every
+/// `pidash_jobs::dispatch::…` path stable.
+pub use pidash_services::dispatch::execution::{
+    defer_admission_error, execution_fields, lock_cloud_creation_capacity, lock_workspace,
+    quota_verdict, ActorScope, DeferredAdmissionError, ExecutionFields, ExecutionFieldsError,
+    ExecutionInputs, ExecutionSeams, ProjectScope, QUEUED_CLOUD_COUNT_SQL, WORKSPACE_LOCK_SQL,
+};
 
 // ---------------------------------------------------------------------------
-// SQL
+// Queries (SeaORM fetchers)
 // ---------------------------------------------------------------------------
 
-/// The workspace mutex (`creation.py:56`, `creation.py:162`,
-/// `dispatch.py:27`): `Workspace.objects.select_for_update().get(pk=...)`.
-/// Projects the constant — the row itself is never read, only locked — and a
-/// missing row surfaces as `RowNotFound`, as `.get()` raises. The default
-/// manager's `deleted_at IS NULL` guard is load-bearing (a soft-deleted
-/// workspace raises instead of locking); the `ORDER BY` the compiler adds is
-/// unobservable on a primary-key lookup and omitted. Param: `$1` workspace id
-/// (uuid).
-pub const WORKSPACE_LOCK_SQL: &str =
-    "SELECT 1 FROM workspaces WHERE id = $1 AND deleted_at IS NULL FOR UPDATE";
-
-/// The queued-cloud count (`creation.py:57-61,163-167`): `COUNT(*)` with the
-/// workspace first (the `$1` param); the compiler's own conjunct order
-/// differs textually — equivalent, since `AND` is commutative. Params: `$1`
-/// workspace id (uuid).
-pub const QUEUED_CLOUD_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run \
-    WHERE workspace_id = $1 AND executor_kind = 'cloud_agent' AND status = 'queued'";
-
-/// The running-cloud count (`dispatch.py:29`): the shared `base`
-/// (`executor_kind`, `workspace_id`) plus `status = 'running'`. Params: `$1`
-/// workspace id (uuid).
-pub const RUNNING_CLOUD_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND workspace_id = $1 AND status = 'running'";
-
-/// The offered count (`dispatch.py:30`): queued rows whose lease is still in
-/// the future. Params: `$1` workspace id (uuid), `$2` now (timestamptz).
-pub const OFFERED_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND workspace_id = $1 AND status = 'queued' \
-    AND lease_expires_at > $2";
-
-/// The due set (`dispatch.py:34-39`): queued, unlocked-or-expired, oldest
-/// first, up to capacity, skipping rows a concurrent dispatcher locked.
-/// Projects the id only (`dispatch.py:45` consumes `run.pk`). Django renders
-/// the locking clause after `LIMIT`; the `Q` span keeps its parens. Params:
-/// `$1` workspace id (uuid), `$2` now (timestamptz), `$3` capacity (bigint).
-pub const DUE_RUNS_SQL: &str = "SELECT id FROM agent_run \
-    WHERE executor_kind = 'cloud_agent' AND workspace_id = $1 AND status = 'queued' \
-    AND (lease_expires_at IS NULL OR lease_expires_at <= $2) \
-    ORDER BY created_at LIMIT $3 FOR UPDATE SKIP LOCKED";
-
-/// The per-row lease (`dispatch.py:42-44`): `SET` order mirrors the
-/// `.update()` kwargs; the `status = 'queued'` guard mirrors the re-filter.
-/// Params: `$1` lease expiry (timestamptz), `$2` run id (uuid).
-pub const LEASE_RUN_SQL: &str = "UPDATE agent_run SET lease_expires_at = $1, \
-    dispatch_attempts = dispatch_attempts + 1 WHERE id = $2 AND status = 'queued'";
-
-/// The single-run read (`dispatch.py:62`): the `.only(...)` columns in call
-/// order (the compiler emits definition order instead — unobservable either
-/// way, rows are read by name), `.first()` as `LIMIT 1`. Param: `$1` run id
-/// (uuid).
-pub const DISPATCH_RUN_SELECT_SQL: &str =
-    "SELECT id, status, executor_kind, pod_id, workspace_id FROM agent_run WHERE id = $1 LIMIT 1";
-
-/// The event-parent lock (`events.py:13`): `.only("id")` projected exactly —
-/// a queryset cannot lock the empty event set, so the parent is locked
-/// instead. A missing row surfaces as `RowNotFound`, as `.get()` raises.
-/// Param: `$1` run id (uuid).
-pub const AGENT_RUN_LOCK_SQL: &str = "SELECT id FROM agent_run WHERE id = $1 FOR UPDATE";
-
-/// The event count (`events.py:15`): `.count()` over the filtered set.
-/// The compiler's select form joins `agent_run` (the `Meta.ordering`
-/// `["agent_run", "seq"]` orders by the related row), but the join filters
-/// nothing — the FK is database-enforced — and `.count()` clears the
-/// ordering, so the plain `COUNT(*)` is exactly equivalent. Param: `$1` run
-/// id (uuid).
-pub const EVENT_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run_event WHERE agent_run_id = $1";
-
-/// The marker probe (`events.py:20`): `.exists()` as `LIMIT 1` (same
-/// join-is-a-no-op argument as [`EVENT_COUNT_SQL`]). Param: `$1` run id
-/// (uuid).
-pub const EVENT_MARKER_EXISTS_SQL: &str = "SELECT 1 FROM agent_run_event \
-    WHERE agent_run_id = $1 AND kind = 'events_truncated' LIMIT 1";
-
-/// The current top sequence (`events.py:23`): `.order_by("-seq")` +
-/// `.first()`. Param: `$1` run id (uuid).
-pub const EVENT_MAX_SEQ_SQL: &str =
-    "SELECT seq FROM agent_run_event WHERE agent_run_id = $1 ORDER BY seq DESC LIMIT 1";
-
-/// The event insert (`events.py:21,24`): both `.create()` sites share one
-/// shape. `id` (BigAutoField) is the only database default; `created_at`
-/// (`auto_now_add`) is Django-side, so Rust inserts supply it explicitly (the
-/// L2 application-defaults rule). Params: `$1` run id (uuid), `$2` seq
-/// (int), `$3` kind (text), `$4` payload (jsonb), `$5` created_at
-/// (timestamptz).
-pub const EVENT_INSERT_SQL: &str = "INSERT INTO agent_run_event \
-    (agent_run_id, seq, kind, payload, created_at) VALUES ($1, $2, $3, $4, $5)";
-
-/// The automatic-waiting pin (`creation.py:125`):
-/// `enrolled_managed_runners(...).order_by("-last_heartbeat_at").first()`.
-/// Same `WHERE` shape as L4's [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] plus
-/// the bare `DESC` — which sorts never-heartbeated (`NULL`) runners first,
-/// exactly as Django does — projecting the id (the pin handle the creation
-/// sites pass as `pinned_runner`). Params: `$1` owner id (uuid), `$2`
-/// project id (uuid), `$3` workspace id (uuid).
-pub const ENROLLED_LATEST_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER JOIN pod \
-    ON pod.id = runner.pod_id WHERE runner.owner_id = $1 \
-    AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 \
-    AND runner.workspace_id = $3 AND runner.revoked_at IS NULL \
-    ORDER BY runner.last_heartbeat_at DESC LIMIT 1";
-
-// ---------------------------------------------------------------------------
-// Creation seam (`creation.py:11-89`)
-// ---------------------------------------------------------------------------
-
-/// The project half of `execution_fields` (`creation.py:14,19,26`): the pod
-/// scope the executor resolves under.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectScope {
-    /// `project.id`.
-    pub project_id: Uuid,
-    /// `project.workspace_id`.
-    pub workspace_id: Uuid,
-    /// `project.default_agent_executor` (inherited when `requested` is
-    /// `None` or `""`).
-    pub default_agent_executor: String,
+pub(crate) fn running_cloud_count_query(workspace_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::WorkspaceId.eq(workspace_id))
+        .filter(agent_run::Column::Status.eq("running"))
 }
 
-/// The actor half of `execution_fields` (`creation.py:17`): `None` is the
-/// anonymous caller (`getattr(actor, "id", None)` → `None`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ActorScope {
-    /// `actor.id`.
-    pub id: Uuid,
-    /// `is_active` / `is_bot` for the LLM-config gate.
-    pub flags: UserFlags,
+fn offered_count_query(workspace_id: Uuid, now: DateTime<Utc>) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::WorkspaceId.eq(workspace_id))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .filter(agent_run::Column::LeaseExpiresAt.gt(now))
 }
 
-/// The inputs `execution_fields` reads off its caller (`creation.py:11-20`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecutionInputs<'a> {
-    /// The project the run is created on.
-    pub project: &'a ProjectScope,
-    /// `run_kind` (`"issue"`, `"scheduler"`, …).
-    pub run_kind: &'a str,
-    /// Whether the run binds a work item.
-    pub has_issue: bool,
-    /// `required_capabilities` (`()` by default).
-    pub required_capabilities: &'a [&'a str],
-    /// The run creator (`None` for the anonymous caller).
-    pub actor: Option<&'a ActorScope>,
-    /// Ticker/scheduler runs wait visibly instead of raising on soft gates.
-    pub automatic: bool,
-    /// The per-issue execution-target override (`Issue.agent_executor`);
-    /// `None` inherits the project default.
-    pub requested: Option<&'a str>,
-    /// `int(time.time())` for the admission buckets.
-    pub now_unix_secs: i64,
-}
-
-/// The EE-overlayable seams `execution_fields` consults, each only when the
-/// Python short-circuit reaches it.
-pub struct ExecutionSeams<F, P> {
-    /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`): consulted
-    /// only for a present, active, non-bot actor on the cloud path.
-    pub has_usable_llm_config: F,
-    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`): the
-    /// injected toolsets seam, awaited only when a creator is present.
-    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`):
-    /// consulted only when the managed path reaches the profile gate.
-    pub llm_profile: P,
-}
-
-/// The executor-specific `AgentRun` fields for one run creation
-/// (`execution_fields`, `creation.py:11-89`).
-///
-/// Consumption mirrors the orchestration call sites: `executor_kind` +
-/// `tool_plan` (+ `error_code` when set) splat into `objects.create`;
-/// `pinned_runner_id` passes explicitly (the sites `pop` it with a default);
-/// `cloud_admission_error` is popped before the splat — `_cloud_admission_error`
-/// is a pseudo-key, not an `AgentRun` column (`creation.py:84-85`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExecutionFields {
-    /// The resolved executor kind.
-    pub executor_kind: AgentExecutorKind,
-    /// The tool plan (`ToolPlan` JSON on the cloud path, `{}` elsewhere).
-    pub tool_plan: Value,
-    /// The pin: always `None` on the cloud/local paths, the selected runner
-    /// on the managed path.
-    pub pinned_runner_id: Option<Uuid>,
-    /// `desktop_not_connected` on the managed automatic-waiting path only —
-    /// a real `AgentRun` column the sweep reads back (`creation.py:126-131`).
-    pub error_code: Option<String>,
-    /// The deferred quota refusal on the automatic cloud path (not a column).
-    pub cloud_admission_error: Option<DeferredAdmissionError>,
-}
-
-/// Every failure `execution_fields` and [`lock_cloud_creation_capacity`]
-/// report: the Python raises (`ValueError` / `RuntimeError` at the
-/// orchestration call sites) plus the database.
-#[derive(Debug, thiserror::Error)]
-pub enum ExecutionFieldsError {
-    /// `resolve_executor_kind` refused (`creation.py:26`): unknown executor,
-    /// cloud not configured, or managed disabled at the instance level.
-    #[error(transparent)]
-    Resolve(#[from] ResolveExecutorError),
-    /// The creator has no LLM config (`creation.py:36-39`).
-    #[error(transparent)]
-    Unavailable(CloudAgentUnavailable),
-    /// A manual gate refused (`creation.py:49-50,68-69`).
-    #[error(transparent)]
-    Admission(#[from] CloudAgentAdmissionError),
-    /// A managed gate refused (`creation.py:132`).
-    #[error(transparent)]
-    Managed(#[from] ManagedRunnerUnavailable),
-    /// A required capability is not plannable (`creation.py:73-81` via
-    /// `build_tool_plan`).
-    #[error(transparent)]
-    Capability(#[from] CloudCapabilityUnavailable),
-    /// The database failed.
-    #[error("database error: {0}")]
-    Db(#[from] sqlx::Error),
-}
-
-async fn lock_workspace(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+fn due_runs_query(
     workspace_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, i32>(WORKSPACE_LOCK_SQL)
-        .bind(workspace_id)
-        .fetch_one(executor)
-        .await?;
-    Ok(())
+    now: DateTime<Utc>,
+    capacity: i64,
+) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::ExecutorKind.eq("cloud_agent"))
+        .filter(agent_run::Column::WorkspaceId.eq(workspace_id))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .filter(
+            Condition::any()
+                .add(agent_run::Column::LeaseExpiresAt.is_null())
+                .add(agent_run::Column::LeaseExpiresAt.lte(now)),
+        )
+        .order_by_asc(agent_run::Column::CreatedAt)
+        .limit(capacity as u64)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
 }
 
-async fn count_queued_cloud(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    workspace_id: Uuid,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(QUEUED_CLOUD_COUNT_SQL)
-        .bind(workspace_id)
-        .fetch_one(executor)
-        .await
+fn lease_run_update(run_id: Uuid, lease: DateTime<Utc>) -> UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::LeaseExpiresAt, Expr::value(lease))
+        .col_expr(
+            agent_run::Column::DispatchAttempts,
+            Expr::col((agent_run::Entity, agent_run::Column::DispatchAttempts)).add(1),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .filter(agent_run::Column::Status.eq("queued"))
 }
 
-async fn github_binding_exists(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    project: &ProjectScope,
-) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar::<_, i32>(GITHUB_BINDING_EXISTS_SQL)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await?;
-    Ok(found.is_some())
+fn dispatch_run_query(run_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::Status,
+            agent_run::Column::ExecutorKind,
+            agent_run::Column::PodId,
+            agent_run::Column::WorkspaceId,
+        ])
+        .filter(agent_run::Column::Id.eq(run_id))
+        .limit(1)
 }
 
-async fn enrolled_exists(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    project: &ProjectScope,
-    owner_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar::<_, i32>(ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await?;
-    Ok(found.is_some())
+fn agent_run_lock_query(run_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::Id.eq(run_id))
+        .lock_exclusive()
 }
 
-async fn online_managed_runner_id(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    project: &ProjectScope,
-    owner_id: Uuid,
-    heartbeat_threshold: DateTime<Utc>,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(ONLINE_MANAGED_RUNNER_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .bind(heartbeat_threshold)
-        .fetch_optional(executor)
-        .await
+fn event_count_query(run_id: Uuid) -> Select<agent_run_event::Entity> {
+    agent_run_event::Entity::find().filter(agent_run_event::Column::AgentRunId.eq(run_id))
 }
 
-/// The paused tiebreaker (`policy.py:88-91`, `09738d222`): whether the
-/// viewer owns any paused bundled runner on the project's pod.
-async fn paused_enrolled_exists(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    project: &ProjectScope,
-    owner_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar::<_, i32>(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await?;
-    Ok(found.is_some())
+fn event_marker_exists_query(run_id: Uuid) -> Select<agent_run_event::Entity> {
+    agent_run_event::Entity::find()
+        .select_only()
+        .column(agent_run_event::Column::Id)
+        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+        .filter(agent_run_event::Column::Kind.eq("events_truncated"))
+        .limit(1)
 }
 
-async fn latest_enrolled_runner_id(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    project: &ProjectScope,
-    owner_id: Uuid,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(ENROLLED_LATEST_RUNNER_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await
+fn event_max_seq_query(run_id: Uuid) -> Select<agent_run_event::Entity> {
+    agent_run_event::Entity::find()
+        .select_only()
+        .column(agent_run_event::Column::Seq)
+        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+        .order_by_desc(agent_run_event::Column::Seq)
+        .limit(1)
 }
 
-/// Resolve the executor-specific `AgentRun` fields for one run creation
-/// (`execution_fields`, `creation.py:11-89`).
-///
-/// The capacity gate runs on the caller's transaction — the ambient
-/// `atomic` at `creation.py:55-70` made explicit. Orchestration callers
-/// (D-12) open a short transaction that commits before the fields are built
-/// (today's inner-atomic shape); the direct-run view
-/// (`runner/views/runs.py:262-264`) passes its insertion transaction, so the
-/// workspace lock is held across gate+insert exactly as the savepoint does in
-/// Python and the queue cap stays a hard cap for concurrent creates. The
-/// deferred admission consumes collect into `on_commit` and the caller runs
-/// them after commit — a rolled-back creation burns no quota, while consumes
-/// registered before a later raise stay registered, as on Django's ambient
-/// transaction. This function never commits or rolls back `tx` itself.
-#[allow(clippy::too_many_arguments)]
-pub async fn execution_fields<C, F, P>(
-    tx: &mut Transaction<'_>,
-    inputs: &ExecutionInputs<'_>,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    cache: &C,
-    on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
-    seams: ExecutionSeams<F, P>,
-) -> Result<ExecutionFields, ExecutionFieldsError>
-where
-    C: AdmissionCache,
-    F: FnOnce() -> bool,
-    P: FnOnce() -> LlmProfile,
-{
-    let executor = resolve_executor_kind(
-        inputs.requested,
-        &inputs.project.default_agent_executor,
-        cloud,
-        managed,
-    )?;
-    if executor == AgentExecutorKind::CloudAgent {
-        return execution_fields_cloud(tx.inner(), inputs, cloud, cache, on_commit, seams).await;
+async fn insert_event(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+    seq: i32,
+    kind: String,
+    payload: Value,
+    now: DateTime<Utc>,
+) -> Result<agent_run_event::Model, DbErr> {
+    agent_run_event::ActiveModel {
+        seq: Set(seq),
+        kind: Set(kind),
+        payload: Set(payload),
+        created_at: Set(now.into()),
+        agent_run_id: Set(run_id),
+        ..Default::default()
     }
-    if executor == AgentExecutorKind::ManagedRunner {
-        return execution_fields_managed(tx.inner(), inputs, managed, seams.llm_profile).await;
-    }
-    Ok(ExecutionFields {
-        executor_kind: executor,
-        tool_plan: Value::Object(Map::new()),
-        pinned_runner_id: None,
-        error_code: None,
-        cloud_admission_error: None,
-    })
-}
-
-async fn execution_fields_cloud<C, F, P>(
-    conn: &mut sqlx::PgConnection,
-    inputs: &ExecutionInputs<'_>,
-    cloud: &CloudAgentSettings,
-    cache: &C,
-    on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
-    seams: ExecutionSeams<F, P>,
-) -> Result<ExecutionFields, ExecutionFieldsError>
-where
-    C: AdmissionCache,
-    F: FnOnce() -> bool,
-    P: FnOnce() -> LlmProfile,
-{
-    let actor_flags = inputs.actor.map(|actor| &actor.flags);
-    // A run without a funded principal can never start (`creation.py:33-39`).
-    if !user_has_llm_config(actor_flags, seams.has_usable_llm_config) {
-        return Err(ExecutionFieldsError::Unavailable(
-            CloudAgentUnavailable::new(
-                "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
-            ),
-        ));
-    }
-    let actor_id = inputs.actor.map(|actor| actor.id.to_string());
-    let mut admission_error = None;
-    if let Err(exc) = enforce_creation_rate(
-        cloud,
-        inputs.now_unix_secs,
-        &inputs.project.workspace_id.to_string(),
-        actor_id.as_deref(),
-        inputs.automatic,
-        cache,
-        on_commit,
-    ) {
-        if !inputs.automatic {
-            return Err(ExecutionFieldsError::Admission(exc));
-        }
-        admission_error = Some(defer_admission_error(&exc));
-    }
-    // The point-in-time gate on the caller's transaction (`creation.py:52-70`):
-    // orchestration callers commit their short transaction after this returns
-    // (releasing the lock before the fields are built, as the inner atomic
-    // does), while the direct-run view holds the lock across gate+insert.
-    // Either way the insertion transaction re-checks via
-    // `lock_cloud_creation_capacity`.
-    lock_workspace(&mut *conn, inputs.project.workspace_id).await?;
-    let queued = count_queued_cloud(&mut *conn, inputs.project.workspace_id).await?;
-    match quota_verdict(
-        queued,
-        cloud.max_queued_per_workspace,
-        cloud.dispatch_scan_interval_secs,
-        inputs.automatic,
-    )? {
-        None => {}
-        Some(deferred) => admission_error = Some(deferred),
-    }
-    // The github leg runs only with the kill switch on (the `policy.py:119`
-    // short-circuit); the project is always present here.
-    let github_available = if cloud.github_tools_enabled {
-        Some(github_binding_exists(&mut *conn, inputs.project).await?)
-    } else {
-        None
-    };
-    // The run executes as its creator, so their preference is what the
-    // snapshot records (`creation.py:78-80`); no creator, no seam consult.
-    let extra_toolsets = match inputs.actor {
-        Some(actor) => {
-            let verdict = seams.toolsets.extra_toolsets_enabled(actor.id).await;
-            Some(move || verdict)
-        }
-        None => None,
-    };
-    let plan = build_tool_plan(
-        inputs.run_kind,
-        inputs.has_issue,
-        inputs.required_capabilities,
-        github_available.map(|available| move || available),
-        extra_toolsets,
-        cloud,
-    )?;
-    Ok(ExecutionFields {
-        executor_kind: AgentExecutorKind::CloudAgent,
-        tool_plan: serde_json::to_value(&plan).expect("ToolPlan serializes to JSON"),
-        pinned_runner_id: None,
-        error_code: None,
-        cloud_admission_error: admission_error,
-    })
-}
-
-async fn execution_fields_managed<P>(
-    conn: &mut sqlx::PgConnection,
-    inputs: &ExecutionInputs<'_>,
-    managed: &ManagedRunnerSettings,
-    llm_profile: P,
-) -> Result<ExecutionFields, ExecutionFieldsError>
-where
-    P: FnOnce() -> LlmProfile,
-{
-    let user = inputs.actor.map(|actor| &actor.flags);
-    // Gate-order mirror (`managed_runner/policy.py:76-96`): the kill switch,
-    // viewer-validity and profile gates return before any query, so the
-    // enrolled/online/paused reads run only when every earlier gate passes —
-    // the online read only when enrolled holds (`:92-95`), the paused probe
-    // only when enrolled holds but nothing is online (`09738d222`). The
-    // stashed profile feeds the L4 call below, so the seam is still consulted
-    // exactly once, exactly when the path reaches it.
-    let pre_gates_pass = managed_runner_is_enabled(managed)
-        && matches!(user, Some(flags) if flags.is_active && !flags.is_bot);
-    let profile = pre_gates_pass.then(llm_profile);
-    let profile_available = profile.as_ref().is_some_and(|profile| profile.available);
-    let (enrolled, online, paused) = match (inputs.actor, profile_available) {
-        (Some(actor), true) => {
-            let enrolled = enrolled_exists(&mut *conn, inputs.project, actor.id).await?;
-            let online = if enrolled {
-                let threshold = Utc::now() - ChronoDuration::seconds(HEARTBEAT_GRACE_SECS);
-                online_managed_runner_id(&mut *conn, inputs.project, actor.id, threshold)
-                    .await?
-                    .is_some()
-            } else {
-                false
-            };
-            // `09738d222`: the paused probe runs only when a runner is
-            // enrolled but none is online.
-            let paused = if enrolled && !online {
-                paused_enrolled_exists(&mut *conn, inputs.project, actor.id).await?
-            } else {
-                false
-            };
-            (enrolled, online, paused)
-        }
-        (None, _) | (Some(_), false) => (false, false, false),
-    };
-    // The fallback profile is dead on arrival: L4 re-evaluates these same
-    // gates and returns before consulting it on every path where `profile` is
-    // `None`. Outcomes are identical to the un-mirrored call; only the query
-    // stream changes (0-3 reads instead of always 2).
-    let verdict = managed_runner_availability(
-        managed,
-        user,
-        || {
-            profile.unwrap_or(LlmProfile {
-                available: false,
-                reason_code: String::new(),
-            })
-        },
-        enrolled,
-        online,
-        paused,
-    );
-    // The re-queries (`creation.py:117,123,125`): the available path and the
-    // transient check re-read rather than reuse the verdicts.
-    let online_id = if verdict.available {
-        match inputs.actor {
-            Some(actor) => {
-                let threshold = Utc::now() - ChronoDuration::seconds(HEARTBEAT_GRACE_SECS);
-                online_managed_runner_id(&mut *conn, inputs.project, actor.id, threshold).await?
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
-    let transient_enrolled = verdict.reason_code == ManagedRunnerReason::NOT_CONNECTED
-        && match inputs.actor {
-            Some(actor) => enrolled_exists(&mut *conn, inputs.project, actor.id).await?,
-            None => false,
-        };
-    let latest_enrolled_id = if inputs.automatic && transient_enrolled {
-        match inputs.actor {
-            Some(actor) => latest_enrolled_runner_id(&mut *conn, inputs.project, actor.id).await?,
-            None => None,
-        }
-    } else {
-        None
-    };
-    let fields = managed_execution_decision(
-        verdict.available,
-        &verdict.reason_code,
-        transient_enrolled,
-        online_id,
-        latest_enrolled_id,
-        inputs.automatic,
-    )?;
-    Ok(ExecutionFields {
-        executor_kind: AgentExecutorKind::ManagedRunner,
-        tool_plan: Value::Object(Map::new()),
-        pinned_runner_id: fields.pinned_runner_id,
-        error_code: fields.error_code.map(str::to_string),
-        cloud_admission_error: None,
-    })
-}
-
-/// Repeat hard admission while holding the caller's insertion transaction
-/// (`lock_cloud_creation_capacity`, `creation.py:155-177`).
-///
-/// Non-cloud executors return `Ok(None)` without touching the database.
-/// Over capacity, automatic runs defer (`Ok(Some(_))`) and manual runs raise —
-/// and the caller folds the deferral over any earlier capture
-/// (`lock(...) or admission_error` at the orchestration sites).
-pub async fn lock_cloud_creation_capacity(
-    tx: &mut Transaction<'_>,
-    workspace_id: Uuid,
-    executor_kind: &AgentExecutorKind,
-    automatic: bool,
-    cloud: &CloudAgentSettings,
-) -> Result<Option<DeferredAdmissionError>, ExecutionFieldsError> {
-    if *executor_kind != AgentExecutorKind::CloudAgent {
-        return Ok(None);
-    }
-    lock_workspace(&mut **tx.inner(), workspace_id).await?;
-    let queued = count_queued_cloud(&mut **tx.inner(), workspace_id).await?;
-    Ok(quota_verdict(
-        queued,
-        cloud.max_queued_per_workspace,
-        cloud.dispatch_scan_interval_secs,
-        automatic,
-    )?
-    .into_iter()
-    .next())
+    .insert(db)
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -912,7 +376,7 @@ pub async fn lock_cloud_creation_capacity(
 // ---------------------------------------------------------------------------
 
 /// One `agent_run` row as `dispatch_agent_run` reads it (`dispatch.py:62`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct DispatchRunRow {
     // Selected (`.only("id", …)`) but unread, as in Python.
     #[allow(dead_code)]
@@ -961,39 +425,51 @@ pub async fn dispatch_waiting(
         return Ok(0);
     }
     let mut tx = Transaction::begin(pool).await?;
-    lock_workspace(&mut **tx.inner(), workspace_id).await?;
-    let running = sqlx::query_scalar::<_, i64>(RUNNING_CLOUD_COUNT_SQL)
-        .bind(workspace_id)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    let offered = sqlx::query_scalar::<_, i64>(OFFERED_COUNT_SQL)
-        .bind(workspace_id)
-        .bind(now)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    let capacity = dispatch_capacity(cloud.max_running_per_workspace, running, offered);
+    lock_workspace(tx.inner(), workspace_id).await?;
+    let (capacity, due) = {
+        let conn = TxConn::new(tx.inner());
+        let running = running_cloud_count_query(workspace_id)
+            .count(&conn)
+            .await
+            .map_err(into_sqlx)? as i64;
+        let offered = offered_count_query(workspace_id, now)
+            .count(&conn)
+            .await
+            .map_err(into_sqlx)? as i64;
+        let capacity = dispatch_capacity(cloud.max_running_per_workspace, running, offered);
+        let due = if capacity == 0 {
+            Vec::new()
+        } else {
+            due_runs_query(workspace_id, now, capacity)
+                .into_tuple::<Uuid>()
+                .all(&conn)
+                .await
+                .map_err(into_sqlx)?
+        };
+        (capacity, due)
+    };
     if capacity == 0 {
         tx.commit().await?;
         return Ok(0);
     }
-    let due: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(DUE_RUNS_SQL)
-        .bind(workspace_id)
-        .bind(now)
-        .bind(capacity)
-        .fetch_all(&mut **tx.inner())
-        .await?;
     let lease = lease_expiry_at(now, cloud.dispatch_lease_secs);
     let mut ids = Vec::with_capacity(due.len());
     for run_id in &due {
         // No row-count check: the id is offered even if a concurrent claim
         // stole the row first (`dispatch.py:41-45`).
-        sqlx::query(LEASE_RUN_SQL)
-            .bind(lease)
-            .bind(run_id)
-            .execute(&mut **tx.inner())
-            .await?;
+        {
+            let conn = TxConn::new(tx.inner());
+            lease_run_update(*run_id, lease)
+                .exec(&conn)
+                .await
+                .map_err(into_sqlx)?;
+        }
         let id = run_id.to_string();
-        enqueue_exec(&mut **tx.inner(), &run_cloud_agent_job(&id)).await?;
+        enqueue_exec(
+            &mut **tx.inner(),
+            &run_cloud_agent_job_with_queue(&id, cloud.job_queue.clone()),
+        )
+        .await?;
         ids.push(id);
     }
     tx.commit().await?;
@@ -1012,10 +488,12 @@ pub async fn dispatch_agent_run(
     run_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<DispatchDecision, sqlx::Error> {
-    let run = sqlx::query_as::<_, DispatchRunRow>(DISPATCH_RUN_SELECT_SQL)
-        .bind(run_id)
-        .fetch_optional(pool)
-        .await?;
+    let db = sea_orm_connection(pool);
+    let run = dispatch_run_query(run_id)
+        .into_model::<DispatchRunRow>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
     let Some(run) = run else {
         return Ok(DispatchDecision::Ignored);
     };
@@ -1066,56 +544,67 @@ pub async fn append_event(
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = Transaction::begin(pool).await?;
-    sqlx::query_scalar::<_, Uuid>(AGENT_RUN_LOCK_SQL)
-        .bind(run_id)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    let count = sqlx::query_scalar::<_, i64>(EVENT_COUNT_SQL)
-        .bind(run_id)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    // The marker probe runs only inside the marker window (the outer `if`
-    // at `events.py:19` plus the `and` short-circuit at `:20`); below it the
-    // decision is Append and above it Capped whatever the probe would say.
-    let marker_threshold = (max_events - 1).max(0);
-    let marker_exists = if (max_events - 2).max(0) <= count && count < marker_threshold {
-        sqlx::query_scalar::<_, i32>(EVENT_MARKER_EXISTS_SQL)
-            .bind(run_id)
-            .fetch_optional(&mut **tx.inner())
-            .await?
-            .is_some()
-    } else {
-        false
-    };
-    let recorded = match event_cap_decision(count, max_events, marker_exists) {
-        EventCapDecision::Append => {
-            let top = sqlx::query_scalar::<_, i32>(EVENT_MAX_SEQ_SQL)
-                .bind(run_id)
-                .fetch_optional(&mut **tx.inner())
-                .await?;
-            let seq = top.unwrap_or(0) + 1;
-            sqlx::query(EVENT_INSERT_SQL)
-                .bind(run_id)
-                .bind(seq)
-                .bind(truncate_kind(kind))
-                .bind(coalesce_payload(payload))
-                .bind(now)
-                .execute(&mut **tx.inner())
-                .await?;
-            true
-        }
-        EventCapDecision::TruncatedMarker => {
-            sqlx::query(EVENT_INSERT_SQL)
-                .bind(run_id)
-                .bind(count as i32 + 1)
-                .bind(EVENTS_TRUNCATED_KIND)
-                .bind(Value::Object(Map::new()))
-                .bind(now)
-                .execute(&mut **tx.inner())
-                .await?;
+    let recorded = {
+        let conn = TxConn::new(tx.inner());
+        agent_run_lock_query(run_id)
+            .into_tuple::<Uuid>()
+            .one(&conn)
+            .await
+            .map_err(into_sqlx)?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        let count = event_count_query(run_id)
+            .count(&conn)
+            .await
+            .map_err(into_sqlx)? as i64;
+        // The marker probe runs only inside the marker window (the outer `if`
+        // at `events.py:19` plus the `and` short-circuit at `:20`); below it the
+        // decision is Append and above it Capped whatever the probe would say.
+        let marker_threshold = (max_events - 1).max(0);
+        let marker_exists = if (max_events - 2).max(0) <= count && count < marker_threshold {
+            event_marker_exists_query(run_id)
+                .into_tuple::<i64>()
+                .one(&conn)
+                .await
+                .map_err(into_sqlx)?
+                .is_some()
+        } else {
             false
+        };
+        match event_cap_decision(count, max_events, marker_exists) {
+            EventCapDecision::Append => {
+                let top = event_max_seq_query(run_id)
+                    .into_tuple::<i32>()
+                    .one(&conn)
+                    .await
+                    .map_err(into_sqlx)?;
+                let seq = top.unwrap_or(0) + 1;
+                insert_event(
+                    &conn,
+                    run_id,
+                    seq,
+                    truncate_kind(kind),
+                    coalesce_payload(payload),
+                    now,
+                )
+                .await
+                .map_err(into_sqlx)?;
+                true
+            }
+            EventCapDecision::TruncatedMarker => {
+                insert_event(
+                    &conn,
+                    run_id,
+                    count as i32 + 1,
+                    EVENTS_TRUNCATED_KIND.to_owned(),
+                    Value::Object(Map::new()),
+                    now,
+                )
+                .await
+                .map_err(into_sqlx)?;
+                false
+            }
+            EventCapDecision::Capped => false,
         }
-        EventCapDecision::Capped => false,
     };
     tx.commit().await?;
     Ok(recorded)
@@ -1124,6 +613,12 @@ pub async fn append_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::config::ManagedRunnerSettings;
+    use pidash_services::dispatch::{
+        build_tool_plan, AdmissionCache, CloudAgentAdmissionError, DeferredConsume,
+        ResolveExecutorError, UserFlags,
+    };
+    use pidash_services::extensions::CloudAgentToolsetsSeam;
     use pidash_services::extensions::NoExtraToolsets;
     use serde_json::json;
     use std::cell::RefCell;
@@ -1131,6 +626,7 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     static FIXTURE: &str =
         include_str!("../../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");
@@ -1145,6 +641,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -1180,7 +677,6 @@ mod tests {
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
@@ -1257,55 +753,11 @@ mod tests {
         }
     }
 
-    fn panic_seams() -> ExecutionSeams<impl FnOnce() -> bool, impl FnOnce() -> LlmProfile> {
+    fn panic_seams() -> ExecutionSeams<impl FnOnce() -> bool> {
         ExecutionSeams {
             has_usable_llm_config: || panic!("llm seam must not be consulted"),
             toolsets: Arc::new(PanicToolsets("toolsets seam must not be consulted")),
-            llm_profile: || panic!("profile seam must not be consulted"),
         }
-    }
-
-    // -- fixture: refusal map ------------------------------------------------
-
-    #[test]
-    fn managed_refusal_details_match_fixture_verbatim() {
-        let details = &fixture()["managed_refusal_detail"];
-        for (reason, expected) in [
-            ("managed_runner_disabled", "Pi Dash Agent is not enabled on this instance."),
-            (
-                "desktop_not_connected",
-                "Open the Pi Dash desktop app on the machine you want this to run on.",
-            ),
-            (
-                "llm_config_missing",
-                "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
-            ),
-            (
-                "gateway_scopes_missing",
-                "Sign in to Pi Dash again to refresh your AI access.",
-            ),
-            (
-                "byok_not_supported_on_desktop",
-                "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; \
-                 Pi Dash AI and the Cloud Agent keep using your own key.",
-            ),
-            (
-                "no_managed_runner_for_project",
-                "This project has no Pi Dash Agent on your desktop yet.",
-            ),
-            (
-                "managed_runner_paused",
-                "Your Pi Dash Agent for this project is paused. Resume it to run here.",
-            ),
-        ] {
-            assert_eq!(details[reason], expected, "fixture row {reason}");
-            assert_eq!(managed_refusal_detail(reason), expected, "port {reason}");
-        }
-        // The `.get(reason, …)` default (`creation.py:132`) has no fixture row.
-        assert_eq!(
-            managed_refusal_detail("something_new"),
-            "Pi Dash Agent is not available"
-        );
     }
 
     // -- quota verdict (pure core of both capacity gates) --------------------
@@ -1346,83 +798,6 @@ mod tests {
             }
         );
     }
-
-    // -- managed branches (pure core) ----------------------------------------
-
-    #[test]
-    fn managed_decision_matrix() {
-        let pin = Uuid::new_v4();
-        // Available: pinned to the re-queried online runner, no marker.
-        assert_eq!(
-            managed_execution_decision(true, "", false, Some(pin), None, false),
-            Ok(ManagedFields {
-                pinned_runner_id: Some(pin),
-                error_code: None,
-            })
-        );
-        // A lost race pins nothing — Python assigns the `None` too.
-        assert_eq!(
-            managed_execution_decision(true, "", false, None, None, false),
-            Ok(ManagedFields {
-                pinned_runner_id: None,
-                error_code: None,
-            })
-        );
-        // Automatic + transient: pinned to the latest heartbeat, waiting marker.
-        assert_eq!(
-            managed_execution_decision(
-                false,
-                ManagedRunnerReason::NOT_CONNECTED,
-                true,
-                None,
-                Some(pin),
-                true,
-            ),
-            Ok(ManagedFields {
-                pinned_runner_id: Some(pin),
-                error_code: Some(ManagedRunnerReason::NOT_CONNECTED),
-            })
-        );
-        // Manual + transient: refused (`creation.py:124` needs `automatic`).
-        let err = managed_execution_decision(
-            false,
-            ManagedRunnerReason::NOT_CONNECTED,
-            true,
-            None,
-            Some(pin),
-            false,
-        )
-        .expect_err("manual transient raises");
-        assert_eq!(err.code(), ManagedRunnerReason::NOT_CONNECTED);
-        assert_eq!(
-            err.to_string(),
-            "Open the Pi Dash desktop app on the machine you want this to run on."
-        );
-        // Structural failures refuse automatic runs too (`creation.py:120-122`).
-        for reason in [
-            ManagedRunnerReason::DISABLED,
-            ManagedRunnerReason::LLM_CONFIG_MISSING,
-            ManagedRunnerReason::NO_RUNNER_FOR_PROJECT,
-        ] {
-            let err = managed_execution_decision(false, reason, true, None, None, true)
-                .expect_err("structural raises");
-            assert_eq!(err.code(), reason);
-            assert_eq!(err.to_string(), managed_refusal_detail(reason));
-        }
-        // Offline but nothing enrolled: not transient, refused.
-        let err = managed_execution_decision(
-            false,
-            ManagedRunnerReason::NOT_CONNECTED,
-            false,
-            None,
-            None,
-            true,
-        )
-        .expect_err("unenrolled raises");
-        assert_eq!(err.code(), ManagedRunnerReason::NOT_CONNECTED);
-    }
-
-    // -- dispatch math --------------------------------------------------------
 
     #[test]
     fn capacity_clamps_at_zero() {
@@ -1584,6 +959,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn job_row_with_queue_routes_agent_queue() {
+        // Phase 2 (2.1): `run_cloud_agent_job_with_queue` puts the job on
+        // the configured label; `dispatch_waiting` routes through
+        // `CloudAgentSettings.job_queue`.
+        let run_id = Uuid::new_v4().to_string();
+        let job = run_cloud_agent_job_with_queue(&run_id, "cloud_agent");
+        assert_eq!(job.queue, "cloud_agent");
+        assert_eq!(job.task, RUN_CLOUD_AGENT_TASK);
+        let celery = run_cloud_agent_job_with_queue(&run_id, crate::queue::DEFAULT_QUEUE);
+        assert_eq!(celery.queue, crate::queue::DEFAULT_QUEUE);
+        // Finding 8: blank/space-padded values collapse to the default
+        // instead of stranding runs on a phantom label.
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, "").queue,
+            crate::queue::DEFAULT_QUEUE
+        );
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, "  ").queue,
+            crate::queue::DEFAULT_QUEUE
+        );
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, " cloud_agent ").queue,
+            "cloud_agent"
+        );
+    }
+
     // -- tool-plan snapshot shape ---------------------------------------------
 
     #[test]
@@ -1670,47 +1072,109 @@ mod tests {
         assert!(!statements.is_empty(), "unparsed: {sql}");
     }
 
+    fn render_select<E: EntityTrait>(select: Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn render_update<E: EntityTrait>(update: UpdateMany<E>) -> String {
+        use sea_orm::QueryTrait;
+        update.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn due_select() -> String {
+        render_select(due_runs_query(Uuid::new_v4(), Utc::now(), 3))
+    }
+
     #[test]
     fn all_statements_parse_as_postgres() {
-        for sql in [
-            WORKSPACE_LOCK_SQL,
-            QUEUED_CLOUD_COUNT_SQL,
-            RUNNING_CLOUD_COUNT_SQL,
-            OFFERED_COUNT_SQL,
-            DUE_RUNS_SQL,
-            LEASE_RUN_SQL,
-            DISPATCH_RUN_SELECT_SQL,
-            AGENT_RUN_LOCK_SQL,
-            EVENT_COUNT_SQL,
-            EVENT_MARKER_EXISTS_SQL,
-            EVENT_MAX_SEQ_SQL,
-            EVENT_INSERT_SQL,
-            ENROLLED_LATEST_RUNNER_SQL,
-        ] {
+        for sql in [WORKSPACE_LOCK_SQL, QUEUED_CLOUD_COUNT_SQL] {
             parse_postgres(sql);
         }
     }
 
     #[test]
     fn due_set_skips_locked_oldest_first() {
-        assert!(DUE_RUNS_SQL.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(DUE_RUNS_SQL.contains("ORDER BY created_at LIMIT $3 FOR UPDATE"));
-        assert!(DUE_RUNS_SQL.contains("(lease_expires_at IS NULL OR lease_expires_at <= $2)"));
-        assert!(DUE_RUNS_SQL.starts_with("SELECT id FROM agent_run"));
+        let sql = due_select();
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(sql.contains("SELECT \"agent_run\".\"id\" FROM \"agent_run\""));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'cloud_agent'"));
+        assert!(sql.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(sql.contains(
+            "(\"agent_run\".\"lease_expires_at\" IS NULL OR \"agent_run\".\"lease_expires_at\" <="
+        ));
+        assert!(sql
+            .contains("ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 3 FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[tokio::test]
+    async fn live_due_runs_skip_locked_against_temp_agent_run() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        if url.is_empty() {
+            return;
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("CREATE TEMP TABLE agent_run AS SELECT * FROM public.agent_run WITH NO DATA")
+            .execute(&mut *tx)
+            .await
+            .expect("temp agent_run");
+        let now = Utc::now();
+        let ws = Uuid::new_v4();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let third = Uuid::new_v4();
+        let mut seed = async |id: Uuid, status: &str, created: DateTime<Utc>| {
+            sqlx::query(
+                "INSERT INTO agent_run (id, workspace_id, executor_kind, status, created_at, lease_expires_at)
+                 VALUES ($1, $2, 'cloud_agent', $3, $4, NULL)",
+            )
+            .bind(id)
+            .bind(ws)
+            .bind(status)
+            .bind(created)
+            .execute(&mut *tx)
+            .await
+            .expect("seed temp agent_run");
+        };
+        seed(first, "queued", now - ChronoDuration::minutes(30)).await;
+        seed(second, "queued", now - ChronoDuration::minutes(20)).await;
+        seed(third, "queued", now - ChronoDuration::minutes(10)).await;
+        seed(Uuid::new_v4(), "running", now - ChronoDuration::minutes(40)).await;
+        let conn = TxConn::new(&mut tx);
+        let ids = due_runs_query(ws, now, 2)
+            .into_tuple::<Uuid>()
+            .all(&conn)
+            .await
+            .expect("due runs against temp agent_run");
+        assert_eq!(
+            ids,
+            vec![first, second],
+            "oldest first, capacity-bounded, running rows excluded"
+        );
+        tx.rollback().await.expect("rollback temp");
     }
 
     #[test]
     fn lease_bumps_attempts_on_queued_rows_only() {
-        assert!(LEASE_RUN_SQL.contains("dispatch_attempts = dispatch_attempts + 1"));
-        assert!(LEASE_RUN_SQL.contains("WHERE id = $2 AND status = 'queued'"));
+        let sql = render_update(lease_run_update(Uuid::new_v4(), Utc::now()));
+        assert!(sql.contains("\"dispatch_attempts\" = \"agent_run\".\"dispatch_attempts\" + 1"));
+        assert!(sql.contains("AND \"agent_run\".\"status\" = 'queued'"));
     }
 
     #[test]
     fn locks_block_on_the_row() {
         assert!(WORKSPACE_LOCK_SQL.ends_with("FOR UPDATE"));
-        assert!(AGENT_RUN_LOCK_SQL.ends_with("FOR UPDATE"));
+        let lock = render_select(agent_run_lock_query(Uuid::new_v4()));
+        assert!(lock.ends_with("FOR UPDATE"));
         assert!(!WORKSPACE_LOCK_SQL.contains("SKIP LOCKED"));
-        assert!(!AGENT_RUN_LOCK_SQL.contains("SKIP LOCKED"));
+        assert!(!lock.contains("SKIP LOCKED"));
         // The default-manager soft-delete guard: a soft-deleted workspace
         // raises instead of locking (compiler-verified).
         assert!(WORKSPACE_LOCK_SQL.contains("deleted_at IS NULL"));
@@ -1718,42 +1182,31 @@ mod tests {
 
     #[test]
     fn counts_scope_cloud_and_time() {
-        assert!(OFFERED_COUNT_SQL.contains("lease_expires_at > $2"));
-        assert!(RUNNING_CLOUD_COUNT_SQL.contains("status = 'running'"));
+        let offered = render_select(offered_count_query(Uuid::new_v4(), Utc::now()));
+        let running = render_select(running_cloud_count_query(Uuid::new_v4()));
+        assert!(offered.contains("\"agent_run\".\"executor_kind\" = 'cloud_agent'"));
+        assert!(offered.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(offered.contains("\"agent_run\".\"lease_expires_at\" >"));
+        assert!(running.contains("\"agent_run\".\"executor_kind\" = 'cloud_agent'"));
+        assert!(running.contains("\"agent_run\".\"status\" = 'running'"));
         assert!(QUEUED_CLOUD_COUNT_SQL.contains("status = 'queued'"));
-        for sql in [
-            QUEUED_CLOUD_COUNT_SQL,
-            RUNNING_CLOUD_COUNT_SQL,
-            OFFERED_COUNT_SQL,
-        ] {
-            assert!(sql.contains("executor_kind = 'cloud_agent'"));
+        for sql in [QUEUED_CLOUD_COUNT_SQL, &running, &offered] {
+            assert!(sql.contains("cloud_agent"));
         }
     }
 
     #[test]
     fn event_statements_match_create_sites() {
-        assert!(EVENT_INSERT_SQL.contains("(agent_run_id, seq, kind, payload, created_at)"));
-        assert!(EVENT_MAX_SEQ_SQL.contains("ORDER BY seq DESC LIMIT 1"));
-        assert!(EVENT_MARKER_EXISTS_SQL.contains("kind = 'events_truncated'"));
+        let marker = render_select(event_marker_exists_query(Uuid::new_v4()));
+        assert!(marker.contains("\"agent_run_event\".\"kind\" = 'events_truncated'"));
+        assert!(marker.contains("LIMIT 1"));
+        let max = render_select(event_max_seq_query(Uuid::new_v4()));
+        assert!(max.contains("ORDER BY \"agent_run_event\".\"seq\" DESC LIMIT 1"));
     }
 
     #[test]
     fn statements_touch_dispatch_tables_only() {
-        for sql in [
-            WORKSPACE_LOCK_SQL,
-            QUEUED_CLOUD_COUNT_SQL,
-            RUNNING_CLOUD_COUNT_SQL,
-            OFFERED_COUNT_SQL,
-            DUE_RUNS_SQL,
-            LEASE_RUN_SQL,
-            DISPATCH_RUN_SELECT_SQL,
-            AGENT_RUN_LOCK_SQL,
-            EVENT_COUNT_SQL,
-            EVENT_MARKER_EXISTS_SQL,
-            EVENT_MAX_SEQ_SQL,
-            EVENT_INSERT_SQL,
-            ENROLLED_LATEST_RUNNER_SQL,
-        ] {
+        for sql in [WORKSPACE_LOCK_SQL, QUEUED_CLOUD_COUNT_SQL] {
             assert!(
                 sql.contains("agent_run")
                     || sql.contains("workspaces")
@@ -1762,9 +1215,6 @@ mod tests {
                 "unexpected table in: {sql}"
             );
         }
-        assert!(
-            ENROLLED_LATEST_RUNNER_SQL.contains("ORDER BY runner.last_heartbeat_at DESC LIMIT 1")
-        );
     }
 
     // -- live Postgres (ignored; needs a migrated scratch DB) ------------------
@@ -1805,13 +1255,6 @@ mod tests {
             CloudAgentSettings {
                 enabled: true,
                 ..django_cloud_settings()
-            }
-        }
-
-        fn managed_on() -> ManagedRunnerSettings {
-            ManagedRunnerSettings {
-                enabled: true,
-                ..django_managed_settings()
             }
         }
 
@@ -1918,12 +1361,12 @@ mod tests {
             let id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, status, \
-                 executor_kind, dispatch_attempts, cancel_reason, error_code, tool_plan, \
+                 executor_kind, dispatch_attempts, cancel_reason, tool_plan, \
                  prompt, trigger, phase_kind, run_config, required_capabilities, thread_id, \
-                 agent_metadata, lease_expires_at, error, refusal_category, llm_model, usage, \
+                 agent_metadata, lease_expires_at, error_details, llm_model, usage, \
                  created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 0, '', '', '{}', '', 'direct', '', '{}', \
-                 '[]', '', '{}', $7, '', '', '', '{}', $8)",
+                 VALUES ($1, $2, $3, $4, $5, $6, 0, '', '{}', '', 'direct', '', '{}', \
+                 '[]', '', '{}', $7, '{}', '', '{}', $8)",
             )
             .bind(id)
             .bind(graph.ws)
@@ -1936,39 +1379,6 @@ mod tests {
             .execute(pool)
             .await
             .expect("seed run");
-            id
-        }
-
-        async fn seed_runner(
-            pool: &PgPool,
-            graph: &Graph,
-            owner: Uuid,
-            status: &str,
-            heartbeat: Option<DateTime<Utc>>,
-        ) -> Uuid {
-            let id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
-                 name, host_label, provisioning, visibility, refresh_token_hash, \
-                 refresh_token_fingerprint, refresh_token_generation, \
-                 previous_refresh_token_hash, access_token_signing_key_version, \
-                 enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
-                 os, arch, runner_version, dev_metadata, protocol_version, last_heartbeat_at, \
-                 revoked_reason) \
-                 VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
-                 1, '', '', '[]', $7, '', '', '', '{}', 1, $8, '')",
-            )
-            .bind(id)
-            .bind(Utc::now())
-            .bind(owner)
-            .bind(graph.ws)
-            .bind(graph.pod)
-            .bind(format!("l6-{}", &id.to_string()[..8]))
-            .bind(status)
-            .bind(heartbeat)
-            .execute(pool)
-            .await
-            .expect("seed runner");
             id
         }
 
@@ -2377,7 +1787,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(NoExtraToolsets),
-                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
             .await
@@ -2465,7 +1874,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(OptedInToolsets),
-                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
             .await
@@ -2474,125 +1882,6 @@ mod tests {
             assert_eq!(fields.executor_kind, AgentExecutorKind::CloudAgent);
             assert_eq!(fields.tool_plan["extra_toolsets"], true);
             cleanup(&pool, &graph, &[], &[]).await;
-        }
-
-        #[tokio::test]
-        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
-        async fn live_execution_fields_managed_branches() {
-            let pool = pool().await;
-            let graph = seed_graph(&pool, "managed").await;
-            let now = Utc::now();
-            let runner = seed_runner(&pool, &graph, graph.user, "online", Some(now)).await;
-            let project = ProjectScope {
-                project_id: graph.project,
-                workspace_id: graph.ws,
-                default_agent_executor: "managed_runner".to_owned(),
-            };
-            let actor = ActorScope {
-                id: graph.user,
-                flags: UserFlags {
-                    is_active: true,
-                    is_bot: false,
-                },
-            };
-            let profile = || LlmProfile {
-                available: true,
-                reason_code: String::new(),
-            };
-            let inputs_for = |automatic| ExecutionInputs {
-                project: &project,
-                run_kind: "issue",
-                has_issue: true,
-                required_capabilities: &[],
-                actor: Some(&actor),
-                automatic,
-                requested: None,
-                now_unix_secs: now.timestamp(),
-            };
-            let cache = FakeCache::default();
-            // Online: pinned to the creator's own runner, no marker.
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let fields = execution_fields(
-                &mut tx,
-                &inputs_for(false),
-                &django_cloud_settings(),
-                &managed_on(),
-                &cache,
-                &mut collect,
-                ExecutionSeams {
-                    has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
-                    llm_profile: profile,
-                },
-            )
-            .await
-            .expect("managed fields");
-            tx.rollback().await.expect("rollback");
-            assert_eq!(fields.executor_kind, AgentExecutorKind::ManagedRunner);
-            assert_eq!(fields.tool_plan, serde_json::json!({}));
-            assert_eq!(fields.pinned_runner_id, Some(runner));
-            assert_eq!(fields.error_code, None);
-            // Offline but enrolled: manual refuses, automatic waits visibly.
-            sqlx::query(
-                "UPDATE runner SET status = 'offline', last_heartbeat_at = $1 WHERE id = $2",
-            )
-            .bind(now - ChronoDuration::hours(1))
-            .bind(runner)
-            .execute(&pool)
-            .await
-            .expect("take runner offline");
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let err = execution_fields(
-                &mut tx,
-                &inputs_for(false),
-                &django_cloud_settings(),
-                &managed_on(),
-                &cache,
-                &mut collect,
-                ExecutionSeams {
-                    has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
-                    llm_profile: profile,
-                },
-            )
-            .await
-            .expect_err("manual offline raises");
-            tx.rollback().await.expect("rollback");
-            match err {
-                ExecutionFieldsError::Managed(refused) => {
-                    assert_eq!(refused.code(), ManagedRunnerReason::NOT_CONNECTED);
-                }
-                other => panic!("wrong variant: {other:?}"),
-            }
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let fields = execution_fields(
-                &mut tx,
-                &inputs_for(true),
-                &django_cloud_settings(),
-                &managed_on(),
-                &cache,
-                &mut collect,
-                ExecutionSeams {
-                    has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
-                    llm_profile: profile,
-                },
-            )
-            .await
-            .expect("automatic waits");
-            tx.rollback().await.expect("rollback");
-            assert_eq!(fields.pinned_runner_id, Some(runner));
-            assert_eq!(
-                fields.error_code.as_deref(),
-                Some(ManagedRunnerReason::NOT_CONNECTED)
-            );
-            cleanup(&pool, &graph, &[], &[runner]).await;
         }
 
         #[tokio::test]
@@ -2828,7 +2117,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(PanicToolsets("no plan is built on refuse")),
-                    llm_profile: || panic!("managed seam unreachable here"),
                 },
             )
             .await
@@ -2837,47 +2125,6 @@ mod tests {
             assert!(matches!(err, ExecutionFieldsError::Admission(_)));
             assert_eq!(err.to_string(), "Cloud Agent creation rate exceeded");
             // The failed bucket registers nothing (`creation.py:49-50` returns).
-            assert!(deferred.is_empty());
-        }
-
-        #[tokio::test]
-        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
-        async fn live_managed_disabled_raises_at_resolve() {
-            let pool = pool().await;
-            let project = project("managed_runner");
-            let actor = actor(true, false);
-            let inputs = ExecutionInputs {
-                project: &project,
-                run_kind: "issue",
-                has_issue: true,
-                required_capabilities: &[],
-                actor: Some(&actor),
-                automatic: false,
-                requested: None,
-                now_unix_secs: 1_700_000_000,
-            };
-            let cache = FakeCache::default();
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let err = execution_fields(
-                &mut tx,
-                &inputs,
-                &django_cloud_settings(),
-                &django_managed_settings(),
-                &cache,
-                &mut collect,
-                panic_seams(),
-            )
-            .await
-            .expect_err("disabled managed raises");
-            tx.rollback().await.expect("rollback");
-            match err {
-                ExecutionFieldsError::Resolve(ResolveExecutorError::ManagedRunner(unavailable)) => {
-                    assert_eq!(unavailable.code(), ManagedRunnerReason::DISABLED);
-                }
-                other => panic!("wrong variant: {other:?}"),
-            }
             assert!(deferred.is_empty());
         }
 
@@ -2932,7 +2179,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(NoExtraToolsets),
-                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
             .await

@@ -118,6 +118,7 @@
 //!   read-only for this layer).
 //!
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
@@ -125,7 +126,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use serde_json::{Map, Value};
 use sqlx::Row;
 
@@ -136,9 +137,16 @@ use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome};
 use crate::app_issues::{fetch_json_rows, query_last, Denial as IssuesDenial, QueryMap};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+use pidash_compat::response::json_response;
+use pidash_db::entity::{
+    analytic_views, cycles, modules, project_members, projects, workspace_members, workspaces,
+};
 use pidash_db::issue_filters::issue_filters_get;
 use pidash_services::app_analytics::queries as q;
 use pidash_types::WorkspaceId;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -250,8 +258,6 @@ pub const NOT_FOUND_BODY: &str = super::gates::NOT_FOUND_BODY;
 /// `handle_exception`'s `ValidationError` branch: malformed `?project_ids=`
 /// entries (UUID coercion inside dispatch).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `{"message": "Invalid tab"}` 400 (`advance.py:152`) in DRF's compact
 /// rendering (no space after the colon — verified against live Django; the
 /// Q-04 builder const keeps a space and is not used for the body).
@@ -331,14 +337,6 @@ impl IntoResponse for Denial {
     }
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("advance response")
-}
-
 // ---------------------------------------------------------------------------
 // Request context: auth + tenant + membership
 // ---------------------------------------------------------------------------
@@ -368,23 +366,37 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
 /// the same row filters Python uses: `member=user, workspace__slug=slug,
 /// role__in=[ADMIN, MEMBER], is_active=True` (`app/permissions/base.py`) —
 /// the `app_cycles` precedent (soft-deleted rows excluded on both sides).
+fn workspace_role_query(
+    slug: &str,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn workspace_role(
     pool: &sqlx::PgPool,
     slug: &str,
     user_id: &uuid::Uuid,
 ) -> Result<Option<i16>, Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<i16>> = workspace_role_query(slug, *user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // `role` is non-nullable; the outer Option is row presence.
-    Ok(row.and_then(|row| row.0))
+    Ok(row.flatten())
 }
 
 /// Build the gate facts for a workspace advance route: WORKSPACE-level
@@ -445,41 +457,62 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = resolve_project_query(slug, &upper)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
+}
+
+fn resolve_project_query(slug: &str, upper: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
 }
 
 /// The active project-membership role for the PROJECT-level gates:
 /// `member=user, workspace__slug=slug, project_id=project_id, is_active=True`
 /// (`app/permissions/base.py:53-59`) — the `app_cycles` precedent
 /// (soft-deleted rows excluded on both sides).
+fn project_role_query(
+    slug: &str,
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn project_role(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Option<i16>, Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<i16>> = project_role_query(slug, *project_id, *user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.flatten())
 }
 
 /// Build the gate facts for a project advance route: PROJECT-level
@@ -552,6 +585,11 @@ pub(crate) struct FilterCtx {
     pub(crate) window: Option<(DateTime<Utc>, DateTime<Utc>)>,
     /// Chart `(start, end)` dates on `created_at::date`.
     pub(crate) period: Option<(NaiveDate, NaiveDate)>,
+    /// The actor zone (`TimezoneMixin` activates it): every `__date`
+    /// truncation and month bucket in the advance statements converts
+    /// with it. The window/period bounds themselves stay UTC (Django
+    /// derives them from `timezone.now()`).
+    pub(crate) timezone: chrono_tz::Tz,
 }
 
 /// Parse one `?project_ids=` csv exactly like `get_analytics_filters`:
@@ -624,8 +662,13 @@ fn chart_period_range(
 impl FilterCtx {
     /// `initialize_workspace` + `get_analytics_filters` for one request:
     /// `kind` is `"analytics"` (`AdvanceAnalyticsEndpoint`) or `"chart"`
-    /// (stats + charts endpoints).
-    pub(crate) fn parse(params: &HashMap<String, String>, kind: &str, now: DateTime<Utc>) -> Self {
+    /// (stats + charts endpoints). `timezone` is the actor zone.
+    pub(crate) fn parse(
+        params: &HashMap<String, String>,
+        kind: &str,
+        now: DateTime<Utc>,
+        timezone: chrono_tz::Tz,
+    ) -> Self {
         let project_ids = parse_project_ids(params.get("project_ids").map(String::as_str));
         let date_filter = params.get("date_filter").map(String::as_str);
         let (window, period) = match kind {
@@ -636,7 +679,13 @@ impl FilterCtx {
             project_ids,
             window,
             period,
+            timezone,
         }
+    }
+
+    /// The actor zone as a quoted `AT TIME ZONE` literal.
+    pub(crate) fn zone_literal(&self) -> String {
+        q::sql_zone_literal(self.timezone.name())
     }
 
     /// The UUID coercion Django applies to every `id__in`/`project_id__in`
@@ -895,6 +944,7 @@ async fn count_one(
     ctx: &FilterCtx,
     range_kind: RangeKind,
 ) -> Result<i64, Denial> {
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let row: (i64,) = bind_range!(sqlx::query_as(sql), slug, user_id, ctx, range_kind)
         .fetch_one(pool)
         .await
@@ -926,7 +976,7 @@ async fn advance_get(
 
     // `initialize_workspace(slug, type="analytics")` (advance.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "analytics", now);
+    let ctx = FilterCtx::parse(&params, "analytics", now, actor.timezone);
     let tab = params.get("tab").map(String::as_str).unwrap_or("overview");
 
     if tab == "overview" {
@@ -1000,6 +1050,7 @@ async fn overview_data(
     // `wph` and the agent scope below).
     let mwindow_vals = ctx.window;
     let run_member_count = |sql: String| async move {
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         let mut query = sqlx::query_as::<_, (i64,)>(&sql);
         if is_workspace_path {
             query = query.bind(slug);
@@ -1095,6 +1146,7 @@ async fn overview_data(
     // list, never in the scope).
     let asql = asql.replace(",0)", ",0)::BIGINT");
     let tokens: (Option<i64>, Option<i64>, Option<i64>) =
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         bind_range!(sqlx::query_as(&asql), slug, user_id, ctx, RangeKind::Window)
             .fetch_one(pool)
             .await
@@ -1171,7 +1223,7 @@ async fn stats_get(
 
     // `initialize_workspace(slug, type="chart")` (advance.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let chart_type = params
         .get("type")
         .map(String::as_str)
@@ -1200,6 +1252,7 @@ async fn project_issues_stats(
     // already expose — no extra join needed.
     let shell = q::advance_project_issues_stats_sql(&base, None);
     let sql = with_joins(shell, "issues", ISSUE_JOINS);
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows: Vec<(uuid::Uuid, String, i64, i64, i64, i64, i64)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(user_id)
@@ -1239,7 +1292,7 @@ async fn charts_get(
 
     // `initialize_workspace(slug, type="chart")` (advance.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let chart_type = params.get("type").map(String::as_str).unwrap_or("projects");
 
     if chart_type == "projects" {
@@ -1276,14 +1329,14 @@ async fn project_chart(
 ) -> Result<String, Denial> {
     let period = ctx.period_ph();
     // `created_at__date` bounds apply per-table (`date_filter`,
-    // `advance.py:211-215`).
-    let date_pred = |table: &str| {
-        match period.as_ref() {
+    // `advance.py:211-215`), truncated in the actor zone.
+    let zone = ctx.zone_literal();
+    let date_pred = |table: &str| match period.as_ref() {
         Some((gte_ph, lte_ph)) => format!(
-            " AND \"{table}\".\"created_at\"::date >= {gte_ph} AND \"{table}\".\"created_at\"::date <= {lte_ph}"
+            " AND (\"{table}\".\"created_at\" AT TIME ZONE {zone})::date >= {gte_ph} \
+             AND (\"{table}\".\"created_at\" AT TIME ZONE {zone})::date <= {lte_ph}"
         ),
         None => String::new(),
-    }
     };
 
     // work_items: `issue_objects` + base, with dates.
@@ -1345,8 +1398,8 @@ async fn project_chart(
         Some((gte_ph, lte_ph)) => format!(
             "\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"is_active\" \
              AND \"workspace_members\".\"deleted_at\" IS NULL \
-             AND \"workspace_members\".\"created_at\"::date >= {gte_ph} \
-             AND \"workspace_members\".\"created_at\"::date <= {lte_ph}"
+             AND (\"workspace_members\".\"created_at\" AT TIME ZONE {zone})::date >= {gte_ph} \
+             AND (\"workspace_members\".\"created_at\" AT TIME ZONE {zone})::date <= {lte_ph}"
         ),
         None => "\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"is_active\" \
              AND \"workspace_members\".\"deleted_at\" IS NULL"
@@ -1357,6 +1410,7 @@ async fn project_chart(
         "workspace_members",
         " INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\")",
     );
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let mut mem_query = sqlx::query_as::<_, (i64,)>(&mem_sql).bind(slug);
     if let Some((start, end)) = ctx.period.as_ref() {
         mem_query = mem_query.bind(*start).bind(*end);
@@ -1422,6 +1476,14 @@ async fn project_chart(
 /// `created_at` month-start through the current month-start. Each row is
 /// `{key, name, count=created, completed_issues, created_issues}` with the
 /// `{"completed_issues": ..., "created_issues": ...}` schema.
+fn workspace_created_query(slug: &str) -> sea_orm::Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::CreatedAt)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn work_item_completion_chart(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -1431,14 +1493,13 @@ async fn work_item_completion_chart(
 ) -> Result<String, Denial> {
     // `Workspace.objects.get(slug=...)` — 404 when missing (unreachable past
     // the gate; the gate denies unknown slugs first).
-    let ws: Option<(DateTime<Utc>,)> = sqlx::query_as(
-        "SELECT \"created_at\" FROM \"workspaces\" WHERE \"slug\" = $1 AND \"deleted_at\" IS NULL",
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (ws_created,) = ws.ok_or(Denial::NotFound)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ws: Option<chrono::DateTime<chrono::FixedOffset>> = workspace_created_query(slug)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let ws_created = ws.ok_or(Denial::NotFound)?.with_timezone(&chrono::Utc);
     let start = ws_created.date_naive().with_day(1).expect("month start");
 
     let base = issue_scope(ctx)?;
@@ -1448,9 +1509,13 @@ async fn work_item_completion_chart(
             .as_ref()
             .map(|(gte, lte)| (gte.as_str(), lte.as_str()))
     };
-    let shell = q::advance_completion_monthly_sql(&base, pph());
+    let shell = q::advance_completion_monthly_sql(&base, pph(), ctx.timezone.name());
     let sql = with_joins(shell, "issues", ISSUE_JOINS);
-    let rows: Vec<(DateTime<Utc>, i64, i64)> =
+    // The month bucket is a naive local timestamp (`date_trunc` over
+    // `AT TIME ZONE`); `%Y-%m-%d` keys the local month-start like Django's
+    // `stat["month"].strftime("%Y-%m-%d")` on the zoned `TruncMonth`.
+    let rows: Vec<(NaiveDateTime, i64, i64)> =
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
             .fetch_all(pool)
             .await
@@ -1500,8 +1565,10 @@ enum KeyKind {
 /// manager scope (exactly like Django reuses its single join).
 struct Axis {
     joins: &'static str,
-    key_expr: &'static str,
-    name_expr: &'static str,
+    /// Owned only for the `CREATED_AT`/`COMPLETED_AT` axes, whose
+    /// `__date` truncation converts with the per-request actor zone.
+    key_expr: Cow<'static, str>,
+    name_expr: Cow<'static, str>,
     filter: &'static str,
     key_kind: KeyKind,
     /// Decode kind of the display-name column: `Text` everywhere except the
@@ -1513,22 +1580,25 @@ struct Axis {
 
 /// `get_x_axis_field()` (`build_chart.py:47-76`) + `x_axis_mapper`
 /// (`build_chart.py:20-34`). Lookup is case-sensitive (a plain dict `in`
-/// check, `build_chart.py:155`).
-fn axis_for(name: &str) -> Option<Axis> {
+/// check, `build_chart.py:155`). `zone` is the quoted `AT TIME ZONE`
+/// literal for the `CREATED_AT`/`COMPLETED_AT` axes (Django's
+/// `created_at__date` is `TruncDate`, which converts with the
+/// `TimezoneMixin`-activated zone).
+fn axis_for(name: &str, zone: &str) -> Option<Axis> {
     match name {
         // `("state__id", "state__name", None)` — shares the base states join.
         "STATES" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"state_id\"",
-            name_expr: "\"states\".\"name\"",
+            key_expr: Cow::Borrowed("\"issues\".\"state_id\""),
+            name_expr: Cow::Borrowed("\"states\".\"name\""),
             filter: "",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
         }),
         "STATE_GROUPS" => Some(Axis {
             joins: "",
-            key_expr: "\"states\".\"group\"",
-            name_expr: "\"states\".\"group\"",
+            key_expr: Cow::Borrowed("\"states\".\"group\""),
+            name_expr: Cow::Borrowed("\"states\".\"group\""),
             filter: "",
             key_kind: KeyKind::Text,
             name_kind: KeyKind::Text,
@@ -1537,8 +1607,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         "LABELS" => Some(Axis {
             joins: " LEFT OUTER JOIN \"issue_labels\" ON (\"issues\".\"id\" = \"issue_labels\".\"issue_id\") \
                      LEFT OUTER JOIN \"labels\" ON (\"issue_labels\".\"label_id\" = \"labels\".\"id\")",
-            key_expr: "\"issue_labels\".\"label_id\"",
-            name_expr: "\"labels\".\"name\"",
+            key_expr: Cow::Borrowed("\"issue_labels\".\"label_id\""),
+            name_expr: Cow::Borrowed("\"labels\".\"name\""),
             filter: " AND \"issue_labels\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1547,8 +1617,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         "ASSIGNEES" => Some(Axis {
             joins: " LEFT OUTER JOIN \"issue_assignees\" ON (\"issues\".\"id\" = \"issue_assignees\".\"issue_id\") \
                      LEFT OUTER JOIN \"users\" AS \"ax_users\" ON (\"issue_assignees\".\"assignee_id\" = \"ax_users\".\"id\")",
-            key_expr: "\"issue_assignees\".\"assignee_id\"",
-            name_expr: "\"ax_users\".\"display_name\"",
+            key_expr: Cow::Borrowed("\"issue_assignees\".\"assignee_id\""),
+            name_expr: Cow::Borrowed("\"ax_users\".\"display_name\""),
             filter: " AND \"issue_assignees\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1557,8 +1627,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         // key is the integer `key`, name the `value` text (`estimate.py`).
         "ESTIMATE_POINTS" => Some(Axis {
             joins: " LEFT OUTER JOIN \"estimate_points\" ON (\"issues\".\"estimate_point_id\" = \"estimate_points\".\"id\")",
-            key_expr: "\"estimate_points\".\"key\"",
-            name_expr: "\"estimate_points\".\"value\"",
+            key_expr: Cow::Borrowed("\"estimate_points\".\"key\""),
+            name_expr: Cow::Borrowed("\"estimate_points\".\"value\""),
             filter: "",
             key_kind: KeyKind::Int,
             name_kind: KeyKind::Text,
@@ -1567,8 +1637,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         "CYCLES" => Some(Axis {
             joins: " LEFT OUTER JOIN \"cycle_issues\" ON (\"issues\".\"id\" = \"cycle_issues\".\"issue_id\") \
                      LEFT OUTER JOIN \"cycles\" AS \"ax_cycles\" ON (\"cycle_issues\".\"cycle_id\" = \"ax_cycles\".\"id\")",
-            key_expr: "\"cycle_issues\".\"cycle_id\"",
-            name_expr: "\"ax_cycles\".\"name\"",
+            key_expr: Cow::Borrowed("\"cycle_issues\".\"cycle_id\""),
+            name_expr: Cow::Borrowed("\"ax_cycles\".\"name\""),
             filter: " AND \"cycle_issues\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1577,48 +1647,56 @@ fn axis_for(name: &str) -> Option<Axis> {
         "MODULES" => Some(Axis {
             joins: " LEFT OUTER JOIN \"module_issues\" ON (\"issues\".\"id\" = \"module_issues\".\"issue_id\") \
                      LEFT OUTER JOIN \"modules\" AS \"ax_modules\" ON (\"module_issues\".\"module_id\" = \"ax_modules\".\"id\")",
-            key_expr: "\"module_issues\".\"module_id\"",
-            name_expr: "\"ax_modules\".\"name\"",
+            key_expr: Cow::Borrowed("\"module_issues\".\"module_id\""),
+            name_expr: Cow::Borrowed("\"ax_modules\".\"name\""),
             filter: " AND \"module_issues\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
         }),
         "PRIORITY" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"priority\"",
-            name_expr: "\"issues\".\"priority\"",
+            key_expr: Cow::Borrowed("\"issues\".\"priority\""),
+            name_expr: Cow::Borrowed("\"issues\".\"priority\""),
             filter: "",
             key_kind: KeyKind::Text,
             name_kind: KeyKind::Text,
         }),
         "START_DATE" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"start_date\"",
-            name_expr: "\"issues\".\"start_date\"",
+            key_expr: Cow::Borrowed("\"issues\".\"start_date\""),
+            name_expr: Cow::Borrowed("\"issues\".\"start_date\""),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
         "TARGET_DATE" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"target_date\"",
-            name_expr: "\"issues\".\"target_date\"",
+            key_expr: Cow::Borrowed("\"issues\".\"target_date\""),
+            name_expr: Cow::Borrowed("\"issues\".\"target_date\""),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
         "CREATED_AT" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"created_at\"::date",
-            name_expr: "\"issues\".\"created_at\"::date",
+            key_expr: Cow::Owned(format!(
+                "(\"issues\".\"created_at\" AT TIME ZONE {zone})::date"
+            )),
+            name_expr: Cow::Owned(format!(
+                "(\"issues\".\"created_at\" AT TIME ZONE {zone})::date"
+            )),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
         "COMPLETED_AT" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"completed_at\"::date",
-            name_expr: "\"issues\".\"completed_at\"::date",
+            key_expr: Cow::Owned(format!(
+                "(\"issues\".\"completed_at\" AT TIME ZONE {zone})::date"
+            )),
+            name_expr: Cow::Owned(format!(
+                "(\"issues\".\"completed_at\" AT TIME ZONE {zone})::date"
+            )),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
@@ -1629,8 +1707,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         // alias 500s here on `specified more than once`.
         "CREATED_BY" => Some(Axis {
             joins: " LEFT OUTER JOIN \"users\" AS \"ax_created_users\" ON (\"issues\".\"created_by_id\" = \"ax_created_users\".\"id\")",
-            key_expr: "\"issues\".\"created_by_id\"",
-            name_expr: "\"ax_created_users\".\"display_name\"",
+            key_expr: Cow::Borrowed("\"issues\".\"created_by_id\""),
+            name_expr: Cow::Borrowed("\"ax_created_users\".\"display_name\""),
             filter: "",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1776,7 +1854,8 @@ pub(crate) async fn build_analytics_chart(
     extra_scope: &str,
 ) -> Result<String, Denial> {
     // `if x_axis not in x_axis_mapper: raise ValidationError(...)`.
-    let axis = axis_for(x_axis).ok_or_else(|| {
+    let zone = ctx.zone_literal();
+    let axis = axis_for(x_axis, &zone).ok_or_else(|| {
         Denial::Raw(
             StatusCode::BAD_REQUEST,
             invalid_axis_body(&format!("Invalid x_axis field: {x_axis}")),
@@ -1786,7 +1865,7 @@ pub(crate) async fn build_analytics_chart(
     // `?group_by=` is falsy in Python, so it takes the simple path, not the
     // 400 (`advance.py:323` passes the raw `GET.get`, `build_chart.py:158`).
     let group = match group_by {
-        Some(name) if !name.is_empty() => Some(axis_for(name).ok_or_else(|| {
+        Some(name) if !name.is_empty() => Some(axis_for(name, &zone).ok_or_else(|| {
             Denial::Raw(
                 StatusCode::BAD_REQUEST,
                 invalid_axis_body(&format!("Invalid group_by field: {name}")),
@@ -1799,7 +1878,8 @@ pub(crate) async fn build_analytics_chart(
     let period = ctx.period_ph();
     let date_pred = match period.as_ref() {
         Some((gte_ph, lte_ph)) => format!(
-            " AND \"issues\".\"created_at\"::date >= {gte_ph} AND \"issues\".\"created_at\"::date <= {lte_ph}"
+            " AND (\"issues\".\"created_at\" AT TIME ZONE {zone})::date >= {gte_ph} \
+             AND (\"issues\".\"created_at\" AT TIME ZONE {zone})::date <= {lte_ph}"
         ),
         None => String::new(),
     };
@@ -1871,6 +1951,7 @@ async fn simple_chart_response(
     } else {
         RangeKind::None
     };
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows = bind_range!(sqlx::query(&sql), slug, user_id, ctx, kind)
         .fetch_all(pool)
         .await
@@ -1879,6 +1960,7 @@ async fn simple_chart_response(
     for row in rows {
         let key = decode_key(&row, 0, axis.key_kind).await?;
         let name = decode_key(&row, 1, axis.name_kind).await?;
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         let count: i64 = row.try_get(2).map_err(|_| Denial::ServerError)?;
         let mut item = Map::new();
         item.insert("key".to_owned(), key.simple_json());
@@ -1921,6 +2003,7 @@ async fn grouped_chart_response(
     } else {
         RangeKind::None
     };
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows = bind_range!(sqlx::query(&sql), slug, user_id, ctx, kind)
         .fetch_all(pool)
         .await
@@ -1944,6 +2027,7 @@ async fn grouped_chart_response(
         let group_key = decode_key(&row, 1, group.key_kind).await?;
         let group_name = decode_key(&row, 2, group.name_kind).await?;
         let display = decode_key(&row, 3, axis.name_kind).await?;
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         let count: i64 = row.try_get(4).map_err(|_| Denial::ServerError)?;
 
         let bucket = buckets.entry(key.clone()).or_insert_with(|| {
@@ -2083,7 +2167,7 @@ async fn project_advance_get(
 
     // `initialize_workspace(slug, type="analytics")` (project_analytics.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "analytics", now);
+    let ctx = FilterCtx::parse(&params, "analytics", now, actor.timezone);
     let branch = through_branch(&params)?;
     let body = project_overview_data(pool, &slug, &actor.id, &ctx, &project_id, branch).await?;
     Ok(json_response(StatusCode::OK, body))
@@ -2159,7 +2243,7 @@ async fn project_advance_stats_get(
 
     // `initialize_workspace(slug, type="chart")` (project_analytics.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let stats_type = params
         .get("type")
         .map(String::as_str)
@@ -2203,6 +2287,7 @@ async fn project_assignee_stats(
         i64,
         i64,
     );
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows: Vec<AssigneeStatRow> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(user_id)
@@ -2269,7 +2354,7 @@ async fn project_advance_charts_get(
 
     // `initialize_workspace(slug, type="chart")` (project_analytics.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let chart_type = params.get("type").map(String::as_str).unwrap_or("projects");
 
     if chart_type == "custom-work-items" {
@@ -2314,6 +2399,30 @@ async fn project_advance_charts_get(
 /// (`cycle.end_date.date()` / the `<= None` comparison raising into the
 /// generic branch).
 #[allow(clippy::too_many_arguments)]
+fn cycle_dates_query(id: uuid::Uuid) -> sea_orm::Select<cycles::Entity> {
+    cycles::Entity::find()
+        .select_only()
+        .columns([cycles::Column::StartDate, cycles::Column::EndDate])
+        .filter(cycles::Column::Id.eq(id))
+        .filter(cycles::Column::DeletedAt.is_null())
+}
+
+fn module_dates_query(id: uuid::Uuid) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([modules::Column::StartDate, modules::Column::TargetDate])
+        .filter(modules::Column::Id.eq(id))
+        .filter(modules::Column::DeletedAt.is_null())
+}
+
+fn project_created_query(id: uuid::Uuid) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::CreatedAt)
+        .filter(projects::Column::Id.eq(id))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
 async fn project_completion_chart(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2325,14 +2434,16 @@ async fn project_completion_chart(
 ) -> Result<String, Denial> {
     match branch {
         ThroughBranch::Cycle(id) => {
-            type CycleDatesRow = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
-            let row: Option<CycleDatesRow> = sqlx::query_as(
-                "SELECT \"start_date\", \"end_date\" FROM \"cycles\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            type CycleDatesRow = (
+                Option<chrono::DateTime<chrono::FixedOffset>>,
+                Option<chrono::DateTime<chrono::FixedOffset>>,
+            );
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row: Option<CycleDatesRow> = cycle_dates_query(id)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
             let (start, end) = match row {
                 Some((Some(start), end)) => (start.date_naive(), end),
                 _ => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
@@ -2352,13 +2463,12 @@ async fn project_completion_chart(
             .await
         }
         ThroughBranch::Module(id) => {
-            let row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = sqlx::query_as(
-                "SELECT \"start_date\", \"target_date\" FROM \"modules\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = module_dates_query(id)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
             let (start, end) = match row {
                 Some((Some(start), end)) => (start, end),
                 _ => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
@@ -2382,16 +2492,16 @@ async fn project_completion_chart(
             // unreachable past the gate for live projects, but a soft-deleted
             // project keeps its membership rows, so the MISS branch is live:
             // `project.created_at` on `None` is the generic 500).
-            let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-                "SELECT \"created_at\" FROM \"projects\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row: Option<Option<chrono::DateTime<chrono::FixedOffset>>> =
+                project_created_query(*project_id)
+                    .into_tuple()
+                    .one(&db)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
             let start = match row {
-                Some((Some(created),)) => created.date_naive().with_day(1).expect("month start"),
-                Some((None,)) => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
+                Some(Some(created)) => created.date_naive().with_day(1).expect("month start"),
+                Some(None) => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
                 None => return Err(Denial::ServerError),
             };
             let mut scope = issue_scope(ctx)?;
@@ -2405,10 +2515,12 @@ async fn project_completion_chart(
                     .as_ref()
                     .map(|(gte, lte)| (gte.as_str(), lte.as_str()))
             };
-            let shell = q::advance_completion_monthly_sql(&scope, pph());
+            let shell = q::advance_completion_monthly_sql(&scope, pph(), ctx.timezone.name());
             let sql = with_joins(shell, "issues", ISSUE_JOINS);
-            let rows: Vec<(DateTime<Utc>, i64, i64)> =
-                bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
+            // Naive local month-start (see the workspace chart above).
+            let rows: Vec<(NaiveDateTime, i64, i64)> =
+                // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
+        bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
                     .fetch_all(pool)
                     .await
                     .map_err(|_| Denial::ServerError)?;
@@ -2454,18 +2566,23 @@ async fn project_completion_daily(
         cycle_like_joins(through_table),
         through_table,
     );
+    // `values("created_at__date")` truncates the through rows' own
+    // `created_at` in the actor zone (`project_analytics.py:226`).
+    let zone = ctx.zone_literal();
     let sql = format!(
-        "SELECT \"{t}\".\"created_at\"::date AS \"created_at__date\", \
+        "SELECT (\"{t}\".\"created_at\" AT TIME ZONE {zone})::date AS \"created_at__date\", \
          COUNT(\"{t}\".\"id\") AS \"created_count\", \
          COUNT(\"{t}\".\"id\") FILTER (WHERE \"states\".\"group\" = 'completed') AS \"completed_count\" \
          FROM \"{t}\"{joins} WHERE ({base} AND \"{t}\".\"{fk}\" = {lit}) \
-         GROUP BY \"{t}\".\"created_at\"::date ORDER BY \"{t}\".\"created_at\"::date",
+         GROUP BY (\"{t}\".\"created_at\" AT TIME ZONE {zone})::date \
+         ORDER BY (\"{t}\".\"created_at\" AT TIME ZONE {zone})::date",
         t = through_table,
         joins = joins,
         base = base,
         fk = fk_col,
         lit = uuid_literal(fk_id),
     );
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows: Vec<(NaiveDate, i64, i64)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(user_id)
@@ -2603,10 +2720,12 @@ fn json_value_response(status: StatusCode, value: &Value) -> Response {
 // ---------------------------------------------------------------------------
 
 /// The authenticated caller the handlers need: the email for the
-/// export acknowledgement (`str(request.user.email)`). Membership
+/// export acknowledgement (`str(request.user.email)`) and the actor
+/// zone for date buckets (`TimezoneMixin` activates it). Membership
 /// rows are consumed inside the gate; no handler re-scopes by user.
 struct Authed {
     email: Option<String>,
+    timezone: chrono_tz::Tz,
 }
 
 fn pool_owned(state: &AppState) -> Result<sqlx::PgPool, IssuesDenial> {
@@ -2621,6 +2740,26 @@ fn pool_owned(state: &AppState) -> Result<sqlx::PgPool, IssuesDenial> {
 /// order. Anonymous answers 401 before anything else (the slug-existence
 /// oracle stays closed); a caller with no allowed-role row — including
 /// unknown slugs and cross-tenant slugs — answers the decorator 403.
+/// Membership lookup for [`authed_gate`]: same filters as
+/// [`workspace_role_query`] but WITHOUT the workspace soft-delete guard
+/// (the hand-written JOIN drops it) — kept verbatim.
+fn authed_member_query(
+    slug: &str,
+    actor_id: uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+}
+
 async fn authed_gate(
     state: &AppState,
     slug: &str,
@@ -2637,18 +2776,15 @@ async fn authed_gate(
     let row = gate_for(method, path).ok_or(IssuesDenial::ServerError)?;
     // Same row filters as the decorator (`is_active=True`, soft-delete
     // scope, slug scoping); `role` is non-nullable, the outer Option is
-    // row presence.
-    let member: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| IssuesDenial::ServerError)?;
-    let role = member.and_then(|row| row.0).map(i32::from);
+    // row presence. No workspace soft-delete guard here (the hand-written
+    // JOIN drops it) — kept verbatim.
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let member: Option<Option<i16>> = authed_member_query(slug, actor.id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| IssuesDenial::ServerError)?;
+    let role = member.flatten().map(i32::from);
     let allowed = match row.gate {
         super::gates::Gate::Workspace { roles } | super::gates::Gate::Project { roles } => {
             role.is_some_and(|role| roles.contains(&role))
@@ -2671,7 +2807,10 @@ async fn authed_gate(
         is_workspace_admin: role == Some(ROLE_ADMIN),
     };
     match decide_gate(&row.gate, &tenant_context(slug), &facts) {
-        GateOutcome::Allow => Ok(Authed { email: actor.email }),
+        GateOutcome::Allow => Ok(Authed {
+            email: actor.email,
+            timezone: actor.timezone,
+        }),
         GateOutcome::Deny => Err(IssuesDenial::Forbidden),
         GateOutcome::Unauthenticated => Err(IssuesDenial::Unauthorized),
     }
@@ -2796,6 +2935,7 @@ fn link_joins_for(fragment: &str, existing: &str) -> String {
 fn legacy_filters(
     query: &QueryMap,
     binder: &mut crate::app_issues::Binder,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, IssuesDenial> {
     let flat: HashMap<String, String> = query
         .keys()
@@ -2808,7 +2948,11 @@ fn legacy_filters(
         // Error bodies are already exact (`{"error": "Please provide
         // valid detail"}` for unparseable UUIDs, 500 for unknown
         // lookups — Django's `FieldError` generic 500); propagate.
-        let fragment = crate::app_issues::legacy_sql(binder, name, value)?;
+        // `__date` terms truncate in the actor zone (Django applies
+        // `issue_filters(request.GET)` under the activated user zone,
+        // `base.py:243`); relative dates still resolve against the UTC
+        // `today` above, like `timezone.now().date()`.
+        let fragment = crate::app_issues::legacy_sql(binder, name, value, timezone)?;
         parts.push(remap_legacy(&fragment));
     }
     if parts.is_empty() {
@@ -3075,21 +3219,23 @@ fn regroup_plot(
 /// from [`q::dimension_sql`] (same `F(x_axis)` + join mapping the
 /// services layer pins); the scope (slug + manager + stored filters)
 /// composes here because only the handler owns the `FROM` joins.
+/// `zone` is the actor zone for date axes.
 fn saved_statements(
     x_axis: &str,
     y_axis: &str,
     segment: Option<&str>,
     stored: Option<&str>,
     link_joins: &str,
+    zone: &str,
 ) -> Option<(String, String)> {
-    let (dim_expr, dim_join) = q::dimension_sql(x_axis)?;
+    let (dim_expr, dim_join) = q::dimension_sql(x_axis, zone)?;
     let (seg_select, seg_outer, seg_group, seg_join) = match segment {
         Some(seg) if !seg.is_empty() => {
-            let (expr, join) = q::dimension_sql(seg)?;
+            let (expr, join) = q::dimension_sql(seg, zone)?;
             // Date segments render through the monthly `Concat`
             // (`analytics_plot.py:89-91`).
             let aliased = if q::is_date_axis(seg) {
-                q::month_dimension_expr(seg)
+                q::month_dimension_expr(seg, zone)
             } else {
                 expr
             };
@@ -3122,20 +3268,23 @@ fn saved_statements(
     let plot_sql = if y_axis == "estimate" {
         // `SUM(CAST(estimate_point__value AS float))` grouped by
         // dimension (`analytics_plot.py:110-115`). The estimate table
-        // joins exactly once: through the dimension/segment when one of
-        // them already brings it, otherwise through the base join.
-        let (_, estimate_join) = q::dimension_sql("estimate_point__value")?;
+        // joins exactly once: through the dimension when it already
+        // brings it, otherwise through the base join.
+        let (_, estimate_join) = q::dimension_sql("estimate_point__value", zone)?;
+        // The estimate segment's join is dropped first (the base join
+        // below covers it, like [`q::base_plot_estimate_sql`]), so the
+        // `already` check only sees joins that survive into the FROM.
+        let seg_join = if segment == Some("estimate_point__value") {
+            String::new()
+        } else {
+            seg_join
+        };
         let already = dim_join.contains(q::ESTIMATE_POINT_TABLE)
             || seg_join.contains(q::ESTIMATE_POINT_TABLE);
         let base_join = if already {
             String::new()
         } else {
             estimate_join
-        };
-        let seg_join = if segment == Some("estimate_point__value") {
-            String::new()
-        } else {
-            seg_join
         };
         let from = issue_from_states(
             &format!("{base_join}{dim_join}{seg_join}{link_joins}"),
@@ -3176,6 +3325,26 @@ fn saved_statements(
 /// `AnalyticView.objects.get(pk, workspace__slug)` lookup (miss →
 /// `ObjectDoesNotExist` 404), then axes validation from `query_dict`,
 /// then the stored-scope count + plot.
+fn saved_analytic_query(
+    slug: &str,
+    view_id: uuid::Uuid,
+) -> sea_orm::Select<analytic_views::Entity> {
+    analytic_views::Entity::find()
+        .select_only()
+        .columns([
+            analytic_views::Column::Query,
+            analytic_views::Column::QueryDict,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            analytic_views::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(analytic_views::Column::Id.eq(view_id))
+        .filter(analytic_views::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 async fn get_saved_analytic(
     State(state): State<AppState>,
     Path((slug, analytic_id)): Path<(String, String)>,
@@ -3183,16 +3352,19 @@ async fn get_saved_analytic(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, IssuesDenial> {
-    // Django's `<uuid:analytic_id>` converter rejects non-UUID segments
-    // at routing time (HTML 404, never reaching the view). Axum path
-    // captures match any segment, so non-UUID tails proxy to Django,
-    // reproducing its routing 404 in every `DEBUG` setting.
+    // Django's `<uuid:analytic_id>` converter routes only canonically
+    // spelled segments (lowercase hex, hyphenated) at routing time (HTML
+    // 404, never reaching the view). Axum path captures match any
+    // segment, so every other spelling proxies to Django, reproducing
+    // its routing 404 in every `DEBUG` setting (`Uuid::parse_str`
+    // alone would also accept uppercase, simple, braced and
+    // `urn:uuid:` spellings Django never routes).
     // Routing precedes auth, like the views-search detail routes.
     let view_id: uuid::Uuid = match analytic_id.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if crate::uuid_path::is_canonical_uuid(&analytic_id) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
-    authed_gate(
+    let authed = authed_gate(
         &state,
         &slug,
         "GET",
@@ -3204,19 +3376,20 @@ async fn get_saved_analytic(
     // `AnalyticView.objects.get(pk=analytic_id, workspace__slug=slug)` —
     // the soft-delete-scoped default manager (`AuditModel` carries
     // `SoftDeleteModel`).
-    let found: Option<(Option<Value>, Option<Value>)> = sqlx::query_as(
-        "SELECT \"analytic_views\".\"query\", \"analytic_views\".\"query_dict\" \
-         FROM \"analytic_views\" \
-         INNER JOIN \"workspaces\" ON (\"analytic_views\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"analytic_views\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 \
-         AND \"analytic_views\".\"deleted_at\" IS NULL) LIMIT 1",
-    )
-    .bind(view_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| IssuesDenial::ServerError)?;
-    let (stored_query, query_dict) = found.ok_or(IssuesDenial::NotFound)?;
+    #[derive(FromQueryResult)]
+    struct SavedAnalyticRow {
+        query: Option<Value>,
+        query_dict: Option<Value>,
+    }
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let found: Option<SavedAnalyticRow> = saved_analytic_query(&slug, view_id)
+        .into_model::<SavedAnalyticRow>()
+        .one(&db)
+        .await
+        .map_err(|_| IssuesDenial::ServerError)?;
+    let (stored_query, query_dict) = found
+        .map(|row| (row.query, row.query_dict))
+        .ok_or(IssuesDenial::NotFound)?;
     // `analytic_view.query_dict.get(...)`: a NULL column is
     // `None.get` → `AttributeError` → generic 500.
     let query_dict = query_dict.ok_or(IssuesDenial::ServerError)?;
@@ -3259,9 +3432,15 @@ async fn get_saved_analytic(
     let segmented = segment.as_deref().is_some_and(|seg| !seg.is_empty());
     let mut binder = slugs_first(&slug);
     let stored = stored_filters(&stored_query.ok_or(IssuesDenial::ServerError)?, &mut binder)?;
-    let (count_sql, plot_sql) =
-        saved_statements(x_axis, y_axis, segment.as_deref(), stored.as_deref(), "")
-            .ok_or(IssuesDenial::ServerError)?;
+    let (count_sql, plot_sql) = saved_statements(
+        x_axis,
+        y_axis,
+        segment.as_deref(),
+        stored.as_deref(),
+        "",
+        authed.timezone.name(),
+    )
+    .ok_or(IssuesDenial::ServerError)?;
     let values = binder.values();
     let total = crate::app_issues::fetch_count(&pool, &count_sql, values.clone()).await?;
     let rows = fetch_json_rows(&pool, &plot_sql, values).await?;
@@ -3382,7 +3561,7 @@ async fn get_default_analytics(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<SessionHandle>>,
 ) -> Result<Response, IssuesDenial> {
-    authed_gate(
+    let authed = authed_gate(
         &state,
         &slug,
         "GET",
@@ -3393,7 +3572,7 @@ async fn get_default_analytics(
     let pool = pool_owned(&state)?;
 
     let mut binder = slugs_first(&slug);
-    let legacy = legacy_filters(&query, &mut binder)?;
+    let legacy = legacy_filters(&query, &mut binder, &authed.timezone)?;
     let scope = issue_where("$1", legacy.as_deref());
     // Link joins per statement family: the base family carries the full
     // set, while the assignee family already joins `issue_assignees`
@@ -3418,12 +3597,17 @@ async fn get_default_analytics(
         "SELECT \"states\".\"group\" AS \"state_group\", COUNT(\"states\".\"group\") AS \"state_count\" \
          {from} WHERE ({open_scope}) GROUP BY \"states\".\"group\" ORDER BY \"state_group\" ASC"
     );
-    // Completed month-wise, current UTC year only (base.py:275-282).
+    // Completed month-wise, current UTC year only (`base.py:275-282`):
+    // `completed_at__year` + `ExtractMonth` both evaluate in the actor zone
+    // (the `__year` bounds are the local calendar year), while the year
+    // itself stays `timezone.now().year` (UTC).
     let year = chrono::Utc::now().year();
     let year_holder = binder.bind(sea_query::Value::Int(Some(year)));
+    let zone = q::sql_zone_literal(authed.timezone.name());
     let month_sql = format!(
-        "SELECT EXTRACT(MONTH FROM \"issues\".\"completed_at\")::INTEGER AS \"month\", COUNT(*) AS \"count\" \
-         {from} WHERE ({scope} AND EXTRACT(YEAR FROM \"issues\".\"completed_at\") = {year_holder}) \
+        "SELECT EXTRACT(MONTH FROM (\"issues\".\"completed_at\" AT TIME ZONE {zone}))::INTEGER AS \"month\", \
+         COUNT(*) AS \"count\" \
+         {from} WHERE ({scope} AND EXTRACT(YEAR FROM (\"issues\".\"completed_at\" AT TIME ZONE {zone})) = {year_holder}) \
          GROUP BY \"month\" ORDER BY \"month\" ASC"
     );
     // Top-5 creators (base.py:291-313): NULL creators excluded; avatar
@@ -3634,10 +3818,14 @@ async fn get_project_stats(
     }
     // `Project.objects.filter(workspace__slug)` is soft-delete scoped
     // (`SoftDeletionManager`); the fixture sketch omits the guard.
+    // Nothing clears `Project.Meta.ordering = ("-created_at",)`
+    // (`db/models/project.py:253`), so Django ends the statement in
+    // `ORDER BY "projects"."created_at" DESC` (PIDASHCONV-1454).
     let sql = format!(
         "SELECT {} FROM \"projects\" \
          INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"workspaces\".\"slug\" = $1 AND \"projects\".\"deleted_at\" IS NULL{id_filter})",
+         WHERE (\"workspaces\".\"slug\" = $1 AND \"projects\".\"deleted_at\" IS NULL{id_filter}) \
+         ORDER BY \"projects\".\"created_at\" DESC",
         selects.join(", ")
     );
     let rows = fetch_json_rows(&pool, &sql, binder.values()).await?;
@@ -3662,6 +3850,7 @@ async fn get_project_stats(
 //   `state_details, assignee_details, label_details, cycle_details,
 //   module_details`; buckets carry `dimension, [segment,] count|estimate`.
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_analytics::queries::sort_data_keys;
 
 /// Regrouped buckets: keys in first-seen (row) order plus each key's
@@ -3941,25 +4130,46 @@ mod tests {
             "COMPLETED_AT",
             "CREATED_BY",
         ] {
-            assert!(axis_for(name).is_some(), "{name}");
+            assert!(axis_for(name, "'UTC'").is_some(), "{name}");
         }
-        assert!(axis_for("priority").is_none());
-        assert!(axis_for("").is_none());
+        assert!(axis_for("priority", "'UTC'").is_none());
+        assert!(axis_for("", "'UTC'").is_none());
         // Deleted guards ride the axis scope (build_chart.py additional filters).
-        assert!(axis_for("LABELS").unwrap().filter.contains("issue_labels"));
-        assert!(axis_for("ASSIGNEES")
+        assert!(axis_for("LABELS", "'UTC'")
+            .unwrap()
+            .filter
+            .contains("issue_labels"));
+        assert!(axis_for("ASSIGNEES", "'UTC'")
             .unwrap()
             .filter
             .contains("issue_assignees"));
-        assert!(axis_for("CYCLES").unwrap().filter.contains("cycle_issues"));
-        assert!(axis_for("MODULES")
+        assert!(axis_for("CYCLES", "'UTC'")
+            .unwrap()
+            .filter
+            .contains("cycle_issues"));
+        assert!(axis_for("MODULES", "'UTC'")
             .unwrap()
             .filter
             .contains("module_issues"));
-        assert_eq!(axis_for("PRIORITY").unwrap().filter, "");
-        assert_eq!(axis_for("STATES").unwrap().key_kind, KeyKind::Uuid);
-        assert_eq!(axis_for("ESTIMATE_POINTS").unwrap().key_kind, KeyKind::Int);
-        assert_eq!(axis_for("START_DATE").unwrap().key_kind, KeyKind::Date);
+        assert_eq!(axis_for("PRIORITY", "'UTC'").unwrap().filter, "");
+        assert_eq!(axis_for("STATES", "'UTC'").unwrap().key_kind, KeyKind::Uuid);
+        assert_eq!(
+            axis_for("ESTIMATE_POINTS", "'UTC'").unwrap().key_kind,
+            KeyKind::Int
+        );
+        assert_eq!(
+            axis_for("START_DATE", "'UTC'").unwrap().key_kind,
+            KeyKind::Date
+        );
+        // The `__date` axes truncate in the actor zone; plain-date axes do not.
+        let created = axis_for("CREATED_AT", "'America/New_York'").unwrap();
+        assert!(created
+            .key_expr
+            .contains("(\"issues\".\"created_at\" AT TIME ZONE 'America/New_York')::date"));
+        assert!(!axis_for("START_DATE", "'America/New_York'")
+            .unwrap()
+            .key_expr
+            .contains("AT TIME ZONE"));
     }
 
     #[test]
@@ -4030,9 +4240,9 @@ mod tests {
 
     #[test]
     fn chart_joins_merge_repeated_axis_joins() {
-        let labels = axis_for("LABELS").unwrap();
-        let created_by = axis_for("CREATED_BY").unwrap();
-        let assignees = axis_for("ASSIGNEES").unwrap();
+        let labels = axis_for("LABELS", "'UTC'").unwrap();
+        let created_by = axis_for("CREATED_BY", "'UTC'").unwrap();
+        let assignees = axis_for("ASSIGNEES", "'UTC'").unwrap();
         // Self-grouping reuses the single Django join (a repeated alias is a
         // Postgres error where Django serves 200).
         let self_grouped = chart_joins(&labels, Some(&labels));
@@ -4059,6 +4269,7 @@ mod tests {
             project_ids: vec!["00000000-0000-0000-0000-000000000000".to_owned()],
             window: None,
             period: None,
+            timezone: chrono_tz::UTC,
         };
         assert!(good.checked_id_list().is_ok());
         assert!(good
@@ -4069,6 +4280,7 @@ mod tests {
             project_ids: Vec::new(),
             window: None,
             period: None,
+            timezone: chrono_tz::UTC,
         };
         assert_eq!(
             empty
@@ -4080,6 +4292,7 @@ mod tests {
             project_ids: vec!["nope".to_owned()],
             window: None,
             period: None,
+            timezone: chrono_tz::UTC,
         };
         assert!(matches!(bad.checked_id_list(), Err(Denial::InvalidDetail)));
     }
@@ -4273,6 +4486,7 @@ mod tests {
             Some("state__group"),
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert_eq!(plot.matches("JOIN \"states\"").count(), 1);
@@ -4290,6 +4504,7 @@ mod tests {
             None,
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert!(!count.contains("issue_labels"));
@@ -4337,6 +4552,7 @@ mod tests {
             None,
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert!(count.starts_with("SELECT COUNT(*)"));
@@ -4350,15 +4566,35 @@ mod tests {
     #[test]
     fn saved_estimate_plot_sums_cast_float_once() {
         let (_, plot) =
-            saved_statements("priority", "estimate", None, None, "").expect("known axes");
+            saved_statements("priority", "estimate", None, None, "", "UTC").expect("known axes");
         assert!(plot.contains("SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION))"));
         assert_eq!(plot.matches("estimate_points").count(), 3);
     }
 
     #[test]
+    fn saved_estimate_segment_joins_estimate_table_once() {
+        // `?segment=estimate_point__value` (PIDASHCONV-1501): the
+        // segment join is dropped in favor of the base join, so the
+        // table still joins exactly once — zero joins 500s on the
+        // SELECT/SUM references to `"estimate_points"."value"`.
+        let (_, plot) = saved_statements(
+            "priority",
+            "estimate",
+            Some("estimate_point__value"),
+            Some("\"workspaces\".\"slug\" = $1"),
+            "",
+            "UTC",
+        )
+        .expect("known axes");
+        assert_eq!(plot.matches("JOIN \"estimate_points\"").count(), 1);
+        assert!(plot.contains("AS \"segment\""));
+    }
+
+    #[test]
     fn default_scope_threads_slug_first() {
         let mut binder = slugs_first("an-ws");
-        let legacy = legacy_filters(&QueryMap::new(), &mut binder).expect("empty params compile");
+        let legacy = legacy_filters(&QueryMap::new(), &mut binder, &chrono_tz::UTC)
+            .expect("empty params compile");
         assert!(legacy.is_none());
         let scope = issue_where("$1", legacy.as_deref());
         assert!(scope.contains("\"workspaces\".\"slug\" = $1"));
@@ -4599,7 +4835,12 @@ mod tests {
 
     #[test]
     fn through_ids_subquery_carries_base_scope() {
-        let ctx = FilterCtx::parse(&HashMap::new(), "analytics", utc(2026, 9, 30));
+        let ctx = FilterCtx::parse(
+            &HashMap::new(),
+            "analytics",
+            utc(2026, 9, 30),
+            chrono_tz::UTC,
+        );
         let id = uuid::Uuid::parse_str("12345678-1234-1234-1234-1234567890ab").expect("uuid");
         let sub = through_ids_subquery(ThroughBranch::Cycle(id), &ctx).expect("subquery");
         // The id list selects through issue ids over the spliced joins (the
@@ -4716,5 +4957,244 @@ mod pidashconv_736_tests {
         // TAB and U+0085 padding already matched Django; pin the behavior.
         assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
         assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}
+
+#[cfg(test)]
+mod part3_tests {
+    use super::*;
+
+    #[test]
+    fn converted_lookup_shapes_pin_queries() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let nil = uuid::Uuid::nil();
+        let ws = workspace_role_query("acme", nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            ws.contains("from \"workspace_members\""),
+            "ws role from: {ws}"
+        );
+        assert!(ws.contains("inner join"), "ws role join: {ws}");
+        assert!(
+            ws.contains("\"workspaces\".\"deleted_at\" is null"),
+            "ws role ws guard: {ws}"
+        );
+        assert!(ws.contains("\"is_active\""), "ws role active: {ws}");
+
+        // authed_member_query keeps the handwritten JOIN without the
+        // workspace soft-delete guard (kept verbatim).
+        let authed = authed_member_query("acme", nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            !authed.contains("\"workspaces\".\"deleted_at\" is null"),
+            "authed no ws guard: {authed}"
+        );
+
+        let resolve = resolve_project_query("acme", "ENG")
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            resolve.contains("\"identifier\""),
+            "resolve identifier: {resolve}"
+        );
+        assert!(resolve.contains("inner join"), "resolve join: {resolve}");
+
+        let pm = project_role_query("acme", nil, nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            pm.contains("from \"project_members\""),
+            "pm role from: {pm}"
+        );
+        assert!(pm.contains("inner join"), "pm role join: {pm}");
+
+        let saved = saved_analytic_query("acme", nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            saved.contains("from \"analytic_views\""),
+            "saved from: {saved}"
+        );
+        assert!(saved.contains("inner join"), "saved join: {saved}");
+        assert!(
+            saved.contains("deleted_at\" is null"),
+            "saved soft delete: {saved}"
+        );
+        assert!(saved.contains("limit"), "saved limit: {saved}");
+
+        let created = workspace_created_query("acme")
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            created.contains("\"created_at\""),
+            "ws created col: {created}"
+        );
+
+        let cyc = cycle_dates_query(nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(cyc.contains("\"start_date\""), "cycle start: {cyc}");
+        assert!(cyc.contains("\"end_date\""), "cycle end: {cyc}");
+
+        let modu = module_dates_query(nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(modu.contains("\"target_date\""), "module target: {modu}");
+
+        let proj = project_created_query(nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(proj.contains("from \"projects\""), "proj from: {proj}");
+    }
+
+    /// TEMP tables shadow public (no FKs needed for statement execution).
+    #[tokio::test]
+    async fn live_converted_lookups() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "workspace_members",
+            "projects",
+            "project_members",
+            "analytic_views",
+            "cycles",
+            "modules",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, user, stranger, proj, cycle, module, view, dead) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, created_at, updated_at, slug, deleted_at) VALUES ('{ws}', now() - interval '3 months', now(), 'acme_render', NULL)"),
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO projects (id, created_at, updated_at, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj}', now() - interval '3 months', now(), '{ws}', 'ENG', NULL, NULL)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES ('{view}', now(), now(), '{user}', NULL, NULL, '{ws}', 'V', '', '{{}}', '{{}}')"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES ('{dead}', now(), now(), '{user}', NULL, now(), '{ws}', 'D', '', '{{}}', '{{}}')"),
+            format!("INSERT INTO cycles (id, name, description, start_date, end_date, created_at, updated_at, project_id, owned_by_id, workspace_id, deleted_at) VALUES ('{cycle}', 'C', '', now(), now() + interval '1 month', now(), now(), '{proj}', '{user}', '{ws}', NULL)"),
+            format!("INSERT INTO modules (id, name, description, start_date, target_date, created_at, updated_at, project_id, workspace_id, deleted_at) VALUES ('{module}', 'M', '', current_date, current_date + 7, now(), now(), '{proj}', '{ws}', NULL)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // role lookups: hit + miss.
+        assert_eq!(
+            workspace_role(&pool, "acme_render", &user)
+                .await
+                .expect("role"),
+            Some(20)
+        );
+        assert_eq!(
+            workspace_role(&pool, "acme_render", &stranger)
+                .await
+                .expect("miss"),
+            None
+        );
+        assert_eq!(
+            project_role(&pool, "acme_render", &proj, &user)
+                .await
+                .expect("pm role"),
+            Some(20)
+        );
+        // identifier resolve: hit via directory, hit via raw UUID, miss.
+        assert_eq!(
+            resolve_project_id(&pool, "acme_render", "eng")
+                .await
+                .expect("resolve"),
+            proj
+        );
+        assert_eq!(
+            resolve_project_id(&pool, "acme_render", &proj.to_string())
+                .await
+                .expect("raw uuid"),
+            proj
+        );
+        assert!(matches!(
+            resolve_project_id(&pool, "acme_render", "missing").await,
+            Err(Denial::ProjectNotFound)
+        ));
+        // date lookups decode against TEMP seeds.
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        type CycleDatesRow = (
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+        );
+        let cycle_row: Option<CycleDatesRow> = cycle_dates_query(cycle)
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("cycle dates");
+        assert!(cycle_row.is_some_and(|(s, e)| s.is_some() && e.is_some()));
+        let module_row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = module_dates_query(module)
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("module dates");
+        assert!(module_row.is_some_and(|(s, e)| s.is_some() && e.is_some()));
+        let ws_created: Option<chrono::DateTime<chrono::FixedOffset>> =
+            workspace_created_query("acme_render")
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("ws created");
+        assert!(ws_created.is_some());
+        let proj_created: Option<Option<chrono::DateTime<chrono::FixedOffset>>> =
+            project_created_query(proj)
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("proj created");
+        assert!(proj_created.is_some_and(|c| c.is_some()));
+        // saved-analytic lookup: hit + soft-deleted miss.
+        #[derive(sea_orm::FromQueryResult)]
+        struct SavedRow {
+            query: Option<serde_json::Value>,
+            query_dict: Option<serde_json::Value>,
+        }
+        let saved: Option<SavedRow> = saved_analytic_query("acme_render", view)
+            .into_model::<SavedRow>()
+            .one(&db)
+            .await
+            .expect("saved");
+        let saved = saved.expect("saved row");
+        assert_eq!(saved.query, Some(serde_json::json!({})));
+        assert_eq!(saved.query_dict, Some(serde_json::json!({})));
+        let saved_dead: Option<SavedRow> = saved_analytic_query("acme_render", dead)
+            .into_model::<SavedRow>()
+            .one(&db)
+            .await
+            .expect("saved dead");
+        assert!(saved_dead.is_none());
     }
 }

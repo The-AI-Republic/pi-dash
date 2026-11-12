@@ -58,12 +58,10 @@ pub fn redirect_location(
 /// `DisallowedRedirect` answer: the final `Location` is longer than
 /// `MAX_URL_REDIRECT_LENGTH` characters, so `HttpResponseRedirectBase`
 /// raises (`django/http/response.py:621-625`) and Django serves its
-/// stock 400 page (`django/views/defaults.py`, `ERROR_PAGE_TEMPLATE`;
-/// the project ships no `400.html` and no `handler400` override).
-/// Under `settings.test` (`DEBUG=True`) Django renders the technical
-/// traceback page instead, which no port reproduces: the contract
-/// suite pins the status only.
-pub const DISALLOWED_REDIRECT_400_BODY: &str = "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n";
+/// stock 400 page. Canonical bytes moved to
+/// `pidash_compat::response::DJANGO_BAD_REQUEST_400_BODY`
+/// (PIDASHCONV-1707); this re-export keeps the old path working.
+pub use pidash_compat::response::DJANGO_BAD_REQUEST_400_BODY as DISALLOWED_REDIRECT_400_BODY;
 
 /// 400 for an over-long redirect `Location` (see
 /// [`DISALLOWED_REDIRECT_400_BODY`]).
@@ -76,22 +74,9 @@ pub fn disallowed_redirect() -> Response {
         .into_response()
 }
 
-/// Django autoescape for the single substituted value (`&<>"'`;
-/// Django renders `'` as `&#x27;`).
-pub fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+/// Canonical Django autoescape, moved to `pidash_compat::html`
+/// (PIDASHCONV-1623); this re-export keeps the old path working.
+pub use pidash_compat::html::html_escape;
 
 /// `apps/api/templates/csrf_failure.html`, verbatim except the
 /// `{{ root_url }}` marker (replaced by [`render_csrf_failure`]).

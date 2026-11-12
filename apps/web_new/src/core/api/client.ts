@@ -1,0 +1,92 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// The app HTTP client (Architecture > Import rules). This module is the
+// only place that builds an ApiClient: transport is platform.fetch, 401s
+// expire the session store, and the CSRF token rides the default endpoint.
+// Features and routes use getAppClient(); components use feature hooks.
+
+import { createClient, type ApiClient, type Transport } from "@pidash/api-client";
+
+import { edition } from "../edition/index.js";
+import { platform, toApiTransport } from "../platform/index.js";
+import { createSessionMiddleware } from "../session/middleware.js";
+import { setSessionClient } from "../session/queries.js";
+
+function defaultBaseUrl(): string {
+  // Desktop advertises the API origin: the bundle's own origin is private,
+  // so API calls must be addressed at the shell's allowlisted origin.
+  if (platform.apiOrigin !== undefined) return platform.apiOrigin;
+  if (typeof globalThis.window !== "undefined" && globalThis.window.location?.origin) {
+    return globalThis.window.location.origin;
+  }
+  return "http://localhost:8000";
+}
+
+let appClient: ApiClient | null = null;
+let providerClient: ApiClient | null = null;
+let appTransport: Transport | null = null;
+let appBaseUrl = "";
+
+/**
+ * Build the singleton client. Called once at bootstrap; also points the
+ * session hooks at the same instance so loaders and components share it.
+ * Tests pass a stub transport; the app always uses platform.fetch.
+ */
+export function createAppClient(baseUrl: string = defaultBaseUrl(), transport?: Transport): ApiClient {
+  // Resolve the transport once so the provider sibling always sends through
+  // the same channel as the app client — platform.fetch in both builds,
+  // including the desktop shell's HTTP bridge (DESK-020).
+  const resolvedTransport = transport ?? toApiTransport(platform);
+  const client = createClient({
+    baseUrl,
+    transport: resolvedTransport,
+    // The expiry layer stays outermost so it reads each answer's final
+    // verdict; the edition's interceptors (cloud rotation, paywall) run
+    // inside it, in listed order. The OSS edition lists none.
+    middleware: [createSessionMiddleware(), ...(edition.api ?? [])],
+  });
+  appClient = client;
+  providerClient = null;
+  appTransport = resolvedTransport;
+  appBaseUrl = baseUrl;
+  setSessionClient(client);
+  return client;
+}
+
+/**
+ * Sibling client for provider-credential writes (NEWFRONT-421): a GitHub
+ * or GitLab token rejection answers 401, but that credential is not the
+ * signed-in session. This client shares the app's origin and transport and
+ * skips the session-expiry middleware and any edition interceptors (a bad
+ * provider token must not rotate the session either); every other call
+ * still uses the app client, so a real expired session keeps signing out.
+ */
+export function getProviderWriteClient(): ApiClient {
+  if (!appClient || appTransport === null) {
+    throw new Error("App client is not configured yet. Call createAppClient at bootstrap.");
+  }
+  if (providerClient === null) {
+    providerClient = createClient({
+      baseUrl: appBaseUrl,
+      transport: appTransport,
+    });
+  }
+  return providerClient;
+}
+
+/** The bootstrap client. Throws before createAppClient has run. */
+export function getAppClient(): ApiClient {
+  if (!appClient) {
+    throw new Error("App client is not configured yet. Call createAppClient at bootstrap.");
+  }
+  return appClient;
+}
+
+/** Drop the singleton. Tests only; the app never rebuilds its client. */
+export function resetAppClient(): void {
+  appClient = null;
+  providerClient = null;
+  appTransport = null;
+  appBaseUrl = "";
+}

@@ -34,11 +34,13 @@
 //!
 //! Write semantics (translate, don't redesign):
 //!
-//! - Connect runs under `transaction.atomic()` (`github.py:450`): the
-//!   `Integration(provider="github")` get-or-create, the `APIToken` FK
-//!   shim + `WorkspaceIntegration` create on first connect, the
-//!   `config`-only save, and the PAT `GitProviderAccount` upsert. The
-//!   statements below run sequentially on the pool; each is atomic.
+//! - Connect runs under `transaction.atomic()` (`github.py:451-482`):
+//!   the `APIToken` FK shim + `WorkspaceIntegration` create on first
+//!   connect, the `config`-only save, and the PAT `GitProviderAccount`
+//!   upsert run in one transaction ([`connect_write`]), opened after the
+//!   `Integration(provider="github")` get-or-create (`:449`, outside the
+//!   block). Disconnect likewise runs its four writes in one transaction
+//!   ([`disconnect_write`], `github.py:512-536`).
 //! - `save(update_fields=["config"])` writes `config` only — `updated_at`
 //!   is untouched (Django only writes the listed fields).
 //! - `QuerySet.update()` never touches `auto_now` fields (verified against
@@ -75,6 +77,7 @@ use crate::license::{resolve_actor, Actor};
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::response::json_ok_value as json_response;
 use pidash_types::WorkspaceId;
 
 /// `@allow_permission([ADMIN])` rows (connect, disconnect).
@@ -241,16 +244,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-fn json_response(value: Value) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&value).expect("json response"),
-        ))
-        .expect("json response")
-}
-
 // ---------------------------------------------------------------------------
 // Shared preamble
 // ---------------------------------------------------------------------------
@@ -290,18 +283,11 @@ async fn gate_workspace(
     let Gate::Workspace { roles: allowed } = gate else {
         return Err(Denial::ServerError);
     };
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(actor_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let role = row.map(|row| row.0 as i32);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::workspace_role(&db, slug, *actor_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(i32::from);
     let facts = AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -322,13 +308,11 @@ async fn gate_workspace(
 /// `get_object_or_404(Workspace, slug=slug)`: the live row's id (default
 /// manager, so soft-deleted slugs 404 with the DRF detail body).
 async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::NotFoundDetail)
 }
 
 /// `_feature_enabled()` (`github.py:82-83`): `GITHUB_SYNC_ENABLED`,
@@ -360,17 +344,29 @@ async fn workspace_integration(
     pool: &sqlx::PgPool,
     workspace_id: &uuid::Uuid,
 ) -> Result<Option<WorkspaceIntegrationRow>, Denial> {
-    let row: Option<(uuid::Uuid, Value)> = sqlx::query_as(
-        r#"SELECT wi.id, wi.config FROM workspace_integrations wi
-           JOIN integrations i ON i.id = wi.integration_id
-           WHERE wi.workspace_id = $1 AND i.provider = 'github'
-           AND wi.deleted_at IS NULL AND i.deleted_at IS NULL
-           ORDER BY wi.id ASC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{integrations, workspace_integrations};
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(uuid::Uuid, Value)> = workspace_integrations::Entity::find()
+        .select_only()
+        .column(workspace_integrations::Column::Id)
+        .column(workspace_integrations::Column::Config)
+        .join(
+            JoinType::InnerJoin,
+            workspace_integrations::Relation::Integrations.def(),
+        )
+        .filter(workspace_integrations::Column::WorkspaceId.eq(*workspace_id))
+        .filter(integrations::Column::Provider.eq("github"))
+        .filter(workspace_integrations::Column::DeletedAt.is_null())
+        .filter(integrations::Column::DeletedAt.is_null())
+        .order_by_asc(workspace_integrations::Column::Id)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|row| WorkspaceIntegrationRow {
         id: row.0,
         config: row.1,
@@ -529,10 +525,28 @@ async fn disconnect(
     let Some(wi) = wi else {
         return json_response(serde_json::json!({"connected": false}));
     };
-    if let Err(denial) = apply_disconnect(&pool, &workspace, &wi).await {
+    if let Err(denial) = disconnect_write(&pool, &workspace, &wi).await {
         return denial.into_response();
     }
     json_response(serde_json::json!({"connected": false}))
+}
+
+/// The whole disconnect in one transaction (`github.py:512-536`, under
+/// `transaction.atomic()`): a failure in any write rolls the earlier ones
+/// back, so the integration never reads "disconnected" while its PAT
+/// stays live (PIDASHCONV-1467).
+async fn disconnect_write(
+    pool: &sqlx::PgPool,
+    workspace_id: &uuid::Uuid,
+    wi: &WorkspaceIntegrationRow,
+) -> Result<(), Denial> {
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        apply_disconnect(&conn, workspace_id, wi).await?;
+    }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
+    Ok(())
 }
 
 /// The disconnect writes (`github.py:512-536`, under
@@ -544,10 +558,12 @@ async fn disconnect(
 /// - PAT `GitProviderAccount`s to REVOKED with the stamp and an emptied
 ///   `credential_config`.
 async fn apply_disconnect(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     wi: &WorkspaceIntegrationRow,
 ) -> Result<(), Denial> {
+    use pidash_db::entity::{github_repository_syncs, workspace_integrations};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     // `config = wi.config or {}` (`github.py:513`): a truthy non-object
     // fails the item assignment below (`TypeError` → 500), like Python.
     let mut config = match config_or_empty(&wi.config)? {
@@ -556,78 +572,101 @@ async fn apply_disconnect(
     };
     config["token"] = Value::String(String::new());
     config["disconnected_at"] = Value::String(now_iso());
-    sqlx::query(r#"UPDATE workspace_integrations SET config = $1 WHERE id = $2"#)
-        .bind(&config)
-        .bind(wi.id)
-        .execute(pool)
+    workspace_integrations::Entity::update_many()
+        .col_expr(
+            workspace_integrations::Column::Config,
+            sea_orm::sea_query::Expr::value(config),
+        )
+        .filter(workspace_integrations::Column::Id.eq(wi.id))
+        .exec(db)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `QuerySet.update()` runs through the default manager, so soft-deleted
     // rows are untouched (`deleted_at IS NULL`).
-    sqlx::query(
-        r#"UPDATE github_repository_syncs
-           SET is_sync_enabled = false, last_sync_error = $1
-           WHERE workspace_integration_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(DISCONNECT_ERROR)
-    .bind(wi.id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    github_repository_syncs::Entity::update_many()
+        .col_expr(
+            github_repository_syncs::Column::IsSyncEnabled,
+            sea_orm::sea_query::Expr::value(false),
+        )
+        .col_expr(
+            github_repository_syncs::Column::LastSyncError,
+            sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
+        )
+        .filter(github_repository_syncs::Column::WorkspaceIntegrationId.eq(wi.id))
+        .filter(github_repository_syncs::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // The PAT accounts of this integration (`github.py:522-527`): their
     // bindings go off first, then the accounts are revoked.
-    disconnect_pat_accounts(pool, workspace_id, &wi.id).await
+    disconnect_pat_accounts(db, workspace_id, &wi.id).await
 }
 
 /// Flip the PAT bindings + accounts off. The account ids feed the binding
 /// update (`provider_account__in=pat_accounts`, `github.py:528-531`)
 /// before the accounts themselves are revoked (`:532-536`).
 async fn disconnect_pat_accounts(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     wi_id: &uuid::Uuid,
 ) -> Result<(), Denial> {
-    let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM git_provider_accounts
-           WHERE workspace_id = $1 AND provider = 'github' AND auth_type = 'pat'
-           AND workspace_integration_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(wi_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if !ids.is_empty() {
-        // Default-manager update: soft-deleted bindings stay untouched.
-        sqlx::query(
-            r#"UPDATE git_repository_bindings
-               SET is_sync_enabled = false, last_sync_error = $1
-               WHERE provider_account_id = ANY($2) AND deleted_at IS NULL"#,
-        )
-        .bind(DISCONNECT_ERROR)
-        .bind(&ids)
-        .execute(pool)
+    use pidash_db::entity::{git_provider_accounts, git_repository_bindings};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let ids: Vec<uuid::Uuid> = git_provider_accounts::Entity::find()
+        .select_only()
+        .column(git_provider_accounts::Column::Id)
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::AuthType.eq("pat"))
+        .filter(git_provider_accounts::Column::WorkspaceIntegrationId.eq(*wi_id))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(db)
         .await
         .map_err(|_| Denial::ServerError)?;
+    if !ids.is_empty() {
+        // Default-manager update: soft-deleted bindings stay untouched.
+        git_repository_bindings::Entity::update_many()
+            .col_expr(
+                git_repository_bindings::Column::IsSyncEnabled,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .col_expr(
+                git_repository_bindings::Column::LastSyncError,
+                sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
+            )
+            .filter(git_repository_bindings::Column::ProviderAccountId.is_in(ids.iter().copied()))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .exec(db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     }
     let emptied = serde_json::json!({
         "auth_type": "pat",
         "host_url": "https://github.com",
         "token": "",
     });
-    sqlx::query(
-        r#"UPDATE git_provider_accounts
-           SET status = 'revoked', last_check_error = $1, credential_config = $2
-           WHERE workspace_id = $3 AND provider = 'github' AND auth_type = 'pat'
-           AND workspace_integration_id = $4 AND deleted_at IS NULL"#,
-    )
-    .bind(DISCONNECT_ERROR)
-    .bind(&emptied)
-    .bind(workspace_id)
-    .bind(wi_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    git_provider_accounts::Entity::update_many()
+        .col_expr(
+            git_provider_accounts::Column::Status,
+            sea_orm::sea_query::Expr::value("revoked"),
+        )
+        .col_expr(
+            git_provider_accounts::Column::LastCheckError,
+            sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
+        )
+        .col_expr(
+            git_provider_accounts::Column::CredentialConfig,
+            sea_orm::sea_query::Expr::value(emptied),
+        )
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::AuthType.eq("pat"))
+        .filter(git_provider_accounts::Column::WorkspaceIntegrationId.eq(*wi_id))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -963,9 +1002,21 @@ fn encrypt_token(state: &AppState, token: &str) -> String {
     pidash_services::license::encryption::encrypt_data(&keyring, Some(token))
 }
 
-/// `timezone.now().isoformat()`: UTC with microseconds and `+00:00`.
+/// `timezone.now().isoformat()`: UTC with `+00:00`; microseconds render
+/// as six digits when nonzero and are omitted on whole-second stamps
+/// (Python drops the fraction when `microsecond == 0`). Reuses the
+/// PIDASHCONV-1464 rule ([`crate::assistant::common::py_iso`]), which
+/// reads microsecond precision like Django's clock, so sub-microsecond
+/// nanos never render.
 fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+    now_iso_at(&chrono::Utc::now())
+}
+
+/// Clock-injected core of [`now_iso`] so tests pin the whole-second shape
+/// deterministically (the live clock lands on a second boundary ~1e-6 of
+/// calls).
+fn now_iso_at(now: &chrono::DateTime<chrono::Utc>) -> String {
+    crate::assistant::common::py_iso(now)
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,12 +1098,8 @@ async fn connect(
         Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
-    let wi = match ensure_workspace_integration(&pool, &workspace, &actor.id, &integration).await {
-        Ok(id) => id,
-        Err(denial) => return denial.into_response(),
-    };
-    // `wi.config = {...}; wi.save(update_fields=["config"])` (`:475-481`):
-    // the config column only.
+    // `wi.config = {...}` (`:475-480`): built before the atomic block's
+    // writes, like Python.
     let login = or_empty(user_info.get("login"));
     let config = serde_json::json!({
         "auth_type": "pat",
@@ -1060,11 +1107,15 @@ async fn connect(
         "github_user_login": login,
         "verified_at": now_iso(),
     });
-    if let Err(denial) = save_wi_config(&pool, &wi, &config).await {
-        return denial.into_response();
-    }
-    if let Err(denial) =
-        upsert_pat_account(&pool, &workspace, &wi, &actor.id, &config, &user_info).await
+    if let Err(denial) = connect_write(
+        &pool,
+        &workspace,
+        &actor.id,
+        &integration,
+        &config,
+        &user_info,
+    )
+    .await
     {
         return denial.into_response();
     }
@@ -1115,48 +1166,82 @@ async fn ensure_github_integration(
     pool: &sqlx::PgPool,
     actor_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM integrations
-           WHERE provider = 'github' AND deleted_at IS NULL
-           ORDER BY id ASC LIMIT 1"#,
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let Some((id,)) = existing {
+    use pidash_db::entity::integrations;
+    use sea_orm::{ActiveModelTrait, Set};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let existing =
+        pidash_db::app_integrations::queries_github::fetch_integration_id_by_provider(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if let Some(id) = existing {
         return Ok(id);
     }
     let now = chrono::Utc::now();
     let id = uuid::Uuid::new_v4();
     let description = serde_json::json!({"summary": "Mirror GitHub issues into Pi Dash projects."});
-    let created: Result<_, sqlx::Error> = sqlx::query(
-        r#"INSERT INTO integrations
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            title, provider, network, description, author,
-            webhook_url, webhook_secret, redirect_url, metadata, verified, avatar_url)
-           VALUES ($1,$2,$2,$4,NULL,NULL,'GitHub','github',1,$3,'','','','{}',true,NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(&description)
-    .bind(actor_id)
-    .execute(pool)
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let created = integrations::ActiveModel {
+        id: Set(id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(*actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        title: Set("GitHub".to_owned()),
+        provider: Set("github".to_owned()),
+        network: Set(1_i32),
+        description: Set(description),
+        author: Set(String::new()),
+        webhook_url: Set(String::new()),
+        webhook_secret: Set(String::new()),
+        redirect_url: Set(String::new()),
+        metadata: Set(serde_json::json!({})),
+        verified: Set(true),
+        avatar_url: Set(None),
+    }
+    .insert(&db)
     .await;
     match created {
         Ok(_) => Ok(id),
         Err(_) => {
             // Concurrent first-connect: re-read the winner.
-            let winner: Option<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT id FROM integrations
-                   WHERE provider = 'github' AND deleted_at IS NULL
-                   ORDER BY id ASC LIMIT 1"#,
-            )
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            winner.map(|row| row.0).ok_or(Denial::ServerError)
+            let winner =
+                pidash_db::app_integrations::queries_github::fetch_integration_id_by_provider(&db)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            winner.ok_or(Denial::ServerError)
         }
     }
+}
+
+/// The whole connect write in one transaction (`github.py:451-482`,
+/// under `transaction.atomic()`): the `WorkspaceIntegration` row (minting
+/// the `APIToken` FK shim on first connect), the `config`-only save, and
+/// the PAT `GitProviderAccount` upsert. A failure anywhere — including a
+/// concurrent first-connect loser hitting the unique constraint — rolls
+/// the shim back too, so no orphan `api_tokens` row survives
+/// (PIDASHCONV-1467). Opened after `ensure_github_integration`, matching
+/// Django (`:449` runs before the block).
+async fn connect_write(
+    pool: &sqlx::PgPool,
+    workspace_id: &uuid::Uuid,
+    actor_id: &uuid::Uuid,
+    integration_id: &uuid::Uuid,
+    config: &Value,
+    user_info: &Value,
+) -> Result<uuid::Uuid, Denial> {
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
+    let wi = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        ensure_workspace_integration(&conn, workspace_id, actor_id, integration_id).await?
+    };
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        save_wi_config(&conn, &wi, config).await?;
+        upsert_pat_account(&conn, workspace_id, &wi, actor_id, config, user_info).await?;
+    }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
+    Ok(wi)
 }
 
 /// The connect row (`github.py:451-474`): reuse the existing
@@ -1164,60 +1249,63 @@ async fn ensure_github_integration(
 /// never for auth — see the review of #65 quoted at `:456-460`) and the
 /// row itself with an empty `config`.
 async fn ensure_workspace_integration(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     actor_id: &uuid::Uuid,
     integration_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM workspace_integrations
-           WHERE workspace_id = $1 AND integration_id = $2 AND deleted_at IS NULL
-           ORDER BY id ASC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(integration_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let Some((id,)) = existing {
+    use pidash_db::entity::workspace_integrations;
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    };
+    let existing: Option<uuid::Uuid> = workspace_integrations::Entity::find()
+        .select_only()
+        .column(workspace_integrations::Column::Id)
+        .filter(workspace_integrations::Column::WorkspaceId.eq(*workspace_id))
+        .filter(workspace_integrations::Column::IntegrationId.eq(*integration_id))
+        .filter(workspace_integrations::Column::DeletedAt.is_null())
+        .order_by_asc(workspace_integrations::Column::Id)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if let Some(id) = existing {
         return Ok(id);
     }
     let now = chrono::Utc::now();
     let token_id = uuid::Uuid::new_v4();
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
     let label = format!("github-integration-{workspace_id}");
-    sqlx::query(
-        r#"INSERT INTO api_tokens
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            label, description, is_active, last_used, token,
-            user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit)
-           VALUES ($1,$2,$2,$3,NULL,NULL,
-            $4,'GitHub integration FK shim — not for auth',false,NULL,$5,
-            $3,1,$6,NULL,false,'60/min')"#,
+    pidash_services::domain::tokens::insert_github_shim_token(
+        db,
+        &pidash_services::domain::tokens::NewGithubShimToken {
+            id: token_id,
+            label,
+            token: api_token,
+            actor_id: *actor_id,
+            workspace_id: *workspace_id,
+            now,
+        },
     )
-    .bind(token_id)
-    .bind(now)
-    .bind(actor_id)
-    .bind(&label)
-    .bind(&api_token)
-    .bind(workspace_id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     let wi_id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO workspace_integrations
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, actor_id, integration_id, api_token_id, metadata, config)
-           VALUES ($1,$2,$2,$3,NULL,NULL,$4,$3,$5,$6,'{}','{}')"#,
-    )
-    .bind(wi_id)
-    .bind(now)
-    .bind(actor_id)
-    .bind(workspace_id)
-    .bind(integration_id)
-    .bind(token_id)
-    .execute(pool)
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    workspace_integrations::ActiveModel {
+        id: Set(wi_id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(*actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(*workspace_id),
+        actor_id: Set(*actor_id),
+        integration_id: Set(*integration_id),
+        api_token_id: Set(token_id),
+        metadata: Set(serde_json::json!({})),
+        config: Set(serde_json::json!({})),
+    }
+    .insert(db)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(wi_id)
@@ -1225,14 +1313,19 @@ async fn ensure_workspace_integration(
 
 /// `wi.save(update_fields=["config"])` (`github.py:480-481`).
 async fn save_wi_config(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     wi_id: &uuid::Uuid,
     config: &Value,
 ) -> Result<(), Denial> {
-    sqlx::query(r#"UPDATE workspace_integrations SET config = $1 WHERE id = $2"#)
-        .bind(config)
-        .bind(wi_id)
-        .execute(pool)
+    use pidash_db::entity::workspace_integrations;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    workspace_integrations::Entity::update_many()
+        .col_expr(
+            workspace_integrations::Column::Config,
+            sea_orm::sea_query::Expr::value(config.clone()),
+        )
+        .filter(workspace_integrations::Column::Id.eq(*wi_id))
+        .exec(db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1245,7 +1338,7 @@ async fn save_wi_config(
 /// prefer it over the live `user_info` (`:294-295`); `verified_at` is now
 /// (`:308`).
 async fn upsert_pat_account(
-    pool: &sqlx::PgPool,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     wi_id: &uuid::Uuid,
     actor_id: &uuid::Uuid,
@@ -1283,65 +1376,94 @@ async fn upsert_pat_account(
     });
     let metadata = serde_json::json!({"identity": user_info});
     let now = chrono::Utc::now();
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM git_provider_accounts
-           WHERE workspace_id = $1 AND provider = 'github' AND host_url = 'https://github.com'
-           AND auth_type = 'pat' AND external_account_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(&external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+    let existing: Option<uuid::Uuid> = git_provider_accounts::Entity::find()
+        .select_only()
+        .column(git_provider_accounts::Column::Id)
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::AuthType.eq("pat"))
+        .filter(git_provider_accounts::Column::ExternalAccountId.eq(external_id.clone()))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
     match existing {
-        Some((id,)) => {
-            sqlx::query(
-                r#"UPDATE git_provider_accounts
-                   SET external_account_login = $1, display_name = $2,
-                       capabilities = $3, credential_config = $4,
-                       workspace_integration_id = $5, status = 'connected',
-                       verified_at = $6, metadata = $7,
-                       updated_at = $6, updated_by_id = $8
-                   WHERE id = $9"#,
-            )
-            .bind(login)
-            .bind(&display)
-            .bind(&capabilities)
-            .bind(&credential_config)
-            .bind(wi_id)
-            .bind(now)
-            .bind(&metadata)
-            .bind(actor_id)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        Some(id) => {
+            git_provider_accounts::Entity::update_many()
+                .col_expr(
+                    git_provider_accounts::Column::ExternalAccountLogin,
+                    sea_orm::sea_query::Expr::value(login.to_owned()),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::DisplayName,
+                    sea_orm::sea_query::Expr::value(display),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::Capabilities,
+                    sea_orm::sea_query::Expr::value(capabilities),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::CredentialConfig,
+                    sea_orm::sea_query::Expr::value(credential_config),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::WorkspaceIntegrationId,
+                    sea_orm::sea_query::Expr::value(*wi_id),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::Status,
+                    sea_orm::sea_query::Expr::value("connected"),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::VerifiedAt,
+                    sea_orm::sea_query::Expr::value(stamped),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::Metadata,
+                    sea_orm::sea_query::Expr::value(metadata),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(stamped),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::UpdatedById,
+                    sea_orm::sea_query::Expr::value(*actor_id),
+                )
+                .filter(git_provider_accounts::Column::Id.eq(id))
+                .exec(db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
         None => {
-            sqlx::query(
-                r#"INSERT INTO git_provider_accounts
-                   (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    workspace_id, provider, host_url, auth_type, external_account_id,
-                    external_account_login, display_name, capabilities, credential_config,
-                    workspace_integration_id, status, verified_at, last_check_error, metadata)
-                   VALUES ($1,$2,$2,$3,NULL,NULL,
-                    $4,'github','https://github.com','pat',$5,
-                    $6,$7,$8,$9,
-                    $10,'connected',$11,'',$12)"#,
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(actor_id)
-            .bind(workspace_id)
-            .bind(&external_id)
-            .bind(login)
-            .bind(&display)
-            .bind(&capabilities)
-            .bind(&credential_config)
-            .bind(wi_id)
-            .bind(now)
-            .bind(&metadata)
-            .execute(pool)
+            git_provider_accounts::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(Some(*actor_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                workspace_id: Set(*workspace_id),
+                provider: Set("github".to_owned()),
+                host_url: Set("https://github.com".to_owned()),
+                auth_type: Set("pat".to_owned()),
+                external_account_id: Set(external_id.clone()),
+                external_account_login: Set(login.to_owned()),
+                display_name: Set(display),
+                capabilities: Set(capabilities),
+                credential_config: Set(credential_config),
+                workspace_integration_id: Set(Some(*wi_id)),
+                status: Set("connected".to_owned()),
+                verified_at: Set(Some(stamped)),
+                last_check_error: Set(String::new()),
+                metadata: Set(metadata),
+            }
+            .insert(db)
             .await
             .map_err(|_| Denial::ServerError)?;
         }
@@ -1640,9 +1762,23 @@ mod tests {
         let rendered = now_iso();
         assert!(rendered.contains('T'), "{rendered}");
         assert!(rendered.ends_with("+00:00"), "{rendered}");
-        // Microseconds, always: `...SS.ffffff+00:00`.
-        let frac = rendered.split('.').nth(1).expect("fraction");
-        assert_eq!(frac.len(), 6 + "+00:00".len(), "{rendered}");
+        // The fraction appears only when nonzero: `...SS.ffffff+00:00`,
+        // else the bare whole-second `...SS+00:00` (PIDASHCONV-1511).
+        if let Some((_, frac)) = rendered.split_once('.') {
+            assert_eq!(frac.len(), 6 + "+00:00".len(), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn now_iso_omits_fraction_on_whole_second() {
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(now_iso_at(&whole), "2026-01-01T00:00:00+00:00");
+        let micros = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.120000+00:00")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(now_iso_at(&micros), "2026-01-01T00:00:00.120000+00:00");
     }
 
     #[test]
@@ -1668,5 +1804,187 @@ mod tests {
             classify(GH::INTERNAL_SERVER_ERROR, String::new()),
             GithubFailure::Other(_)
         ));
+    }
+
+    // -- live kernel test (env-gated, PIDASHCONV-1467) ---------------------
+    // Same convention as oauth_github (PIDASHCONV-1083): unset
+    // DATABASE_URL (plain `cargo test`) skips this. The HTTP
+    // connect-success path is sealed in tests (verification posts to
+    // hardcoded https://api.github.com on both backends), so this drives
+    // `connect_write` directly with a fabricated verified config +
+    // user_info — the kernel-level harness.
+
+    async fn kernel_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(20)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-kernel test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed one actor user. Column lists mirror the contract
+    /// `_harness.seed` factories.
+    async fn kernel_seed_user(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let actor_id = uuid::Uuid::new_v4();
+        let uniq = actor_id.simple().to_string();
+        let email = format!("kernel1467-{uniq}@example.com");
+        let username = format!("kernel1467-{}", &uniq[..12]);
+        sqlx::query(
+            r#"INSERT INTO users
+               (id, password, username, first_name, last_name,
+                avatar, date_joined, created_at, updated_at, last_location,
+                created_location, is_superuser, is_managed, is_password_expired,
+                is_active, is_staff, is_email_verified, is_password_autoset, token,
+                user_timezone, last_login_ip, last_logout_ip, last_login_medium,
+                last_login_uagent, is_bot, display_name, is_email_valid,
+                is_password_reset_required, email)
+               VALUES ($1,'kernel!',$2,'First','Last','',now(),now(),now(),'','',
+                false,false,false,true,false,false,false,'tok','UTC','','','','ua',
+                false,'Display','t',false,$3)"#,
+        )
+        .bind(actor_id)
+        .bind(&username)
+        .bind(&email)
+        .execute(pool)
+        .await
+        .expect("seed kernel user");
+        actor_id
+    }
+
+    /// Seed a workspace owned by `actor_id`.
+    async fn kernel_seed_workspace(pool: &sqlx::PgPool, actor_id: &uuid::Uuid) -> uuid::Uuid {
+        let ws_id = uuid::Uuid::new_v4();
+        let slug = format!("kernel1467-{}", ws_id.simple());
+        let name = format!("kernel1467 {slug}");
+        sqlx::query(
+            r#"INSERT INTO workspaces
+               (id, name, slug, owner_id, timezone, background_color, created_at, updated_at)
+               VALUES ($1,$2,$3,$4,'UTC','#ffffff',now(),now())"#,
+        )
+        .bind(ws_id)
+        .bind(&name)
+        .bind(&slug)
+        .bind(actor_id)
+        .execute(pool)
+        .await
+        .expect("seed kernel workspace");
+        ws_id
+    }
+
+    /// Delete a seeded workspace in FK order (accounts, rows, shims, then
+    /// the workspace). The actor and the shared `github` integration row
+    /// stay for the next round.
+    async fn kernel_cleanup_workspace(pool: &sqlx::PgPool, ws_id: &uuid::Uuid) {
+        sqlx::query(r#"DELETE FROM git_provider_accounts WHERE workspace_id = $1"#)
+            .bind(ws_id)
+            .execute(pool)
+            .await
+            .expect("cleanup accounts");
+        sqlx::query(r#"DELETE FROM workspace_integrations WHERE workspace_id = $1"#)
+            .bind(ws_id)
+            .execute(pool)
+            .await
+            .expect("cleanup wi");
+        sqlx::query(r#"DELETE FROM api_tokens WHERE workspace_id = $1"#)
+            .bind(ws_id)
+            .execute(pool)
+            .await
+            .expect("cleanup tokens");
+        sqlx::query(r#"DELETE FROM workspaces WHERE id = $1"#)
+            .bind(ws_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workspace");
+    }
+
+    /// Concurrent first connects leave no orphan `api_tokens` rows: every
+    /// loser rolls its shim back with its failed `workspace_integrations`
+    /// insert (`github.py:451-482`), so the shim count equals the row
+    /// count. Fails on the pre-fix autocommit writes (losers commit
+    /// orphans); passes with the transaction.
+    #[tokio::test]
+    async fn connect_kernel_concurrent_first_connect_leaves_no_orphans() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        // One actor for the suite of rounds; `ensure_github_integration`
+        // runs before the raced kernel, like the handler.
+        let actor_id = kernel_seed_user(&pool).await;
+        let integration = ensure_github_integration(&pool, &actor_id)
+            .await
+            .expect("github integration");
+        for _ in 0..3 {
+            let ws_id = kernel_seed_workspace(&pool, &actor_id).await;
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(10));
+            let mut handles = Vec::new();
+            for _ in 0..10 {
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+                handles.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    let config = serde_json::json!({
+                        "auth_type": "pat",
+                        "token": "kernel1467-sealed-token",
+                        "github_user_login": "kernel-octocat",
+                        "verified_at": now_iso(),
+                    });
+                    let user_info = serde_json::json!({"login": "kernel-octocat"});
+                    let _ =
+                        connect_write(&pool, &ws_id, &actor_id, &integration, &config, &user_info)
+                            .await;
+                }));
+            }
+            for handle in handles {
+                handle.await.expect("kernel task joins");
+            }
+            let label = format!("github-integration-{ws_id}");
+            let n_tokens: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM api_tokens
+                   WHERE workspace_id = $1 AND label = $2 AND deleted_at IS NULL"#,
+            )
+            .bind(ws_id)
+            .bind(&label)
+            .fetch_one(&pool)
+            .await
+            .expect("count shims");
+            let n_wi: i64 = sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM workspace_integrations
+                   WHERE workspace_id = $1 AND integration_id = $2 AND deleted_at IS NULL"#,
+            )
+            .bind(ws_id)
+            .bind(integration)
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+            assert_eq!(n_wi, 1, "one winner commits the row");
+            assert_eq!(
+                n_tokens, n_wi,
+                "losers roll their api_tokens shims back (workspace {ws_id})"
+            );
+            kernel_cleanup_workspace(&pool, &ws_id).await;
+        }
+        // The shared `github` row keeps its `created_by`; point it away
+        // from the seeded actor first (a fresh DB mints it under him).
+        sqlx::query(
+            r#"UPDATE integrations SET created_by_id = NULL, updated_by_id = NULL
+               WHERE created_by_id = $1 OR updated_by_id = $1"#,
+        )
+        .bind(actor_id)
+        .execute(&pool)
+        .await
+        .expect("unpin actor");
+        sqlx::query(r#"DELETE FROM users WHERE id = $1"#)
+            .bind(actor_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup actor");
     }
 }

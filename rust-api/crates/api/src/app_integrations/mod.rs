@@ -54,6 +54,8 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_types::WorkspaceId;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 /// Owned D-33 app-integration routes (cutover granularity: registered
 /// paths serve from Rust, everything else keeps proxying). Sibling
@@ -75,8 +77,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// POST duplicate URL (`app/views/webhook/base.py:31-35`).
@@ -137,17 +137,6 @@ pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render a `serde_json::Map` built in serializer field order as compact
-/// JSON (`JSONRenderer` default: no spaces; `preserve_order` keeps the
-/// insertion order DRF emits).
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// Authenticated actor plus time zone (`TimezoneMixin.initial` activates
 /// the user's zone; datetimes render in it).
 pub struct Actor {
@@ -183,37 +172,17 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Parse a UUID path segment: Django's `<uuid:>` converter 404s on
-/// garbage, so unparseable ids behave as missing rows (the D-02 `space`
-/// `parse_id` precedent).
+/// Parse a UUID path segment: Django's `<uuid:>` converter routes only
+/// the canonical lowercase hyphenated spelling, so anything else takes
+/// the route's existing unmatched path (the D-02 `space` `parse_id`
+/// precedent). `Uuid::parse` also accepts uppercase, simple, braced and
+/// `urn:uuid:` spellings that Django resolver-404s (PIDASHCONV-1463).
 #[allow(clippy::result_large_err)]
 pub fn parse_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::NotFound.into_response())
-}
-
-/// An app path: the owned methods serve from Rust, everything else falls
-/// through to Django (its 405-after-auth and metadata responses live
-/// there). List `"HEAD"` alongside the other unowned methods: axum would
-/// auto-serve it from `get`, but Django defines no `head` and 405s after
-/// auth.
-pub fn owned(
-    handler: axum::routing::MethodRouter<AppState>,
-    unowned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = handler;
-    for method in unowned {
-        router = match *method {
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "OPTIONS" => router.options(crate::edge::proxy),
-            _ => router.get(crate::edge::proxy),
-        };
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Ok(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => Err(Denial::NotFound.into_response()),
     }
-    router
 }
 
 /// The `@allow_permission(allowed_roles=[ADMIN], level="WORKSPACE")`
@@ -230,28 +199,37 @@ pub async fn require_workspace_admin(
     method: &str,
     path: &str,
 ) -> Result<(), Denial> {
-    let membership: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL
-           AND w.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{workspace_members, workspaces};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // The gate read needs the role row inside a live workspace (the
+    // decorator's `workspace__slug` traversal): both tables live.
+    let membership: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let gate = gates::gate_for(method, path).ok_or(Denial::ServerError)?;
     let facts = AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
         is_workspace_member: membership.is_some(),
-        has_allowed_workspace_role: matches!(membership, Some((20,))),
+        has_allowed_workspace_role: matches!(membership, Some(20)),
         is_creator: false,
         has_allowed_project_role: false,
         is_project_member: false,
-        is_workspace_admin: matches!(membership, Some((20,))),
+        is_workspace_admin: matches!(membership, Some(20)),
     };
     match gates::decide_gate(&gate.gate, &gates::tenant_context(slug), &facts) {
         gates::GateOutcome::Allow => Ok(()),
@@ -262,8 +240,32 @@ pub async fn require_workspace_admin(
 /// `Workspace.objects.get(slug=slug)` (`webhook/base.py:23`): the live
 /// row's id, or the 404 branch when the slug names nothing.
 pub async fn workspace_id_or_404(pool: &PgPool, slug: &str) -> Result<Uuid, Denial> {
-    pidash_db::app_integrations::fetch_workspace_id_by_slug(pool, slug)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_id;
+
+    #[test]
+    fn parse_id_serves_canonical_spelling_only() {
+        // Django's `<uuid:>` converter routes only the canonical
+        // lowercase hyphenated spelling; `Uuid::parse` also accepts the
+        // rest, which take the unmatched path like garbage
+        // (PIDASHCONV-1463).
+        assert!(parse_id("3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f").is_ok());
+        for raw in [
+            "3F9A2C1E-9B1A-4D2E-8F3A-1A2B3C4D5E6F",
+            "3f9a2c1e9b1a4d2e8f3a1a2b3c4d5e6f",
+            "{3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f}",
+            "urn:uuid:3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f",
+            "not-a-uuid",
+        ] {
+            assert!(parse_id(raw).is_err(), "{raw}");
+        }
+    }
 }

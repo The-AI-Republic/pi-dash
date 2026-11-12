@@ -10,6 +10,9 @@
 //!   adapter, model routing, CE seams (`cloud_agent/tools.py`,
 //!   `cloud_agent/github_mcp.py`, `cloud_agent/model.py`,
 //!   `ee/cloud_agent/toolsets.py`, `ee/cloud_agent/model_provider.py`).
+//! * [`execution`] — executor resolve + creation capacity
+//!   (`creation.py`, `policy.py`); relocated from `pidash_jobs::dispatch`
+//!   so the SeaORM-backed creation seam can call it (PIDASHCONV-1521).
 //!
 //! Sibling L6+ issues add their own files under this module; L1 types live in
 //! `pidash_types::dispatch` and L2 read shapes in `pidash_db::dispatch`.
@@ -23,7 +26,9 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod admission;
+pub mod execution;
 pub mod policy;
+pub mod tool_issues;
 pub mod tools;
 
 pub use admission::admission_bucket;
@@ -44,17 +49,34 @@ pub use admission::DeferredConsume;
 pub use admission::DesktopSessionRequiredBody;
 pub use admission::LlmProfile;
 pub use admission::PhaseTemplate;
+pub use admission::RedisAdmissionCache;
 pub use admission::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS;
 pub use admission::CONSUME_TIMEOUT_OVERHANG_SECS;
 pub use admission::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL;
 pub use admission::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL;
 pub use admission::HEARTBEAT_GRACE_SECS;
 pub use admission::ONLINE_MANAGED_RUNNER_SQL;
+pub use execution::defer_admission_error;
+pub use execution::execution_fields;
+pub use execution::lock_cloud_creation_capacity;
+pub use execution::lock_workspace;
+pub use execution::quota_verdict;
+pub use execution::ActorScope;
+pub use execution::DeferredAdmissionError;
+pub use execution::ExecutionFields;
+pub use execution::ExecutionFieldsError;
+pub use execution::ExecutionInputs;
+pub use execution::ExecutionSeams;
+pub use execution::ProjectScope;
+pub use execution::QUEUED_CLOUD_COUNT_SQL;
+pub use execution::WORKSPACE_LOCK_SQL;
 pub use policy::agent_executor_options;
 pub use policy::build_tool_plan;
 pub use policy::cloud_agent_is_configured;
 pub use policy::effective_executor_for_issue;
 pub use policy::github_available_for_project;
+pub use policy::local_runner_available_exists;
+pub use policy::local_runner_exists;
 pub use policy::managed_runner_is_enabled;
 pub use policy::resolve_current_tool_names;
 pub use policy::resolve_executor_kind;
@@ -77,8 +99,6 @@ pub use policy::CURRENT_ISSUE_WRITE_TOOLS;
 pub use policy::GITHUB_BINDING_EXISTS_SQL;
 pub use policy::GITHUB_TOOLS;
 pub use policy::LLM_CONFIG_MISSING_REASON;
-pub use policy::LOCAL_RUNNER_AVAILABLE_EXISTS_SQL;
-pub use policy::LOCAL_RUNNER_EXISTS_SQL;
 pub use policy::LOCAL_RUNNER_PAUSED_REASON;
 pub use policy::NO_LOCAL_RUNNER_REASON;
 pub use policy::READ_TOOLS;
@@ -168,9 +188,6 @@ pub use tools::ToolRisk;
 pub use tools::TransitionResult;
 pub use tools::WorkpadUpdated;
 pub use tools::COMMENT_BODY_MAX_CHARS;
-pub use tools::COMMENT_DESCRIPTION_INSERT_SQL;
-pub use tools::COMMENT_DESCRIPTION_LINK_SQL;
-pub use tools::COMMENT_INSERT_SQL;
 pub use tools::COMMENT_LIST_LIMIT;
 pub use tools::COMMENT_MAX_CHARS;
 pub use tools::COUNT_SUCCEEDED_WRITES_SQL;
@@ -179,8 +196,6 @@ pub use tools::CREATE_BACKLOG_STATE_SQL;
 pub use tools::CREATE_DEFAULT_POD_SQL;
 pub use tools::CREATE_DEFAULT_STATE_SQL;
 pub use tools::CREATE_DESCRIPTION_MAX_CHARS;
-pub use tools::CREATE_ISSUE_INSERT_SQL;
-pub use tools::CREATE_ISSUE_SEQUENCE_INSERT_SQL;
 pub use tools::CREATE_PROJECT_LOCK_SQL;
 pub use tools::CREATE_SAVE_DEFAULT_STATE_SQL;
 pub use tools::CREATE_SAVE_FALLBACK_STATE_SQL;
@@ -191,7 +206,6 @@ pub use tools::CREATE_TITLE_MAX_CHARS;
 pub use tools::CURRENT_ISSUE_COMMENTS_SQL;
 pub use tools::ERROR_CODE_MAX_CHARS;
 pub use tools::FIND_EXISTING_CALL_SQL;
-pub use tools::GET_PROJECT_ISSUE_SQL;
 pub use tools::GITHUB_BINDING_SQL;
 pub use tools::GITHUB_INSTALLATION_SQL;
 pub use tools::GITHUB_PATH_MAX_CHARS;
@@ -227,15 +241,12 @@ pub use tools::SCOPE_ROLES_WRITE;
 pub use tools::SCOPE_RUN_SQL;
 pub use tools::SCOPE_WORKSPACE_MEMBER_SQL;
 pub use tools::SEARCH_DEFAULT_LIMIT;
-pub use tools::SEARCH_ISSUES_SQL;
 pub use tools::SEARCH_MAX_LIMIT;
 pub use tools::SERVER_KEY_GITHUB;
 pub use tools::SOURCE_INTERNAL;
 pub use tools::SOURCE_MCP;
 pub use tools::TOOL_CATALOG;
 pub use tools::TRANSITION_ISSUE_LOCK_SQL;
-pub use tools::TRANSITION_ISSUE_SAVE_SQL;
 pub use tools::TRANSITION_STATE_GET_SQL;
 pub use tools::WORKPAD_MAX_CHARS;
-pub use tools::WORKPAD_UPDATE_SQL;
 pub use tools::WRITE_TOOL_USED_SQL;

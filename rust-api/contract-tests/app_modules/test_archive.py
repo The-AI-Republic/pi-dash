@@ -11,6 +11,8 @@ Django raises TypeError into the generic 500 handler. Archived modules
 vanish from the main list/retrieve and appear under archived-modules.
 """
 
+from datetime import datetime, timedelta, timezone
+
 from .conftest import module_url, modules_url
 
 from _harness.seed import estimate, estimate_point
@@ -181,23 +183,91 @@ def test_archived_detail_points_estimate_labels(api, seed, db, tenant_a,
             "pending_estimates": 5.0,
         }], labels
     finally:
-        # estimates/estimate_points are untracked by Seed.cleanup, and both
-        # projects.estimate_id and issues.estimate_point_id pin them: clear
-        # the references first. Project-scoped so partial seeds still clean.
+        _drop_estimates(db, project_a)
+
+
+def _drop_estimates(db, project_id):
+    # estimates/estimate_points are untracked by Seed.cleanup, and both
+    # projects.estimate_id and issues.estimate_point_id pin them: clear
+    # the references first. Project-scoped so partial seeds still clean.
+    with db.cursor() as cur:
+        cur.execute(
+            "update issues set estimate_point_id=null"
+            " where project_id=%s",
+            (project_id,),
+        )
+        cur.execute(
+            "update projects set estimate_id=null where id=%s",
+            (project_id,),
+        )
+        cur.execute(
+            "delete from estimate_points where project_id=%s",
+            (project_id,),
+        )
+        cur.execute(
+            "delete from estimates where project_id=%s", (project_id,),
+        )
+
+
+def test_archived_detail_completion_chart_uses_actor_timezone(
+    api, seed, db, tenant_a, project_a, auth_a,
+):
+    """Archived burndown charts bucket completions in the actor zone too.
+
+    Same Tokyo seed as the live retrieve test (PIDASHCONV-1423): the
+    completion lands at 20:00 UTC two days ago, the next calendar day in
+    Asia/Tokyo, so the UTC day still shows it pending.
+    """
+    today = datetime.now(timezone.utc).date()
+    utc_day = str(today - timedelta(days=2))
+    tokyo_day = str(today - timedelta(days=1))
+    completed_at = datetime.combine(
+        today - timedelta(days=2), datetime.min.time()
+    ).replace(tzinfo=timezone.utc) + timedelta(hours=20)
+    ws = tenant_a["workspace"]["id"]
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE users SET user_timezone = %s WHERE id = %s",
+            ("Asia/Tokyo", tenant_a["user"]["id"]),
+        )
+    mid = seed.module(ws, project_a, name="CT1423 archived", status="completed")
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE modules SET start_date = %s, target_date = %s WHERE id = %s",
+            (
+                (today - timedelta(days=3)).isoformat(),
+                (today + timedelta(days=3)).isoformat(),
+                mid,
+            ),
+        )
+    est = estimate(db, project_a, ws)
+    ep = estimate_point(db, est["id"], project_a, ws, value="5")
+    try:
+        issue_id = seed.issue(
+            ws, project_a, name="ct1423 issue", completed_at=completed_at,
+        )
         with db.cursor() as cur:
             cur.execute(
-                "update issues set estimate_point_id=null"
-                " where project_id=%s",
-                (project_a,),
+                "UPDATE projects SET estimate_id = %s WHERE id = %s",
+                (est["id"], project_a),
             )
             cur.execute(
-                "update projects set estimate_id=null where id=%s",
-                (project_a,),
+                "UPDATE issues SET estimate_point_id = %s WHERE id = %s",
+                (ep["id"], issue_id),
             )
-            cur.execute(
-                "delete from estimate_points where project_id=%s",
-                (project_a,),
-            )
-            cur.execute(
-                "delete from estimates where project_id=%s", (project_a,),
-            )
+        seed.module_issue(ws, project_a, mid, issue_id)
+        r = api.post(_archive_url(tenant_a, project_a, mid), headers=auth_a)
+        assert r.status_code == 200, r.text
+        r = api.get(
+            f"{_archived_url(tenant_a, project_a)}{mid}/", headers=auth_a,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        issues_chart = body["distribution"]["completion_chart"]
+        assert issues_chart[utc_day] == 1, issues_chart
+        assert issues_chart[tokyo_day] == 0, issues_chart
+        points_chart = body["estimate_distribution"]["completion_chart"]
+        assert points_chart[utc_day] == 5.0, points_chart
+        assert points_chart[tokyo_day] == 0.0, points_chart
+    finally:
+        _drop_estimates(db, project_a)

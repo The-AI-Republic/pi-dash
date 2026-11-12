@@ -31,6 +31,7 @@
 //!
 //! Ported bugs: none found in this unit on read-through.
 
+use pidash_compat::py::py_strip;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -76,12 +77,6 @@ const REASONING_NESTED: [(&str, &str); 3] = [
 /// Anthropic reports cache reads/writes *beside* `input_tokens`; their
 /// presence marks an Anthropic usage block (`usage.py:66`).
 const ANTHROPIC_CACHE_KEYS: [&str; 2] = ["cache_read_input_tokens", "cache_creation_input_tokens"];
-
-/// Python `str.strip()` for `int()`/counter parsing: Rust's `is_whitespace`
-/// set plus U+001C..=U+001F (verified over the BMP: the only delta).
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
 
 /// `int(text)` for counter strings: optional ASCII whitespace (already
 /// stripped), one optional sign, then digits with single underscores only

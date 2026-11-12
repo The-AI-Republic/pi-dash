@@ -470,3 +470,75 @@ def test_review_link_create_list_delete(api, world):
     assert set(listed) == ENVELOPE_KEYS
     assert listed["total_results"] == 1
     assert api.delete(sub_url(world, issue_id, "code-reviews", link_id)).status_code == 204
+
+
+def test_comment_patch_mints_description_when_null(api, world, db):
+    """PATCH on a legacy comment (`description_id` NULL) mints a Description.
+
+    Django's ``IssueComment.save()`` creates the linked ``Description`` row
+    whenever ``description_id`` is unset (PIDASHCONV-1384); rows written
+    before migration ``0109_issuecomment_description_and_parent_id`` have
+    NULL there, so the same edit must mint on both backends.
+    """
+    issue_id = world["issue"]["id"]
+    comment_id = api.post(
+        sub_url(world, issue_id, "comments"),
+        json={"comment_html": "<p>v1</p>", "access": "EXTERNAL"},
+    ).json()["id"]
+    db.execute(
+        "UPDATE issue_comments SET description_id = NULL WHERE id = %s",
+        (comment_id,),
+    )
+    patched = api.patch(
+        sub_url(world, issue_id, "comments", comment_id),
+        json={"comment_html": "<p>new</p>"},
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["description"] is not None
+    row = db.fetchone(
+        "SELECT description_id FROM issue_comments WHERE id = %s",
+        (comment_id,),
+    )
+    assert row["description_id"] is not None
+    assert str(row["description_id"]) == body["description"]
+    desc = db.fetchone(
+        "SELECT description_html, description_stripped FROM descriptions WHERE id = %s",
+        (row["description_id"],),
+    )
+    assert desc is not None
+    assert desc["description_html"] == "<p>new</p>"
+    assert desc["description_stripped"] == "new"
+
+
+def test_comment_patch_recomputes_stripped_without_html(api, world, db):
+    """PATCH without ``comment_html`` still recomputes ``comment_stripped``.
+
+    Django's ``IssueComment.save()`` re-strips on every save and syncs
+    ``description_stripped`` when it changed (PIDASHCONV-1384); a stale
+    stored value is repaired even when the body carries no html.
+    """
+    issue_id = world["issue"]["id"]
+    comment_id = api.post(
+        sub_url(world, issue_id, "comments"),
+        json={"comment_html": "<p>hello</p>", "access": "EXTERNAL"},
+    ).json()["id"]
+    db.execute(
+        "UPDATE issue_comments SET comment_stripped = 'stale' WHERE id = %s",
+        (comment_id,),
+    )
+    patched = api.patch(
+        sub_url(world, issue_id, "comments", comment_id),
+        json={"access": "INTERNAL"},
+    )
+    assert patched.status_code == 200, patched.text
+    row = db.fetchone(
+        "SELECT comment_stripped, description_id FROM issue_comments WHERE id = %s",
+        (comment_id,),
+    )
+    assert row["comment_stripped"] == "hello"
+    desc = db.fetchone(
+        "SELECT description_stripped FROM descriptions WHERE id = %s",
+        (row["description_id"],),
+    )
+    assert desc["description_stripped"] == "hello"

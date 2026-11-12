@@ -922,6 +922,68 @@ def test_accept_invitation_via_me(other_api, world, space):
     assert deleted_at is not None
 
 
+def test_invite_and_join_request_lists_render_soft_deleted_assets(user_api, other_api, world, space):
+    # Forward FKs resolve through the unscoped _base_manager (no
+    # base_manager_name), so a soft-deleted logo/avatar asset still
+    # renders its static URL (PIDASHCONV-1374). Both flags mirror the
+    # asset re-PATCH path (asset_delete sets is_deleted + deleted_at).
+    db = world["db"]
+    with db.connect() as conn:
+        logo_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO file_assets (id, attributes, asset, created_by_id, workspace_id,
+                user_id, entity_type, is_deleted, deleted_at, is_archived, is_uploaded,
+                size, storage_metadata, created_at, updated_at)
+               VALUES (%s, '{}', %s, %s, %s, %s, 'WORKSPACE_LOGO', true, now(), false,
+                true, 100, '{}', now(), now())""",
+            (logo_id, f"{space['id']}/logo.png", world["user"]["id"], space["id"], world["user"]["id"]),
+        )
+        conn.execute(
+            "UPDATE workspaces SET logo_asset_id = %s WHERE id = %s",
+            (logo_id, space["id"]),
+        )
+        avatar_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO file_assets (id, attributes, asset, created_by_id, workspace_id,
+                user_id, entity_type, is_deleted, deleted_at, is_archived, is_uploaded,
+                size, storage_metadata, created_at, updated_at)
+               VALUES (%s, '{}', %s, %s, %s, %s, 'USER_AVATAR', true, now(), false,
+                true, 100, '{}', now(), now())""",
+            (
+                avatar_id,
+                f"user-{avatar_id}-avatar.png",
+                world["other"]["id"],
+                space["id"],
+                world["other"]["id"],
+            ),
+        )
+        conn.execute(
+            "UPDATE users SET avatar_asset_id = %s WHERE id = %s",
+            (avatar_id, world["other"]["id"]),
+        )
+        conn.commit()
+    db.make_invite(
+        space["id"], "other@example.com", token="tok-1374", created_by_id=world["user"]["id"]
+    )
+    db.make_join_request(
+        world["other"]["id"], "user@example.com", workspace_id=space["id"], message="hi"
+    )
+
+    want_logo = f"/api/assets/v2/static/{logo_id}/"
+    res = user_api.get(f"/api/workspaces/{space['slug']}/invitations/")
+    assert res.status_code == 200
+    assert res.json()[0]["workspace"]["logo_url"] == want_logo
+
+    res = other_api.get("/api/users/me/workspaces/invitations/")
+    assert res.status_code == 200
+    assert res.json()[0]["workspace"]["logo_url"] == want_logo
+
+    want_avatar = f"/api/assets/v2/static/{avatar_id}/"
+    res = other_api.get("/api/users/me/workspaces/join-requests/")
+    assert res.status_code == 200
+    assert res.json()[0]["requester"]["avatar_url"] == want_avatar
+
+
 # --- join requests ---
 
 
