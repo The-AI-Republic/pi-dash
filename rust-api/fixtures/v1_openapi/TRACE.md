@@ -85,10 +85,11 @@ djangorestframework 3.15.2, Django 4.2.30.
   `?format=json`) against Django with `ENABLE_DRF_SPECTACULAR=1` (routes
   `pi_dash/urls.py:31-44`); per-operation essentials (operationId, tags,
   summary, parameters, responses — verbatim) for every path × method in
-  the golden route map (126 paths, 194 operations; re-recorded PDASHOSS01-272 for `release-pin`); default content-type
+  the golden route map (135 paths, 209 operations; re-recorded by
+  NEWPIDASH-60); default content-type
   `application/vnd.oai.openapi; charset=utf-8` (YAML, no `+json`),
   `?format=json` content-type `application/vnd.oai.openapi+json`, parsed
-  doc-equality proof (`parsed_equal: true`, 126 paths each), route-map ==
+  doc-equality proof (`parsed_equal: true`, 135 paths each), route-map ==
   golden assertion, `ApiKeyAuthentication` securityScheme block verbatim
   (rendered from `utils/openapi/auth.py:15-34`
   `APIKeyAuthenticationExtension.get_security_definition`).
@@ -130,8 +131,9 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 - `FX-OPENAPI-06.routes_golden.json` — byte copy of
   `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81
-  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090, PDASHOSS01-272): 126 paths, sha256
-  `9d0f3fc01467760c98cb9c217d724b8be687b67881a9770371e6d6b5f231828f`.
+  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090, NEWPIDASH-34 and
+  NEWPIDASH-60): 135 paths, sha256
+  `6de0073de566bf28e6c97805a2786cb7380a0481e67d47025b29acdfa6990dde`.
   Regen rule (from `test_routes_golden.py`, never blanket-update):
   `REGEN_GOLDEN=1 pytest v1_openapi/test_routes_golden.py` + reviewed
   diff. The live capture in FX-OPENAPI-04 asserted route-map equality
@@ -141,17 +143,17 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 - `FX-OPENAPI-07.components_schemas.json` — `components.schemas` of the
   live Django document (`GET /api/schema/?format=json` with
-  `ENABLE_DRF_SPECTACULAR=1`) at `apps/api == origin/main d656243d3`;
-  89 schemas, copied verbatim (key order preserved). Provenance: the
-  served JSON body is 1,397,521 bytes, sha256
-  `9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7` —
+  `ENABLE_DRF_SPECTACULAR=1`) at `apps/api == origin/main d656243d3`
+  (re-recorded by NEWPIDASH-34 at `origin/main 08be546d6`: +SchedulerBindingAPI,
+  +SchedulerAPI.is_builtin, SchedulerRunAPI.error_code description);
+  90 schemas, copied verbatim (key order preserved). Provenance: the
+  served JSON body is 1,417,414 bytes, sha256
+  `5c35ac9acb8964c678678d851be8b23f912ea6a5c9f853d8bc8685d02bb5e3dd` —
   identical to FX-OPENAPI-04's `json_rendering`, so the registry is from
   the same document the operation essentials were extracted from.
-  PDASHOSS01-272 re-recorded FX-OPENAPI-04 (one added operation with no
-  serializer); the registry of that capture is parsed-equal to this file,
-  so it is unchanged.
   Method: `curl` GET against a scratch Django server (scratch DB
-  `pidash_1208_dj`); the fixture is `{...metadata..., "schemas": {...}}`.
+  `pidash_1208_dj`, NEWPIDASH-34 re-record on `pidash_n34_dj`); the fixture
+  is `{...metadata..., "schemas": {...}}`.
   drf-spectacular's `SchemaGenerator.get_schema`
   (`0.28.0 generators.py:282-293`) writes `components=self.registry.build(...)`,
   so Django serves this registry and every operation `$ref` resolves; the
@@ -159,6 +161,12 @@ djangorestframework 3.15.2, Django 4.2.30.
   (`COMPONENT_SCHEMAS_JSON`) so no `$ref` dangles. Guarded by the Rust
   unit tests in `doc.rs` and the contract test
   `rust-api/contract-tests/v1_openapi/test_refs_resolve.py`.
+
+PDASHOSS01-331 refresh (pytz 2024.1 -> 2025.2): only the seven `timezone`
+properties changed (`Asia/Choibalsan` out, `America/Coyhaique` in, in `enum`
+and `description`; `x-spec-enum-id` e7668cf5fe0b8280 -> 5de22777dc4bb067).
+Each now equals the same property from `manage.py spectacular` on that Python
+branch. Other properties in the fixture were left at their recorded state.
 
 ## Out of scope (reading context, not ported here)
 

@@ -22,7 +22,7 @@ DETAIL_KEYS = [
     "agent_test_default_interval_seconds", "agent_ticking_enabled", "anchor",
     "archive_in", "archived_at", "base_branch", "close_in", "cover_image",
     "cover_image_asset", "cover_image_url", "created_at", "created_by",
-    "cycle_view", "default_agent_executor", "default_assignee",
+    "cycle_view", "dedicated_runner_lost_action", "default_agent_executor", "default_assignee",
     "default_state", "deleted_at", "description", "description_html",
     "description_text", "emoji", "estimate", "external_id", "external_source",
     "guest_view_all_features", "icon_prop", "id", "identifier", "inbox_view",
@@ -49,6 +49,73 @@ def test_list_projects_shape(world):
     assert isinstance(body, list) and len(body) == 1
     assert_keys(body[0], LIST_KEYS, "list")
     assert body[0]["id"] == project["id"]
+    assert body[0]["member_role"] == 20
+
+
+def test_list_projects_with_intake_rows(world):
+    """NEWPIDASH-130: the intake_count CASE must qualify its columns.
+
+    The list joins projects (deleted_at/id) to intake_issues
+    (deleted_at/id); bare columns are Postgres 42702 (500 on Rust).
+    Seeds one live intake_issue (status=-2) plus a non-pending one
+    (status=1) and pins 200 + intake_count==1 on both backends. The
+    project is seeded via SQL, not POST, because Rust project create
+    is still drift-broken on dedicated_runner_lost_action — this case
+    isolates the list query.
+    """
+    from _harness import seed as _seed
+
+    user = world.user()
+    ws = world.workspace(user)
+    world.ws_member(ws, user, 20)
+    client = world.client(user)
+    project = _seed.project(
+        world.conn, ws["id"], network=2,
+        dedicated_runner_lost_action="fail_to_backlog",
+    )
+    _seed.project_member(world.conn, project["id"], ws["id"], user["id"], role=20)
+    state = _seed.state(world.conn, project["id"], ws["id"])
+    intake = _seed.intake(world.conn, ws["id"], project["id"], is_default=True)
+
+    def _issue(name):
+        return _seed.insert_row(
+            world.conn,
+            "issues",
+            {
+                "workspace_id": str(ws["id"]),
+                "project_id": str(project["id"]),
+                "state_id": str(state["id"]),
+                "name": name,
+                "description_json": {},
+                "description_html": "<p></p>",
+                "priority": "none",
+                "complexity_score": 0,
+                "sequence_id": 1,
+                "sort_order": 65535,
+                "is_draft": False,
+                "git_work_branch": "",
+                "workpad": "",
+            },
+        )
+
+    pending = _issue("pending intake")
+    other = _issue("other intake")
+    _seed.intake_issue(
+        world.conn, ws["id"], project["id"], intake["id"], pending["id"],
+        status=-2,
+    )
+    _seed.intake_issue(
+        world.conn, ws["id"], project["id"], intake["id"], other["id"],
+        status=1,
+    )
+
+    resp = client.get(f"/api/workspaces/{ws['slug']}/projects/")
+    assert resp.status_code == 200, resp.text[:500]
+    body = resp.json()
+    assert isinstance(body, list) and len(body) == 1
+    assert_keys(body[0], LIST_KEYS, "list_with_intake")
+    assert body[0]["id"] == str(project["id"])
+    assert body[0]["intake_count"] == 1
     assert body[0]["member_role"] == 20
 
 
@@ -146,6 +213,38 @@ def test_create_project_duplicate_identifier_400(world):
     resp = client.post(f"/api/workspaces/{ws['slug']}/projects/",
                        json={"name": "Dupe Other", "identifier": project["identifier"]})
     assert resp.status_code == 400
+
+
+def test_executor_options_carry_deprecated(world, db):
+    # #2903: every agent_executor_options entry gains "deprecated",
+    # true for cloud_agent/managed_runner, false for local_runner.
+    client, _, ws, project = world.full_stack()
+    resp = client.get(f"/api/workspaces/{ws['slug']}/projects/{project['id']}/")
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["agent_executor_options"]
+    options = {row["kind"]: row for row in rows}
+    assert [row["kind"] for row in rows] == [
+        "cloud_agent", "local_runner", "managed_runner",
+    ]
+    assert options["local_runner"]["deprecated"] is False
+    assert options["cloud_agent"]["deprecated"] is True
+    assert options["managed_runner"]["deprecated"] is True
+
+
+def test_default_executor_write_translates(world, db):
+    # #2903: a deprecated default is normalized to local_runner on write.
+    client, _, ws, project = world.full_stack()
+    resp = client.patch(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/",
+        json={"default_agent_executor": "managed_runner"},
+    )
+    assert resp.status_code == 200, resp.text
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT default_agent_executor FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["default_agent_executor"] == "local_runner"
 
 
 def test_partial_update_project(world):

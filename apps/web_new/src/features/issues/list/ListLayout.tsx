@@ -87,6 +87,13 @@ export function groupLabelsFor(prefs: DisplayPrefs, refs: ReturnType<typeof useL
   return refs.labels[prefs.groupBy ?? ""] ?? new Map<string, string>();
 }
 
+const NO_GROUP_ORDER: readonly string[] = [];
+
+/** Explicit section order for the display dimension, when it has one. */
+export function groupOrderFor(prefs: DisplayPrefs, refs: Pick<ReturnType<typeof useListReferences>, "orders">) {
+  return refs.orders[prefs.groupBy ?? ""] ?? NO_GROUP_ORDER;
+}
+
 export interface ListLayoutProps extends LayoutPeekProps {
   workspaceSlug: string;
   entity: IssuesEntity;
@@ -225,7 +232,8 @@ export function ListLayout({
     labels,
     prefs.showEmptyGroups,
     prefs.showSubIssues,
-    richFilters
+    richFilters,
+    groupOrderFor(prefs, refs)
   );
   const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
   const { data: details } = useQuery(projectDetailsQueryOptions(client, workspaceSlug));

@@ -19,8 +19,8 @@
 //! the key (`openapi.py:93` `if parameters:`, `openapi.py:85` `if summary:`),
 //! so the builder omits it too.
 //!
-//! `components.schemas` is *not* optional: the essentials carry 104
-//! `#/components/schemas/<Name>` `$ref`s (43 distinct names), so the
+//! `components.schemas` is *not* optional: the essentials carry 109
+//! `#/components/schemas/<Name>` `$ref`s (44 distinct names), so the
 //! registry captured from Django's document
 //! (`FX-OPENAPI-07.components_schemas.json`) is emitted verbatim and every
 //! reference resolves inside the served document (PIDASHCONV-1208).
@@ -219,7 +219,7 @@ fn push_indent(indent: usize, out: &mut String) {
 /// writes `components=self.registry.build(...)`, so every component an
 /// operation references is in the served document. The Rust port emits the
 /// same registry: without it every `#/components/schemas/<Name>` `$ref` the
-/// essentials carry dangles (43 targets / 104 refs, PIDASHCONV-1208) and the
+/// essentials carry dangles (44 targets / 109 refs, PIDASHCONV-1208) and the
 /// document is not a valid OpenAPI 3.0.3 spec. Embedded at build time and
 /// parsed per call like [`OPERATIONS_JSON`], so the served binary reads no
 /// files at runtime.
@@ -237,7 +237,7 @@ fn component_schemas() -> Value {
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 194 golden operations, pretty JSON
+/// parameters, responses}}}` for all 209 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -666,6 +666,54 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/": {
+    "get": {
+      "operationId": "runner_dev_machines_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "runner_dev_machines_partial_update",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": {
     "post": {
       "operationId": "runner_dev_machines_commands_result_create",
@@ -686,6 +734,56 @@ const OPERATIONS_JSON: &str = r##"
         {
           "in": "path",
           "name": "request_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/": {
+    "post": {
+      "operationId": "runner_dev_machines_merge_into_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/": {
+    "get": {
+      "operationId": "runner_dev_machines_replace_candidates_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
           "schema": {
             "type": "string",
             "format": "uuid"
@@ -754,6 +852,51 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "responses": {
         "204": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/credential/revoke/": {
+    "post": {
+      "operationId": "runner_engine_credential_revoke_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/model-token/": {
+    "post": {
+      "operationId": "runner_engine_model_token_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/profile/": {
+    "get": {
+      "operationId": "runner_engine_profile_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
           "description": "No response body"
         }
       }
@@ -869,6 +1012,29 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "responses": {
         "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "post": {
+      "operationId": "runner_runners_create_2",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "runner_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
           "description": "No response body"
         }
       }
@@ -1317,53 +1483,6 @@ const OPERATIONS_JSON: &str = r##"
             }
           },
           "description": "Current user profile"
-        }
-      }
-    }
-  },
-  "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": {
-    "post": {
-      "operationId": "release_agent_run_pin",
-      "tags": [
-        "Work Items"
-      ],
-      "summary": "Release a queued run's runner pin",
-      "parameters": [
-        {
-          "in": "path",
-          "name": "run_id",
-          "schema": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "required": true
-        },
-        {
-          "in": "path",
-          "name": "slug",
-          "schema": {
-            "type": "string"
-          },
-          "description": "Workspace slug",
-          "required": true,
-          "examples": {
-            "ExampleWorkspace": {
-              "value": "my-workspace",
-              "summary": "Example workspace",
-              "description": "A typical workspace slug"
-            }
-          }
-        }
-      ],
-      "responses": {
-        "200": {
-          "description": "Pin released"
-        },
-        "404": {
-          "description": "Run not found"
-        },
-        "409": {
-          "description": "Run is not a pinned, queued local run"
         }
       }
     }
@@ -11011,6 +11130,54 @@ const OPERATIONS_JSON: &str = r##"
           "description": ""
         }
       }
+    },
+    "post": {
+      "operationId": "workspaces_projects_schedulers_create",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
     }
   },
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": {
@@ -11064,6 +11231,174 @@ const OPERATIONS_JSON: &str = r##"
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/": {
+    "delete": {
+      "operationId": "workspaces_projects_schedulers_binding_destroy",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "workspaces_projects_schedulers_binding_partial_update",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerBindingAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/": {
+    "post": {
+      "operationId": "workspaces_projects_schedulers_run_now_create",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerBindingAPI"
               }
             }
           },
@@ -16119,6 +16454,30 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/runners/": {
+    "get": {
+      "operationId": "workspaces_runners_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/schedulers/": {
     "get": {
       "operationId": "workspaces_schedulers_retrieve",
@@ -16127,6 +16486,106 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "summary": null,
       "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    },
+    "post": {
+      "operationId": "workspaces_schedulers_create",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/": {
+    "delete": {
+      "operationId": "workspaces_schedulers_destroy",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "workspaces_schedulers_partial_update",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
         {
           "in": "path",
           "name": "slug",
@@ -16803,7 +17262,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 194);
+        assert_eq!(ops, 209);
     }
 
     #[test]
@@ -17034,8 +17493,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(omitted_parameters, 16);
-        assert_eq!(omitted_summaries, 99);
+        assert_eq!(omitted_parameters, 19);
+        assert_eq!(omitted_summaries, 115);
     }
 
     #[test]

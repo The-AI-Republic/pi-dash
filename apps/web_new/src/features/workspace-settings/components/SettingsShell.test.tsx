@@ -76,6 +76,31 @@ describe("SettingsShell", () => {
     expect(screen.getByText("roster")).toBeInTheDocument();
   });
 
+  it.each(["members", "billing", "exports"] as const)(
+    "renders the wide %s section without the centred column",
+    (section) => {
+      renderShell({ section });
+      expect(screen.queryByTestId("settings-page-content")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("settings-page-header-content")).not.toBeInTheDocument();
+      expect(screen.getByText("section body")).toBeInTheDocument();
+    }
+  );
+
+  it.each(["general", "webhooks", "integrations"] as const)(
+    "renders the %s section inside the centred column",
+    (section) => {
+      renderShell({ section });
+      expect(screen.getByTestId("settings-page-content")).toHaveTextContent("section body");
+      expect(screen.getByTestId("settings-page-header-content")).toBeInTheDocument();
+    }
+  );
+
+  it("keeps a webhook detail address inside the centred column", () => {
+    renderShell({ section: "webhooks", webhookDetail: true });
+    expect(screen.getByTestId("settings-page-content")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-page-header-content")).toBeInTheDocument();
+  });
+
   it("filters the entries by role", () => {
     renderShell({ role: ROLE_MEMBER, permissions: selectPermissions(ROLE_MEMBER), section: "general" });
     expect(screen.queryByRole("link", { name: "Billing & Plans" })).not.toBeInTheDocument();

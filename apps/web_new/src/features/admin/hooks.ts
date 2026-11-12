@@ -12,11 +12,14 @@ import {
   cloudSignInUrl,
   createInstanceWorkspace,
   createLoopJob,
+  createRunnerModel,
   deleteLoopJob,
+  deleteRunnerModel,
   disableEmailFeature,
   updateInstance,
   updateInstanceConfigurations,
   updateLoopJob,
+  updateRunnerModel,
   type ApiClient,
   type EmailCredentialCandidate,
   type InstanceBootstrap,
@@ -26,6 +29,8 @@ import {
   type LoopJobCreateInput,
   type LoopJobList,
   type LoopJobPatchInput,
+  type RunnerModelCreateInput,
+  type RunnerModelPatchInput,
 } from "@pidash/api-client";
 import { showToast } from "@pidash/kit";
 import * as React from "react";
@@ -59,6 +64,7 @@ import {
   loopJobsQueryOptions,
   loopJobTargetsQueryOptions,
   mergeConfigurationRows,
+  runnerModelsQueryOptions,
 } from "./queries.js";
 import {
   CONFIG_SAVE_FAILURE_MESSAGE,
@@ -525,4 +531,69 @@ export function useCreateInstanceWorkspace() {
  */
 export function useInstanceRunners(provisioning: string, page: number) {
   return useQuery(instanceRunnersQueryOptions(getAppClient(), provisioning, page));
+}
+
+/**
+ * The runner model catalog (NEWPIDASH-169): every row grouped by
+ * agent, including disabled ones, so the page renders each agent's
+ * table and revalidates after every mutation.
+ */
+export function useRunnerModels() {
+  return useQuery(runnerModelsQueryOptions(getAppClient()));
+}
+
+export function createRunnerModelMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (input: RunnerModelCreateInput) => createRunnerModel(client, input),
+    onError: () => {
+      notifyError("Could not add the model", "The model was not added. Check the fields and try again.");
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.runnerModels });
+    },
+  });
+}
+
+/** Adds a model to the catalog (NEWPIDASH-169). */
+export function useCreateRunnerModel() {
+  return useMutation(createRunnerModelMutationOptions(getAppClient(), useQueryClient()));
+}
+
+export interface RunnerModelUpdate {
+  id: string;
+  patch: RunnerModelPatchInput;
+}
+
+export function updateRunnerModelMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (update: RunnerModelUpdate) => updateRunnerModel(client, update.id, update.patch),
+    onError: () => {
+      notifyError("Could not save the model", "The model was not saved. Check the fields and try again.");
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.runnerModels });
+    },
+  });
+}
+
+/** Saves a model field, toggle, preselect, or reorder (NEWPIDASH-169). */
+export function useUpdateRunnerModel() {
+  return useMutation(updateRunnerModelMutationOptions(getAppClient(), useQueryClient()));
+}
+
+export function deleteRunnerModelMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (rowId: string) => deleteRunnerModel(client, rowId),
+    onError: () => {
+      notifyError("Could not delete the model", "The model was not deleted. Try again.");
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.runnerModels });
+    },
+  });
+}
+
+/** Deletes a model from the catalog (NEWPIDASH-169). */
+export function useDeleteRunnerModel() {
+  return useMutation(deleteRunnerModelMutationOptions(getAppClient(), useQueryClient()));
 }

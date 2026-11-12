@@ -64,6 +64,13 @@ const SMTP_BACKEND: &str = "django.core.mail.backends.smtp.EmailBackend";
 const CONSOLE_BACKEND: &str = "django.core.mail.backends.console.EmailBackend";
 const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
 
+/// Known desktop bundle origins. See `apps/api/pi_dash/settings/common.py`.
+const DESKTOP_BUNDLE_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+];
+
 /// Boot-time settings for the Rust server and worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -215,7 +222,6 @@ pub struct RunnerSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedRunnerSettings {
     pub enabled: bool,
-    pub max_per_user_project: i64,
     pub queued_max_age_secs: i64,
     pub graceful_stop_secs: i64,
     pub sweep_interval_secs: i64,
@@ -228,6 +234,11 @@ pub struct CloudAgentSettings {
     pub writes_enabled: bool,
     pub github_tools_enabled: bool,
     pub disabled_tools: Vec<String>,
+    /// Queue every `cloud_agent.run_agent_run` job is enqueued on.
+    /// Default `celery`; set to `cloud_agent` after the dedicated
+    /// agent-worker pool is running (Phase 2 rollout). Kept as the
+    /// string queue label `NewJob` carries / workers claim on.
+    pub job_queue: String,
     pub reconcile_interval_secs: i64,
     pub model_request_timeout_secs: i64,
     pub execution_timeout_secs: i64,
@@ -265,7 +276,9 @@ pub struct SessionSettings {
     pub cookie_name: String,
     pub cookie_domain: Option<String>,
     /// `SESSION_COOKIE_SECURE = secure_origins`: true when explicit origins
-    /// exist and none is plain `http:`; false with no origins set.
+    /// exist and none is plain `http:`; false with no origins set. Desktop
+    /// bundle origins are ignored (see common.py DESKTOP_BUNDLE_ORIGINS) so
+    /// that http://tauri.localhost does not downgrade an HTTPS deployment.
     pub cookie_secure: bool,
     pub save_every_request: bool,
     pub admin_cookie_age_secs: i64,
@@ -936,9 +949,16 @@ impl Settings {
         let mut app_base_url = validated_base_url(ctx.opt_string("APP_BASE_URL")?);
 
         let cors_allowed_origins = ctx.csv_stripped("CORS_ALLOWED_ORIGINS", "")?;
-        // secure_origins, ported exactly (substring match on "http:").
+        // secure_origins: true unless any non-desktop origin carries "http:".
+        // Desktop bundle origins (see common.py) are exempt — http://tauri.localhost
+        // is a local webview origin, not a plain-HTTP deployment.
         let cookie_secure = !cors_allowed_origins.is_empty()
-            && !cors_allowed_origins.iter().any(|o| o.contains("http:"));
+            && !cors_allowed_origins.iter().any(|o| {
+                o.contains("http:")
+                    && !DESKTOP_BUNDLE_ORIGINS
+                        .iter()
+                        .any(|d| o.trim_end_matches('/').eq_ignore_ascii_case(d))
+            });
 
         match profile {
             Profile::Common => {}
@@ -1111,8 +1131,6 @@ impl Settings {
             },
             managed_runner: ManagedRunnerSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
-                max_per_user_project: ctx
-                    .req_int("MANAGED_RUNNER_MAX_PER_USER_PROJECT", ConfigValue::from(1))?,
                 queued_max_age_secs: ctx.req_int(
                     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
                     ConfigValue::from(43200),
@@ -1131,6 +1149,7 @@ impl Settings {
                 writes_enabled: ctx.flag_tri("CLOUD_AGENT_WRITES_ENABLED", "false")?,
                 github_tools_enabled: ctx.flag_tri("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true")?,
                 disabled_tools: ctx.csv_stripped("CLOUD_AGENT_DISABLED_TOOLS", "")?,
+                job_queue: ctx.req_string("CLOUD_AGENT_JOB_QUEUE", "celery")?,
                 reconcile_interval_secs: ctx.req_int(
                     "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
                     ConfigValue::from(30),
@@ -1338,7 +1357,6 @@ impl Settings {
             "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
             "RUNNER_PIN_WAIT_BUDGET_SECS",
             "MANAGED_RUNNER_ENABLED",
-            "MANAGED_RUNNER_MAX_PER_USER_PROJECT",
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
             "MANAGED_RUNNER_GRACEFUL_STOP_SECS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
@@ -1433,6 +1451,9 @@ mod tests {
         assert_eq!(s.loop_tuning.max_writes, 10);
         assert_eq!(s.file_size_limit, 5242880);
         assert_eq!(s.email_backend, SMTP_BACKEND);
+        // Phase 2 (2.1): the agent job queue defaults to `celery` until
+        // both workers are running.
+        assert_eq!(s.cloud_agent.job_queue, "celery");
         // Non-Local profiles ignore an EMAIL_BACKEND env override, exactly
         // like common.py's hardcoded assignment.
         let s2 = Settings::from_map_with(
@@ -1493,6 +1514,17 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
+    }
+
+    #[test]
+    fn cloud_agent_job_queue_overrides_from_env() {
+        let s = Settings::from_map_with(
+            &vars(&[("CLOUD_AGENT_JOB_QUEUE", "cloud_agent")]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert_eq!(s.cloud_agent.job_queue, "cloud_agent");
     }
 
     #[test]
@@ -1739,6 +1771,42 @@ mod tests {
         )
         .expect("resolves");
         assert!(s.session.cookie_secure);
+        // HTTPS deployment + Windows desktop origin -> True (desktop exempt).
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "https://a.example, http://tauri.localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(s.session.cookie_secure);
+        assert!(s
+            .csrf_trusted_origins
+            .contains(&"http://tauri.localhost".to_owned()));
+        // tauri://localhost also exempt (no "http:" anyway, but pinned).
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "https://a.example, tauri://localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(s.session.cookie_secure);
+        // Plain http + desktop still False.
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "http://a.example, http://tauri.localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(!s.session.cookie_secure);
     }
 
     #[test]

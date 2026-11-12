@@ -565,6 +565,265 @@ pub fn relations_summary(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Builder form of the summary statements (`relations_summary`, `:184-198`)
+// ---------------------------------------------------------------------------
+//
+// The same three statements as [`summary_sql`] (both directions) and
+// [`has_open_blockers_sql`], built with sea-query and decoded by name.
+// Aliases, predicates and their order mirror the text form above, so the
+// two cannot disagree about the edge rules.
+
+mod orm {
+    use sea_orm::{ConnectionTrait, DbBackend, DbErr, FromQueryResult};
+    use sea_query::{
+        Alias, Cond, Condition, Expr, JoinType, Order, Query, SelectStatement, SimpleExpr,
+    };
+    use uuid::Uuid;
+
+    use pidash_db::entity::{issue_relations, issues, projects, states};
+
+    use super::{BlockerRow, BLOCKED_BY, BLOCKING, SUMMARY_LIMIT};
+
+    fn alias(name: &str) -> Alias {
+        Alias::new(name)
+    }
+
+    /// `<s>."group" IN ('cancelled', 'completed')` (the closed groups).
+    fn closed_group(s: &str) -> SimpleExpr {
+        Expr::col((alias(s), states::Column::Group)).is_in(["cancelled", "completed"])
+    }
+
+    /// [`super::live_issue_predicate`]: `Issue.issue_objects` liveness,
+    /// stateless issues kept (quirk 2).
+    fn live_issue(i: &str, s: &str, p: &str) -> Condition {
+        let group = || Expr::col((alias(s), states::Column::Group));
+        Cond::all()
+            .add(Expr::col((alias(i), issues::Column::DeletedAt)).is_null())
+            .add(group().eq("triage").and(group().is_not_null()).not())
+            .add(
+                Expr::col((alias(i), issues::Column::ArchivedAt))
+                    .is_not_null()
+                    .not(),
+            )
+            .add(
+                Expr::col((alias(p), projects::Column::ArchivedAt))
+                    .is_not_null()
+                    .not(),
+            )
+            .add(Expr::col((alias(i), issues::Column::IsDraft)).not())
+    }
+
+    /// [`super::open_predicate`]: closed groups excluded, NULL groups kept.
+    fn open(s: &str) -> SimpleExpr {
+        closed_group(s)
+            .and(Expr::col((alias(s), states::Column::Group)).is_not_null())
+            .not()
+    }
+
+    /// `issues <i> LEFT JOIN states <s> INNER JOIN projects <p>`.
+    fn issue_from(select: &mut SelectStatement, i: &str, s: &str, p: &str) {
+        select
+            .from_as(issues::Entity, alias(i))
+            .join_as(
+                JoinType::LeftJoin,
+                states::Entity,
+                alias(s),
+                Expr::col((alias(i), issues::Column::StateId))
+                    .equals((alias(s), states::Column::Id)),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                projects::Entity,
+                alias(p),
+                Expr::col((alias(i), issues::Column::ProjectId))
+                    .equals((alias(p), projects::Column::Id)),
+            );
+    }
+
+    /// [`super::live_targets_sql`]: live issue ids (`lt`/`ls`/`lp`).
+    fn live_targets() -> SelectStatement {
+        let mut select = Query::select();
+        select.column((alias("lt"), issues::Column::Id));
+        issue_from(&mut select, "lt", "ls", "lp");
+        select.cond_where(live_issue("lt", "ls", "lp"));
+        select
+    }
+
+    /// `edge_subquery_sql`: live relation rows of `relation_type` whose
+    /// `anchor` end is `issue_id`, projecting the `target` end.
+    fn edge(
+        anchor: issue_relations::Column,
+        issue_id: Uuid,
+        relation_type: &str,
+        target: issue_relations::Column,
+    ) -> SelectStatement {
+        let r = || alias("r");
+        let mut select = Query::select();
+        select
+            .column((r(), target))
+            .from_as(issue_relations::Entity, r())
+            .join_as(
+                JoinType::InnerJoin,
+                issues::Entity,
+                alias("t"),
+                Expr::col((r(), target)).equals((alias("t"), issues::Column::Id)),
+            )
+            .cond_where(
+                Cond::all()
+                    .add(Expr::col((r(), issue_relations::Column::DeletedAt)).is_null())
+                    .add(
+                        Expr::col((r(), issue_relations::Column::IssueId))
+                            .equals((r(), issue_relations::Column::RelatedIssueId))
+                            .not(),
+                    )
+                    .add(Expr::col((r(), anchor)).eq(issue_id))
+                    .add(Expr::col((r(), target)).in_subquery(live_targets()))
+                    .add(
+                        Expr::col((alias("t"), issues::Column::WorkspaceId))
+                            .equals((r(), issue_relations::Column::WorkspaceId)),
+                    )
+                    .add(Expr::col((r(), issue_relations::Column::RelationType)).eq(relation_type)),
+            );
+        select
+    }
+
+    /// `(forward, stored_reversed)` edges of one direction:
+    /// `blocking = false` is `_blocked_by_edges`, `true` `_blocking_edges`.
+    fn edges(issue_id: Uuid, blocking: bool) -> (SelectStatement, SelectStatement) {
+        use issue_relations::Column::{IssueId, RelatedIssueId};
+        if blocking {
+            (
+                edge(RelatedIssueId, issue_id, BLOCKED_BY, IssueId),
+                edge(IssueId, issue_id, BLOCKING, RelatedIssueId),
+            )
+        } else {
+            (
+                edge(IssueId, issue_id, BLOCKED_BY, RelatedIssueId),
+                edge(RelatedIssueId, issue_id, BLOCKING, IssueId),
+            )
+        }
+    }
+
+    /// Live outer issues narrowed to the union of the two edge subqueries
+    /// (`row_statement_skeleton`), with `open_only` adding `_open`.
+    fn skeleton(select: &mut SelectStatement, issue_id: Uuid, blocking: bool, open_only: bool) {
+        let (forward, stored_reversed) = edges(issue_id, blocking);
+        issue_from(select, "i", "s", "p");
+        let mut cond = live_issue("i", "s", "p").add(
+            Cond::any()
+                .add(Expr::col((alias("i"), issues::Column::Id)).in_subquery(forward))
+                .add(Expr::col((alias("i"), issues::Column::Id)).in_subquery(stored_reversed)),
+        );
+        if open_only {
+            cond = cond.add(open("s"));
+        }
+        select.cond_where(cond);
+    }
+
+    /// [`super::summary_sql`]: one direction, open-first, capped at
+    /// [`SUMMARY_LIMIT`]. Output names: `issue_id`, `sequence_id`,
+    /// `project_identifier`, `state_name`, `state_group`, `_resolved`.
+    pub fn summary_statement(issue_id: Uuid, blocking: bool) -> SelectStatement {
+        let mut select = Query::select();
+        select
+            .expr_as(
+                Expr::col((alias("i"), issues::Column::Id)),
+                alias("issue_id"),
+            )
+            .expr_as(
+                Expr::col((alias("i"), issues::Column::SequenceId)),
+                alias("sequence_id"),
+            )
+            .expr_as(
+                Expr::col((alias("p"), projects::Column::Identifier)),
+                alias("project_identifier"),
+            )
+            .expr_as(
+                Expr::col((alias("s"), states::Column::Name)),
+                alias("state_name"),
+            )
+            .expr_as(
+                Expr::col((alias("s"), states::Column::Group)),
+                alias("state_group"),
+            )
+            .expr_as(
+                Expr::case(closed_group("s"), 1).finally(0),
+                alias("_resolved"),
+            );
+        skeleton(&mut select, issue_id, blocking, false);
+        select
+            .order_by(alias("_resolved"), Order::Asc)
+            .order_by((alias("p"), projects::Column::Identifier), Order::Asc)
+            .order_by((alias("i"), issues::Column::SequenceId), Order::Asc)
+            .limit(SUMMARY_LIMIT as u64);
+        select
+    }
+
+    /// [`super::has_open_blockers_sql`]: `SELECT 1 AS a ... LIMIT 1` over
+    /// the full open blocked-by set.
+    pub fn has_open_blockers_statement(issue_id: Uuid) -> SelectStatement {
+        let mut select = Query::select();
+        select.expr_as(Expr::val(1), alias("a"));
+        skeleton(&mut select, issue_id, false, true);
+        select.limit(1);
+        select
+    }
+
+    /// One [`summary_statement`] row, decoded by name.
+    #[derive(FromQueryResult)]
+    struct SummaryDbRow {
+        issue_id: Uuid,
+        sequence_id: i32,
+        project_identifier: String,
+        state_name: Option<String>,
+        state_group: Option<String>,
+    }
+
+    async fn summary_rows<C: ConnectionTrait>(
+        db: &C,
+        issue_id: Uuid,
+        blocking: bool,
+    ) -> Result<Vec<BlockerRow>, DbErr> {
+        let rows = db
+            .query_all(DbBackend::Postgres.build(&summary_statement(issue_id, blocking)))
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let row = SummaryDbRow::from_query_result(row, "")?;
+                Ok(BlockerRow {
+                    issue_id: row.issue_id,
+                    sequence_id: row.sequence_id,
+                    project_identifier: row.project_identifier,
+                    state_name: row.state_name,
+                    state_group: row.state_group,
+                })
+            })
+            .collect()
+    }
+
+    /// `relations_summary(issue)` (`:184-198`): the blocked-by and
+    /// blocking summary lists plus the full-set open check — the
+    /// fixture's 3 statements, in that order.
+    pub async fn fetch_relations_summary<C: ConnectionTrait>(
+        db: &C,
+        issue_id: Uuid,
+    ) -> Result<super::RelationsSummary, DbErr> {
+        let blocked_by = summary_rows(db, issue_id, false).await?;
+        let blocking = summary_rows(db, issue_id, true).await?;
+        let open = db
+            .query_one(DbBackend::Postgres.build(&has_open_blockers_statement(issue_id)))
+            .await?;
+        Ok(super::relations_summary(
+            &blocked_by,
+            &blocking,
+            open.is_some(),
+        ))
+    }
+}
+
+pub use orm::{fetch_relations_summary, has_open_blockers_statement, summary_statement};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,5 +1463,189 @@ mod tests {
         assert_eq!(object["identifier"].as_str(), Some("FX3A-11"));
         assert!(object["state"].is_null());
         assert!(object["state_group"].is_null());
+    }
+}
+
+/// Live oracle: the builder statements return exactly what the text
+/// statements return over a seeded edge set (both directions, both
+/// stored orientations, closed / stateless / triage / archived /
+/// self / deleted / cross-workspace edges).
+#[cfg(test)]
+mod live {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::read::test_support::{pool, seed_world};
+
+    async fn state(pool: &PgPool, project: Uuid, workspace: Uuid, group: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, slug,\
+             project_id, workspace_id, sequence, \"group\", \"default\", is_triage)\
+             VALUES ($1, now(), now(), $4, '', '#000000', $4, $2, $3, 2, $4, false, false)",
+        )
+        .bind(id)
+        .bind(project)
+        .bind(workspace)
+        .bind(group)
+        .execute(pool)
+        .await
+        .expect("seed state");
+        id
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn issue(
+        pool: &PgPool,
+        project: Uuid,
+        workspace: Uuid,
+        state: Option<Uuid>,
+        sequence: i32,
+        archived: bool,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issues (id, created_at, updated_at, name, description_json, priority,\
+             sequence_id, project_id, state_id, workspace_id, description_html, sort_order,\
+             is_draft, git_work_branch, workpad, complexity_score, archived_at)\
+             VALUES ($1, now(), now(), 'Edge', '{}', 'none', $2, $3, $4, $5, '', 65535,\
+             false, '', '', 0, CASE WHEN $6 THEN now() END)",
+        )
+        .bind(id)
+        .bind(sequence)
+        .bind(project)
+        .bind(state)
+        .bind(workspace)
+        .bind(archived)
+        .execute(pool)
+        .await
+        .expect("seed issue");
+        id
+    }
+
+    async fn relation(
+        pool: &PgPool,
+        world: (Uuid, Uuid),
+        from: Uuid,
+        to: Uuid,
+        kind: &str,
+        deleted: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO issue_relations (id, relation_type, issue_id, project_id,\
+             related_issue_id, workspace_id, created_at, updated_at, deleted_at)\
+             VALUES ($1, $2, $3, $4, $5, $6, now(), now(), CASE WHEN $7 THEN now() END)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(kind)
+        .bind(from)
+        .bind(world.0)
+        .bind(to)
+        .bind(world.1)
+        .bind(deleted)
+        .execute(pool)
+        .await
+        .expect("seed relation");
+    }
+
+    /// One text-form summary row (plus the `_resolved` flag).
+    type TextRow = (Uuid, i32, String, Option<String>, Option<String>, i32);
+
+    /// The text-form summary (`summary_sql` ×2 + `has_open_blockers_sql`).
+    async fn text_summary(pool: &PgPool, issue_id: Uuid) -> RelationsSummary {
+        let mut lists = Vec::new();
+        for blocking in [false, true] {
+            let sql = summary_sql(blocking).replace(":issue_id", "$1");
+            let rows: Vec<TextRow> = sqlx::query_as(&sql)
+                .bind(issue_id)
+                .fetch_all(pool)
+                .await
+                .expect("text summary");
+            lists.push(
+                rows.into_iter()
+                    .map(
+                        |(issue_id, sequence_id, project_identifier, name, group, _)| BlockerRow {
+                            issue_id,
+                            sequence_id,
+                            project_identifier,
+                            state_name: name,
+                            state_group: group,
+                        },
+                    )
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let open: Option<(i32,)> =
+            sqlx::query_as(&has_open_blockers_sql().replace(":issue_id", "$1"))
+                .bind(issue_id)
+                .fetch_optional(pool)
+                .await
+                .expect("text open");
+        relations_summary(&lists[0], &lists[1], open.is_some())
+    }
+
+    #[tokio::test]
+    async fn builder_summary_matches_text_summary() {
+        let Some(pool) = pool().await else { return };
+        let world = seed_world(&pool).await;
+        let other = seed_world(&pool).await;
+        let (p, w) = (world.project_id, world.workspace_id);
+        let done = state(&pool, p, w, "completed").await;
+        let cancelled = state(&pool, p, w, "cancelled").await;
+        let triage = state(&pool, p, w, "triage").await;
+        let started = state(&pool, p, w, "started").await;
+        let anchor = world.issue_id;
+        let open_blocker = issue(&pool, p, w, Some(started), 201, false).await;
+        let closed_blocker = issue(&pool, p, w, Some(done), 202, false).await;
+        let stateless = issue(&pool, p, w, None, 203, false).await;
+        let triaged = issue(&pool, p, w, Some(triage), 204, false).await;
+        let archived = issue(&pool, p, w, Some(started), 205, true).await;
+        let reversed = issue(&pool, p, w, Some(cancelled), 206, false).await;
+        let dependent = issue(&pool, p, w, Some(started), 207, false).await;
+        let dependent_rev = issue(&pool, p, w, None, 208, false).await;
+        let deleted_edge = issue(&pool, p, w, Some(started), 209, false).await;
+        let foreign = issue(
+            &pool,
+            other.project_id,
+            other.workspace_id,
+            Some(other.state_id),
+            210,
+            false,
+        )
+        .await;
+        let ctx = (p, w);
+        for target in [
+            open_blocker,
+            closed_blocker,
+            stateless,
+            triaged,
+            archived,
+            foreign,
+        ] {
+            relation(&pool, ctx, anchor, target, BLOCKED_BY, false).await;
+        }
+        relation(&pool, ctx, reversed, anchor, BLOCKING, false).await;
+        relation(&pool, ctx, dependent, anchor, BLOCKED_BY, false).await;
+        relation(&pool, ctx, anchor, dependent_rev, BLOCKING, false).await;
+        relation(&pool, ctx, anchor, deleted_edge, BLOCKED_BY, true).await;
+        relation(&pool, ctx, anchor, anchor, BLOCKED_BY, false).await;
+
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let built = fetch_relations_summary(&db, anchor).await.expect("builder");
+        let text = text_summary(&pool, anchor).await;
+        assert_eq!(built, text);
+        // Sanity: the seeded set is the non-trivial one.
+        assert_eq!(built.relations_summary.blocked_by.len(), 4);
+        assert_eq!(built.relations_summary.blocking.len(), 2);
+        assert!(built.has_open_blockers);
+
+        // A dependent-only issue: no open blockers on either form.
+        let built = fetch_relations_summary(&db, closed_blocker)
+            .await
+            .expect("builder");
+        assert_eq!(built, text_summary(&pool, closed_blocker).await);
+        assert!(!built.has_open_blockers);
+        assert_eq!(built.relations_summary.blocking.len(), 1);
     }
 }

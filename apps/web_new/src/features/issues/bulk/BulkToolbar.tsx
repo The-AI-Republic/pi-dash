@@ -130,6 +130,11 @@ export function armedBulkProperties(
 export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null {
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  // The first property switch takes the edit dialog's open-time focus.
+  // Left to the kit's default, the deferred initial-focus pass picks the
+  // header's Close button and can land after the reader has clicked into
+  // a field, eating their input on a busy host (NEWFRONT-1055, 1058).
+  const firstFieldRef = React.useRef<HTMLInputElement | null>(null);
   const [stateError, setStateError] = React.useState<string | null>(null);
   const [armed, setArmed] = React.useState<ArmedProperties>(UNARMED);
   const [stateId, setStateId] = React.useState<string | null>(null);
@@ -220,6 +225,7 @@ export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null 
         onOpenChange={setUpdateOpen}
         title="Edit selected work items"
         description="Turn on a property to apply it to every selected work item."
+        initialFocus={firstFieldRef}
         actions={
           <>
             <Button variant="secondary" onClick={() => setUpdateOpen(false)}>
@@ -232,10 +238,11 @@ export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null 
         }
       >
         <div className="flex flex-col gap-(--space-3)">
-          {fields.map((key) => (
+          {fields.map((key, at) => (
             <div key={key} className="grid grid-cols-[minmax(9rem,auto)_1fr] items-center gap-(--space-3)">
               <label className="text-body flex items-center gap-(--space-2) text-(--text)">
                 <input
+                  ref={at === 0 ? firstFieldRef : undefined}
                   type="checkbox"
                   aria-label={FIELD_LABELS[key]}
                   checked={armed[key]}

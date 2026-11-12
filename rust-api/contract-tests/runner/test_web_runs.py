@@ -1087,12 +1087,12 @@ def _seed_scheduler_run(seeder, daemon_world, binding_id, *, status="completed")
             status, prompt, trigger, executor_kind, run_config,
             required_capabilities, thread_id, agent_metadata, tool_plan,
             usage, dispatch_attempts, error_details, llm_model,
-            cancel_reason, phase_kind, created_at)
+            cancel_reason, phase_kind, pin_kind, created_at)
            VALUES (%s,%s,%s,%s,%s,
                    %s,'','scheduler','local_runner','{}',
                    '[]','{}','{}','{}',
                    '{}',0,'{}','',
-                   '','',now())""",
+                   '','','locality',now())""",
         (
             run_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
             daemon_world["pod"]["id"], binding_id, status,

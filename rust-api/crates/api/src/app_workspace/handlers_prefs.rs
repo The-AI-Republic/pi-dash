@@ -86,6 +86,12 @@ use uuid::Uuid;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::workspace::WorkspaceFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_db::entity::{
+    issue_assignees, issues, pages, project_members, project_pages, projects, stickies,
+    user_recent_visits, users, workspace_home_preferences, workspace_user_links,
+    workspace_user_preferences, workspace_user_properties, workspaces,
+};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::v1_assets::model::sticky as sticky_model;
 use pidash_services::app_workspace::models_prefs::workspace_user_properties as user_props_model;
 use pidash_services::app_workspace::models_prefs::{
@@ -94,6 +100,13 @@ use pidash_services::app_workspace::models_prefs::{
 use pidash_services::app_workspace::{queries_extras, ser_extras, ser_invite};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::extension::postgres::PgExpr;
+use sea_orm::sea_query::{Expr, Func, OnConflict};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select, Set,
+};
 
 use super::gates;
 use crate::app_issues::{query_last, Denial, QueryMap};
@@ -274,14 +287,28 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
 /// detail"}`.
 const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 
-fn parse_uuid_or_invalid(raw: &str) -> Result<Uuid, Denial> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+/// Parse a `<uuid:pk>` path segment the way Django's converter routes it:
+/// only the canonical lowercase hyphenated spelling reaches the view;
+/// anything else is the resolver 404 before auth (`UUIDConverter`
+/// matches `[0-9a-f]{8}-…` lowercase-only, PIDASHCONV-1713).
+fn parse_uuid_path(raw: &str) -> Result<Uuid, Denial> {
+    match crate::uuid_path::classify_uuid_segment(raw) {
+        crate::uuid_path::UuidSegment::Canonical(id) => Ok(id),
+        crate::uuid_path::UuidSegment::NonCanonical | crate::uuid_path::UuidSegment::Garbage => {
+            Err(Denial::PageNotFound)
+        }
+    }
+}
+
+/// A SeaORM connection over the request pool (no I/O, `list_engine`
+/// precedent).
+fn orm(pool: &PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
 }
 
 /// Membership facts for one `(user, slug)` over the same rows the
 /// decorator reads (`app/permissions/base.py:19-86`): the active-row
-/// filters and the `workspace__slug=` scoping are this SQL; the scope
+/// filters and the `workspace__slug=` scoping are this read; the scope
 /// check denies facts fetched for another tenant. `is_creator` is the
 /// tagged creator lookup (sticky rows only); every other row passes
 /// `false`.
@@ -292,30 +319,19 @@ async fn fetch_allow_facts(
     allowed: &[i32],
     is_creator: bool,
 ) -> Result<AllowFacts, Denial> {
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let workspace_role = crate::app_issues::access::workspace_role(&orm(pool), slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
         is_workspace_member: workspace_role.is_some(),
         has_allowed_workspace_role: workspace_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
+            .is_some_and(|role| allowed.contains(&i32::from(role))),
         is_creator,
         has_allowed_project_role: false,
         is_project_member: false,
-        is_workspace_admin: workspace_role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
-            .unwrap_or(false),
+        is_workspace_admin: workspace_role.is_some_and(|role| i32::from(role) == ROLE_ADMIN),
     })
 }
 
@@ -326,18 +342,10 @@ async fn fetch_viewer_facts(
     slug: &str,
     user_id: &Uuid,
 ) -> Result<WorkspaceFacts, Denial> {
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let role = workspace_role.map(|(role,)| i32::from(role));
+    let workspace_role = crate::app_issues::access::workspace_role(&orm(pool), slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let role = workspace_role.map(i32::from);
     Ok(WorkspaceFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -381,27 +389,40 @@ fn check_viewer_gate(slug: &str, facts: &WorkspaceFacts) -> ViewerGate {
 /// `request.user.user_timezone` (`TimezoneMixin`): unknown zones 500
 /// through the same branch Django's `zoneinfo` activation raises into.
 async fn actor_timezone(pool: &PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+    let name = crate::app_issues::access::user_timezone(&orm(pool), *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
 /// `Workspace.objects.get(slug=slug)`: a miss (including a soft-deleted
 /// row) answers the `ObjectDoesNotExist` 404.
 async fn resolve_workspace_id(pool: &PgPool, slug: &str) -> Result<Uuid, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let row: Option<Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
+}
+
+/// A live `users` row exists (the plain manager: no soft-delete scope,
+/// users have none).
+async fn user_exists(pool: &PgPool, id: Uuid) -> Result<bool, Denial> {
+    let row: Option<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
 }
 
 /// DRF datetime rendering through the request zone
@@ -565,7 +586,8 @@ async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &Uuid) {
 /// A write that dies in the database: unique/FK violations are Django's
 /// `IntegrityError` → 400 `{"error": "The payload is not valid"}`;
 /// anything else is the generic 500.
-fn map_write_error(error: sqlx::Error) -> Denial {
+fn map_write_error(error: DbErr) -> Denial {
+    let error = into_sqlx(error);
     if let sqlx::Error::Database(db) = &error {
         if let Some(code) = db.code() {
             if code.as_ref() == "23505" || code.as_ref() == "23503" {
@@ -1903,22 +1925,14 @@ async fn validate_quick_link_body(
         // Existence through the default manager (projects soft-delete
         // scoped, users plain).
         let exists: bool = if field == "project" {
-            let row: Option<(Uuid,)> = sqlx::query_as(
-                r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| WriteInvalid::ServerError)?;
-            row.is_some()
+            crate::app_issues::access::project_tenant(&orm(pool), id)
+                .await
+                .map_err(|_| WriteInvalid::ServerError)?
+                .is_some()
         } else {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT u.id FROM users u WHERE u.id = $1"#)
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| WriteInvalid::ServerError)?;
-            row.is_some()
+            user_exists(pool, id)
+                .await
+                .map_err(|_| WriteInvalid::ServerError)?
         };
         if !exists {
             push_field_msg(&mut errors, field, pk_does_not_exist_msg(value));
@@ -1944,59 +1958,65 @@ async fn validate_quick_link_body(
     })
 }
 
-type QuickLinkRow = (
-    Uuid,
-    DateTime<Utc>,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-    Option<String>,
-    String,
-    Value,
-    Option<Uuid>,
-    Option<Uuid>,
-    Uuid,
-    Option<Uuid>,
-    Uuid,
-);
+/// One `workspace_user_links` row.
+struct QuickLinkRow {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+    title: Option<String>,
+    url: String,
+    metadata: Value,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    workspace_id: Uuid,
+    project_id: Option<Uuid>,
+    owner_id: Uuid,
+}
+
+impl From<workspace_user_links::Model> for QuickLinkRow {
+    fn from(model: workspace_user_links::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|at| at.with_timezone(&Utc)),
+            title: model.title,
+            url: model.url,
+            metadata: model.metadata,
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            workspace_id: model.workspace_id,
+            project_id: model.project_id,
+            owner_id: model.owner_id,
+        }
+    }
+}
 
 /// One `workspace_user_links` row rendered through
 /// `WorkspaceUserLinkSerializer` in [`ser_extras::USER_LINK_WIRE_FIELDS`]
 /// order.
 fn render_quick_link(row: &QuickLinkRow, timezone: &Tz) -> Result<String, Denial> {
-    let (
-        id,
-        created_at,
-        updated_at,
-        deleted_at,
-        title,
-        url,
-        metadata,
-        created_by,
-        updated_by,
-        workspace,
-        project,
-        owner,
-    ) = row;
-    let id = id.to_string();
-    let created_at = render_dt(created_at, timezone)?;
-    let updated_at = render_dt(updated_at, timezone)?;
-    let deleted_at = match deleted_at {
+    let id = row.id.to_string();
+    let created_at = render_dt(&row.created_at, timezone)?;
+    let updated_at = render_dt(&row.updated_at, timezone)?;
+    let deleted_at = match &row.deleted_at {
         Some(dt) => Some(render_dt(dt, timezone)?),
         None => None,
     };
-    let created_by = (*created_by).map(|id| id.to_string());
-    let updated_by = (*updated_by).map(|id| id.to_string());
-    let workspace = workspace.to_string();
-    let project = (*project).map(|id| id.to_string());
-    let owner = owner.to_string();
+    let created_by = row.created_by_id.map(|id| id.to_string());
+    let updated_by = row.updated_by_id.map(|id| id.to_string());
+    let workspace = row.workspace_id.to_string();
+    let project = row.project_id.map(|id| id.to_string());
+    let owner = row.owner_id.to_string();
     let shaped = ser_extras::UserLinkRow {
         id: &id,
         created_at: &created_at,
         updated_at: &updated_at,
         deleted_at: deleted_at.as_deref(),
-        title: title.as_deref(),
-        url,
-        metadata,
+        title: row.title.as_deref(),
+        url: &row.url,
+        metadata: &row.metadata,
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         workspace: &workspace,
@@ -2005,6 +2025,50 @@ fn render_quick_link(row: &QuickLinkRow, timezone: &Tz) -> Result<String, Denial
     };
     let view = ser_extras::user_link_to_representation(&shaped);
     Ok(serde_json::to_string(&view).expect("link view"))
+}
+
+/// The owner-scoped quick-link lookup (`workspace.py:248-252, 43`):
+/// one owner's live row in this slug, optionally newest first.
+fn quick_link_owned_query(
+    pk: Uuid,
+    slug: &str,
+    user_id: Uuid,
+    newest_first: bool,
+) -> Select<workspace_user_links::Entity> {
+    let mut query = workspace_user_links::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_user_links::Relation::Workspaces.def(),
+        )
+        .filter(workspace_user_links::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_user_links::Column::OwnerId.eq(user_id))
+        .filter(workspace_user_links::Column::DeletedAt.is_null());
+    if newest_first {
+        query = query.order_by_desc(workspace_user_links::Column::CreatedAt);
+    }
+    query
+}
+
+/// The quick-link duplicate lookup (`workspace.py:218-232, 234-246`):
+/// `except_id` is the `id != pk` arm of the update guard.
+fn quick_link_dup_query(
+    url: &str,
+    workspace_id: Uuid,
+    owner_id: Uuid,
+    except_id: Option<Uuid>,
+) -> Select<workspace_user_links::Entity> {
+    let mut query = workspace_user_links::Entity::find()
+        .select_only()
+        .column(workspace_user_links::Column::Id)
+        .filter(workspace_user_links::Column::Url.eq(url))
+        .filter(workspace_user_links::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_user_links::Column::OwnerId.eq(owner_id))
+        .filter(workspace_user_links::Column::DeletedAt.is_null());
+    if let Some(except) = except_id {
+        query = query.filter(workspace_user_links::Column::Id.ne(except));
+    }
+    query
 }
 
 async fn quick_link_create(
@@ -2031,17 +2095,11 @@ async fn quick_link_create(
     // Dup guard (`workspace.py:218-232`, [`ser_extras::user_link_create_lookup`]):
     // `url` is always present (required).
     let url = input.url.expect("required url");
-    let dup: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT l.id FROM workspace_user_links l
-           WHERE l.url = $1 AND l.workspace_id = $2 AND l.owner_id = $3
-           AND l.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(&url)
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let dup: Option<Uuid> = quick_link_dup_query(&url, workspace_id, user_id, None)
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if dup.is_some() {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -2052,13 +2110,15 @@ async fn quick_link_create(
     // workspace at the project's workspace.
     let workspace_id = match input.project {
         Some(Some(project_id)) => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-                    .bind(project_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(|_| Denial::ServerError)?;
-            backfill_workspace_id(workspace_id, row.map(|row| row.0))
+            let row: Option<Uuid> = projects::Entity::find()
+                .select_only()
+                .column(projects::Column::WorkspaceId)
+                .filter(projects::Column::Id.eq(project_id))
+                .into_tuple()
+                .one(&orm(&pool))
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            backfill_workspace_id(workspace_id, row)
         }
         _ => workspace_id,
     };
@@ -2074,28 +2134,24 @@ async fn quick_link_create(
     let title = input.title.flatten();
     let project_id = input.project.flatten();
     let metadata = input.metadata.unwrap_or(Value::Object(Map::new()));
-    sqlx::query(
-        r#"INSERT INTO workspace_user_links
-           (id, created_at, updated_at, deleted_at, title, url, metadata,
-            created_by_id, updated_by_id, workspace_id, project_id, owner_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)"#,
-    )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(deleted_at)
-    .bind(&title)
-    .bind(&url)
-    .bind(&metadata)
-    .bind(user_id)
-    .bind(Option::<Uuid>::None)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(user_id)
-    .execute(&pool)
+    workspace_user_links::ActiveModel {
+        id: Set(id),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+        deleted_at: Set(deleted_at.map(Into::into)),
+        title: Set(title.clone()),
+        url: Set(url.clone()),
+        metadata: Set(metadata.clone()),
+        created_by_id: Set(Some(user_id)),
+        owner_id: Set(user_id),
+        project_id: Set(project_id),
+        updated_by_id: Set(None),
+        workspace_id: Set(workspace_id),
+    }
+    .insert(&orm(&pool))
     .await
     .map_err(map_write_error)?;
-    let row: QuickLinkRow = (
+    let row = QuickLinkRow {
         id,
         created_at,
         updated_at,
@@ -2103,12 +2159,12 @@ async fn quick_link_create(
         title,
         url,
         metadata,
-        Some(user_id),
-        None,
+        created_by_id: Some(user_id),
+        updated_by_id: None,
         workspace_id,
         project_id,
-        user_id,
-    );
+        owner_id: user_id,
+    };
     Ok(json_response(
         StatusCode::CREATED,
         render_quick_link(&row, &timezone)?,
@@ -2121,28 +2177,20 @@ async fn quick_link_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("PATCH", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
     // Zone activation precedes the view body (`TimezoneMixin.initial`).
     let timezone = actor_timezone(&pool, &user_id).await?;
-    let row: Option<QuickLinkRow> = sqlx::query_as(
-        r#"SELECT l.id, l.created_at, l.updated_at, l.deleted_at, l.title, l.url,
-                  l.metadata, l.created_by_id, l.updated_by_id, l.workspace_id,
-                  l.project_id, l.owner_id
-           FROM workspace_user_links l JOIN workspaces w ON w.id = l.workspace_id
-           WHERE l.id = $1 AND w.slug = $2 AND l.owner_id = $3 AND l.deleted_at IS NULL
-           ORDER BY l.created_at DESC LIMIT 1"#,
-    )
-    .bind(pk)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = quick_link_owned_query(pk, &slug, user_id, true)
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(QuickLinkRow::from);
     let Some(current) = row else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -2160,16 +2208,14 @@ async fn quick_link_partial_update(
     // Dup guard (`workspace.py:234-246`): an omitted `url` passes `None`,
     // which matches nothing on the `NOT NULL` column.
     if input.url.is_some() {
-        let dup: Option<(Uuid,)> = sqlx::query_as(
-            r#"SELECT l.id FROM workspace_user_links l
-               WHERE l.url = $1 AND l.workspace_id = $2 AND l.owner_id = $3
-               AND l.id != $4 AND l.deleted_at IS NULL LIMIT 1"#,
+        let dup: Option<Uuid> = quick_link_dup_query(
+            input.url.clone().expect("some url").as_str(),
+            current.workspace_id,
+            current.owner_id,
+            Some(pk),
         )
-        .bind(input.url.as_deref().expect("some url"))
-        .bind(current.9)
-        .bind(current.11)
-        .bind(pk)
-        .fetch_optional(&pool)
+        .into_tuple()
+        .one(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
         if dup.is_some() {
@@ -2181,60 +2227,81 @@ async fn quick_link_partial_update(
     }
     let workspace_id = match input.project {
         Some(Some(project_id)) => {
-            let prow: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-                    .bind(project_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(|_| Denial::ServerError)?;
-            backfill_workspace_id(current.9, prow.map(|row| row.0))
+            let prow: Option<Uuid> = projects::Entity::find()
+                .select_only()
+                .column(projects::Column::WorkspaceId)
+                .filter(projects::Column::Id.eq(project_id))
+                .into_tuple()
+                .one(&orm(&pool))
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            backfill_workspace_id(current.workspace_id, prow)
         }
-        _ => current.9,
+        _ => current.workspace_id,
     };
     // Validated, then overwritten (`updated_by=user`).
     let _ = input.updated_by;
     let updated_at = Utc::now();
     // `update()` writes the validated keys; `save()` stamps
     // `updated_at`/`updated_by` (and keeps a validated `created_by`).
-    let deleted_at = input.deleted_at.unwrap_or(current.3);
-    let title = input.title.unwrap_or(current.4);
-    let url = input.url.unwrap_or(current.5);
-    let metadata = input.metadata.unwrap_or(current.6);
-    let created_by = input.created_by.unwrap_or(current.7);
-    let project = input.project.unwrap_or(current.10);
-    sqlx::query(
-        r#"UPDATE workspace_user_links SET deleted_at = $1, title = $2, url = $3,
-                  metadata = $4, created_by_id = $5, updated_by_id = $6,
-                  workspace_id = $7, project_id = $8, updated_at = $9
-           WHERE id = $10"#,
-    )
-    .bind(deleted_at)
-    .bind(&title)
-    .bind(&url)
-    .bind(&metadata)
-    .bind(created_by)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(project)
-    .bind(updated_at)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(map_write_error)?;
-    let row: QuickLinkRow = (
-        pk,
-        current.1,
+    let deleted_at = input.deleted_at.unwrap_or(current.deleted_at);
+    let title = input.title.unwrap_or(current.title);
+    let url = input.url.unwrap_or(current.url);
+    let metadata = input.metadata.unwrap_or(current.metadata);
+    let created_by = input.created_by.unwrap_or(current.created_by_id);
+    let project = input.project.unwrap_or(current.project_id);
+    workspace_user_links::Entity::update_many()
+        .col_expr(
+            workspace_user_links::Column::DeletedAt,
+            Expr::value(deleted_at.map(DateTimeWithTimeZone::from)),
+        )
+        .col_expr(
+            workspace_user_links::Column::Title,
+            Expr::value(title.clone()),
+        )
+        .col_expr(workspace_user_links::Column::Url, Expr::value(url.clone()))
+        .col_expr(
+            workspace_user_links::Column::Metadata,
+            Expr::value(metadata.clone()),
+        )
+        .col_expr(
+            workspace_user_links::Column::CreatedById,
+            Expr::value(created_by),
+        )
+        .col_expr(
+            workspace_user_links::Column::UpdatedById,
+            Expr::value(Some(user_id)),
+        )
+        .col_expr(
+            workspace_user_links::Column::WorkspaceId,
+            Expr::value(workspace_id),
+        )
+        .col_expr(
+            workspace_user_links::Column::ProjectId,
+            Expr::value(project),
+        )
+        .col_expr(
+            workspace_user_links::Column::UpdatedAt,
+            Expr::value(DateTimeWithTimeZone::from(updated_at)),
+        )
+        .filter(workspace_user_links::Column::Id.eq(pk))
+        .exec(&orm(&pool))
+        .await
+        .map_err(map_write_error)?;
+    let row = QuickLinkRow {
+        id: pk,
+        created_at: current.created_at,
         updated_at,
         deleted_at,
         title,
         url,
         metadata,
-        created_by,
-        Some(user_id),
+        created_by_id: created_by,
+        updated_by_id: Some(user_id),
         workspace_id,
-        project,
-        current.11,
-    );
+        project_id: project,
+        owner_id: current.owner_id,
+    };
     Ok(json_response(
         StatusCode::OK,
         render_quick_link(&row, &timezone)?,
@@ -2246,28 +2313,20 @@ async fn quick_link_retrieve(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("GET", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
     // Zone activation precedes the view body (`TimezoneMixin.initial`).
     let timezone = actor_timezone(&pool, &user_id).await?;
-    let row: Option<QuickLinkRow> = sqlx::query_as(
-        r#"SELECT l.id, l.created_at, l.updated_at, l.deleted_at, l.title, l.url,
-                  l.metadata, l.created_by_id, l.updated_by_id, l.workspace_id,
-                  l.project_id, l.owner_id
-           FROM workspace_user_links l JOIN workspaces w ON w.id = l.workspace_id
-           WHERE l.id = $1 AND w.slug = $2 AND l.owner_id = $3 AND l.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(pk)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = quick_link_owned_query(pk, &slug, user_id, false)
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(QuickLinkRow::from);
     let Some(row) = row else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -2285,41 +2344,52 @@ async fn quick_link_destroy(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("DELETE", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
     // No try/except in Python (`:56`): a miss funnels into the generic
     // `ObjectDoesNotExist` 404.
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT l.id FROM workspace_user_links l JOIN workspaces w ON w.id = l.workspace_id
-           WHERE l.id = $1 AND w.slug = $2 AND l.owner_id = $3 AND l.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(pk)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<Uuid> = workspace_user_links::Entity::find()
+        .select_only()
+        .column(workspace_user_links::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_user_links::Relation::Workspaces.def(),
+        )
+        .filter(workspace_user_links::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(workspace_user_links::Column::OwnerId.eq(user_id))
+        .filter(workspace_user_links::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if row.is_none() {
         return Err(Denial::NotFound);
     }
     let deleted_at = Utc::now();
     let updated_at = Utc::now();
-    sqlx::query(
-        r#"UPDATE workspace_user_links SET deleted_at = $1, updated_at = $2, updated_by_id = $3
-           WHERE id = $4"#,
-    )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(user_id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(map_write_error)?;
+    workspace_user_links::Entity::update_many()
+        .col_expr(
+            workspace_user_links::Column::DeletedAt,
+            Expr::value(DateTimeWithTimeZone::from(deleted_at)),
+        )
+        .col_expr(
+            workspace_user_links::Column::UpdatedAt,
+            Expr::value(DateTimeWithTimeZone::from(updated_at)),
+        )
+        .col_expr(
+            workspace_user_links::Column::UpdatedById,
+            Expr::value(Some(user_id)),
+        )
+        .filter(workspace_user_links::Column::Id.eq(pk))
+        .exec(&orm(&pool))
+        .await
+        .map_err(map_write_error)?;
     enqueue_soft_delete(&pool, QUICK_LINK_MODEL, &pk).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
@@ -2337,19 +2407,21 @@ async fn quick_link_list(
     // No `Workspace.objects.get` on this path (`:62` filters the slug
     // directly), so there is no 404 — only the gate's 403.
     let timezone = actor_timezone(&pool, &user_id).await?;
-    let rows: Vec<QuickLinkRow> = sqlx::query_as(
-        r#"SELECT l.id, l.created_at, l.updated_at, l.deleted_at, l.title, l.url,
-                  l.metadata, l.created_by_id, l.updated_by_id, l.workspace_id,
-                  l.project_id, l.owner_id
-           FROM workspace_user_links l JOIN workspaces w ON w.id = l.workspace_id
-           WHERE w.slug = $1 AND l.owner_id = $2 AND l.deleted_at IS NULL
-           ORDER BY l.created_at DESC"#,
-    )
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows: Vec<QuickLinkRow> = workspace_user_links::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_user_links::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(workspace_user_links::Column::OwnerId.eq(user_id))
+        .filter(workspace_user_links::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_user_links::Column::CreatedAt)
+        .all(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .into_iter()
+        .map(QuickLinkRow::from)
+        .collect();
     let mut parts = Vec::with_capacity(rows.len());
     for row in &rows {
         parts.push(render_quick_link(row, &timezone)?);
@@ -2573,12 +2645,10 @@ async fn validate_sticky_body(
             }
             continue;
         };
-        let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT u.id FROM users u WHERE u.id = $1"#)
-            .bind(id)
-            .fetch_optional(pool)
+        if !user_exists(pool, id)
             .await
-            .map_err(|_| WriteInvalid::ServerError)?;
-        if row.is_none() {
+            .map_err(|_| WriteInvalid::ServerError)?
+        {
             push_field_msg(&mut errors, field, pk_does_not_exist_msg(value));
         } else {
             match field {
@@ -2633,7 +2703,7 @@ async fn validate_sticky_body(
 
 /// One `stickies` row (17 columns — past the tuple `FromRow` arity,
 /// so a named struct).
-#[derive(sqlx::FromRow, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct StickyRow {
     id: Uuid,
     created_at: DateTime<Utc>,
@@ -2652,6 +2722,30 @@ struct StickyRow {
     updated_by_id: Option<Uuid>,
     workspace_id: Uuid,
     owner_id: Uuid,
+}
+
+impl From<stickies::Model> for StickyRow {
+    fn from(model: stickies::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|at| at.with_timezone(&Utc)),
+            name: model.name,
+            description: model.description,
+            description_html: model.description_html,
+            description_stripped: model.description_stripped,
+            description_binary: model.description_binary,
+            logo_props: model.logo_props,
+            color: model.color,
+            background_color: model.background_color,
+            sort_order: model.sort_order,
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            workspace_id: model.workspace_id,
+            owner_id: model.owner_id,
+        }
+    }
 }
 
 /// One `stickies` row in [`ser_extras::STICKY_WIRE_FIELDS`] order. The
@@ -2779,7 +2873,24 @@ fn render_sticky(row: &StickyRow, timezone: &Tz) -> Result<String, Denial> {
     Ok(out)
 }
 
-const STICKY_SELECT: &str = "s.id, s.created_at, s.updated_at, s.deleted_at, s.name, s.description, s.description_html, s.description_stripped, s.description_binary, s.logo_props, s.color, s.background_color, s.sort_order, s.created_by_id, s.updated_by_id, s.workspace_id, s.owner_id";
+/// The `MAX(sort_order)` read (`sticky.py`, `Sticky.save` sequence
+/// rule).
+#[derive(FromQueryResult)]
+struct StickyMaxRow {
+    max_sort_order: Option<f64>,
+}
+
+/// The live workspace `MAX(sort_order)` over `stickies`.
+fn sticky_max_query(workspace_id: Uuid) -> Select<stickies::Entity> {
+    stickies::Entity::find()
+        .select_only()
+        .expr_as(
+            Func::max(Expr::col(stickies::Column::SortOrder)),
+            "max_sort_order",
+        )
+        .filter(stickies::Column::WorkspaceId.eq(workspace_id))
+        .filter(stickies::Column::DeletedAt.is_null())
+}
 
 async fn sticky_create(
     State(state): State<AppState>,
@@ -2805,15 +2916,12 @@ async fn sticky_create(
     // `Sticky.save` sequence rule: `max + 10000` wins whenever the
     // workspace has rows (input `sort_order` ignored); the input (or the
     // 65535 default) survives only on an empty table.
-    let max_row: (Option<f64>,) = sqlx::query_as(
-        r#"SELECT MAX(s.sort_order) FROM stickies s
-           WHERE s.workspace_id = $1 AND s.deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let sort_order = match max_row.0 {
+    let max_row = sticky_max_query(workspace_id)
+        .into_model::<StickyMaxRow>()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let sort_order = match max_row.and_then(|row| row.max_sort_order) {
         None => input.sort_order.unwrap_or(sticky_model::DEFAULT_SORT_ORDER),
         Some(max) => sticky_model::sort_order_on_create(Some(max)),
     };
@@ -2837,31 +2945,26 @@ async fn sticky_create(
     let name = input.name.flatten();
     let color = input.color.flatten();
     let background_color = input.background_color.flatten();
-    sqlx::query(
-        r#"INSERT INTO stickies
-           (id, created_at, updated_at, deleted_at, name, description, description_html,
-            description_stripped, description_binary, logo_props, color, background_color,
-            sort_order, created_by_id, updated_by_id, workspace_id, owner_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
-    )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(deleted_at)
-    .bind(&name)
-    .bind(&description)
-    .bind(&description_html)
-    .bind(&description_stripped)
-    .bind(Option::<Vec<u8>>::None)
-    .bind(&logo_props)
-    .bind(&color)
-    .bind(&background_color)
-    .bind(sort_order)
-    .bind(user_id)
-    .bind(Option::<Uuid>::None)
-    .bind(workspace_id)
-    .bind(user_id)
-    .execute(&pool)
+    stickies::ActiveModel {
+        id: Set(id),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+        deleted_at: Set(deleted_at.map(Into::into)),
+        name: Set(name.clone()),
+        description: Set(description.clone()),
+        description_html: Set(description_html.clone()),
+        description_stripped: Set(description_stripped.clone()),
+        description_binary: Set(None),
+        logo_props: Set(logo_props.clone()),
+        color: Set(color.clone()),
+        background_color: Set(background_color.clone()),
+        sort_order: Set(sort_order),
+        created_by_id: Set(Some(user_id)),
+        owner_id: Set(user_id),
+        updated_by_id: Set(None),
+        workspace_id: Set(workspace_id),
+    }
+    .insert(&orm(&pool))
     .await
     .map_err(map_write_error)?;
     let row = StickyRow {
@@ -2918,33 +3021,21 @@ async fn sticky_list(
     // `?query=` applies only when truthy (`:42,44`).
     let filter = query_last(&query, "query").filter(|term| !term.is_empty());
     let pattern = filter.map(|term| format!("%{}%", queries_extras::escape_icontains(&term)));
-    let total: (i64,) = sqlx::query_as(
-        r#"SELECT COUNT(*) FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE w.slug = $1 AND s.owner_id = $2 AND s.deleted_at IS NULL
-           AND ($3::text IS NULL OR s.description_stripped ILIKE $3)"#,
-    )
-    .bind(&slug)
-    .bind(user_id)
-    .bind(pattern.as_deref())
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // `-sort_order` (`queries_extras::STICKY_LIST_ORDER_SQL`), spelled with
-    // the `s` alias this query uses (the unaliased fragment is a 42P01).
-    let fetch: Vec<StickyRow> = sqlx::query_as(&format!(
-        r#"SELECT {STICKY_SELECT} FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE w.slug = $1 AND s.owner_id = $2 AND s.deleted_at IS NULL
-           AND ($3::text IS NULL OR s.description_stripped ILIKE $3)
-           ORDER BY s.sort_order DESC LIMIT $4 OFFSET $5"#,
-    ))
-    .bind(&slug)
-    .bind(user_id)
-    .bind(pattern.as_deref())
-    .bind(window.stop - window.offset)
-    .bind(window.offset)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let total = sticky_list_base(&slug, user_id, pattern.as_deref())
+        .count(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    // `-sort_order` (`queries_extras::STICKY_LIST_ORDER_SQL`).
+    let fetch: Vec<StickyRow> = sticky_list_base(&slug, user_id, pattern.as_deref())
+        .order_by_desc(stickies::Column::SortOrder)
+        .limit((window.stop - window.offset) as u64)
+        .offset(window.offset as u64)
+        .all(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .into_iter()
+        .map(StickyRow::from)
+        .collect();
     let has_more = i64::try_from(fetch.len()).unwrap_or(i64::MAX) > limit;
     let next = crate::paginator::next_cursor(limit, window.page, has_more);
     let prev = crate::paginator::prev_cursor(limit, window.page);
@@ -2957,7 +3048,28 @@ async fn sticky_list(
     for part in &parts {
         rendered.push(serde_json::from_str(part).map_err(|_| Denial::ServerError)?);
     }
-    envelope(total.0, per_page, &next, &prev, Value::Array(rendered))
+    envelope(
+        i64::try_from(total).unwrap_or(i64::MAX),
+        per_page,
+        &next,
+        &prev,
+        Value::Array(rendered),
+    )
+}
+
+/// The sticky-list tenant scope (`sticky.py:38-44`): the workspace slug,
+/// the owner, live rows, and the truthy `?query=` icontains filter on the
+/// stripped description. The count and the page fetch share it.
+fn sticky_list_base(slug: &str, user_id: Uuid, pattern: Option<&str>) -> Select<stickies::Entity> {
+    let mut query = stickies::Entity::find()
+        .join(JoinType::InnerJoin, stickies::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(stickies::Column::OwnerId.eq(user_id))
+        .filter(stickies::Column::DeletedAt.is_null());
+    if let Some(pattern) = pattern {
+        query = query.filter(Expr::col(stickies::Column::DescriptionStripped).ilike(pattern));
+    }
+    query
 }
 
 async fn sticky_retrieve(
@@ -2965,23 +3077,23 @@ async fn sticky_retrieve(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     // No decorator on this action: any signed-in user reaches the body.
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     // Zone activation precedes the view body (`TimezoneMixin.initial`).
     let timezone = actor_timezone(&pool, &user_id).await?;
-    let row: Option<StickyRow> = sqlx::query_as(&format!(
-        r#"SELECT {STICKY_SELECT} FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.id = $1 AND w.slug = $2 AND s.owner_id = $3 AND s.deleted_at IS NULL
-           LIMIT 1"#,
-    ))
-    .bind(pk)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = stickies::Entity::find()
+        .join(JoinType::InnerJoin, stickies::Relation::Workspaces.def())
+        .filter(stickies::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(stickies::Column::OwnerId.eq(user_id))
+        .filter(stickies::Column::DeletedAt.is_null())
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(StickyRow::from);
     let Some(row) = row else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -2999,15 +3111,16 @@ async fn sticky_retrieve(
 /// created_by=user).exists()` — unscoped by workspace/owner, unlike the
 /// handler lookups.
 async fn sticky_creator_fact(pool: &PgPool, pk: &Uuid, user_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT s.id FROM stickies s
-           WHERE s.id = $1 AND s.created_by_id = $2 AND s.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(pk)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<Uuid> = stickies::Entity::find()
+        .select_only()
+        .column(stickies::Column::Id)
+        .filter(stickies::Column::Id.eq(*pk))
+        .filter(stickies::Column::CreatedById.eq(*user_id))
+        .filter(stickies::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -3017,26 +3130,26 @@ async fn sticky_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("PATCH", "workspaces/<slug>/stickies/<pk>/");
     let is_creator = sticky_creator_fact(&pool, &pk, &user_id).await?;
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), is_creator).await?;
     check_gate(&gate, &slug, &facts)?;
     // Zone activation precedes the view body (`TimezoneMixin.initial`).
     let timezone = actor_timezone(&pool, &user_id).await?;
-    let row: Option<StickyRow> = sqlx::query_as(&format!(
-        r#"SELECT {STICKY_SELECT} FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.id = $1 AND w.slug = $2 AND s.owner_id = $3 AND s.deleted_at IS NULL
-           LIMIT 1"#,
-    ))
-    .bind(pk)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = stickies::Entity::find()
+        .join(JoinType::InnerJoin, stickies::Relation::Workspaces.def())
+        .filter(stickies::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(stickies::Column::OwnerId.eq(user_id))
+        .filter(stickies::Column::DeletedAt.is_null())
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(StickyRow::from);
     let Some(current) = row else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -3066,29 +3179,41 @@ async fn sticky_partial_update(
     let background_color = input.background_color.unwrap_or(current.background_color);
     let sort_order = input.sort_order.unwrap_or(current.sort_order);
     let created_by = input.created_by.unwrap_or(current.created_by_id);
-    sqlx::query(
-        r#"UPDATE stickies SET deleted_at = $1, name = $2, description = $3,
-                  description_html = $4, description_stripped = $5, logo_props = $6,
-                  color = $7, background_color = $8, sort_order = $9,
-                  created_by_id = $10, updated_by_id = $11, updated_at = $12
-           WHERE id = $13"#,
-    )
-    .bind(deleted_at)
-    .bind(&name)
-    .bind(&description)
-    .bind(&description_html)
-    .bind(&description_stripped)
-    .bind(&logo_props)
-    .bind(&color)
-    .bind(&background_color)
-    .bind(sort_order)
-    .bind(created_by)
-    .bind(user_id)
-    .bind(updated_at)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(map_write_error)?;
+    stickies::Entity::update_many()
+        .col_expr(
+            stickies::Column::DeletedAt,
+            Expr::value(deleted_at.map(DateTimeWithTimeZone::from)),
+        )
+        .col_expr(stickies::Column::Name, Expr::value(name.clone()))
+        .col_expr(
+            stickies::Column::Description,
+            Expr::value(description.clone()),
+        )
+        .col_expr(
+            stickies::Column::DescriptionHtml,
+            Expr::value(description_html.clone()),
+        )
+        .col_expr(
+            stickies::Column::DescriptionStripped,
+            Expr::value(description_stripped.clone()),
+        )
+        .col_expr(stickies::Column::LogoProps, Expr::value(logo_props.clone()))
+        .col_expr(stickies::Column::Color, Expr::value(color.clone()))
+        .col_expr(
+            stickies::Column::BackgroundColor,
+            Expr::value(background_color.clone()),
+        )
+        .col_expr(stickies::Column::SortOrder, Expr::value(sort_order))
+        .col_expr(stickies::Column::CreatedById, Expr::value(created_by))
+        .col_expr(stickies::Column::UpdatedById, Expr::value(Some(user_id)))
+        .col_expr(
+            stickies::Column::UpdatedAt,
+            Expr::value(DateTimeWithTimeZone::from(updated_at)),
+        )
+        .filter(stickies::Column::Id.eq(pk))
+        .exec(&orm(&pool))
+        .await
+        .map_err(map_write_error)?;
     let row = StickyRow {
         id: pk,
         created_at: current.created_at,
@@ -3119,24 +3244,26 @@ async fn sticky_destroy(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("DELETE", "workspaces/<slug>/stickies/<pk>/");
     let is_creator = sticky_creator_fact(&pool, &pk, &user_id).await?;
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), is_creator).await?;
     check_gate(&gate, &slug, &facts)?;
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT s.id FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.id = $1 AND w.slug = $2 AND s.owner_id = $3 AND s.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(pk)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<Uuid> = stickies::Entity::find()
+        .select_only()
+        .column(stickies::Column::Id)
+        .join(JoinType::InnerJoin, stickies::Relation::Workspaces.def())
+        .filter(stickies::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(stickies::Column::OwnerId.eq(user_id))
+        .filter(stickies::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if row.is_none() {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -3145,16 +3272,20 @@ async fn sticky_destroy(
     }
     let deleted_at = Utc::now();
     let updated_at = Utc::now();
-    sqlx::query(
-        r#"UPDATE stickies SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4"#,
-    )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(user_id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(map_write_error)?;
+    stickies::Entity::update_many()
+        .col_expr(
+            stickies::Column::DeletedAt,
+            Expr::value(DateTimeWithTimeZone::from(deleted_at)),
+        )
+        .col_expr(
+            stickies::Column::UpdatedAt,
+            Expr::value(DateTimeWithTimeZone::from(updated_at)),
+        )
+        .col_expr(stickies::Column::UpdatedById, Expr::value(Some(user_id)))
+        .filter(stickies::Column::Id.eq(pk))
+        .exec(&orm(&pool))
+        .await
+        .map_err(map_write_error)?;
     enqueue_soft_delete(&pool, STICKY_MODEL, &pk).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
@@ -3270,16 +3401,17 @@ async fn home_prefs_get(
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
     let workspace_id = resolve_workspace_id(&pool, &slug).await?;
-    let existing: Vec<(String,)> = sqlx::query_as(
-        r#"SELECT p.key FROM workspace_home_preferences p
-           WHERE p.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let borrowed: Vec<&str> = existing.iter().map(|row| row.0.as_str()).collect();
+    let existing: Vec<String> = workspace_home_preferences::Entity::find()
+        .select_only()
+        .column(workspace_home_preferences::Column::Key)
+        .filter(workspace_home_preferences::Column::UserId.eq(user_id))
+        .filter(workspace_home_preferences::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_home_preferences::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let borrowed: Vec<&str> = existing.iter().map(String::as_str).collect();
     // The autocreate loop (`:37-58`, [`queries_extras::home_autocreate_plan`]):
     // one insert per missing key in plan order, each with its own clock
     // read (the `-created_at` response order depends on it).
@@ -3289,37 +3421,39 @@ async fn home_prefs_get(
         // which have no DB-level DEFAULT — omitting them violates NOT NULL.
         // `bulk_create` skips `save()`, so `created_by`/`updated_by` stay
         // NULL (matching the omitted columns here).
-        sqlx::query(
-            r#"INSERT INTO workspace_home_preferences
-               (id, created_at, updated_at, "key", user_id, workspace_id, sort_order,
-                is_enabled, config)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(key)
-        .bind(user_id)
-        .bind(workspace_id)
-        .bind(f64::from(sort_order))
-        .bind(true)
-        .bind(Value::Object(Map::new()))
-        .execute(&pool)
+        workspace_home_preferences::Entity::insert(workspace_home_preferences::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(Utc::now().into()),
+            updated_at: Set(Utc::now().into()),
+            key: Set(key.to_owned()),
+            user_id: Set(user_id),
+            workspace_id: Set(workspace_id),
+            sort_order: Set(f64::from(sort_order)),
+            is_enabled: Set(true),
+            config: Set(Value::Object(Map::new())),
+            ..Default::default()
+        })
+        .on_conflict(OnConflict::new().do_nothing().to_owned())
+        .exec_without_returning(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     }
-    let rows: Vec<(String, bool, Value, f64)> = sqlx::query_as(
-        r#"SELECT p."key", p.is_enabled, p.config, p.sort_order
-           FROM workspace_home_preferences p
-           WHERE p.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL
-           ORDER BY p.created_at DESC"#,
-    )
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows: Vec<(String, bool, Value, f64)> = workspace_home_preferences::Entity::find()
+        .select_only()
+        .columns([
+            workspace_home_preferences::Column::Key,
+            workspace_home_preferences::Column::IsEnabled,
+            workspace_home_preferences::Column::Config,
+            workspace_home_preferences::Column::SortOrder,
+        ])
+        .filter(workspace_home_preferences::Column::UserId.eq(user_id))
+        .filter(workspace_home_preferences::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_home_preferences::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_home_preferences::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let parts: Vec<String> = rows
         .iter()
         .map(|row| render_home_pref_row(&row.0, row.1, &row.2, row.3))
@@ -3341,18 +3475,27 @@ async fn home_pref_patch(
     let gate = gate_for("PATCH", "workspaces/<slug>/home-preferences/<key>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
-    let row: Option<(Uuid, String, bool, f64)> = sqlx::query_as(
-        r#"SELECT p.id, p."key", p.is_enabled, p.sort_order
-           FROM workspace_home_preferences p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p."key" = $1 AND w.slug = $2 AND p.user_id = $3 AND p.deleted_at IS NULL
-           ORDER BY p.created_at DESC LIMIT 1"#,
-    )
-    .bind(&key)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(Uuid, String, bool, f64)> = workspace_home_preferences::Entity::find()
+        .select_only()
+        .columns([
+            workspace_home_preferences::Column::Id,
+            workspace_home_preferences::Column::Key,
+            workspace_home_preferences::Column::IsEnabled,
+            workspace_home_preferences::Column::SortOrder,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            workspace_home_preferences::Relation::Workspaces.def(),
+        )
+        .filter(workspace_home_preferences::Column::Key.eq(key.clone()))
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(workspace_home_preferences::Column::UserId.eq(user_id))
+        .filter(workspace_home_preferences::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_home_preferences::Column::CreatedAt)
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((id, current_key, current_enabled, current_sort)) = row else {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -3375,22 +3518,34 @@ async fn home_pref_patch(
     let new_key = input.key.unwrap_or(current_key);
     let new_enabled = input.is_enabled.unwrap_or(current_enabled);
     let new_sort = input.sort_order.unwrap_or(current_sort);
+    let now = Utc::now();
     // `serializer.save()` → full `save()` (`updated_at`/`updated_by`
     // move); a clashing `key` is `IntegrityError` → 400.
-    sqlx::query(
-        r#"UPDATE workspace_home_preferences
-           SET "key" = $1, is_enabled = $2, sort_order = $3, updated_at = $4, updated_by_id = $5
-           WHERE id = $6"#,
-    )
-    .bind(&new_key)
-    .bind(new_enabled)
-    .bind(new_sort)
-    .bind(Utc::now())
-    .bind(user_id)
-    .bind(id)
-    .execute(&pool)
-    .await
-    .map_err(map_write_error)?;
+    workspace_home_preferences::Entity::update_many()
+        .col_expr(
+            workspace_home_preferences::Column::Key,
+            Expr::value(new_key.clone()),
+        )
+        .col_expr(
+            workspace_home_preferences::Column::IsEnabled,
+            Expr::value(new_enabled),
+        )
+        .col_expr(
+            workspace_home_preferences::Column::SortOrder,
+            Expr::value(new_sort),
+        )
+        .col_expr(
+            workspace_home_preferences::Column::UpdatedAt,
+            Expr::value(DateTimeWithTimeZone::from(now)),
+        )
+        .col_expr(
+            workspace_home_preferences::Column::UpdatedById,
+            Expr::value(Some(user_id)),
+        )
+        .filter(workspace_home_preferences::Column::Id.eq(id))
+        .exec(&orm(&pool))
+        .await
+        .map_err(map_write_error)?;
     Ok(json_response(
         StatusCode::OK,
         render_home_pref_patch(&new_key, new_enabled, new_sort),
@@ -3485,48 +3640,51 @@ async fn sidebar_prefs_get(
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
     let workspace_id = resolve_workspace_id(&pool, &slug).await?;
-    let existing: Vec<(String,)> = sqlx::query_as(
-        r#"SELECT p."key" FROM workspace_user_preferences p
-           WHERE p.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let borrowed: Vec<&str> = existing.iter().map(|row| row.0.as_str()).collect();
+    let existing: Vec<String> = workspace_user_preferences::Entity::find()
+        .select_only()
+        .column(workspace_user_preferences::Column::Key)
+        .filter(workspace_user_preferences::Column::UserId.eq(user_id))
+        .filter(workspace_user_preferences::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_user_preferences::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let borrowed: Vec<&str> = existing.iter().map(String::as_str).collect();
     // The autocreate loop (`:35-61`,
     // [`queries_extras::sidebar_autocreate_plan`]).
     for (key, is_pinned, sort_order) in queries_extras::sidebar_autocreate_plan(&borrowed) {
-        sqlx::query(
-            r#"INSERT INTO workspace_user_preferences
-               (id, created_at, updated_at, "key", user_id, workspace_id, sort_order, is_pinned)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(key)
-        .bind(user_id)
-        .bind(workspace_id)
-        .bind(f64::from(sort_order))
-        .bind(is_pinned)
-        .execute(&pool)
+        workspace_user_preferences::Entity::insert(workspace_user_preferences::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(Utc::now().into()),
+            updated_at: Set(Utc::now().into()),
+            key: Set(key.to_owned()),
+            user_id: Set(user_id),
+            workspace_id: Set(workspace_id),
+            sort_order: Set(f64::from(sort_order)),
+            is_pinned: Set(is_pinned),
+            ..Default::default()
+        })
+        .on_conflict(OnConflict::new().do_nothing().to_owned())
+        .exec_without_returning(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     }
-    let rows: Vec<(String, bool, f64)> = sqlx::query_as(
-        r#"SELECT p."key", p.is_pinned, p.sort_order
-           FROM workspace_user_preferences p
-           WHERE p.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL
-           ORDER BY p.sort_order ASC"#,
-    )
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows: Vec<(String, bool, f64)> = workspace_user_preferences::Entity::find()
+        .select_only()
+        .columns([
+            workspace_user_preferences::Column::Key,
+            workspace_user_preferences::Column::IsPinned,
+            workspace_user_preferences::Column::SortOrder,
+        ])
+        .filter(workspace_user_preferences::Column::UserId.eq(user_id))
+        .filter(workspace_user_preferences::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_user_preferences::Column::DeletedAt.is_null())
+        .order_by_asc(workspace_user_preferences::Column::SortOrder)
+        .into_tuple()
+        .all(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::OK, render_sidebar_prefs(&rows)))
 }
 
@@ -3575,17 +3733,25 @@ async fn sidebar_prefs_patch(
         // match another user's row. Non-string keys stringify
         // (`CharField.get_prep_value`) and miss.
         let key_text = py_str(key);
-        let found: Option<(Uuid, bool, f64)> = sqlx::query_as(
-            r#"SELECT p.id, p.is_pinned, p.sort_order
-               FROM workspace_user_preferences p JOIN workspaces w ON w.id = p.workspace_id
-               WHERE p."key" = $1 AND w.slug = $2 AND p.deleted_at IS NULL
-               ORDER BY p.created_at DESC LIMIT 1"#,
-        )
-        .bind(&key_text)
-        .bind(&slug)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let found: Option<(Uuid, bool, f64)> = workspace_user_preferences::Entity::find()
+            .select_only()
+            .columns([
+                workspace_user_preferences::Column::Id,
+                workspace_user_preferences::Column::IsPinned,
+                workspace_user_preferences::Column::SortOrder,
+            ])
+            .join(
+                JoinType::InnerJoin,
+                workspace_user_preferences::Relation::Workspaces.def(),
+            )
+            .filter(workspace_user_preferences::Column::Key.eq(key_text))
+            .filter(workspaces::Column::Slug.eq(slug.clone()))
+            .filter(workspace_user_preferences::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_user_preferences::Column::CreatedAt)
+            .into_tuple()
+            .one(&orm(&pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
         let Some((id, current_pinned, current_sort)) = found else {
             continue;
         };
@@ -3621,11 +3787,17 @@ async fn sidebar_prefs_patch(
         }
         // `save(update_fields=["is_pinned", "sort_order"])`: only these
         // two columns move — `updated_at` is NOT stamped.
-        sqlx::query(r#"UPDATE workspace_user_preferences SET is_pinned = $1, sort_order = $2 WHERE id = $3"#)
-            .bind(new_pinned.unwrap_or(current_pinned))
-            .bind(new_sort.unwrap_or(current_sort))
-            .bind(id)
-            .execute(&pool)
+        workspace_user_preferences::Entity::update_many()
+            .col_expr(
+                workspace_user_preferences::Column::IsPinned,
+                Expr::value(new_pinned.unwrap_or(current_pinned)),
+            )
+            .col_expr(
+                workspace_user_preferences::Column::SortOrder,
+                Expr::value(new_sort.unwrap_or(current_sort)),
+            )
+            .filter(workspace_user_preferences::Column::Id.eq(id))
+            .exec(&orm(&pool))
             .await
             .map_err(map_write_error)?;
     }
@@ -3638,6 +3810,38 @@ async fn sidebar_prefs_patch(
 // ---------------------------------------------------------------------------
 // Recent visits (recent_visit.py:17-36)
 // ---------------------------------------------------------------------------
+
+/// The recent-visits read (`:26-33`): the slug tenant scope, the truthy
+/// `?entity_name=` narrowing, and the `issue`/`page`/`project` allowlist
+/// clamp, newest first, at most 20 rows.
+fn recent_visits_query(
+    slug: &str,
+    user_id: Uuid,
+    entity: Option<&str>,
+) -> Select<user_recent_visits::Entity> {
+    let mut query = user_recent_visits::Entity::find()
+        .select_only()
+        .columns([
+            user_recent_visits::Column::Id,
+            user_recent_visits::Column::EntityName,
+            user_recent_visits::Column::EntityIdentifier,
+            user_recent_visits::Column::VisitedAt,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            user_recent_visits::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(user_recent_visits::Column::UserId.eq(user_id))
+        .filter(user_recent_visits::Column::DeletedAt.is_null())
+        .filter(user_recent_visits::Column::EntityName.is_in(["issue", "page", "project"]));
+    if let Some(name) = entity {
+        query = query.filter(user_recent_visits::Column::EntityName.eq(name));
+    }
+    query
+        .order_by_desc(user_recent_visits::Column::CreatedAt)
+        .limit(20)
+}
 
 async fn recent_visits_list(
     State(state): State<AppState>,
@@ -3655,20 +3859,12 @@ async fn recent_visits_list(
     // (`:30`); the allowlist clamp applies regardless (`:33`).
     let timezone = actor_timezone(&pool, &user_id).await?;
     let entity = query_last(&query, "entity_name").filter(|name| !name.is_empty());
-    let rows: Vec<(Uuid, String, Option<Uuid>, DateTime<Utc>)> = sqlx::query_as(
-        r#"SELECT v.id, v.entity_name, v.entity_identifier, v.visited_at
-           FROM user_recent_visits v JOIN workspaces w ON w.id = v.workspace_id
-           WHERE w.slug = $1 AND v.user_id = $2 AND v.deleted_at IS NULL
-           AND ($3::text IS NULL OR v.entity_name = $3)
-           AND v.entity_name IN ('issue', 'page', 'project')
-           ORDER BY v.created_at DESC LIMIT 20"#,
-    )
-    .bind(&slug)
-    .bind(user_id)
-    .bind(entity.as_deref())
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows: Vec<(Uuid, String, Option<Uuid>, DateTime<Utc>)> =
+        recent_visits_query(&slug, user_id, entity.as_deref())
+            .into_tuple()
+            .all(&orm(&pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
     let mut parts = Vec::with_capacity(rows.len());
     for (id, entity_name, entity_identifier, visited_at) in &rows {
         let fetched = match ser_extras::recent_visit_entity(entity_name) {
@@ -3723,39 +3919,52 @@ async fn fetch_issue_visit(
     let Some(identifier) = entity_identifier else {
         return Ok(None);
     };
-    let row: Option<IssueVisitQueryRow> = sqlx::query_as(
-        r#"SELECT i.id, i.name, i.state_id, i.priority, i.type_id, i.sequence_id, i.project_id
-               FROM issues i WHERE i.id = $1 AND i.deleted_at IS NULL"#,
-    )
-    .bind(identifier)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<IssueVisitQueryRow> = issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::Name,
+            issues::Column::StateId,
+            issues::Column::Priority,
+            issues::Column::TypeId,
+            issues::Column::SequenceId,
+            issues::Column::ProjectId,
+        ])
+        .filter(issues::Column::Id.eq(*identifier))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((id, name, state, priority, issue_type, sequence_id, project_id)) = row else {
         return Ok(None);
     };
     // `get_assignees` (`:271-272`): a `User` queryset, so the order is
     // `User.Meta.ordering` (`-created_at`), not the through-row clock.
-    let assignees: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT a.assignee_id FROM issue_assignees a JOIN users u ON u.id = a.assignee_id
-           WHERE a.issue_id = $1 AND a.deleted_at IS NULL ORDER BY u.created_at DESC"#,
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let assignee_ids: Vec<String> = assignees.iter().map(|row| row.0.to_string()).collect();
+    let assignees: Vec<Uuid> = issue_assignees::Entity::find()
+        .select_only()
+        .column(issue_assignees::Column::AssigneeId)
+        .join(JoinType::InnerJoin, issue_assignees::Relation::Users3.def())
+        .filter(issue_assignees::Column::IssueId.eq(id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .order_by_desc(users::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let assignee_ids: Vec<String> = assignees.iter().map(|id| id.to_string()).collect();
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();
     // `get_project_identifier` (`:267-269`): the FK fetch runs through
     // `_base_manager` (unfiltered), so a soft-deleted project still
     // yields its identifier.
-    let project_row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT p.identifier FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let project_identifier = project_row.map(|row| row.0);
+    let project_identifier: Option<String> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Identifier)
+        .filter(projects::Column::Id.eq(project_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let id = id.to_string();
     let state = state.map(|id| id.to_string());
     let issue_type = issue_type.map(|id| id.to_string());
@@ -3784,29 +3993,39 @@ async fn fetch_project_visit(
     let Some(identifier) = entity_identifier else {
         return Ok(None);
     };
-    let row: Option<(Uuid, String, Value, String)> = sqlx::query_as(
-        r#"SELECT p.id, p.name, p.logo_props, p.identifier FROM projects p
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(identifier)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(Uuid, String, Value, String)> = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Name,
+            projects::Column::LogoProps,
+            projects::Column::Identifier,
+        ])
+        .filter(projects::Column::Id.eq(*identifier))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((id, name, logo_props, identifier)) = row else {
         return Ok(None);
     };
     // `get_project_members` (`:282-287`): non-bot active members over the
     // default (soft-delete scoped) manager, `-created_at`.
-    let members: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT pm.member_id FROM project_members pm JOIN users u ON u.id = pm.member_id
-           WHERE pm.project_id = $1 AND u.is_bot = FALSE AND pm.is_active
-           AND pm.deleted_at IS NULL ORDER BY pm.created_at DESC"#,
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let member_ids: Vec<String> = members.iter().map(|row| row.0.to_string()).collect();
+    let members: Vec<Uuid> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::MemberId)
+        .join(JoinType::InnerJoin, project_members::Relation::Users2.def())
+        .filter(project_members::Column::ProjectId.eq(id))
+        .filter(users::Column::IsBot.eq(false))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .order_by_desc(project_members::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let member_ids: Vec<String> = members.iter().map(|id| id.to_string()).collect();
     let member_refs: Vec<&str> = member_ids.iter().map(String::as_str).collect();
     let id = id.to_string();
     let shaped = ser_extras::ProjectVisitRow {
@@ -3823,6 +4042,28 @@ async fn fetch_project_visit(
 /// `Page.objects.get(pk=…)` + `PageRecentVisitSerializer`
 /// (`workspace.py:290-311`). The row is never annotated here, so
 /// `get_project_id` always takes the first-related-project fallback.
+#[derive(FromQueryResult)]
+struct PageFirstProject {
+    first_id: Uuid,
+    first_identifier: String,
+}
+
+/// `obj.projects.first()`: the newest live project linked to the page.
+/// The through join carries no soft-delete filter on `project_pages`
+/// (Django core does not know the through model is soft-deletable), but
+/// the target is live.
+fn page_first_project_query(page_id: Uuid) -> Select<project_pages::Entity> {
+    project_pages::Entity::find()
+        .select_only()
+        .column_as(projects::Column::Id, "first_id")
+        .column_as(projects::Column::Identifier, "first_identifier")
+        .join(JoinType::InnerJoin, project_pages::Relation::Projects.def())
+        .filter(project_pages::Column::PageId.eq(page_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .order_by_desc(projects::Column::CreatedAt)
+        .limit(1)
+}
+
 async fn fetch_page_visit(
     pool: &PgPool,
     entity_identifier: &Option<Uuid>,
@@ -3830,30 +4071,32 @@ async fn fetch_page_visit(
     let Some(identifier) = entity_identifier else {
         return Ok(None);
     };
-    let row: Option<(Uuid, String, Value, Uuid)> = sqlx::query_as(
-        r#"SELECT p.id, p.name, p.logo_props, p.owned_by_id FROM pages p
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(identifier)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(Uuid, String, Value, Uuid)> = pages::Entity::find()
+        .select_only()
+        .columns([
+            pages::Column::Id,
+            pages::Column::Name,
+            pages::Column::LogoProps,
+            pages::Column::OwnedById,
+        ])
+        .filter(pages::Column::Id.eq(*identifier))
+        .filter(pages::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((id, name, logo_props, owned_by)) = row else {
         return Ok(None);
     };
     // `obj.projects.first()`: live targets, newest first; the through
     // join carries no soft-delete filter (Django core does not know the
     // through model is soft-deletable).
-    let first: Option<(Uuid, String)> = sqlx::query_as(
-        r#"SELECT p.id, p.identifier FROM projects p
-           JOIN project_pages pp ON pp.project_id = p.id
-           WHERE pp.page_id = $1 AND p.deleted_at IS NULL
-           ORDER BY p.created_at DESC LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let first = page_first_project_query(id)
+        .into_model::<PageFirstProject>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let first = first.map(|row| (row.first_id, row.first_identifier));
     let (first_id, first_identifier) = match first {
         Some((first_id, first_identifier)) => (Some(first_id.to_string()), Some(first_identifier)),
         None => (None, None),
@@ -4023,12 +4266,10 @@ async fn validate_user_props_body(
             }
             continue;
         };
-        let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT u.id FROM users u WHERE u.id = $1"#)
-            .bind(id)
-            .fetch_optional(pool)
+        if !user_exists(pool, id)
             .await
-            .map_err(|_| WriteInvalid::ServerError)?;
-        if row.is_none() {
+            .map_err(|_| WriteInvalid::ServerError)?
+        {
             push_field_msg(&mut errors, field, pk_does_not_exist_msg(value));
         } else {
             match field {
@@ -4053,62 +4294,68 @@ async fn validate_user_props_body(
     })
 }
 
-type UserPropsRow = (
-    Uuid,
-    DateTime<Utc>,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-    Value,
-    Value,
-    Value,
-    Value,
-    i32,
-    String,
-    Option<Uuid>,
-    Option<Uuid>,
-    Uuid,
-    Uuid,
-);
+/// One `workspace_user_properties` row.
+struct UserPropsRow {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+    filters: Value,
+    display_filters: Value,
+    display_properties: Value,
+    rich_filters: Value,
+    navigation_project_limit: i32,
+    navigation_control_preference: String,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+}
+
+impl From<workspace_user_properties::Model> for UserPropsRow {
+    fn from(model: workspace_user_properties::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|at| at.with_timezone(&Utc)),
+            filters: model.filters,
+            display_filters: model.display_filters,
+            display_properties: model.display_properties,
+            rich_filters: model.rich_filters,
+            navigation_project_limit: model.navigation_project_limit,
+            navigation_control_preference: model.navigation_control_preference,
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            workspace_id: model.workspace_id,
+            user_id: model.user_id,
+        }
+    }
+}
 
 fn render_user_props(row: &UserPropsRow, timezone: &Tz) -> Result<String, Denial> {
-    let (
-        id,
-        created_at,
-        updated_at,
-        deleted_at,
-        filters,
-        display_filters,
-        display_properties,
-        rich_filters,
-        navigation_project_limit,
-        navigation_control_preference,
-        created_by,
-        updated_by,
-        workspace,
-        user,
-    ) = row;
-    let id = id.to_string();
-    let created_at = render_dt(created_at, timezone)?;
-    let updated_at = render_dt(updated_at, timezone)?;
-    let deleted_at = match deleted_at {
+    let id = row.id.to_string();
+    let created_at = render_dt(&row.created_at, timezone)?;
+    let updated_at = render_dt(&row.updated_at, timezone)?;
+    let deleted_at = match &row.deleted_at {
         Some(dt) => Some(render_dt(dt, timezone)?),
         None => None,
     };
-    let created_by = created_by.map(|id| id.to_string());
-    let updated_by = updated_by.map(|id| id.to_string());
-    let workspace = workspace.to_string();
-    let user = user.to_string();
+    let created_by = row.created_by_id.map(|id| id.to_string());
+    let updated_by = row.updated_by_id.map(|id| id.to_string());
+    let workspace = row.workspace_id.to_string();
+    let user = row.user_id.to_string();
     let shaped = ser_invite::UserPropertiesRow {
         id: &id,
         created_at: &created_at,
         updated_at: &updated_at,
         deleted_at: deleted_at.as_deref(),
-        filters,
-        display_filters,
-        display_properties,
-        rich_filters,
-        navigation_project_limit: *navigation_project_limit,
-        navigation_control_preference,
+        filters: &row.filters,
+        display_filters: &row.display_filters,
+        display_properties: &row.display_properties,
+        rich_filters: &row.rich_filters,
+        navigation_project_limit: row.navigation_project_limit,
+        navigation_control_preference: &row.navigation_control_preference,
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         workspace: &workspace,
@@ -4118,7 +4365,16 @@ fn render_user_props(row: &UserPropsRow, timezone: &Tz) -> Result<String, Denial
     Ok(serde_json::to_string(&view).expect("props view"))
 }
 
-const USER_PROPS_SELECT: &str = "p.id, p.created_at, p.updated_at, p.deleted_at, p.filters, p.display_filters, p.display_properties, p.rich_filters, p.navigation_project_limit, p.navigation_control_preference, p.created_by_id, p.updated_by_id, p.workspace_id, p.user_id";
+/// The live `(user, workspace)` user-properties row.
+fn live_user_props_query(
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Select<workspace_user_properties::Entity> {
+    workspace_user_properties::Entity::find()
+        .filter(workspace_user_properties::Column::UserId.eq(user_id))
+        .filter(workspace_user_properties::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_user_properties::Column::DeletedAt.is_null())
+}
 
 /// `WorkspaceUserProperties.objects.get_or_create(user, workspace)`:
 /// the live row, or a fresh insert with the Django-side defaults
@@ -4129,17 +4385,12 @@ async fn get_or_create_user_props(
     user_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<UserPropsRow, Denial> {
-    let row: Option<UserPropsRow> = sqlx::query_as(&format!(
-        r#"SELECT {USER_PROPS_SELECT} FROM workspace_user_properties p
-           WHERE p.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL LIMIT 1"#,
-    ))
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let Some(row) = row {
-        return Ok(row);
+    if let Some(row) = live_user_props_query(*user_id, *workspace_id)
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Ok(row.into());
     }
     let id = Uuid::new_v4();
     let created_at = Utc::now();
@@ -4147,40 +4398,42 @@ async fn get_or_create_user_props(
     let filters = user_props_model::default_filters();
     let display_filters = user_props_model::default_display_filters();
     let display_properties = user_props_model::default_display_properties();
-    sqlx::query(
-        r#"INSERT INTO workspace_user_properties
-           (id, created_at, updated_at, workspace_id, user_id, filters, display_filters,
-            display_properties, rich_filters, navigation_project_limit,
-            navigation_control_preference, created_by_id, updated_by_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-           ON CONFLICT (workspace_id, user_id) WHERE deleted_at IS NULL DO NOTHING"#,
+    workspace_user_properties::Entity::insert(workspace_user_properties::ActiveModel {
+        id: Set(id),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+        workspace_id: Set(*workspace_id),
+        user_id: Set(*user_id),
+        filters: Set(filters),
+        display_filters: Set(display_filters),
+        display_properties: Set(display_properties),
+        rich_filters: Set(Value::Object(Map::new())),
+        navigation_project_limit: Set(user_props_model::DEFAULT_NAVIGATION_PROJECT_LIMIT),
+        navigation_control_preference: Set(
+            user_props_model::DEFAULT_NAVIGATION_CONTROL_PREFERENCE.to_owned()
+        ),
+        created_by_id: Set(Some(*user_id)),
+        updated_by_id: Set(None),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            workspace_user_properties::Column::WorkspaceId,
+            workspace_user_properties::Column::UserId,
+        ])
+        .target_and_where(workspace_user_properties::Column::DeletedAt.is_null())
+        .do_nothing()
+        .to_owned(),
     )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(&filters)
-    .bind(&display_filters)
-    .bind(&display_properties)
-    .bind(Value::Object(Map::new()))
-    .bind(user_props_model::DEFAULT_NAVIGATION_PROJECT_LIMIT)
-    .bind(user_props_model::DEFAULT_NAVIGATION_CONTROL_PREFERENCE)
-    .bind(user_id)
-    .bind(Option::<Uuid>::None)
-    .execute(pool)
+    .exec_without_returning(&orm(pool))
     .await
     .map_err(|_| Denial::ServerError)?;
-    let row: Option<UserPropsRow> = sqlx::query_as(&format!(
-        r#"SELECT {USER_PROPS_SELECT} FROM workspace_user_properties p
-           WHERE p.user_id = $1 AND p.workspace_id = $2 AND p.deleted_at IS NULL LIMIT 1"#,
-    ))
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.ok_or(Denial::ServerError)
+    live_user_props_query(*user_id, *workspace_id)
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(UserPropsRow::from)
+        .ok_or(Denial::ServerError)
 }
 
 async fn user_props_get(
@@ -4245,43 +4498,70 @@ async fn user_props_patch(
     // An out-of-`i32` limit validates (unbounded Python ints) and dies at
     // the database instead.
     let navigation_project_limit = match input.navigation_project_limit {
-        None => current.8,
+        None => current.navigation_project_limit,
         Some(UserPropsLimit::Value(limit)) => limit,
         Some(UserPropsLimit::TooBig) => return Err(Denial::ServerError),
     };
-    let deleted_at = input.deleted_at.unwrap_or(current.3);
-    let filters = input.filters.unwrap_or(current.4);
-    let display_filters = input.display_filters.unwrap_or(current.5);
-    let display_properties = input.display_properties.unwrap_or(current.6);
-    let rich_filters = input.rich_filters.unwrap_or(current.7);
-    let navigation_control_preference = input.navigation_control_preference.unwrap_or(current.9);
-    let created_by = input.created_by.unwrap_or(current.10);
+    let deleted_at = input.deleted_at.unwrap_or(current.deleted_at);
+    let filters = input.filters.unwrap_or(current.filters);
+    let display_filters = input.display_filters.unwrap_or(current.display_filters);
+    let display_properties = input
+        .display_properties
+        .unwrap_or(current.display_properties);
+    let rich_filters = input.rich_filters.unwrap_or(current.rich_filters);
+    let navigation_control_preference = input
+        .navigation_control_preference
+        .unwrap_or(current.navigation_control_preference);
+    let created_by = input.created_by.unwrap_or(current.created_by_id);
     let updated_at = Utc::now();
-    sqlx::query(
-        r#"UPDATE workspace_user_properties
-           SET deleted_at = $1, filters = $2, display_filters = $3, display_properties = $4,
-               rich_filters = $5, navigation_project_limit = $6,
-               navigation_control_preference = $7, created_by_id = $8,
-               updated_by_id = $9, updated_at = $10
-           WHERE id = $11"#,
-    )
-    .bind(deleted_at)
-    .bind(&filters)
-    .bind(&display_filters)
-    .bind(&display_properties)
-    .bind(&rich_filters)
-    .bind(navigation_project_limit)
-    .bind(&navigation_control_preference)
-    .bind(created_by)
-    .bind(user_id)
-    .bind(updated_at)
-    .bind(current.0)
-    .execute(&pool)
-    .await
-    .map_err(map_write_error)?;
-    let row: UserPropsRow = (
-        current.0,
-        current.1,
+    workspace_user_properties::Entity::update_many()
+        .col_expr(
+            workspace_user_properties::Column::DeletedAt,
+            Expr::value(deleted_at.map(DateTimeWithTimeZone::from)),
+        )
+        .col_expr(
+            workspace_user_properties::Column::Filters,
+            Expr::value(filters.clone()),
+        )
+        .col_expr(
+            workspace_user_properties::Column::DisplayFilters,
+            Expr::value(display_filters.clone()),
+        )
+        .col_expr(
+            workspace_user_properties::Column::DisplayProperties,
+            Expr::value(display_properties.clone()),
+        )
+        .col_expr(
+            workspace_user_properties::Column::RichFilters,
+            Expr::value(rich_filters.clone()),
+        )
+        .col_expr(
+            workspace_user_properties::Column::NavigationProjectLimit,
+            Expr::value(navigation_project_limit),
+        )
+        .col_expr(
+            workspace_user_properties::Column::NavigationControlPreference,
+            Expr::value(navigation_control_preference.clone()),
+        )
+        .col_expr(
+            workspace_user_properties::Column::CreatedById,
+            Expr::value(created_by),
+        )
+        .col_expr(
+            workspace_user_properties::Column::UpdatedById,
+            Expr::value(Some(user_id)),
+        )
+        .col_expr(
+            workspace_user_properties::Column::UpdatedAt,
+            Expr::value(DateTimeWithTimeZone::from(updated_at)),
+        )
+        .filter(workspace_user_properties::Column::Id.eq(current.id))
+        .exec(&orm(&pool))
+        .await
+        .map_err(map_write_error)?;
+    let row = UserPropsRow {
+        id: current.id,
+        created_at: current.created_at,
         updated_at,
         deleted_at,
         filters,
@@ -4290,11 +4570,11 @@ async fn user_props_patch(
         rich_filters,
         navigation_project_limit,
         navigation_control_preference,
-        created_by,
-        Some(user_id),
-        current.12,
-        current.13,
-    );
+        created_by_id: created_by,
+        updated_by_id: Some(user_id),
+        workspace_id: current.workspace_id,
+        user_id: current.user_id,
+    };
     Ok(json_response(
         StatusCode::OK,
         render_user_props(&row, &timezone)?,
@@ -5025,20 +5305,20 @@ mod tests {
     #[test]
     fn link_and_props_render_in_wire_order() {
         let utc: Tz = "UTC".parse().unwrap();
-        let link: QuickLinkRow = (
-            Uuid::nil(),
-            "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
-            "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
-            None,
-            Some("T".to_owned()),
-            "https://x.test".to_owned(),
-            json!({}),
-            Some(Uuid::nil()),
-            None,
-            Uuid::nil(),
-            None,
-            Uuid::nil(),
-        );
+        let link = QuickLinkRow {
+            id: Uuid::nil(),
+            created_at: "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            updated_at: "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            deleted_at: None,
+            title: Some("T".to_owned()),
+            url: "https://x.test".to_owned(),
+            metadata: json!({}),
+            created_by_id: Some(Uuid::nil()),
+            updated_by_id: None,
+            workspace_id: Uuid::nil(),
+            project_id: None,
+            owner_id: Uuid::nil(),
+        };
         let rendered = render_quick_link(&link, &utc).unwrap();
         let value: Value = serde_json::from_str(&rendered).unwrap();
         let keys: Vec<&str> = value
@@ -5048,22 +5328,22 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, ser_extras::USER_LINK_WIRE_FIELDS);
-        let props: UserPropsRow = (
-            Uuid::nil(),
-            "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
-            "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
-            None,
-            json!({}),
-            json!({}),
-            json!({}),
-            json!({}),
-            10,
-            "ACCORDION".to_owned(),
-            Some(Uuid::nil()),
-            None,
-            Uuid::nil(),
-            Uuid::nil(),
-        );
+        let props = UserPropsRow {
+            id: Uuid::nil(),
+            created_at: "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            updated_at: "2024-05-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            deleted_at: None,
+            filters: json!({}),
+            display_filters: json!({}),
+            display_properties: json!({}),
+            rich_filters: json!({}),
+            navigation_project_limit: 10,
+            navigation_control_preference: "ACCORDION".to_owned(),
+            created_by_id: Some(Uuid::nil()),
+            updated_by_id: None,
+            workspace_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+        };
         let rendered = render_user_props(&props, &utc).unwrap();
         let value: Value = serde_json::from_str(&rendered).unwrap();
         let keys: Vec<&str> = value
@@ -5117,10 +5397,21 @@ mod tests {
             Denial::BadDetail(_)
         ));
         assert!(matches!(page_denial(E::ZeroLimit), Denial::ServerError));
+        // PIDASHCONV-1713: garbage and non-canonical `<uuid:pk>` segments
+        // 404 at resolution, before auth — never the 400 validation body.
+        assert!(matches!(parse_uuid_path("xyz"), Err(Denial::PageNotFound)));
         assert!(matches!(
-            parse_uuid_or_invalid("xyz"),
-            Err(Denial::BadError(_))
+            parse_uuid_path("12345678-1234-1234-1234-1234567890AB"),
+            Err(Denial::PageNotFound)
         ));
+        assert!(matches!(
+            parse_uuid_path("123456781234123412341234567890ab"),
+            Err(Denial::PageNotFound)
+        ));
+        assert_eq!(
+            parse_uuid_path("12345678-1234-1234-1234-1234567890ab").unwrap(),
+            Uuid::parse_str("12345678-1234-1234-1234-1234567890ab").unwrap()
+        );
     }
 
     #[test]
@@ -5210,5 +5501,642 @@ mod tests {
                 assert!(matches!(gate, gates::Gate::Authenticated));
             }
         }
+    }
+
+    /// The sticky-list scope keeps the tenant join and the icontains
+    /// filter; the count wraps it as a subquery, and the page fetch adds
+    /// `-sort_order` with the window.
+    #[test]
+    fn sticky_list_statement_shapes() {
+        use sea_orm::QueryTrait;
+        let (slug, user) = ("acme", Uuid::from_u128(2));
+        let sql = sticky_list_base(slug, user, Some("%x%"))
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(
+                r#"FROM "stickies" INNER JOIN "workspaces" ON "stickies"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(r#""workspaces"."slug" = '{}'"#, slug)),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(r#""stickies"."owner_id" = '{}'"#, user)),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""stickies"."deleted_at" IS NULL"#));
+        assert!(sql.contains("ILIKE"), "{sql}");
+        let unfiltered = sticky_list_base(slug, user, None)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(!unfiltered.contains("ILIKE"), "{unfiltered}");
+        let page_sql = sticky_list_base(slug, user, None)
+            .order_by_desc(stickies::Column::SortOrder)
+            .limit(20)
+            .offset(40)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            page_sql.ends_with(r#"ORDER BY "stickies"."sort_order" DESC LIMIT 20 OFFSET 40"#),
+            "{page_sql}"
+        );
+    }
+
+    /// The `MAX(sort_order)` read and the owner-scoped quick-link /
+    /// duplicate lookups keep their joins, scopes and order.
+    #[test]
+    fn sticky_max_and_quick_link_statement_shapes() {
+        use sea_orm::QueryTrait;
+        let workspace = Uuid::from_u128(7);
+        let max_sql = sticky_max_query(workspace)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            max_sql.starts_with(r#"SELECT MAX("sort_order") AS "max_sort_order" FROM "stickies""#),
+            "{max_sql}"
+        );
+        assert!(
+            max_sql.contains(&format!(r#""stickies"."workspace_id" = '{}'"#, workspace)),
+            "{max_sql}"
+        );
+        let (pk, user) = (Uuid::from_u128(3), Uuid::from_u128(4));
+        let owned = quick_link_owned_query(pk, "acme", user, true)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            owned.contains(
+                r#"FROM "workspace_user_links" INNER JOIN "workspaces" ON "workspace_user_links"."workspace_id" = "workspaces"."id""#
+            ),
+            "{owned}"
+        );
+        assert!(owned.contains(r#""workspace_user_links"."deleted_at" IS NULL"#));
+        assert!(owned.ends_with(r#"ORDER BY "workspace_user_links"."created_at" DESC"#));
+        let plain = quick_link_owned_query(pk, "acme", user, false)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(!plain.contains("ORDER BY"), "{plain}");
+        let dup = quick_link_dup_query("https://x.test", workspace, user, Some(pk))
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            dup.contains(&format!(r#""workspace_user_links"."id" <> '{}'"#, pk)),
+            "{dup}"
+        );
+        let create_dup = quick_link_dup_query("https://x.test", workspace, user, None)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(!create_dup.contains("<>"), "{create_dup}");
+    }
+
+    /// Recent visits keep the allowlist clamp, the optional entity
+    /// narrowing, newest-first order and the 20-row ceiling; the
+    /// first-project fallback keeps its through join and live target.
+    #[test]
+    fn visits_statement_shapes() {
+        use sea_orm::QueryTrait;
+        let sql = recent_visits_query("acme", Uuid::from_u128(2), None)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(
+                r#"SELECT "user_recent_visits"."id", "user_recent_visits"."entity_name", "user_recent_visits"."entity_identifier", "user_recent_visits"."visited_at" FROM "user_recent_visits" INNER JOIN "workspaces" ON "user_recent_visits"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"IN ('issue', 'page', 'project')"#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "user_recent_visits"."created_at" DESC LIMIT 20"#),
+            "{sql}"
+        );
+        let narrowed = recent_visits_query("acme", Uuid::from_u128(2), Some("issue"))
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            narrowed.contains(r#""user_recent_visits"."entity_name" = 'issue'"#),
+            "{narrowed}"
+        );
+        let first_sql = page_first_project_query(Uuid::from_u128(9))
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            first_sql.contains(
+                r#"FROM "project_pages" INNER JOIN "projects" ON "project_pages"."project_id" = "projects"."id""#
+            ),
+            "{first_sql}"
+        );
+        assert!(first_sql.contains(r#""first_id""#));
+        assert!(first_sql.contains(r#""first_identifier""#));
+        assert!(first_sql.contains(r#""projects"."deleted_at" IS NULL"#));
+        assert!(
+            first_sql.ends_with(r#"ORDER BY "projects"."created_at" DESC LIMIT 1"#),
+            "{first_sql}"
+        );
+    }
+
+    /// The migrated reads against constraint-free temp tables on a
+    /// one-connection pool: the shared role facts, the timezone read,
+    /// the creator fact, the sticky max/list, quick-link owned+dup,
+    /// recent visits, the issue/project/page fetchers, and
+    /// get-or-create user properties.
+    #[tokio::test]
+    async fn live_prefs_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "users",
+            "workspaces",
+            "workspace_members",
+            "projects",
+            "issues",
+            "issue_assignees",
+            "project_members",
+            "pages",
+            "project_pages",
+            "stickies",
+            "workspace_user_links",
+            "user_recent_visits",
+            "workspace_user_properties",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        // The partial unique index get_or_create conflicts on (a plain
+        // CTAS copy carries no index).
+        sqlx::query(
+            "CREATE UNIQUE INDEX temp_user_props_partial ON workspace_user_properties \
+             (workspace_id, user_id) WHERE deleted_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .expect("partial index");
+        let (admin, member, bot, outsider) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (ws, ws_gone, proj, proj_newer, proj_dead) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (issue, issue_dead, page, link, visit_issue) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (sticky_a, sticky_b, sticky_dead) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        async fn seed(pool: &sqlx::PgPool, sql: String) {
+            sqlx::query(sql.as_str()).execute(pool).await.expect("seed");
+        }
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO users (id, username, password, first_name, last_name, avatar, \
+             date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, \
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
+             is_bot, display_name, is_email_valid, is_password_reset_required) VALUES \
+             ('{admin}', 'admin', 'p', 'A', 'A', '', now(), '2024-01-01', now(), '', '', \
+             false, false, false, true, false, false, false, 't', 'UTC', '', '', '', '', \
+             false, 'A', true, false), \
+             ('{member}', 'member', 'p', 'M', 'M', '', now(), '2024-01-02', now(), '', '', \
+             false, false, false, true, false, false, false, 't', 'UTC', '', '', '', '', \
+             false, 'M', true, false), \
+             ('{bot}', 'bot', 'p', 'B', 'B', '', now(), '2024-01-03', now(), '', '', \
+             false, false, false, true, false, false, false, 't', 'UTC', '', '', '', '', \
+             true, 'B', true, false), \
+             ('{outsider}', 'outsider', 'p', 'O', 'O', '', now(), '2024-01-04', now(), '', '', \
+             false, false, false, true, false, false, false, 't', 'UTC', '', '', '', '', \
+             false, 'O', true, false)"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO workspaces (id, created_at, updated_at, name, slug, owner_id, \
+             timezone, background_color, deleted_at) VALUES \
+             ('{ws}', now(), now(), 'Acme', 'acme', '{admin}', 'UTC', '#fff', NULL), \
+             ('{ws_gone}', now(), now(), 'Gone', 'gone', '{admin}', 'UTC', '#fff', now())"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO workspace_members (id, created_at, updated_at, role, member_id, \
+             workspace_id, view_props, default_props, issue_props, is_active, \
+             explored_features, getting_started_checklist, tips, deleted_at) VALUES \
+             (gen_random_uuid(), now(), now(), 20, '{admin}', '{ws}', '{{}}', '{{}}', '{{}}', \
+             true, '{{}}', '{{}}', '{{}}', NULL), \
+             (gen_random_uuid(), now(), now(), 15, '{member}', '{ws}', '{{}}', '{{}}', '{{}}', \
+             true, '{{}}', '{{}}', '{{}}', NULL), \
+             (gen_random_uuid(), now(), now(), 15, '{member}', '{ws}', '{{}}', '{{}}', '{{}}', \
+             true, '{{}}', '{{}}', '{{}}', now()), \
+             (gen_random_uuid(), now(), now(), 20, '{outsider}', '{ws}', '{{}}', '{{}}', '{{}}', \
+             false, '{{}}', '{{}}', '{{}}', NULL)"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO projects (id, created_at, updated_at, name, description, network, \
+             identifier, workspace_id, cycle_view, module_view, issue_views_view, page_view, \
+             intake_view, archive_in, close_in, logo_props, is_time_tracking_enabled, \
+             is_issue_type_enabled, guest_view_all_features, timezone, \
+             members_can_edit_states, repo_url, base_branch, \
+             agent_default_interval_seconds, agent_default_max_ticks, \
+             agent_ticking_enabled, is_default, \
+             agent_review_default_interval_seconds, default_agent_executor, \
+             agent_test_default_interval_seconds, deleted_at) VALUES \
+             ('{proj}', '2024-01-01', now(), 'Acme', '', 1, 'ACME', '{ws}', false, false, \
+             false, false, false, 0, 0, '{{}}', false, false, false, 'UTC', false, '', '', \
+             0, 0, false, false, 0, 'x', 0, NULL), \
+             ('{proj_newer}', '2024-02-01', now(), 'Acme New', '', 1, 'NEW', '{ws}', false, \
+             false, false, false, false, 0, 0, '{{}}', false, false, false, 'UTC', false, \
+             '', '', 0, 0, false, false, 0, 'x', 0, NULL), \
+             ('{proj_dead}', '2024-03-01', now(), 'Dead', '', 1, 'DEAD', '{ws}', false, false, \
+             false, false, false, 0, 0, '{{}}', false, false, false, 'UTC', false, '', '', \
+             0, 0, false, false, 0, 'x', 0, now())"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+            "INSERT INTO issues (id, created_at, updated_at, name, description_json, priority, \
+             sequence_id, project_id, workspace_id, description_html, sort_order, is_draft, \
+             git_work_branch, workpad, complexity_score, deleted_at) VALUES \
+             ('{issue}', now(), now(), 'Task', '{{}}', 'high', 7, '{proj}', '{ws}', '', 0, \
+             false, '', '', 0, NULL), \
+             ('{issue_dead}', now(), now(), 'Gone', '{{}}', 'low', 1, '{proj}', '{ws}', '', \
+             0, false, '', '', 0, now())"
+        ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO issue_assignees (id, created_at, updated_at, assignee_id, issue_id, \
+             project_id, workspace_id, deleted_at) VALUES \
+             (gen_random_uuid(), now(), now(), '{member}', '{issue}', '{proj}', '{ws}', NULL), \
+             (gen_random_uuid(), now(), now(), '{outsider}', '{issue}', '{proj}', '{ws}', \
+             NULL), \
+             (gen_random_uuid(), now(), now(), '{bot}', '{issue}', '{proj}', '{ws}', now())"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO project_members (id, created_at, updated_at, role, member_id, \
+             project_id, workspace_id, view_props, default_props, sort_order, preferences, \
+             is_active, deleted_at) VALUES \
+             (gen_random_uuid(), now(), now(), 15, '{member}', '{proj}', '{ws}', '{{}}', \
+             '{{}}', 0, '{{}}', true, NULL), \
+             (gen_random_uuid(), now(), now(), 15, '{bot}', '{proj}', '{ws}', '{{}}', '{{}}', \
+             0, '{{}}', true, NULL), \
+             (gen_random_uuid(), now(), now(), 15, '{outsider}', '{proj}', '{ws}', '{{}}', \
+             '{{}}', 0, '{{}}', false, NULL), \
+             (gen_random_uuid(), now(), now(), 15, '{outsider}', '{proj}', '{ws}', '{{}}', \
+             '{{}}', 0, '{{}}', true, now())"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO pages (id, created_at, updated_at, name, description_json, \
+             description_html, access, owned_by_id, workspace_id, color, is_locked, \
+             view_props, logo_props, is_global, sort_order, deleted_at) VALUES \
+             ('{page}', now(), now(), 'Doc', '{{}}', '', 1, '{admin}', '{ws}', '', false, \
+             '{{}}', '{{}}', false, 0, NULL)"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO project_pages (id, created_at, updated_at, page_id, project_id, \
+             workspace_id, deleted_at) VALUES \
+             (gen_random_uuid(), now(), now(), '{page}', '{proj}', '{ws}', NULL), \
+             (gen_random_uuid(), now(), now(), '{page}', '{proj_newer}', '{ws}', NULL), \
+             (gen_random_uuid(), now(), now(), '{page}', '{proj_dead}', '{ws}', NULL)"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO stickies (id, created_at, updated_at, description, description_html, \
+             logo_props, owner_id, workspace_id, sort_order, description_stripped, name, \
+             created_by_id, deleted_at) VALUES \
+             ('{sticky_a}', now(), now(), '{{}}', '<p>Hello</p>', '{{}}', '{admin}', '{ws}', \
+             100, 'Hello', 'A', '{admin}', NULL), \
+             ('{sticky_b}', now(), now(), '{{}}', '<p>hello there</p>', '{{}}', '{admin}', \
+             '{ws}', 200, 'hello there', 'B', '{admin}', NULL), \
+             ('{sticky_dead}', now(), now(), '{{}}', '<p>x</p>', '{{}}', '{admin}', '{ws}', \
+             999, 'x', 'D', '{admin}', now())"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO workspace_user_links (id, created_at, updated_at, url, metadata, \
+             owner_id, workspace_id, deleted_at, title) VALUES \
+             ('{link}', now(), now(), 'https://x.test', '{{}}', '{admin}', '{ws}', NULL, NULL)"
+            ),
+        )
+        .await;
+        seed(
+            &pool,
+            format!(
+                "INSERT INTO user_recent_visits (id, created_at, updated_at, entity_name, \
+             entity_identifier, visited_at, user_id, workspace_id, deleted_at) VALUES \
+             ('{visit_issue}', '2024-02-01', now(), 'issue', '{issue}', now(), '{admin}', \
+             '{ws}', NULL), \
+             (gen_random_uuid(), '2024-01-01', now(), 'project', '{proj}', now(), '{admin}', \
+             '{ws}', NULL), \
+             (gen_random_uuid(), '2024-03-01', now(), 'board', NULL, now(), '{admin}', '{ws}', \
+             NULL), \
+             (gen_random_uuid(), '2024-04-01', now(), 'issue', '{issue}', now(), '{admin}', \
+             '{ws}', now())"
+            ),
+        )
+        .await;
+
+        let admin_facts = fetch_allow_facts(&pool, "acme", &admin, &[20], false)
+            .await
+            .expect("admin facts");
+        assert!(admin_facts.is_workspace_member);
+        assert!(admin_facts.has_allowed_workspace_role);
+        assert!(admin_facts.is_workspace_admin);
+        let member_facts = fetch_allow_facts(&pool, "acme", &member, &[20], false)
+            .await
+            .expect("member facts");
+        assert!(member_facts.is_workspace_member);
+        assert!(!member_facts.has_allowed_workspace_role);
+        assert!(!member_facts.is_workspace_admin);
+        let outsider_facts = fetch_allow_facts(&pool, "acme", &outsider, &[20], false)
+            .await
+            .expect("outsider facts");
+        assert!(!outsider_facts.is_workspace_member);
+        assert_eq!(
+            resolve_workspace_id(&pool, "acme").await.expect("resolve"),
+            ws
+        );
+        assert!(matches!(
+            resolve_workspace_id(&pool, "gone").await,
+            Err(Denial::NotFound)
+        ));
+        assert_eq!(
+            actor_timezone(&pool, &admin).await.expect("tz").to_string(),
+            "UTC"
+        );
+        assert!(matches!(
+            actor_timezone(&pool, &Uuid::new_v4()).await,
+            Err(Denial::ServerError)
+        ));
+        assert!(user_exists(&pool, admin).await.expect("exists"));
+        assert!(!user_exists(&pool, Uuid::new_v4()).await.expect("missing"));
+        assert!(sticky_creator_fact(&pool, &sticky_a, &admin)
+            .await
+            .expect("creator"));
+        assert!(!sticky_creator_fact(&pool, &sticky_a, &member)
+            .await
+            .expect("not creator"));
+        let max = sticky_max_query(ws)
+            .into_model::<StickyMaxRow>()
+            .one(&orm(&pool))
+            .await
+            .expect("max")
+            .expect("max row");
+        assert_eq!(max.max_sort_order, Some(200.0));
+        assert_eq!(
+            sticky_list_base("acme", admin, None)
+                .count(&orm(&pool))
+                .await
+                .expect("count"),
+            2
+        );
+        assert_eq!(
+            sticky_list_base("acme", admin, Some("%hello%"))
+                .count(&orm(&pool))
+                .await
+                .expect("filtered count"),
+            2
+        );
+        assert_eq!(
+            sticky_list_base("acme", admin, Some("%zzz%"))
+                .count(&orm(&pool))
+                .await
+                .expect("empty count"),
+            0
+        );
+        let listed: Vec<Uuid> = sticky_list_base("acme", admin, None)
+            .order_by_desc(stickies::Column::SortOrder)
+            .all(&orm(&pool))
+            .await
+            .expect("list")
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(listed, vec![sticky_b, sticky_a]);
+        let link = quick_link_owned_query(link, "acme", admin, true)
+            .one(&orm(&pool))
+            .await
+            .expect("owned")
+            .expect("link row");
+        assert_eq!(link.url, "https://x.test");
+        let dup = quick_link_dup_query("https://x.test", ws, admin, None)
+            .into_tuple::<Uuid>()
+            .one(&orm(&pool))
+            .await
+            .expect("dup");
+        assert!(dup.is_some());
+        let self_dup = quick_link_dup_query("https://x.test", ws, admin, Some(link.id))
+            .into_tuple::<Uuid>()
+            .one(&orm(&pool))
+            .await
+            .expect("self dup");
+        assert!(self_dup.is_none());
+        let visits: Vec<(Uuid, String, Option<Uuid>, DateTime<Utc>)> =
+            recent_visits_query("acme", admin, None)
+                .into_tuple()
+                .all(&orm(&pool))
+                .await
+                .expect("visits");
+        assert_eq!(visits.len(), 2);
+        assert_eq!(visits[0].0, visit_issue);
+        assert_eq!(visits[0].1, "issue");
+        assert_eq!(visits[1].1, "project");
+        let narrowed: Vec<(Uuid, String, Option<Uuid>, DateTime<Utc>)> =
+            recent_visits_query("acme", admin, Some("project"))
+                .into_tuple()
+                .all(&orm(&pool))
+                .await
+                .expect("narrowed visits");
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].1, "project");
+        let issue_view = fetch_issue_visit(&pool, &Some(issue))
+            .await
+            .expect("issue visit")
+            .expect("issue view");
+        let assignees: Vec<&str> = issue_view["assignees"]
+            .as_array()
+            .expect("assignee array")
+            .iter()
+            .map(|value| value.as_str().expect("assignee id"))
+            .collect();
+        // `User.Meta.ordering` (`-created_at`): outsider (Jan 4) then
+        // member (Jan 2); the deleted row and the bot's role are out.
+        assert_eq!(
+            assignees,
+            vec![outsider.to_string().as_str(), member.to_string().as_str()]
+        );
+        assert_eq!(issue_view["project_identifier"], json!("ACME"));
+        assert_eq!(issue_view["sequence_id"], json!(7));
+        assert!(fetch_issue_visit(&pool, &Some(issue_dead))
+            .await
+            .expect("dead visit")
+            .is_none());
+        assert!(fetch_issue_visit(&pool, &None)
+            .await
+            .expect("null visit")
+            .is_none());
+        let project_view = fetch_project_visit(&pool, &Some(proj))
+            .await
+            .expect("project visit")
+            .expect("project view");
+        assert_eq!(project_view["project_members"], json!([member.to_string()]));
+        assert_eq!(project_view["identifier"], json!("ACME"));
+        let page_view = fetch_page_visit(&pool, &Some(page))
+            .await
+            .expect("page visit")
+            .expect("page view");
+        assert_eq!(page_view["project_identifier"], json!("NEW"));
+        assert_eq!(page_view["project_id"], json!(proj_newer.to_string()));
+        let first = get_or_create_user_props(&pool, &admin, &ws)
+            .await
+            .expect("get or create");
+        assert_eq!(first.navigation_project_limit, 10);
+        assert_eq!(first.navigation_control_preference, "ACCORDION");
+        let again = get_or_create_user_props(&pool, &admin, &ws)
+            .await
+            .expect("get again");
+        assert_eq!(again.id, first.id);
+        let utc: Tz = "UTC".parse().unwrap();
+        let body: Map<String, Value> = serde_json::from_value(json!({
+            "url": "https://y.test",
+            "project": proj.to_string(),
+        }))
+        .expect("body map");
+        assert!(validate_quick_link_body(&pool, &body, false, &utc)
+            .await
+            .is_ok());
+        let dead_body: Map<String, Value> = serde_json::from_value(json!({
+            "url": "https://y.test",
+            "project": proj_dead.to_string(),
+        }))
+        .expect("dead body");
+        let dead = validate_quick_link_body(&pool, &dead_body, false, &utc).await;
+        match dead {
+            Err(WriteInvalid::Fields(errors)) => assert!(
+                errors.iter().any(|(field, _)| field == "project"),
+                "project error expected"
+            ),
+            Err(WriteInvalid::Object(_)) => panic!("expected project field error, got object"),
+            Err(WriteInvalid::ServerError) => panic!("expected project field error, got server"),
+            Ok(_) => panic!("expected project field error, got ok"),
+        }
+        let bad_user: Map<String, Value> = serde_json::from_value(json!({
+            "url": "https://y.test",
+            "created_by": Uuid::new_v4().to_string(),
+        }))
+        .expect("bad user body");
+        let bad = validate_quick_link_body(&pool, &bad_user, false, &utc).await;
+        match bad {
+            Err(WriteInvalid::Fields(errors)) => assert!(
+                errors.iter().any(|(field, _)| field == "created_by"),
+                "created_by error expected"
+            ),
+            Err(WriteInvalid::Object(_)) => {
+                panic!("expected created_by field error, got object")
+            }
+            Err(WriteInvalid::ServerError) => {
+                panic!("expected created_by field error, got server")
+            }
+            Ok(_) => panic!("expected created_by field error, got ok"),
+        }
+    }
+
+    /// The user-properties insert conflicts on the partial unique index
+    /// (`WHERE deleted_at IS NULL`) and does nothing, like before.
+    #[test]
+    fn user_props_insert_conflict_shape() {
+        use sea_orm::QueryTrait;
+        let now = Utc::now();
+        let sql =
+            workspace_user_properties::Entity::insert(workspace_user_properties::ActiveModel {
+                id: Set(Uuid::nil()),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                workspace_id: Set(Uuid::nil()),
+                user_id: Set(Uuid::nil()),
+                filters: Set(json!({})),
+                display_filters: Set(json!({})),
+                display_properties: Set(json!({})),
+                rich_filters: Set(json!({})),
+                navigation_project_limit: Set(10),
+                navigation_control_preference: Set("ACCORDION".to_owned()),
+                created_by_id: Set(Some(Uuid::nil())),
+                updated_by_id: Set(None),
+                ..Default::default()
+            })
+            .on_conflict(
+                OnConflict::columns([
+                    workspace_user_properties::Column::WorkspaceId,
+                    workspace_user_properties::Column::UserId,
+                ])
+                .target_and_where(workspace_user_properties::Column::DeletedAt.is_null())
+                .do_nothing()
+                .to_owned(),
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(
+                r#"INSERT INTO "workspace_user_properties" ("created_at", "updated_at", "id", "filters", "display_filters", "display_properties", "created_by_id", "updated_by_id", "user_id", "workspace_id", "rich_filters", "navigation_control_preference", "navigation_project_limit")"#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#"ON CONFLICT ("workspace_id", "user_id") WHERE "workspace_user_properties"."deleted_at" IS NULL DO NOTHING"#
+            ),
+            "{sql}"
+        );
     }
 }

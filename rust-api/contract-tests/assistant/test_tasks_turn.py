@@ -182,13 +182,23 @@ def test_fixture_task_vectors_present():
     assert path.exists(), f"fixture missing: {path}"
     tasks = json.loads(path.read_text())["tasks"]
     vectors = tasks["classify_error"]["vectors"]
+    # NEWPIDASH-30: the status-first classifier (PIDASHCONV-1566, main
+    # 52df56b9e) records one vector per (status, provider-text) shape.
     assert set(vectors) == {
-        "payment_required",
-        "status_402",
+        "auth_400_text",
         "auth_401",
-        "connection",
-        "model_not_found",
-        "other",
+        "credit_402_bare",
+        "credit_402_body",
+        "credit_429_quota",
+        "gateway_401",
+        "gateway_402_body",
+        "gateway_429",
+        "gateway_model",
+        "model_400_named",
+        "model_noname",
+        "rate_429",
+        "unreachable_500",
+        "unreachable_text",
     }
     assert tasks["cancel_key"]["vector"] == "assistant:cancel:abc"
     assert tasks["turn_limits"] == {"soft": 300, "hard": 330, "delta_flush_ms": 100}

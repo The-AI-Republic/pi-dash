@@ -1,12 +1,20 @@
 """PIDASHCONV-1670: link-crawler ignores tags inside comments and scripts.
 
 Pins the Django-observed ``<title>`` texts and favicon ``href`` values
-the Rust crawler must reproduce byte for byte. BeautifulSoup with
-``html.parser`` treats ``<!--...-->`` comments as declarations and
-``<script>`` / ``<style>`` contents as CDATA (``html/parser.py``:
-``commentclose`` plus the ``</name(?=[\\t\\n\\r\\f />])`` interesting
-pattern ``set_cdata_mode`` installs), so tags inside those regions are
-never elements: the first real ``<title>`` and matching ``<link>`` win.
+the Rust crawler must reproduce byte for byte. On the production
+interpreter (stock CPython 3.12.10 — ``apps/api/Dockerfile.api`` — and
+every stock release before 3.12.12) BeautifulSoup with ``html.parser``
+treats ``<!--...-->`` comments as declarations and ``<script>`` /
+``<style>`` contents as CDATA (``html/parser.py``: ``commentclose``
+plus the strict ``</name\\s*>`` pattern ``set_cdata_mode`` installs —
+no attributes allowed), so tags inside those regions are never
+elements: the first real ``<title>`` and matching ``<link>`` win.
+
+Interpreter requirement (NEWPIDASH-30): the CDATA close pin below is
+the production-parser behavior (3.12.12+ and backported distro builds
+accept attributes on the close tag). It skips on those interpreters
+instead of asserting the wrong oracle; run it on stock CPython
+3.12.10, the version CI uses.
 
 Each title test replicates exactly
 ``apps/api/pi_dash/bgtasks/work_item_link_task.py:141-143``::
@@ -35,7 +43,10 @@ same literals through ``crawl()`` / ``find_favicon_url()`` with stub
 transports (they fail on pre-fix rust-dev).
 """
 
+from html.parser import HTMLParser
+
 import bs4
+import pytest
 from bs4 import BeautifulSoup
 
 FAVICON_SELECTORS = [
@@ -61,6 +72,16 @@ def django_href(content: bytes):
         if tag and tag.get("href"):
             return tag["href"]
     return None
+
+
+# See the module docstring: this pin is the production (pre-RCDATA)
+# parser behavior and reads differently where the close tag was
+# loosened.
+requires_legacy_parser = pytest.mark.skipif(
+    hasattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS"),
+    reason="pins stock html.parser (<=3.12.11, production 3.12.10); "
+    "this interpreter accepts attributes on </script> (NEWPIDASH-30)",
+)
 
 
 def test_oracle_library_versions():
@@ -131,10 +152,13 @@ def test_self_closed_script_opens_no_span():
     assert django_title(b"<script/><title>real</title>") == "real"
 
 
-def test_script_close_allows_attributes():
+@requires_legacy_parser
+def test_script_close_rejects_attributes():
+    # The CDATA close is strictly "</script\\s*>": attributes keep the
+    # script open, swallowing the title to EOF.
     assert (
         django_title(b"<script>x</script foo=bar><title>real</title>")
-        == "real"
+        is None
     )
 
 

@@ -1,12 +1,9 @@
-"""Contract: work-item actions — move, re-tick, wait, run-ai, agent-run yield
-and agent-run release-pin.
+"""Contract: work-item actions — move, re-tick, wait, run-ai, agent-run yield.
 
 Shapes are the live Django wire format. ``run-ai`` returns 409 with a
 machine-readable ``reason`` when no runner can take the run (the bare
 contract environment has none); that 409 shape is itself the contract.
 """
-
-import uuid
 
 import pytest
 
@@ -92,6 +89,7 @@ def test_yield_happy_path(api, world, seeder):
         "work_item_id": world["issue"]["id"],
         "outcome": "done",
         "stop_ticking": False,
+        "run_kind": "issue",
     }
 
 
@@ -200,90 +198,93 @@ def test_yield_anonymous_is_401(anon, world, seeder):
     assert response.status_code == 401
 
 
-# -- release-pin (PDASHOSS01-272) ------------------------------------------
+# -- runs with no work item (PDASHOSS01-276) ---------------------------------
+# A scheduler run is project-scoped (work_item NULL, scheduler_binding set);
+# its agent ends on the same `pidash run yield`. Ports of the scheduler and
+# direct-run cases in Django's test_run_yield_and_moved_by_run.py.
 
 
-def _release_pin(client, world, run_id):
-    return client.post(
-        f"/api/v1/workspaces/{world['workspace']['slug']}/agent-runs/{run_id}/release-pin/"
-    )
-
-
-def _pinned_queued_run(world, seeder, db, *, status="queued", pinned=True):
+def _scheduler_run(world, seeder, *, status="running"):
     pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    binding = seeder.create_scheduler_binding(
+        world["workspace"]["id"], world["project"]["id"], world["owner"]["id"]
+    )
     run = seeder.create_agent_run(
         world["workspace"]["id"],
         world["owner"]["id"],
         pod["id"],
-        world["issue"]["id"],
+        None,
         status=status,
+        scheduler_binding_id=binding["id"],
     )
-    runner = None
-    if pinned:
-        # An offline runner: the post-commit pod drain assigns nothing.
-        runner = seeder.enroll_runner(
-            world["owner"]["id"],
-            world["workspace"]["id"],
-            pod["id"],
-            f"contract-enroll-{uuid.uuid4().hex}",
-        )
-        db.execute(
-            "UPDATE agent_run SET pinned_runner_id = %s WHERE id = %s",
-            (runner["id"], run["id"]),
-        )
-    return run, runner
+    return run, binding
 
 
-def test_release_pin_happy_path(api, world, seeder, db):
-    run, runner = _pinned_queued_run(world, seeder, db)
-    response = _release_pin(api, world, run["id"])
+def test_yield_scheduler_run_records_the_outcome(api, world, seeder, db):
+    run, binding = _scheduler_run(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "note": "scan finished"})
     assert response.status_code == 200, response.text
     assert response.json() == {
         "ok": True,
         "run_id": run["id"],
-        "work_item_id": world["issue"]["id"],
-        "previous_pinned_runner_id": runner["id"],
+        "work_item_id": None,
+        "outcome": "done",
+        "stop_ticking": False,
+        "run_kind": "scheduler",
+        "scheduler_binding_id": binding["id"],
     }
-    assert list(response.json()) == [
-        "ok",
-        "run_id",
-        "work_item_id",
-        "previous_pinned_runner_id",
-    ]
-    row = db.fetchone(
-        "SELECT pinned_runner_id, status FROM agent_run WHERE id = %s", (run["id"],)
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert row["done_payload"]["status"] == "done"
+    assert row["done_payload"]["note"] == "scan finished"
+    assert "yielded_at" in row["done_payload"]
+
+
+def test_yield_scheduler_run_ignores_stop_ticking(api, world, seeder, db):
+    """No clock to stop: the flag is not stored and never disables the binding."""
+    run, binding = _scheduler_run(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "stop_ticking": True})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["stop_ticking"] is False
+    assert body["run_kind"] == "scheduler"
+    assert body["detail"] == (
+        "outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"
     )
-    assert row["pinned_runner_id"] is None
-    assert row["status"] == "queued"
-
-
-def test_release_pin_unpinned_is_409(api, world, seeder, db):
-    run, _ = _pinned_queued_run(world, seeder, db, pinned=False)
-    response = _release_pin(api, world, run["id"])
-    assert response.status_code == 409
-    assert response.json() == {"error": "run not pinned", "code": "not_pinned"}
-
-
-def test_release_pin_not_queued_is_409(api, world, seeder, db):
-    run, runner = _pinned_queued_run(world, seeder, db, status="running")
-    response = _release_pin(api, world, run["id"])
-    assert response.status_code == 409
-    assert response.json() == {"error": "run not queued", "code": "not_queued"}
-    row = db.fetchone("SELECT pinned_runner_id FROM agent_run WHERE id = %s", (run["id"],))
-    assert str(row["pinned_runner_id"]) == runner["id"]
-
-
-def test_release_pin_foreign_run_is_404(other_api, world, other_world):
-    """Tenant isolation: another tenant's run id resolves to not-found."""
-    response = other_api.post(
-        f"/api/v1/workspaces/{other_world['workspace']['slug']}"
-        f"/agent-runs/{world['issue']['id']}/release-pin/"
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert "stop_ticking" not in row["done_payload"]
+    binding_row = db.fetchone(
+        "SELECT enabled FROM scheduler_bindings WHERE id = %s", (binding["id"],)
     )
-    assert response.status_code == 404
-    assert response.json() == {"error": "run not found"}
+    assert binding_row["enabled"] is True
 
 
-def test_release_pin_anonymous_is_401(anon, world, seeder, db):
-    run, _ = _pinned_queued_run(world, seeder, db, pinned=False)
-    response = _release_pin(anon, world, run["id"])
-    assert response.status_code == 401
+def test_yield_finished_scheduler_run_is_409(api, world, seeder):
+    run, _ = _scheduler_run(world, seeder, status="completed")
+    response = _yield(api, world, run["id"], {"outcome": "done"})
+    assert response.status_code == 409
+    assert response.json() == {"error": "run is not active"}
+
+
+def test_yield_direct_run_records_the_outcome(api, world, seeder, db):
+    """A run with neither a work item nor a binding yields as `direct`."""
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    run = seeder.create_agent_run(
+        world["workspace"]["id"], world["owner"]["id"], pod["id"], None
+    )
+    response = _yield(api, world, run["id"], {"outcome": "progressed", "stop_ticking": True})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "run_id": run["id"],
+        "work_item_id": None,
+        "outcome": "progressed",
+        "stop_ticking": False,
+        "run_kind": "direct",
+        "detail": (
+            "outcome recorded; a run without a work item has no ticking clock,"
+            " so stop_ticking was ignored"
+        ),
+    }
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert row["done_payload"]["status"] == "progressed"
+    assert "stop_ticking" not in row["done_payload"]
