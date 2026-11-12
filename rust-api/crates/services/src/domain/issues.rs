@@ -2019,6 +2019,7 @@ fn mirror_issue_row(insert: &MirrorIssueInsert) -> Result<issues::ActiveModel, s
         assigned_pod_id: Set(insert.pod_id),
         assigned_runner_id: sea_orm::NotSet,
         agent_executor: Set(None),
+        work_type: sea_orm::NotSet,
     })
 }
 
@@ -2256,6 +2257,7 @@ fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, s
         type_id: Set(None),
         assigned_pod_id: Set(insert.pod_id),
         assigned_runner_id: Set(insert.runner_id),
+        work_type: sea_orm::NotSet,
     })
 }
 
@@ -2479,6 +2481,7 @@ fn seed_issue_row(id: Uuid, issue: &SeedIssue<'_>) -> Result<issues::ActiveModel
         created_via: Set(None),
         agent_executor: Set(None),
         complexity_score: Set(0),
+        work_type: sea_orm::NotSet,
     })
 }
 

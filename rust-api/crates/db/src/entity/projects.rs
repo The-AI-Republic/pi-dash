@@ -65,6 +65,9 @@ pub struct Model {
     // (default) or `fall_back`. Reads the Django-owned column (db 0173);
     // Django model order puts it last.
     pub dedicated_runner_lost_action: String,
+    // `Project.default_work_type` (PDASHOSS01-234): NOT NULL, no DB
+    // default; `Project.save()` fills a blank one from the repo binding.
+    pub default_work_type: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

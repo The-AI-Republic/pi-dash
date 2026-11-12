@@ -3445,7 +3445,7 @@ pub async fn patch_project_inner(
     // (`views/project.py` patch, PDASHOSS01-234): after the archived guard,
     // before the serializer.
     let stored_work_type: String = plain
-        .try_get("default_work_type")
+        .try_get("", "default_work_type")
         .map_err(|_| Denial::ServerError)?;
     if default_work_type_locked(headers, &input, from_form, &stored_work_type) {
         return Err(Denial::ForbiddenError(
@@ -3727,7 +3727,7 @@ pub async fn apply_project_update(
         );
     }
     if let Some(v) = field_str(data, "default_work_type") {
-        push_str(&mut sets, &mut binds, "default_work_type", v);
+        push(&mut sets, "default_work_type", ProjectPatchBind::Str(v));
     }
     // New `is_default` value (or the stored one when untouched).
     let new_default: bool = field_bool(data, "is_default").unwrap_or(was_default);

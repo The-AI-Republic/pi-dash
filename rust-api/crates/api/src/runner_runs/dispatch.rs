@@ -401,6 +401,8 @@ impl DirectRunInsert<'_> {
             terminal_hooks_applied_at: Set(None),
             terminal_capacity_released_at: Set(None),
             phase_kind: Set(String::new()),
+            // No stamp on direct runs (the model default).
+            work_type: Set(String::new()),
             agent_metadata: Set(Value::Object(Default::default())),
             usage: Set(Value::Object(Default::default())),
             error_details: Set(self.error_details.clone()),

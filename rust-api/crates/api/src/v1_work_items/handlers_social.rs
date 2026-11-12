@@ -1537,6 +1537,7 @@ async fn expand_issue(
     let git_work_branch: Option<String> = Some(row.git_work_branch);
     let created_via = row.created_via;
     let agent_executor = row.agent_executor;
+    let work_type = row.work_type;
     let created_by = row.created_by_id.map(|id| id.to_string());
     let updated_by = row.updated_by_id.map(|id| id.to_string());
     let project = Some(row.project_id.to_string());

@@ -1085,10 +1085,12 @@ mod tests {
             validate_shared(&shared),
             Err(ProjectSerError::UnknownWorkType)
         );
+        // #2903: the executor check never fails now (no cloud/managed
+        // refusals); the work type still wins over the name.
         shared.executor = Some("managed_runner");
         assert_eq!(
             validate_shared(&shared),
-            Err(ProjectSerError::ManagedRunnerDisabled)
+            Err(ProjectSerError::UnknownWorkType)
         );
     }
 

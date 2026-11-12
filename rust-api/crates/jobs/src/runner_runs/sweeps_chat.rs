@@ -1885,7 +1885,7 @@ mod tests {
             .filter(|e| e.starts_with("\"runner\""))
             .copied()
             .collect();
-        assert_eq!(agent_entries.len(), 40, "agent_run columns");
+        assert_eq!(agent_entries.len(), 41, "agent_run columns");
         assert_eq!(
             runner_entries.len(),
             32,

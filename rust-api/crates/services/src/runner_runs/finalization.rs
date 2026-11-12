@@ -1983,7 +1983,7 @@ mod tests {
     #[test]
     fn finalize_lock_sql_variants() {
         let bare = lock_run_for_finalize_sql(false, false);
-        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 40)]);
+        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 41)]);
         assert!(
             bare.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND NOT \
@@ -2080,9 +2080,9 @@ mod tests {
         assert_eq!(
             select_runs(&fetch),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
-                ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 46),
+                ("\"agent_run\"".to_owned(), 41),
+                ("\"issues\"".to_owned(), 35),
+                ("\"projects\"".to_owned(), 47),
                 ("\"states\"".to_owned(), 18),
                 ("\"scheduler_bindings\"".to_owned(), 22),
             ]
@@ -2101,7 +2101,7 @@ mod tests {
         assert_eq!(
             select_runs(&capacity),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
+                ("\"agent_run\"".to_owned(), 41),
                 ("\"pod\"".to_owned(), 10),
                 ("\"runner\"".to_owned(), 31),
             ]

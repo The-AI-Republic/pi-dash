@@ -4108,6 +4108,7 @@ fn assemble_new_issue(
         assigned_runner_id: v_uuid(validated, "assigned_runner_id"),
         // The normalized write (#2903): deprecated choices land local.
         agent_executor: filtered.agent_executor.clone().flatten(),
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,

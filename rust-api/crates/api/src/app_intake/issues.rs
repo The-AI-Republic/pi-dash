@@ -326,6 +326,7 @@ fn issue_row_from(model: issue_entity::Model) -> IssueRow {
         assigned_runner_id: model.assigned_runner_id,
         created_via: model.created_via,
         agent_executor: model.agent_executor,
+        work_type: model.work_type,
         complexity_score: model.complexity_score,
         workpad: model.workpad,
     }
@@ -457,6 +458,7 @@ struct AnnotatedIssueRow {
     assigned_runner_id: Option<Uuid>,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     complexity_score: i32,
     workpad: String,
     label_ids: Vec<Uuid>,
@@ -502,6 +504,7 @@ impl AnnotatedIssueRow {
                 assigned_runner_id: self.assigned_runner_id,
                 created_via: self.created_via,
                 agent_executor: self.agent_executor,
+                work_type: self.work_type,
                 complexity_score: self.complexity_score,
                 workpad: self.workpad,
             },
@@ -555,6 +558,7 @@ pub async fn fetch_issue_annotated(
             issue_entity::Column::AssignedRunnerId,
             issue_entity::Column::CreatedVia,
             issue_entity::Column::AgentExecutor,
+            issue_entity::Column::WorkType,
             issue_entity::Column::ComplexityScore,
             issue_entity::Column::Workpad,
         ])
@@ -637,6 +641,7 @@ struct DetailRow {
     i_assigned_runner_id: Option<Uuid>,
     i_created_via: Option<String>,
     i_agent_executor: Option<String>,
+    i_work_type: Option<String>,
     i_complexity_score: i32,
     i_workpad: String,
     label_ids: Vec<Uuid>,
@@ -698,6 +703,7 @@ impl DetailRow {
             assigned_runner_id: self.i_assigned_runner_id,
             created_via: self.i_created_via,
             agent_executor: self.i_agent_executor,
+            work_type: self.i_work_type,
             complexity_score: self.i_complexity_score,
             workpad: self.i_workpad,
         };
@@ -768,6 +774,7 @@ pub async fn fetch_detail(
         )
         .column_as(issue_entity::Column::CreatedVia, "i_created_via")
         .column_as(issue_entity::Column::AgentExecutor, "i_agent_executor")
+        .column_as(issue_entity::Column::WorkType, "i_work_type")
         .column_as(issue_entity::Column::ComplexityScore, "i_complexity_score")
         .column_as(issue_entity::Column::Workpad, "i_workpad")
         .column_as(label_ids_annotation(), "label_ids")
@@ -7055,6 +7062,7 @@ async fn render_created_detail(
         .await
         .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
+        work_type: m.work_type,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
         created_by_id: m.created_by_id,

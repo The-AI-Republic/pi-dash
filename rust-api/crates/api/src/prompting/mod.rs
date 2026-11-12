@@ -129,7 +129,7 @@ use pidash_db::entity::{
     issue_labels, issues, labels, projects, prompt_section_override, scheduler_bindings,
     schedulers, states, users, workspaces,
 };
-use pidash_services::prompting::{composer, context, recipes, registry, validation};
+use pidash_services::prompting::{composer, context, recipes, registry, validation, work_types};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
 pub const WORKSPACE_ADMIN_ROLE: i32 = 20;
@@ -2136,6 +2136,7 @@ async fn load_issue_context(
         } else {
             Some(im.workpad)
         },
+        work_type: im.work_type,
     };
 
     let project = load_project(pool, &issue.project_id).await?;
@@ -2293,6 +2294,7 @@ async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Pr
         interval_impl: i64::from(m.agent_default_interval_seconds),
         interval_review: i64::from(m.agent_review_default_interval_seconds),
         interval_test: i64::from(m.agent_test_default_interval_seconds),
+        default_work_type: m.default_work_type,
     })
 }
 

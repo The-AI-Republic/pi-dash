@@ -267,18 +267,18 @@ pub async fn clock_policy(
 /// `work_item` NULL, `scheduler_binding` bound, `parent_run` NULL, the
 /// `'scheduler'` trigger and `'{}'` run config as literals (fixed by the
 /// call path, like `'queued'`), no `phase_kind` or `work_type` stamp (the
-/// model default `""`). `$1..$10` carry the caller-supplied fields in
+/// model default `""`, bound as the `''` literal). `$1..$10` carry the caller-supplied fields in
 /// [`NewSchedulerRun`] order.
 pub const SCHEDULER_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $9, \
-    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '{}', $10, \
+    NULL, NULL, '', 'scheduler', NULL, '', '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '{}', $10, \
     NULL, NULL, NULL)";
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus

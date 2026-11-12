@@ -125,9 +125,9 @@ pub fn serialize_drf_datetime(value: DateTime<Utc>) -> String {
 }
 
 /// App `IssueSerializer` wire keys (`issue.py:1071-1103`), in
-/// `Meta.fields` order: the 31-key base every detail response starts with.
-/// Count the list: 31.
-pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 32] = [
+/// `Meta.fields` order: the 32-key base every detail response starts with.
+/// Count the list: 32.
+pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 33] = [
     "id",
     "name",
     "state_id",
@@ -669,10 +669,10 @@ pub fn has_open_blockers_field(summary: &RelationsSummary) -> bool {
 }
 
 /// `IssueDetailSerializer` wire keys (`issue.py:1237-1245`), in
-/// `Meta.fields` order: the 32 base keys plus the 8 added keys. 40.
+/// `Meta.fields` order: the 33 base keys plus the 8 added keys. 41.
 /// (`assigned_runner_id` sits after `assigned_pod_id` in the base keys;
 /// `assigned_runner_detail` is the last key, design §14.1.)
-pub const ISSUE_DETAIL_FIELDS: [&str; 40] = [
+pub const ISSUE_DETAIL_FIELDS: [&str; 41] = [
     "id",
     "name",
     "state_id",
@@ -718,9 +718,9 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 40] = [
 
 /// The retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus `is_intake`, which
 /// that view does not annotate, so DRF's `SkipField` omits the key
-/// (`base.py:486-618`). 39. (Archive retrieve is a different, 32-key shape
+/// (`base.py:486-618`). 40. (Archive retrieve is a different, 33-key shape
 /// — see [`ISSUE_DETAIL_ARCHIVE_FIELDS`].)
-pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 39] = [
+pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 40] = [
     "id",
     "name",
     "state_id",
@@ -766,8 +766,8 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 39] = [
 /// The archive-retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus the eight
 /// unannotated keys — the seven annotation-driven base fields plus
 /// `is_intake` — which DRF's `SkipField` omits (`archive.py:222-255`
-/// annotates only `is_subscribed`). 32.
-pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 32] = [
+/// annotates only `is_subscribed`). 33.
+pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 33] = [
     "id",
     "name",
     "state_id",
@@ -1351,7 +1351,7 @@ mod tests {
              \"complexity_score\":4,\"start_date\":\"2026-10-01\",\"target_date\":null,\
              \"sequence_id\":639,\"project_id\":\"22222222-2222-2222-2222-222222222222\",\
              \"parent_id\":null,\"cycle_id\":null,\"type_id\":\"77777777-7777-7777-7777-777777777777\",\"is_epic\":true,\"assigned_pod_id\":null,\"assigned_runner_id\":null,\
-             \"agent_executor\":null,\"module_ids\":[],\"label_ids\":[],\
+             \"agent_executor\":null,\"work_type\":null,\"module_ids\":[],\"label_ids\":[],\
              \"assignee_ids\":[\"44444444-4444-4444-4444-444444444444\"],\
              \"sub_issues_count\":2,\"created_at\":\"2026-10-02T21:42:34.824827Z\",\
              \"updated_at\":\"2026-10-04T03:57:29.850339Z\",\

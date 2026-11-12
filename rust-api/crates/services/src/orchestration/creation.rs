@@ -172,7 +172,7 @@ pub const OWNER_UNASSIGNED: Option<Uuid> = None;
 /// The issue projection every unit reads (`service.py` passes full issue
 /// rows; this projects the consumed columns). `$1` is the issue id.
 pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_id, parent_id, \
-    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, git_work_branch, workpad, name, \
+    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, work_type, git_work_branch, workpad, name, \
     description_stripped, priority, sequence_id, target_date FROM issues WHERE id = $1";
 
 /// The project projection (`service.py` reads `issue.project` for the
@@ -333,17 +333,18 @@ pub fn run_lock_sql() -> String {
 /// `JSONKeyTextField` `refusal_category` excluded). Fixed values
 /// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14` and
 /// `$15` (`pin_kind`, appended at the end) carry the caller-supplied
-/// fields in [`NewAgentRun`] order.
+/// fields in [`NewAgentRun`] order, and `$16` the `work_type` stamp
+/// (added after `phase_kind` in model order).
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
+    NULL, NULL, '', $11, NULL, $12, $16, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
     NULL, NULL, NULL, $15)";
 
 /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
@@ -662,6 +663,7 @@ pub mod orm {
                 C::AssignedPodId,
                 C::AssignedRunnerId,
                 C::AgentExecutor,
+                C::WorkType,
                 C::GitWorkBranch,
                 C::Workpad,
                 C::Name,
@@ -694,6 +696,7 @@ pub mod orm {
                 C::AgentDefaultIntervalSeconds,
                 C::AgentReviewDefaultIntervalSeconds,
                 C::AgentTestDefaultIntervalSeconds,
+                C::DefaultWorkType,
             ])
             .from(projects::Entity)
             .and_where(Expr::col(C::Id).eq(project_id))
@@ -937,6 +940,7 @@ pub mod orm {
                 C::Trigger,
                 C::PromptManifest,
                 C::PhaseKind,
+                C::WorkType,
                 C::RunConfig,
                 C::RequiredCapabilities,
                 C::ThreadId,
@@ -975,6 +979,7 @@ pub mod orm {
                 Expr::value(row.trigger.as_str()),
                 none_json(),
                 Expr::value(row.phase_kind.as_str()),
+                Expr::value(row.work_type.as_str()),
                 Expr::value(row.run_config.clone()),
                 Expr::value(serde_json::json!([])),
                 Expr::value(""),
@@ -3462,6 +3467,7 @@ mod tests {
             tool_plan: json!({}),
             trigger: "direct".to_owned(),
             phase_kind: String::new(),
+            work_type: "software".to_owned(),
             run_config: json!({}),
             now: now(),
         })
@@ -5453,10 +5459,13 @@ mod tests {
         ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind,
-        // appended so no other bind moves.
+        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind
+        // (appended at the end), `$16` the work_type stamp after
+        // phase_kind.
         assert!(RUN_INSERT_SQL.contains("$14"));
         assert!(RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$16"));
+        assert!(RUN_INSERT_SQL.contains("work_type"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(!finalize_update_sql().contains("queue_position"));
         assert!(!RUN_INSERT_SQL.contains("queue_position"));

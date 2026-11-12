@@ -1187,6 +1187,7 @@ fn write_row((issue, state): (issues::Model, Option<states::Model>)) -> WriteRow
         assigned_pod_id: id_text(issue.assigned_pod_id),
         assigned_runner_id: id_text(issue.assigned_runner_id),
         agent_executor: issue.agent_executor,
+        work_type: issue.work_type,
         created_at: at(issue.created_at),
         updated_at: at(issue.updated_at),
         created_by: id_text(issue.created_by_id),
@@ -1626,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_25_keys_in_meta_order() {
+    fn current_instance_is_26_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -1678,7 +1679,7 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 25);
+        assert_eq!(parsed.len(), 26);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));

@@ -4,7 +4,7 @@
 //! (`apps/api/pi_dash/app/serializers/issue.py:136-520`):
 //!
 //! * `to_representation` (`:185-191`) → [`issue_create_to_representation`]:
-//!   the 41-key wire shape ([`ISSUE_CREATE_FIELDS`], order verified live on
+//!   the 43-key wire shape ([`ISSUE_CREATE_FIELDS`], order verified live on
 //!   the pinned Django 4.2.30 + DRF 3.15.2) with the `assignee_ids` /
 //!   `label_ids` `initial_data` echo appended last. The create view
 //!   re-queries instead of returning this (FX-ISS-14 owns that shape), but
@@ -100,7 +100,7 @@ use crate::tasks_cleanup::versions::chunk_ranges;
 /// `assignee_ids` first and `label_ids` second (`:187-190`). The write-only
 /// pair is absent from `super().to_representation` — the echo keys sit at
 /// the END, not in declared position.
-pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
+pub const ISSUE_CREATE_FIELDS: [&str; 43] = [
     "id",
     "state_id",
     "parent_id",
@@ -831,6 +831,7 @@ pub fn issue_create_validate(
 
     let mut validated = ValidatedAttrs {
         description_html: None,
+        work_type: None,
         assignee_ids: None,
         label_ids: None,
         agent_executor: None,
@@ -892,6 +893,22 @@ pub fn issue_create_validate(
             validated.agent_executor = Some(None);
         }
     }
+
+    // Step 4b. work_type (PDASHOSS01-234): key presence; falsy normalizes
+    // to the inherit state, a truthy key must be registered.
+    validated.work_type = match attrs.work_type {
+        None => None,
+        Some(None) | Some(Some("")) => Some(None),
+        Some(Some(key)) => {
+            if !crate::prompting::work_types::is_known(key) {
+                return Err(CreateValidateError::Field {
+                    field: "work_type",
+                    message: Cow::Owned(crate::prompting::work_types::unknown_work_type_message()),
+                });
+            }
+            Some(Some(key.to_owned()))
+        }
+    };
 
     // Step 5. description_html sanitize (:324-330): truthy inputs only; the
     // cleaned output always replaces the input (`nh3.clean` never returns
@@ -2648,8 +2665,8 @@ mod tests {
         let sent = serde_json::json!(["a", "b"]);
         assert_eq!(echo_initial_ids(Some(&sent)), sent);
 
-        // 42 wire keys with the echo pair appended last (:187-190).
-        assert_eq!(ISSUE_CREATE_FIELDS.len(), 42);
+        // 43 wire keys with the echo pair appended last (:187-190).
+        assert_eq!(ISSUE_CREATE_FIELDS.len(), 43);
         assert_eq!(ISSUE_CREATE_FIELDS[0], "id");
         assert_eq!(
             &ISSUE_CREATE_FIELDS[ISSUE_CREATE_FIELDS.len() - 2..],

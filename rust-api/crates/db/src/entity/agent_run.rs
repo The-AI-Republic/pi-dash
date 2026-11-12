@@ -56,6 +56,10 @@ pub struct Model {
     pub terminal_hooks_applied_at: Option<DateTimeWithTimeZone>,
     pub terminal_capacity_released_at: Option<DateTimeWithTimeZone>,
     pub phase_kind: String,
+    // `AgentRun.work_type` (PDASHOSS01-234): NOT NULL, Django default "";
+    // the creation paths stamp the effective work type, scheduler and
+    // direct runs keep the default.
+    pub work_type: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub agent_metadata: Json,
     #[sea_orm(column_type = "JsonBinary")]

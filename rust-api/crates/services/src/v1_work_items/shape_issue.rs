@@ -454,6 +454,19 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// `validate()` work-type registry check (PDASHOSS01-234): a truthy
+/// `work_type` that names no registered work type. Raised with a dict, so
+/// DRF list-wraps the message under the field key.
+pub static UNKNOWN_WORK_TYPE_BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    serde_json::json!({
+        "work_type": [crate::prompting::work_types::unknown_work_type_message()]
+    })
+    .to_string()
+});
+/// `IssueDetailAPIEndpoint.patch` work-type lock (PDASHOSS01-234): an
+/// agent-attributed PATCH (explicit run-id header) changing `work_type`
+/// while the issue sits in a ticking stage (started / review / test).
+pub const WORK_TYPE_LOCKED_BODY: &str = r#"{"error":"work_type is locked while the issue is being worked; only a human can change it"}"#;
 /// The dedicated-runner E-checks (`validate_execution_target`, design
 /// §7.1): one variant per code, each Django's `ErrorDetail` — every
 /// one keyed on `assigned_runner` (both serializers carry the runner
@@ -1749,7 +1762,7 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 39);
+        assert_eq!(FIELDS_IN_ORDER.len(), 40);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
@@ -1767,7 +1780,7 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 36);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 37);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
         assert!(READABLE_FIELDS_IN_ORDER.contains(&"dispatch_wait"));
         assert_eq!(
@@ -2743,7 +2756,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 40);
+        assert_eq!(keys.len(), 41);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(

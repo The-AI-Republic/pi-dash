@@ -780,6 +780,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         trigger: model.trigger,
         prompt_manifest: model.prompt_manifest,
         phase_kind: model.phase_kind,
+        work_type: model.work_type,
         run_config: model.run_config,
         required_capabilities: model.required_capabilities,
         thread_id: model.thread_id,
@@ -802,7 +803,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
     })
 }
 
-/// Decode the 40-column run image at `base..base+40` into the L2 row.
+/// Decode the 41-column run image at `base..base+41` into the L2 row.
 /// Kept for the `app_scheduler` binding-runs list, whose hand-written
 /// `SELECT` still opens with [`run_select_list`]; every reader here
 /// goes through [`run_from_model`].
@@ -848,23 +849,24 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         trigger,
         prompt_manifest: row.try_get(base + 21)?,
         phase_kind: row.try_get(base + 22)?,
-        run_config: row.try_get(base + 23)?,
-        required_capabilities: row.try_get(base + 24)?,
-        thread_id: row.try_get(base + 25)?,
-        agent_metadata: row.try_get(base + 26)?,
-        lease_expires_at: row.try_get(base + 27)?,
-        done_payload: row.try_get(base + 28)?,
-        error_details: row.try_get(base + 29)?,
-        refusal_category: row.try_get(base + 30)?,
-        llm_model: row.try_get(base + 31)?,
-        usage: row.try_get(base + 32)?,
-        input_tokens: row.try_get(base + 33)?,
-        output_tokens: row.try_get(base + 34)?,
-        total_tokens: row.try_get(base + 35)?,
-        created_at: row.try_get(base + 36)?,
-        assigned_at: row.try_get(base + 37)?,
-        started_at: row.try_get(base + 38)?,
-        ended_at: row.try_get(base + 39)?,
+        work_type: row.try_get(base + 23)?,
+        run_config: row.try_get(base + 24)?,
+        required_capabilities: row.try_get(base + 25)?,
+        thread_id: row.try_get(base + 26)?,
+        agent_metadata: row.try_get(base + 27)?,
+        lease_expires_at: row.try_get(base + 28)?,
+        done_payload: row.try_get(base + 29)?,
+        error_details: row.try_get(base + 30)?,
+        refusal_category: row.try_get(base + 31)?,
+        llm_model: row.try_get(base + 32)?,
+        usage: row.try_get(base + 33)?,
+        input_tokens: row.try_get(base + 34)?,
+        output_tokens: row.try_get(base + 35)?,
+        total_tokens: row.try_get(base + 36)?,
+        created_at: row.try_get(base + 37)?,
+        assigned_at: row.try_get(base + 38)?,
+        started_at: row.try_get(base + 39)?,
+        ended_at: row.try_get(base + 40)?,
     })
 }
 
@@ -2584,7 +2586,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 40);
+        assert_eq!(agent_run::COLUMNS.len(), 41);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }

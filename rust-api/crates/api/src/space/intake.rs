@@ -479,6 +479,7 @@ async fn fetch_issue(
                 assigned_runner_id: m.assigned_runner_id,
                 agent_executor: m.agent_executor,
                 workpad: m.workpad,
+                work_type: m.work_type,
             })
         })
         .transpose()
@@ -2953,6 +2954,7 @@ mod tests {
                 assigned_runner_id: None,
                 agent_executor: None,
                 workpad: String::new(),
+                work_type: None,
             },
             state: None,
             project: ProjectRow {

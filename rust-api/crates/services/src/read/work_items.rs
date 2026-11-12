@@ -30,7 +30,7 @@ use crate::v1_work_items::{filter_fields, FieldSpec};
 /// The `issues.*` columns every read path selects (F18-05 column order).
 /// `description_json` / `description_stripped` / `workpad` are unrendered
 /// and unread here, so they stay out of the select list.
-pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id", "issues"."assigned_runner_id""#;
+pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."work_type", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id", "issues"."assigned_runner_id""#;
 
 /// The joined extras every read path selects: the URL parts and the state
 /// group (the completed-arm check on writes).
@@ -1527,6 +1527,7 @@ pub async fn fetch_issue_for_write(
         git_work_branch: String,
         created_via: Option<String>,
         agent_executor: Option<String>,
+        work_type: Option<String>,
         created_by_id: Option<Uuid>,
         updated_by_id: Option<Uuid>,
         project_id: Uuid,
@@ -1574,6 +1575,7 @@ pub async fn fetch_issue_for_write(
             issues::Column::GitWorkBranch,
             issues::Column::CreatedVia,
             issues::Column::AgentExecutor,
+            issues::Column::WorkType,
             issues::Column::CreatedById,
             issues::Column::UpdatedById,
             issues::Column::ProjectId,
@@ -1624,6 +1626,7 @@ pub async fn fetch_issue_for_write(
         git_work_branch: row.git_work_branch,
         created_via: row.created_via,
         agent_executor: row.agent_executor,
+        work_type: row.work_type,
         project: row.project_id.to_string(),
         workspace: row.workspace_id.to_string(),
         parent: row.parent_id.map(|id| id.to_string()),

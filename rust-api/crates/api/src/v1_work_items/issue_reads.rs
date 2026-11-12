@@ -58,7 +58,7 @@ fn sub(stmt: SelectStatement) -> SimpleExpr {
 
 /// The `issues.*` columns every read path selects
 /// (`read::work_items::ISSUE_SELECT_COLS`, F18-05 column order).
-const ISSUE_COLUMNS: [issues::Column; 32] = [
+const ISSUE_COLUMNS: [issues::Column; 33] = [
     issues::Column::Id,
     issues::Column::CreatedAt,
     issues::Column::UpdatedAt,
@@ -81,6 +81,7 @@ const ISSUE_COLUMNS: [issues::Column; 32] = [
     issues::Column::GitWorkBranch,
     issues::Column::CreatedVia,
     issues::Column::AgentExecutor,
+    issues::Column::WorkType,
     issues::Column::CreatedById,
     issues::Column::UpdatedById,
     issues::Column::ProjectId,
@@ -957,6 +958,7 @@ struct IssueRow {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_by_id: Option<Uuid>,
     updated_by_id: Option<Uuid>,
     project_id: Uuid,
@@ -1001,6 +1003,7 @@ impl IssueRow {
             git_work_branch: self.git_work_branch,
             created_via: self.created_via,
             agent_executor: self.agent_executor,
+            work_type: self.work_type,
             created_by: self.created_by_id.map(|id| id.to_string()),
             updated_by: self.updated_by_id.map(|id| id.to_string()),
             project: self.project_id.to_string(),

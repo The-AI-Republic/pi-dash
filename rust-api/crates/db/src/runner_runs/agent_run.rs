@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 40);
+        assert_eq!(COLUMNS.len(), 41);
     }
 
     #[test]
