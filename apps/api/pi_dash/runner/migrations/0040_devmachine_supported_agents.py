@@ -25,4 +25,12 @@ class Migration(migrations.Migration):
             name="supported_agents",
             field=models.JSONField(blank=True, default=list),
         ),
+        # Django drops the column default after backfilling. Keep a
+        # database-level default too, so writers that do not go through the
+        # Django model (the Rust API, raw SQL) can still insert rows without
+        # naming the new NOT NULL column (the 0034 / 0036 convention).
+        migrations.RunSQL(
+            sql=["ALTER TABLE dev_machine ALTER COLUMN supported_agents SET DEFAULT '[]'::jsonb"],
+            reverse_sql=["ALTER TABLE dev_machine ALTER COLUMN supported_agents DROP DEFAULT"],
+        ),
     ]
