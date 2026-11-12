@@ -4695,6 +4695,7 @@ async fn insert_project(
         &pidash_services::domain::projects::NewProject {
             name,
             description: validated.description.as_deref().unwrap_or(""),
+            context: validated.context.as_deref().unwrap_or(""),
             description_text: validated
                 .description_text
                 .as_ref()
@@ -4985,6 +4986,7 @@ async fn apply_update(
             .description
             .as_deref()
             .unwrap_or(&instance.description),
+        context: validated.context.as_deref().unwrap_or(&instance.context),
         description_text: validated
             .description_text
             .as_ref()
@@ -7471,9 +7473,14 @@ mod tests {
         assert!(position("deleted_at") < position("name"));
         assert!(position("name") < position("identifier"));
         assert!(position("identifier") < position("workspace"));
+        assert_eq!(
+            WRITE_FIELDS[position("description") + 1],
+            "context",
+            "context follows description (PDASHOSS01-294)"
+        );
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 44);
+        assert_eq!(WRITE_FIELDS.len(), 45);
     }
 
     #[test]

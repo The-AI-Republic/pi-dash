@@ -492,7 +492,10 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
     );
     out.insert(
         "context".to_owned(),
-        row.context.clone().map(Value::String).unwrap_or(Value::Null),
+        row.context
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
     );
     out.insert(
         "description_text".to_owned(),
@@ -1878,6 +1881,7 @@ mod tests {
             deleted_at: dt_opt(&g["deleted_at"]),
             name: g["name"].as_str().unwrap().to_owned(),
             description: g["description"].as_str().unwrap().to_owned(),
+            context: str_opt(&g["context"]),
             description_text: json_opt(&g["description_text"]),
             description_html: json_opt(&g["description_html"]),
             network: g["network"].as_i64().unwrap() as i32,

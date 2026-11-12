@@ -3035,6 +3035,7 @@ pub async fn create_project_inner(
         &pidash_services::domain::projects::NewProject {
             name: &v1_name,
             description: &description,
+            context: &context,
             description_text: None,
             description_html: None,
             network: 2,

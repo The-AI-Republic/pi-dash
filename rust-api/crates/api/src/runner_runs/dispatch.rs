@@ -1310,7 +1310,9 @@ async fn render_cloud_free_prompt(
         .one(&db)
         .await
         .map_err(|_| server_error())?;
-    let Some((project_id, project_identifier, project_name, project_description, project_context)) = project else {
+    let Some((project_id, project_identifier, project_name, project_description, project_context)) =
+        project
+    else {
         return Err(server_error());
     };
     let extra_toolsets_enabled = tool_plan
