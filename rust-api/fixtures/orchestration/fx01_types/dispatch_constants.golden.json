@@ -1,0 +1,40 @@
+{
+  "AgentRunTrigger": {
+    "STATE_TRANSITION": "state_transition",
+    "RUN_AI": "run_ai",
+    "COMMENT_AND_RUN": "comment_and_run",
+    "TICK": "tick",
+    "SCHEDULER": "scheduler",
+    "DIRECT": "direct"
+  },
+  "TRIGGER_TICK": "tick",
+  "TRIGGER_COMMENT_AND_RUN": "comment_and_run",
+  "TRIGGER_RUN_AI": "run_ai",
+  "_MACHINE_TRIGGERS": [
+    "tick"
+  ],
+  "RUN_AI_ACTIVE_RUN_EXISTS": "active_run_exists",
+  "RUN_AI_NO_POD": "no_pod",
+  "RUN_AI_NO_ELIGIBLE_RUNNER": "no_eligible_runner",
+  "WAIT_GRANTED": "waited",
+  "WAIT_CAP_REACHED": "wait_cap_reached",
+  "WAIT_INFINITE_POOL": "infinite_pool",
+  "WAIT_NO_TICKER": "no_ticker",
+  "WAIT_ACTIVITY_FIELD": "agent_wait",
+  "_WAIT_REARMABLE_DISARMS": [
+    "cap_hit",
+    "pool_spent"
+  ],
+  "_TICKER_CLOCK_FIELDS": [
+    "enabled",
+    "disarm_reason",
+    "next_run_at",
+    "pending_entry",
+    "pending_entry_free",
+    "pending_entry_actor",
+    "pending_entry_trigger",
+    "granted",
+    "resume_parent_run",
+    "updated_at"
+  ]
+}

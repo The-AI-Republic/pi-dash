@@ -1,0 +1,84 @@
+{
+  "trace": "apps/api/pi_dash/assistant/views/_base.py:1-34; throttle scopes in views + rates in settings/common.py:93-117",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "roles": {
+    "source": "apps/api/pi_dash/core/permissions.py:23-25",
+    "ADMIN": 20,
+    "MEMBER": 15,
+    "GUEST": 5
+  },
+  "require_member": {
+    "source": "apps/api/pi_dash/assistant/views/_base.py:25-29",
+    "rule": "role None or < MEMBER(15) -> 403 {'error': 'role_not_allowed', 'detail': 'The assistant is available to workspace members.'}",
+    "matrix": [
+      {
+        "role": "guest (5)",
+        "result": "403 role_not_allowed"
+      },
+      {
+        "role": "non-member (None)",
+        "result": "403 role_not_allowed"
+      },
+      {
+        "role": "member (15)",
+        "result": "pass"
+      },
+      {
+        "role": "admin (20)",
+        "result": "pass"
+      }
+    ]
+  },
+  "owned_thread": {
+    "source": "apps/api/pi_dash/assistant/views/_base.py:31-34",
+    "filter": [
+      "id=thread_id",
+      "user=request.user",
+      "workspace__slug=slug"
+    ],
+    "missing": "None -> 404 {'error': 'not_found'} on thread-scoped endpoints"
+  },
+  "sse_resolve": {
+    "source": "apps/api/pi_dash/assistant/views/events.py:28-41",
+    "matrix": [
+      "unauthenticated -> 401",
+      "guest/non-member -> thread None -> 404",
+      "member, other-user thread -> None -> 404"
+    ]
+  },
+  "throttles": [
+    {
+      "scope": "assistant_message",
+      "rate": "30/hour",
+      "source": "apps/api/pi_dash/assistant/views/messages.py:29-42",
+      "note": "POST messages only (get_throttles gates on POST); probe scope=assistant_message"
+    },
+    {
+      "scope": "assistant_llm_test",
+      "rate": "6/minute",
+      "source": "apps/api/pi_dash/assistant/views/llm_config.py:81-86"
+    },
+    {
+      "scope": "assistant_llm_generate_title",
+      "rate": "20/minute",
+      "source": "apps/api/pi_dash/assistant/views/llm_config.py:111-126"
+    },
+    {
+      "scope": "assistant_stt_test",
+      "rate": "6/minute",
+      "source": "apps/api/pi_dash/assistant/views/stt_config.py:84-89"
+    },
+    {
+      "scope": "assistant_transcribe",
+      "rate": "20/minute",
+      "source": "apps/api/pi_dash/assistant/views/transcribe.py:57-62"
+    },
+    {
+      "scope": "assistant_agent_token",
+      "rate": "12/minute",
+      "source": "apps/api/pi_dash/assistant/views/agent_profile.py:67-82",
+      "note": "profile endpoint unthrottled; token endpoint throttled"
+    }
+  ],
+  "rates_source": "apps/api/pi_dash/settings/common.py:93-117"
+}

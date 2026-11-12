@@ -1,0 +1,518 @@
+//! Soft/hard deletion task bodies.
+//!
+//! Port of `apps/api/pi_dash/bgtasks/deletion_task.py` (all 193 lines,
+//! PIDASHCONV-186): `soft_delete_related_objects` (`:18`), the
+//! never-registered `restore_related_objects` (`:109`), and `hard_delete`
+//! (`:114`).
+//!
+//! Walk semantics (fixture `soft_delete_walk`):
+//!
+//! - Entry reads through `all_objects` (unscoped: already-soft-deleted
+//!   rows are found); a missing row returns silently (`DoesNotExist` at
+//!   `:25-28`); an unknown `(app_label, model_name)` fails loudly (the
+//!   `apps.get_model` `LookupError`, which the `except` does not catch).
+//! - Relations first, self last. Hidden (`related_name='+'`) relations
+//!   are skipped before dispatch (Python's `get_fields()` never
+//!   enumerates them). `DO_NOTHING` skips. `SET_NULL` nulls
+//!   (one-to-one: single-row `save(update_fields)` with the `auto_now`
+//!   bump; to-many: scoped queryset `update`, no `updated_at` touch).
+//!   To-many nulling into `issues` carries the `IssueManager` guards
+//!   (triage / archived / draft / archived-project rows are preserved,
+//!   NULL-FK rows retained) — the reverse manager inherits the child
+//!   default manager.
+//!   Everything else takes the CASCADE branch: one-to-one stamps with a
+//!   full save and recurses depth-first; to-many iterates the live-scoped
+//!   `(manager="objects").all()` queryset (`:82-96`), stamping each child
+//!   with a full save and recursing into it. (PIDASHCONV-900 corrected the
+//!   port's BUG-DEL-1 claim of a manager-call `TypeError` here: reverse-FK
+//!   related managers ARE callable — `RelatedManager.__call__`
+//!   (`django/db/models/fields/related_descriptors.py:650`) rebuilds the
+//!   manager with the named class — and a live `soft_delete_related_objects`
+//!   run on `("db", "loopjob")` stamps both to-many children.)
+//! - `SET_NULL` failures propagate (that branch sits outside the `try`);
+//!   CASCADE-branch failures are warnings and the walk continues.
+//! - Recursion is an explicit worklist with a visited set instead of
+//!   Python's unbounded call stack. The terminal DB state is identical:
+//!   Python re-visits are no-ops (stamps guarded by `not deleted_at`,
+//!   nulling idempotent), so visiting each node once only drops redundant
+//!   re-walks — and guarantees termination on relation cycles, where
+//!   Python would spin until `RecursionError`.
+//!
+//! Write scoping follows the Porting guide: every function takes an
+//! explicit [`RequestContext`][pidash_db::RequestContext]. Discovery reads
+//! honor `use_read_replica`; every write runs on the primary pool. These
+//! maintenance writes set no audit FK columns, mirroring the Python task
+//! (which never touches `created_by`/`updated_by` on these paths).
+
+use std::collections::HashSet;
+
+use pidash_db::tasks_cleanup::{
+    classify_delete_edges, entry_table_for, fetch_live_to_many, fetch_one_to_one, fetch_row,
+    load_fk_details, load_schema_info, now_stamp, null_bulk, null_one_to_one, parse_pk,
+    reverse_relations, run_model_hard_delete, stamp_row, sweep_tables_in_django_order, LookupError,
+    ModelDeleteError, RowState, HARD_DELETE_NAMED_TABLES,
+};
+use pidash_db::{Pools, RequestContext};
+use serde_json::Value;
+
+/// What `soft_delete_related_objects` may fail with.
+#[derive(Debug, thiserror::Error)]
+pub enum DeletionError {
+    /// `(app_label, model_name)` resolves to no model: the
+    /// `apps.get_model` `LookupError` equivalent. Loud, like Python.
+    #[error("unknown model: {app_label}.{model_name}")]
+    UnknownModel {
+        app_label: String,
+        model_name: String,
+    },
+    /// The Celery args/kwargs do not carry `(app_label, model_name,
+    /// instance_pk)`: the task fails, as a Python `TypeError` on missing
+    /// positional arguments would.
+    #[error("bad task payload: {0}")]
+    BadPayload(String),
+    /// The `instance_pk` is not a UUID (Django `ValidationError`).
+    #[error("bad primary key {0:?}: not a UUID")]
+    BadPk(String),
+    /// Any database failure.
+    #[error("database error: {0}")]
+    Db(String),
+}
+
+impl From<LookupError> for DeletionError {
+    fn from(error: LookupError) -> Self {
+        match error {
+            LookupError::BadPk(raw) => DeletionError::BadPk(raw),
+            LookupError::Db(error) => DeletionError::Db(error.to_string()),
+        }
+    }
+}
+
+fn db_error(error: impl std::fmt::Display) -> DeletionError {
+    DeletionError::Db(error.to_string())
+}
+
+/// A parsed `soft_delete_related_objects` invocation:
+/// `(app_label, model_name, instance_pk, using=None)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftDeleteTarget {
+    pub app_label: String,
+    pub model_name: String,
+    /// Raw pk text; parsed to `Uuid` at execution (every fixture table
+    /// uses a UUID pk).
+    pub instance_pk: String,
+    /// The Django DB alias. Accepted for wire parity, ignored: the Rust
+    /// worker has a single primary pool.
+    pub using: Option<String>,
+}
+
+/// Read pool honoring the request context: replica reads only when the
+/// context opts in (writes always use [`Pools::primary`]).
+macro_rules! read_pool {
+    ($pools:expr, $ctx:expr) => {
+        if $ctx.use_read_replica() {
+            $pools.replica().unwrap_or_else(|| $pools.primary())
+        } else {
+            $pools.primary()
+        }
+    };
+}
+
+fn json_string(value: &Value) -> Option<String> {
+    value.as_str().map(str::to_owned)
+}
+
+/// Parse Celery v2 `(args, kwargs)` into a [`SoftDeleteTarget`].
+/// `using` arrives positionally (`delay(a, m, pk, using=u)` puts it in
+/// `args[3]`) or as a kwarg (`kwargs["using"]`); both are accepted.
+pub fn parse_soft_delete_call(
+    args: &Value,
+    kwargs: &Value,
+) -> Result<SoftDeleteTarget, DeletionError> {
+    let positional: &[Value] = args.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let get = |index: usize, key: &str| {
+        positional
+            .get(index)
+            .and_then(json_string)
+            .or_else(|| kwargs.get(key).and_then(json_string))
+    };
+    let app_label = get(0, "app_label")
+        .ok_or_else(|| DeletionError::BadPayload("missing app_label".to_owned()))?;
+    let model_name = get(1, "model_name")
+        .ok_or_else(|| DeletionError::BadPayload("missing model_name".to_owned()))?;
+    let instance_pk = get(2, "instance_pk")
+        .ok_or_else(|| DeletionError::BadPayload("missing instance_pk".to_owned()))?;
+    if instance_pk.is_empty() {
+        return Err(DeletionError::BadPayload("empty instance_pk".to_owned()));
+    }
+    Ok(SoftDeleteTarget {
+        app_label,
+        model_name,
+        instance_pk,
+        using: get(3, "using"),
+    })
+}
+
+/// What one `soft_delete_related_objects` run did. `warnings` carries the
+/// per-relation error lines Python `print`s (`Error handling relation
+/// ...`); the jobs handler logs them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SoftDeleteOutcome {
+    /// Distinct `(table, pk)` nodes walked.
+    pub visited: usize,
+    /// Rows stamped `deleted_at` (relations + self).
+    pub stamped: usize,
+    /// Rows touched by FK nulling.
+    pub nulled_rows: usize,
+    /// Per-relation error lines (CASCADE-branch row failures). The walk
+    /// continued past every one.
+    pub warnings: Vec<String>,
+}
+
+/// `soft_delete_related_objects(app_label, model_name, instance_pk,
+/// using=None)` (`deletion_task.py:18-105`).
+pub async fn soft_delete_related_objects(
+    pools: &Pools,
+    ctx: &RequestContext,
+    target: SoftDeleteTarget,
+) -> Result<SoftDeleteOutcome, DeletionError> {
+    let table = entry_table_for(&target.app_label, &target.model_name).ok_or_else(|| {
+        DeletionError::UnknownModel {
+            app_label: target.app_label.clone(),
+            model_name: target.model_name.clone(),
+        }
+    })?;
+    let pk = parse_pk(&target.instance_pk)?;
+
+    let reads = read_pool!(pools, ctx);
+    let writes = pools.primary();
+    let schema = load_schema_info(reads).await.map_err(db_error)?;
+
+    let root = fetch_row(reads, &schema, table, &pk)
+        .await
+        .map_err(db_error)?;
+    let root = match root {
+        None => return Ok(SoftDeleteOutcome::default()),
+        Some(row) => row,
+    };
+
+    let mut outcome = SoftDeleteOutcome::default();
+    let mut visited: HashSet<(String, String)> = HashSet::new();
+    let mut stack = vec![(table.to_owned(), root)];
+
+    while let Some((table, state)) = stack.pop() {
+        if !visited.insert((table.clone(), state.pk.to_string())) {
+            continue;
+        }
+        outcome.visited += 1;
+
+        let relations = reverse_relations(reads, &table).await.map_err(db_error)?;
+        for relation in &relations {
+            if relation.is_hidden() {
+                continue;
+            }
+            if relation.is_do_nothing() {
+                continue;
+            }
+            if relation.is_set_null() {
+                // Outside the Python `try`: failures propagate.
+                if relation.one_to_one {
+                    // Unscoped read, like the descriptor `getattr`
+                    // (`:54`): whatever is found — live or
+                    // soft-deleted — is nulled (`:56-57`).
+                    if let Some(related) = fetch_one_to_one(reads, &schema, relation, &state.pk)
+                        .await
+                        .map_err(db_error)?
+                    {
+                        outcome.nulled_rows +=
+                            null_one_to_one(writes, &schema, relation, &related.pk, &now_stamp())
+                                .await
+                                .map_err(db_error)? as usize;
+                    }
+                } else {
+                    outcome.nulled_rows += null_bulk(writes, &schema, relation, &state.pk)
+                        .await
+                        .map_err(db_error)? as usize;
+                }
+                continue;
+            }
+            // CASCADE branch (and RESTRICT / SET DEFAULT / anything else,
+            // exactly like the Python `else`): inside the `try`, so a row
+            // failure becomes a warning and the walk continues with the
+            // next relation (`:97-99`).
+            if relation.one_to_one {
+                let step: Result<Option<(String, RowState)>, DeletionError> = async {
+                    // Unscoped read, like the descriptor `getattr`
+                    // (`:68`); the `deleted_at` skip below (`:70-71`)
+                    // is what keeps stamped rows untouched.
+                    let related = fetch_one_to_one(reads, &schema, relation, &state.pk)
+                        .await
+                        .map_err(db_error)?;
+                    let related = match related {
+                        None => return Ok(None),
+                        Some(related) => related,
+                    };
+                    if !schema.has_deleted_at(&relation.child_table) || related.deleted_at.is_some()
+                    {
+                        return Ok(None);
+                    }
+                    stamp_row(
+                        writes,
+                        &schema,
+                        &relation.child_table,
+                        &related.pk,
+                        &now_stamp(),
+                    )
+                    .await
+                    .map_err(db_error)?;
+                    Ok(Some((relation.child_table.clone(), related)))
+                }
+                .await;
+                match step {
+                    Ok(None) => {}
+                    Ok(Some((child_table, child_state))) => {
+                        outcome.stamped += 1;
+                        stack.push((child_table, child_state));
+                    }
+                    Err(error) => {
+                        outcome.warnings.push(format!(
+                            "Error handling relation {}: {error}",
+                            accessor(&relation.child_table, &relation.fk_column)
+                        ));
+                    }
+                }
+            } else {
+                // To-many (`:82-96`): `(manager="objects").all()` is the
+                // live-scoped child queryset — reverse-FK related managers
+                // ARE callable (`RelatedManager.__call__` rebuilds with the
+                // named manager), so every live child is stamped with a
+                // full save and recursed into. Each stamped child joins the
+                // worklist immediately, mirroring the per-child recursion:
+                // a later sibling's failure warns and abandons only the
+                // rest of this relation, like the Python `except`.
+                let step: Result<(), DeletionError> = async {
+                    let children = fetch_live_to_many(reads, &schema, relation, &state.pk)
+                        .await
+                        .map_err(db_error)?;
+                    for child in &children {
+                        stamp_row(
+                            writes,
+                            &schema,
+                            &relation.child_table,
+                            &child.pk,
+                            &now_stamp(),
+                        )
+                        .await
+                        .map_err(db_error)?;
+                        outcome.stamped += 1;
+                        stack.push((relation.child_table.clone(), child.clone()));
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = step {
+                    outcome.warnings.push(format!(
+                        "Error handling relation {}: {error}",
+                        accessor(&relation.child_table, &relation.fk_column)
+                    ));
+                }
+            }
+        }
+
+        // Finally, the instance itself (`:102-105`), outside the `try`:
+        // failures propagate.
+        if schema.has_deleted_at(&table) && state.deleted_at.is_none() {
+            stamp_row(writes, &schema, &table, &state.pk, &now_stamp())
+                .await
+                .map_err(db_error)?;
+            outcome.stamped += 1;
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// Fixture-style accessor label for warning lines
+/// (`<child_table>.<fk_column>`; the exact Django accessor name is a
+/// `_meta` detail with no catalog equivalent).
+fn accessor(child_table: &str, fk_column: &str) -> String {
+    format!("{child_table}.{fk_column}")
+}
+
+/// What one `hard_delete` run did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HardDeleteOutcome {
+    /// Rows removed by the 18 named deletes.
+    pub named_deleted: u64,
+    /// Rows removed by the catalog sweep (re-inclusive of the named
+    /// tables, like the Python loop).
+    pub sweep_deleted: u64,
+    /// Tables the sweep visited.
+    pub sweep_tables: usize,
+}
+
+/// `hard_delete()` (`deletion_task.py:114-193`): the 18 named models in
+/// source order, then every `deleted_at` model in `apps.get_models()`
+/// order (re-inclusive of the named ones). `cutoff` is the preformatted
+/// `now - HARD_DELETE_AFTER_DAYS` literal.
+///
+/// Collector emulation (PIDASHCONV-928): each per-model `.delete()` runs
+/// the ORM Collector — `CASCADE` closure collected unscoped (live,
+/// tombstoned, triage, and future-dated rows alike), `SET_NULL` targets
+/// nulled unscoped, a remaining `PROTECT` reference aborting before any
+/// write — with the writes landing in ONE transaction whose deferred FK
+/// checks enforce `DO_NOTHING` at commit. [`run_model_hard_delete`]
+/// emulates one model; this driver only fixes the model order and
+/// attributes row counts. An aborting model leaves earlier models'
+/// commits in place, exactly like the sequential Python `.delete()`
+/// calls.
+///
+/// Ported bugs (BUG-DEL-3): the Collector's per-model atomicity fails the
+/// whole task on remnants no table order could avoid — a due issue with
+/// ANY `issue_activities` (the `DO_NOTHING` edges are never collected, and
+/// `issues` precedes `issue_activities` in both phases, so nothing from
+/// `issues` onward is ever deleted while one exists), and a due parent
+/// with a due `PROTECT` child processed later (the check ignores the
+/// delete set). Pinned on both sides by the `*_protect_*` /
+/// `*_do_nothing_*` contract tests against the Django baseline.
+pub async fn hard_delete(
+    pools: &Pools,
+    ctx: &RequestContext,
+    cutoff: &str,
+) -> Result<HardDeleteOutcome, DeletionError> {
+    let writes = pools.primary();
+    let reads = read_pool!(pools, ctx);
+    let schema = load_schema_info(reads).await.map_err(db_error)?;
+    let edges = load_fk_details(reads).await.map_err(db_error)?;
+    let (cascade, set_null, protect) = classify_delete_edges(&edges, &schema);
+    let mut named_deleted = 0;
+    let mut sweep_deleted = 0;
+    for table in HARD_DELETE_NAMED_TABLES {
+        let outcome = run_model_hard_delete(
+            writes, &schema, &cascade, &set_null, &protect, table, cutoff,
+        )
+        .await
+        .map_err(map_model_error)?;
+        for (deleted_table, affected) in outcome.deleted {
+            if HARD_DELETE_NAMED_TABLES.contains(&deleted_table.as_str()) {
+                named_deleted += affected;
+            } else {
+                sweep_deleted += affected;
+            }
+        }
+    }
+    let tables = sweep_tables_in_django_order(&schema);
+    let sweep_tables_count = tables.len();
+    for table in &tables {
+        let outcome = run_model_hard_delete(
+            writes, &schema, &cascade, &set_null, &protect, table, cutoff,
+        )
+        .await
+        .map_err(map_model_error)?;
+        for (deleted_table, affected) in outcome.deleted {
+            if HARD_DELETE_NAMED_TABLES.contains(&deleted_table.as_str()) {
+                named_deleted += affected;
+            } else {
+                sweep_deleted += affected;
+            }
+        }
+    }
+    Ok(HardDeleteOutcome {
+        named_deleted,
+        sweep_deleted,
+        sweep_tables: sweep_tables_count,
+    })
+}
+
+/// A [`ModelDeleteError`] fails the task exactly like the Python
+/// exception would: `ProtectedError` and the deferred `IntegrityError`
+/// both propagate out of `hard_delete()` and park the queue row.
+fn map_model_error(error: ModelDeleteError) -> DeletionError {
+    match error {
+        ModelDeleteError::Protected { .. } => DeletionError::Db(error.to_string()),
+        ModelDeleteError::Db(error) => db_error(error),
+    }
+}
+
+/// `restore_related_objects` (`deletion_task.py:108-110`), ported as-is:
+///
+/// ```python
+/// # @shared_task
+/// def restore_related_objects(app_label, model_name, instance_pk, using=None):
+///     pass
+/// ```
+///
+/// The decorator ships commented out, so this is a plain function that
+/// returns `None` unconditionally — it is NOT a registered task.
+/// Ported bug BUG-DEL-2: the restore path is dead; the jobs layer must
+/// not register any task under its would-be name, and the registry test
+/// pins that absence.
+pub fn restore_related_objects(
+    _app_label: &str,
+    _model_name: &str,
+    _instance_pk: &str,
+    _using: Option<&str>,
+) {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn payload_parses_positional_and_using_kwarg() {
+        let target = parse_soft_delete_call(
+            &json!(["db", "issue", "12345678-1234-1234-1234-1234567890ab"]),
+            &json!({"using": "other"}),
+        )
+        .expect("valid");
+        assert_eq!(
+            target,
+            SoftDeleteTarget {
+                app_label: "db".to_owned(),
+                model_name: "issue".to_owned(),
+                instance_pk: "12345678-1234-1234-1234-1234567890ab".to_owned(),
+                using: Some("other".to_owned()),
+            }
+        );
+        let positional_using = parse_soft_delete_call(
+            &json!([
+                "db",
+                "issue",
+                "12345678-1234-1234-1234-1234567890ab",
+                "other"
+            ]),
+            &json!({}),
+        )
+        .expect("valid");
+        assert_eq!(positional_using.using, Some("other".to_owned()));
+        let no_using = parse_soft_delete_call(
+            &json!(["db", "issue", "12345678-1234-1234-1234-1234567890ab"]),
+            &json!({}),
+        )
+        .expect("valid");
+        assert_eq!(no_using.using, None);
+    }
+
+    #[test]
+    fn payload_rejects_missing_or_empty_fields() {
+        assert!(parse_soft_delete_call(&json!(["db", "issue"]), &json!({})).is_err());
+        assert!(parse_soft_delete_call(&json!([]), &json!({})).is_err());
+        assert!(parse_soft_delete_call(&json!([1, 2, 3]), &json!({})).is_err());
+        assert!(parse_soft_delete_call(&json!(["db", "issue", ""]), &json!({})).is_err());
+    }
+
+    #[test]
+    fn restore_is_a_plain_no_op() {
+        restore_related_objects("db", "issue", "pk", None);
+    }
+
+    #[test]
+    fn unknown_model_error_names_both_parts() {
+        let error = DeletionError::UnknownModel {
+            app_label: "db".to_owned(),
+            model_name: "nope".to_owned(),
+        };
+        assert_eq!(error.to_string(), "unknown model: db.nope");
+    }
+}

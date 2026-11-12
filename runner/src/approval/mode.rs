@@ -107,7 +107,10 @@ mod tests {
     #[test]
     fn default_matches_legacy_full_access_posture() {
         // The mode-less (cloud) path keeps the historical hardcoded posture.
-        assert_eq!(EngineThreadSettings::default().sandbox, "danger-full-access");
+        assert_eq!(
+            EngineThreadSettings::default().sandbox,
+            "danger-full-access"
+        );
         assert_eq!(EngineThreadSettings::default().approval_policy, "never");
     }
 

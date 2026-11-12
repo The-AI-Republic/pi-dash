@@ -795,7 +795,9 @@ def test_queued_hand_back_parents_off_the_implementation_run(seeded, issue, stat
 
 def _failed_run(issue, runner, *, reason, error="boom", phase_kind="coding-task", thread_id=""):
     run = _run(issue, runner, status=AgentRunStatus.FAILED, phase_kind=phase_kind)
-    AgentRun.objects.filter(pk=run.pk).update(failure_reason=reason, error=error, thread_id=thread_id)
+    AgentRun.objects.filter(pk=run.pk).update(
+        failure_reason=reason, error_details={"message": error}, thread_id=thread_id
+    )
     run.refresh_from_db()
     return run
 

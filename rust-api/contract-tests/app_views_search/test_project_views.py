@@ -1,0 +1,410 @@
+"""Project-level views CRUD (PIDASHCONV-87, D-29).
+
+Routes (apps/api/pi_dash/app/urls/views.py):
+  GET/POST /api/workspaces/<slug>/projects/<project_id>/views/
+  GET/PUT/PATCH/DELETE /api/workspaces/<slug>/projects/<project_id>/views/<pk>/
+"""
+
+import os
+from uuid import uuid4
+
+from .conftest import session_headers
+
+PROJECT_VIEW_KEYS = {
+    "access", "anchor", "archived_at", "created_at", "created_by",
+    "deleted_at", "description", "display_filters", "display_properties",
+    "filters", "id", "is_favorite", "is_locked", "logo_props", "name",
+    "owned_by", "project", "query", "rich_filters", "sort_order",
+    "updated_at", "updated_by", "workspace",
+}
+
+# POST / PATCH serialize the bare instance (no is_favorite annotation);
+# list / retrieve / PUT go through the annotated queryset.
+WRITE_VIEW_KEYS = PROJECT_VIEW_KEYS - {"is_favorite"}
+
+
+def _views_url(tenant, project_id):
+    return f"/api/workspaces/{tenant['workspace']['slug']}/projects/{project_id}/views/"
+
+
+def _view_url(tenant, project_id, pk):
+    return f"{_views_url(tenant, project_id)}{pk}/"
+
+
+def test_create_shape(api, seed, tenant_a, project_a, auth_a):
+    r = api.post(
+        _views_url(tenant_a, project_a),
+        headers=auth_a,
+        json={"name": "Sprint board", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert set(body) == WRITE_VIEW_KEYS, sorted(set(body) ^ WRITE_VIEW_KEYS)
+        assert body["name"] == "Sprint board"
+        assert body["owned_by"] == tenant_a["user"]["id"]
+        assert body["project"] == project_a
+        assert body["workspace"] == tenant_a["workspace"]["id"]
+        assert body["query"] == {}
+        assert body["access"] == 1
+        assert body["is_locked"] is False
+    finally:
+        api.delete(_view_url(tenant_a, project_a, body["id"]), headers=auth_a)
+
+
+def test_list_shape(api, seed, tenant_a, project_a, auth_a):
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Listed view",
+    )
+    r = api.get(_views_url(tenant_a, project_a), headers=auth_a)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body, list)
+    entry = next(v for v in body if v["id"] == view_id)
+    assert set(entry) == PROJECT_VIEW_KEYS
+    assert entry["name"] == "Listed view"
+    assert entry["is_favorite"] is False
+
+
+def test_list_fields_param_is_ignored(api, seed, tenant_a, project_a, auth_a):
+    """Port-existing-quirk: ?fields=name is accepted but the list view
+    still renders full objects (DynamicBaseSerializer ignores the param
+    here). Pinned so the Rust port reproduces it."""
+    seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Field view",
+    )
+    r = api.get(
+        _views_url(tenant_a, project_a), headers=auth_a, params={"fields": "name"}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body, "expected at least one view"
+    for entry in body:
+        assert set(entry) == PROJECT_VIEW_KEYS
+
+
+def test_list_marks_favorite(api, seed, tenant_a, project_a, auth_a):
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Fav view",
+    )
+    r = api.post(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}"
+        f"/projects/{project_a}/user-favorite-views/",
+        headers=auth_a,
+        json={"view": str(view_id)},
+    )
+    assert r.status_code == 204, r.text
+    try:
+        r = api.get(_views_url(tenant_a, project_a), headers=auth_a)
+        assert r.status_code == 200, r.text
+        entry = next(v for v in r.json() if v["id"] == view_id)
+        assert entry["is_favorite"] is True
+    finally:
+        api.delete(
+            f"/api/workspaces/{tenant_a['workspace']['slug']}"
+            f"/projects/{project_a}/user-favorite-views/{view_id}/",
+            headers=auth_a,
+        )
+
+
+def test_retrieve_shape(api, seed, tenant_a, project_a, auth_a):
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Detail view",
+    )
+    r = api.get(_view_url(tenant_a, project_a, view_id), headers=auth_a)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == PROJECT_VIEW_KEYS
+    assert body["id"] == view_id
+    assert body["name"] == "Detail view"
+
+
+def test_retrieve_guest_sees_only_own(api, seed, tenant_a, project_a, auth_a):
+    """Guest (role 5) with guest_view_all_features off cannot read another
+    owner's project view: 403."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=5)
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Owner view",
+    )
+    r = api.get(_view_url(tenant_a, project_a, view_id), headers=other_headers)
+    assert r.status_code == 403, r.text
+    assert r.json() == {"error": "You are not allowed to view this issue"}
+
+
+def test_retrieve_unknown_view_id_returns_404(api, seed, tenant_a, project_a, auth_a):
+    """Port of test_unknown_view_id_returns_404
+    (apps/api/pi_dash/tests/contract/app/test_view_app.py, VIEW-022): an
+    unknown project view id misses with 404 before the guest recheck."""
+    r = api.get(_view_url(tenant_a, project_a, uuid4()), headers=auth_a)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "View not found"}
+
+
+def test_retrieve_unknown_view_id_member_returns_404(api, seed, tenant_a, project_a):
+    """Same miss for a project member (role 15): 404, not the old
+    get_initial() 200 (PIDASHCONV-1683)."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=15)
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.get(_view_url(tenant_a, project_a, uuid4()), headers=other_headers)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "View not found"}
+
+
+def test_retrieve_unknown_view_id_guest_returns_404(api, seed, tenant_a, project_a):
+    """Same miss for a guest (role 5) with guest_view_all_features off
+    (the seed default): 404, not the old AttributeError 500
+    (PIDASHCONV-1683)."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=5)
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.get(_view_url(tenant_a, project_a, uuid4()), headers=other_headers)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "View not found"}
+
+
+def test_partial_update(api, seed, tenant_a, project_a, auth_a):
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Before",
+    )
+    r = api.patch(
+        _view_url(tenant_a, project_a, view_id), headers=auth_a,
+        json={"name": "After"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == WRITE_VIEW_KEYS, sorted(set(body) ^ WRITE_VIEW_KEYS)
+    assert body["name"] == "After"
+
+
+def test_full_update_shape(api, seed, tenant_a, project_a, auth_a):
+    """PUT goes through the annotated queryset, so is_favorite is present
+    (unlike PATCH)."""
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Put me",
+    )
+    r = api.put(
+        _view_url(tenant_a, project_a, view_id), headers=auth_a,
+        json={"name": "Put done", "filters": {}},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == PROJECT_VIEW_KEYS, sorted(set(body) ^ PROJECT_VIEW_KEYS)
+    assert body["name"] == "Put done"
+    assert body["is_favorite"] is False
+
+
+def test_update_locked_view_rejected(api, seed, tenant_a, project_a, auth_a):
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Locked", locked=True,
+    )
+    r = api.patch(
+        _view_url(tenant_a, project_a, view_id), headers=auth_a,
+        json={"name": "Unlock attempt"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"error": "view is locked"}
+
+
+def test_update_by_non_owner_rejected(api, seed, tenant_a, project_a, auth_a):
+    """A public view PATCHed by a project admin who does not own it: the
+    creator gate passes (admin role) but the owner check inside rejects."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=20)
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Mine",
+    )
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.patch(
+        _view_url(tenant_a, project_a, view_id), headers=other_headers,
+        json={"name": "Theirs"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"error": "Only the owner of the view can update the view"}
+
+
+def test_destroy_owner(api, seed, db, tenant_a, project_a, auth_a):
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Doomed",
+    )
+    r = api.delete(_view_url(tenant_a, project_a, view_id), headers=auth_a)
+    assert r.status_code == 204, r.text
+    r = api.get(_views_url(tenant_a, project_a), headers=auth_a)
+    assert r.status_code == 200, r.text
+    assert all(v["id"] != view_id for v in r.json())
+    # PIDASHCONV-925: project destroy stamps updated_by/updated_at through
+    # the same model soft-delete as the global destroy (db/mixins.py:72-78).
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT updated_by_id, deleted_at FROM issue_views WHERE id = %s",
+            (view_id,),
+        )
+        row = cur.fetchone()
+    assert row[1] is not None
+    assert str(row[0]) == tenant_a["user"]["id"]
+
+
+def test_destroy_denied_for_member_non_owner(api, seed, tenant_a, project_a, auth_a):
+    """Workspace member (not admin) + project member (not admin), not the
+    owner: the creator gate fails (seeded row is created_by the owner),
+    the admin role gate fails, and the workspace-admin bypass does not
+    apply → 403."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=15)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=15)
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="Kept",
+    )
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.delete(_view_url(tenant_a, project_a, view_id), headers=other_headers)
+    assert r.status_code == 403, r.text
+    assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_requires_auth(api, tenant_a, project_a):
+    r = api.get(_views_url(tenant_a, project_a))
+    assert r.status_code == 401, r.text
+
+
+def test_denied_without_project_membership(api, seed, tenant_a, project_a):
+    """Workspace member with no project membership hits the PROJECT-level
+    role gate → 403. This is the suite's denied-permission case."""
+    outsider = seed.user()
+    seed.member(tenant_a["workspace"]["id"], outsider["id"], role=20)
+    headers = session_headers(
+        seed, outsider, outsider["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.get(_views_url(tenant_a, project_a), headers=headers)
+    assert r.status_code == 403, r.text
+    assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_tenant_isolation(api, seed, tenant_a, tenant_b, project_a, auth_a, auth_b):
+    """Tenant B (no membership in A's workspace) is denied at the PROJECT
+    role gate — A's views do not leak, not even as an empty list."""
+    seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="A private view",
+    )
+    r = api.get(_views_url(tenant_a, project_a), headers=auth_b)
+    assert r.status_code == 403, r.text
+    assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_unknown_project_identifier_404(api, tenant_a, auth_a):
+    """A non-UUID project identifier that resolves to no row raises
+    Http404("Project not found") in _rewrite_project_kwarg
+    (db/models/project.py:213-217); DRF's Http404 -> NotFound conversion
+    keeps the message, so the body is {"detail": "Project not found"} --
+    not the bare {"detail": "Not found."}."""
+    r = api.get(_views_url(tenant_a, "NOPE"), headers=auth_a)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"detail": "Project not found"}
+
+
+def test_create_trims_name_and_description(api, seed, tenant_a, project_a, auth_a):
+    """DRF ``CharField(trim_whitespace=True)`` stores the stripped value;
+    ``max_length`` applies to it, so a 255-char name with trailing spaces
+    still passes (PIDASHCONV-1447)."""
+    r = api.post(
+        _views_url(tenant_a, project_a), headers=auth_a,
+        json={"name": "  x  ", "description": "notes\n", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "x", body["name"]
+        assert body["description"] == "notes", body["description"]
+        g = api.get(_view_url(tenant_a, project_a, body["id"]), headers=auth_a)
+        assert g.status_code == 200, g.text
+        assert g.json()["name"] == "x"
+        assert g.json()["description"] == "notes"
+    finally:
+        api.delete(_view_url(tenant_a, project_a, body["id"]), headers=auth_a)
+    r = api.post(
+        _views_url(tenant_a, project_a), headers=auth_a,
+        json={"name": "y" * 255 + "   ", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "y" * 255, body["name"][:260]
+    finally:
+        api.delete(_view_url(tenant_a, project_a, body["id"]), headers=auth_a)
+
+
+def test_create_blank_name_rejected(api, seed, tenant_a, project_a, auth_a):
+    """A name blank after stripping is 400, not a blank-looking row
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _views_url(tenant_a, project_a), headers=auth_a,
+        json={"name": "   ", "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["This field may not be blank."]}
+
+
+def test_create_numeric_name_coerced(api, seed, tenant_a, project_a, auth_a):
+    """DRF coerces int/float via ``str()``; booleans stay invalid
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _views_url(tenant_a, project_a), headers=auth_a,
+        json={"name": 123, "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "123", body["name"]
+    finally:
+        api.delete(_view_url(tenant_a, project_a, body["id"]), headers=auth_a)
+    r = api.post(
+        _views_url(tenant_a, project_a), headers=auth_a,
+        json={"name": True, "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["Not a valid string."]}
+
+
+def test_patch_trims_description(api, seed, tenant_a, project_a, auth_a):
+    """PATCH trims the description the same way create does
+    (PIDASHCONV-1447)."""
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"],
+        project_id=project_a, name="P-trim",
+    )
+    r = api.patch(
+        _view_url(tenant_a, project_a, view_id), headers=auth_a,
+        json={"description": "d\n"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] == "d", r.json()["description"]
+    g = api.get(_view_url(tenant_a, project_a, view_id), headers=auth_a)
+    assert g.status_code == 200, g.text
+    assert g.json()["description"] == "d"
