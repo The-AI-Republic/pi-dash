@@ -1,0 +1,59 @@
+{
+  "fixture": "FX-A-SER-04",
+  "source": "utils/porters/serializers/issue.py:12-146",
+  "serializer": "IssueExportSerializer extends IssueSerializer",
+  "meta_fields_in_order": ["project_name", "project_identifier", "parent", "identifier", "sequence_id", "name", "state_name", "priority", "complexity_score", "assignees", "subscribers", "created_by_name", "start_date", "target_date", "completed_at", "created_at", "updated_at", "archived_at", "estimate", "labels", "cycles", "modules", "links", "relations", "comments", "sub_issues_count", "link_count", "attachment_count", "is_draft"],
+  "get_methods": {
+    "get_identifier:69-70": "f\"{obj.project.identifier}-{obj.sequence_id}\" e.g. \"AN-3\"",
+    "get_assignees:72-73": "[u.full_name for u in obj.assignees.all() if u.is_active] — inactive users dropped",
+    "get_subscribers:75-77": "[sub.subscriber.full_name for sub in obj.issue_subscribers.all() if sub.subscriber] — null subscribers dropped",
+    "get_parent:79-82": "\"\" when no parent else f\"{parent.project.identifier}-{parent.sequence_id}\"",
+    "get_labels:84-89": "[il.label.name for il in obj.label_issue.all() if il.deleted_at is None] — NOTE reads label_issue (through table), not labels m2m",
+    "get_cycles:91-92": "[ic.cycle.name for ic in obj.issue_cycle.all()] — no deleted guard",
+    "get_modules:94-95": "[im.module.name for im in obj.issue_module.all()] — no deleted guard",
+    "get_estimate:97-101": "obj.estimate_point.value if hasattr value else str(estimate_point); \"\" when null",
+    "get_links:103-111": "[{\"url\": link.url, \"title\": link.title if link.title else link.url} for link in obj.issue_link.all()] — empty title falls back to url",
+    "get_relations:113-135": "outgoing from issue_relation + incoming from issue_related; each {\"type\": rel.relation_type (getattr fallback \"related\"), \"issue\": \"IDENT-seq\", \"direction\": \"outgoing\"|\"incoming\"}; null related_issue/issue skipped",
+    "get_comments:137-146": "[{\"comment\": comment.comment_stripped if hasattr else comment_html, \"created_by\": actor.full_name or \"\", \"created_at\": created_at.strftime(\"%Y-%m-%d %H:%M:%S\") or \"\"}] — ordered by created_at via the task prefetch"
+  },
+  "flat_string_sources": {
+    "project_name:20": "source=project.name default=\"\"",
+    "project_identifier:21": "source=project.identifier default=\"\"",
+    "state_name:22": "source=state.name default=\"\"",
+    "created_by_name:23": "source=created_by.full_name default=\"\""
+  },
+  "golden_object": {
+    "project_name": "Analytics Project",
+    "project_identifier": "AN",
+    "parent": "",
+    "identifier": "AN-3",
+    "sequence_id": 3,
+    "name": "I3",
+    "state_name": "Done",
+    "priority": "medium",
+    "complexity_score": null,
+    "assignees": [],
+    "subscribers": [],
+    "created_by_name": "an_admin User",
+    "start_date": null,
+    "target_date": null,
+    "completed_at": "<drf datetime>",
+    "created_at": "<drf datetime>",
+    "updated_at": "<drf datetime>",
+    "archived_at": null,
+    "estimate": 8,
+    "labels": [],
+    "cycles": [],
+    "modules": [],
+    "links": [],
+    "relations": [],
+    "comments": [],
+    "sub_issues_count": 0,
+    "link_count": 0,
+    "attachment_count": 0,
+    "is_draft": false
+  },
+  "ported_notes": [
+    "get_labels reads the label_issue through rows (soft-delete aware) while the schema variant (utils/exporters/schemas/issue.py:prepare_labels) reads labels.all() unguarded — the two exporters differ; port each as-is."
+  ]
+}

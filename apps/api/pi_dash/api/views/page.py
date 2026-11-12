@@ -76,6 +76,7 @@ from pi_dash.utils.content_validator import validate_html_content
 from pi_dash.utils.error_codes import ERROR_CODES
 from pi_dash.utils.live_document import LiveConversionError, convert_document
 from pi_dash.utils.markdown_converter import markdown_to_html
+from pi_dash.utils.page_tree import parent_error
 from pi_dash.utils.openapi import (
     page_docs,
     PAGE_ID_PARAMETER,
@@ -197,26 +198,11 @@ class BasePageReadAPIEndpoint(BaseAPIView):
         )
 
     def validate_parent(self, parent_id, page=None):
-        """Return an error response when ``parent_id`` cannot be the parent.
-
-        The parent must be a page the caller can see in this project, not
-        archived, and — on update — not the page itself or one of its
-        descendants.
-        """
-        if parent_id is None:
-            return None
-        parent = self.get_queryset().filter(pk=parent_id).first()
-        if parent is None:
-            return _error("Parent page not found in this project", status.HTTP_400_BAD_REQUEST)
-        if parent.archived_at is not None:
-            return _error("Parent page is archived", status.HTTP_400_BAD_REQUEST)
-        if page is not None:
-            ancestor_id, seen = parent.id, set()
-            while ancestor_id is not None and ancestor_id not in seen:
-                if ancestor_id == page.id:
-                    return _error("A page cannot be nested under itself", status.HTTP_400_BAD_REQUEST)
-                seen.add(ancestor_id)
-                ancestor_id = Page.objects.filter(pk=ancestor_id).values_list("parent_id", flat=True).first()
+        """Return an error response when ``parent_id`` cannot be the parent
+        (see ``pi_dash.utils.page_tree.parent_error``)."""
+        message = parent_error(self.get_queryset(), parent_id, page=page)
+        if message:
+            return _error(message, status.HTTP_400_BAD_REQUEST)
         return None
 
     def get_page_or_error(self, page_id):
