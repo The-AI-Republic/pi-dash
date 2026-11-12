@@ -1,0 +1,891 @@
+{
+  "_trace": "Routes apps/api/pi_dash/app/urls/state.py:11-32 (4 paths), apps/api/pi_dash/app/urls/estimate.py:15-41 (5 paths); handlers apps/api/pi_dash/app/views/state/base.py:27-157, apps/api/pi_dash/app/views/estimate/base.py:29-247.",
+  "_method": "Live captures against Django runserver (pi_dash.settings.test) from this checkout on scratch Postgres pidash_562_fixtures (own cluster 127.0.0.1:5434), BASE_URL http://127.0.0.1:8460, SECRET_KEY=562-fixtures-secret-not-for-prod, CLOUD_AGENT_ENABLED unset (False), redis db 14 as Celery broker. Django 4.2.30, djangorestframework 3.15.2. IDs/datetimes are live values (volatile); key sets, key order, statuses and error bodies are the pins. Every route below was issued over HTTP against seeded users; DB before/after checked with SQL.",
+  "routes": [
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/project-estimates/",
+      "name": "project-estimate-points",
+      "actions": null,
+      "view": "ProjectEstimatePointEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/estimates/",
+      "name": "bulk-create-estimate-points",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "BulkEstimatePointEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/estimates/<uuid:estimate_id>/",
+      "name": "bulk-create-estimate-points",
+      "actions": {
+        "get": "retrieve",
+        "patch": "partial_update",
+        "delete": "destroy"
+      },
+      "view": "BulkEstimatePointEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/estimates/<uuid:estimate_id>/estimate-points/",
+      "name": "estimate-points",
+      "actions": {
+        "post": "create"
+      },
+      "view": "EstimatePointEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/estimates/<uuid:estimate_id>/estimate-points/<estimate_point_id>/",
+      "name": "estimate-points",
+      "actions": {
+        "patch": "partial_update",
+        "delete": "destroy"
+      },
+      "view": "EstimatePointEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/states/",
+      "name": "project-states",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "StateViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/states/<uuid:pk>/",
+      "name": "project-state",
+      "actions": {
+        "get": "retrieve",
+        "patch": "partial_update",
+        "delete": "destroy"
+      },
+      "view": "StateViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/intake-state/",
+      "name": "intake-state",
+      "actions": null,
+      "view": "IntakeStateEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/states/<uuid:pk>/mark-default/",
+      "name": "project-state",
+      "actions": {
+        "post": "mark_as_default"
+      },
+      "view": "StateViewSet"
+    }
+  ],
+  "states": {
+    "state_list": {
+      "status": 200,
+      "body": [
+        {
+          "id": "08bfa3c6-3213-4559-af45-b8aa934012b8",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Backlog",
+          "color": "#60646C",
+          "group": "backlog",
+          "default": true,
+          "description": "",
+          "sequence": 15000.0,
+          "order": 1.0
+        },
+        {
+          "id": "33e8975c-af56-4392-b4b6-68f8bd695c9c",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Todo",
+          "color": "#60646C",
+          "group": "unstarted",
+          "default": false,
+          "description": "",
+          "sequence": 25000.0,
+          "order": 1.0
+        },
+        {
+          "id": "2dc81201-0867-4468-857c-264f003833c6",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "In Progress",
+          "color": "#F59E0B",
+          "group": "started",
+          "default": false,
+          "description": "",
+          "sequence": 35000.0,
+          "order": 1.0
+        },
+        {
+          "id": "48738819-d0d5-4d0e-b342-b59f1fe78cb8",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "In Review",
+          "color": "#5B5BD6",
+          "group": "review",
+          "default": false,
+          "description": "",
+          "sequence": 40000.0,
+          "order": 1.0
+        },
+        {
+          "id": "55f36ea0-3825-4458-be57-43dc05815651",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "In Test",
+          "color": "#14B8A6",
+          "group": "test",
+          "default": false,
+          "description": "",
+          "sequence": 42500.0,
+          "order": 1.0
+        },
+        {
+          "id": "405455f6-9132-4b8e-a41b-5f43e5d2835c",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Done",
+          "color": "#46A758",
+          "group": "completed",
+          "default": false,
+          "description": "",
+          "sequence": 45000.0,
+          "order": 1.0
+        },
+        {
+          "id": "570cc941-85fb-4e2b-aa5c-c6134b460f5b",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Cancelled",
+          "color": "#9AA4BC",
+          "group": "cancelled",
+          "default": false,
+          "description": "",
+          "sequence": 55000.0,
+          "order": 1.0
+        }
+      ]
+    },
+    "state_list_grouped": {
+      "status": 200,
+      "body": {
+        "backlog": [
+          {
+            "id": "08bfa3c6-3213-4559-af45-b8aa934012b8",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "Backlog",
+            "color": "#60646C",
+            "group": "backlog",
+            "default": true,
+            "description": "",
+            "sequence": 15000.0,
+            "order": 1.0
+          }
+        ],
+        "cancelled": [
+          {
+            "id": "570cc941-85fb-4e2b-aa5c-c6134b460f5b",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "Cancelled",
+            "color": "#9AA4BC",
+            "group": "cancelled",
+            "default": false,
+            "description": "",
+            "sequence": 55000.0,
+            "order": 1.0
+          }
+        ],
+        "completed": [
+          {
+            "id": "405455f6-9132-4b8e-a41b-5f43e5d2835c",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "Done",
+            "color": "#46A758",
+            "group": "completed",
+            "default": false,
+            "description": "",
+            "sequence": 45000.0,
+            "order": 1.0
+          }
+        ],
+        "review": [
+          {
+            "id": "48738819-d0d5-4d0e-b342-b59f1fe78cb8",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "In Review",
+            "color": "#5B5BD6",
+            "group": "review",
+            "default": false,
+            "description": "",
+            "sequence": 40000.0,
+            "order": 1.0
+          }
+        ],
+        "started": [
+          {
+            "id": "2dc81201-0867-4468-857c-264f003833c6",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "In Progress",
+            "color": "#F59E0B",
+            "group": "started",
+            "default": false,
+            "description": "",
+            "sequence": 35000.0,
+            "order": 1.0
+          }
+        ],
+        "test": [
+          {
+            "id": "55f36ea0-3825-4458-be57-43dc05815651",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "In Test",
+            "color": "#14B8A6",
+            "group": "test",
+            "default": false,
+            "description": "",
+            "sequence": 42500.0,
+            "order": 1.0
+          }
+        ],
+        "unstarted": [
+          {
+            "id": "33e8975c-af56-4392-b4b6-68f8bd695c9c",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "Todo",
+            "color": "#60646C",
+            "group": "unstarted",
+            "default": false,
+            "description": "",
+            "sequence": 25000.0,
+            "order": 1.0
+          }
+        ]
+      }
+    },
+    "state_list_grouped_false": {
+      "status": 200,
+      "body": [
+        {
+          "id": "08bfa3c6-3213-4559-af45-b8aa934012b8",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Backlog",
+          "color": "#60646C",
+          "group": "backlog",
+          "default": true,
+          "description": "",
+          "sequence": 15000.0,
+          "order": 1.0
+        },
+        {
+          "id": "33e8975c-af56-4392-b4b6-68f8bd695c9c",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Todo",
+          "color": "#60646C",
+          "group": "unstarted",
+          "default": false,
+          "description": "",
+          "sequence": 25000.0,
+          "order": 1.0
+        },
+        {
+          "id": "2dc81201-0867-4468-857c-264f003833c6",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "In Progress",
+          "color": "#F59E0B",
+          "group": "started",
+          "default": false,
+          "description": "",
+          "sequence": 35000.0,
+          "order": 1.0
+        },
+        {
+          "id": "48738819-d0d5-4d0e-b342-b59f1fe78cb8",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "In Review",
+          "color": "#5B5BD6",
+          "group": "review",
+          "default": false,
+          "description": "",
+          "sequence": 40000.0,
+          "order": 1.0
+        },
+        {
+          "id": "55f36ea0-3825-4458-be57-43dc05815651",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "In Test",
+          "color": "#14B8A6",
+          "group": "test",
+          "default": false,
+          "description": "",
+          "sequence": 42500.0,
+          "order": 1.0
+        },
+        {
+          "id": "405455f6-9132-4b8e-a41b-5f43e5d2835c",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Done",
+          "color": "#46A758",
+          "group": "completed",
+          "default": false,
+          "description": "",
+          "sequence": 45000.0,
+          "order": 1.0
+        },
+        {
+          "id": "570cc941-85fb-4e2b-aa5c-c6134b460f5b",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "Cancelled",
+          "color": "#9AA4BC",
+          "group": "cancelled",
+          "default": false,
+          "description": "",
+          "sequence": 55000.0,
+          "order": 1.0
+        }
+      ]
+    },
+    "state_retrieve": {
+      "status": 200,
+      "keys": [
+        "color",
+        "default",
+        "description",
+        "group",
+        "id",
+        "name",
+        "project_id",
+        "sequence",
+        "workspace_id"
+      ]
+    },
+    "state_create": {
+      "status": 200,
+      "body": {
+        "id": "51c37f86-28ce-4312-bc88-652b24de6290",
+        "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+        "name": "Staging",
+        "color": "#00FF00",
+        "group": "started",
+        "default": false,
+        "description": "",
+        "sequence": 70000.0
+      }
+    },
+    "state_create_dup_400": {
+      "status": 400,
+      "body": {
+        "name": "The state name is already taken"
+      }
+    },
+    "state_create_triage_400": {
+      "status": 400,
+      "body": {
+        "non_field_errors": [
+          "Cannot create triage state"
+        ]
+      }
+    },
+    "state_create_member_blocked_403": {
+      "status": 403,
+      "body": {
+        "error": "Members are not permitted to edit workflow states for this project."
+      }
+    },
+    "state_patch_member_blocked_403": {
+      "status": 403,
+      "body": {
+        "error": "Members are not permitted to edit workflow states for this project."
+      }
+    },
+    "state_create_member_ok": {
+      "status": 200,
+      "body": {
+        "id": "2cd67880-561b-4666-99b3-8f05a9b73925",
+        "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+        "name": "MState2",
+        "color": "#000",
+        "group": "started",
+        "default": false,
+        "description": "",
+        "sequence": 85000.0
+      }
+    },
+    "state_patch": {
+      "status": 200,
+      "body": {
+        "id": "08bfa3c6-3213-4559-af45-b8aa934012b8",
+        "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+        "name": "Backlog",
+        "color": "#123456",
+        "group": "backlog",
+        "default": true,
+        "description": "upd",
+        "sequence": 15000.0
+      }
+    },
+    "state_patch_dup_400": {
+      "status": 400,
+      "body": {
+        "name": "The state name is already taken"
+      }
+    },
+    "mark_default": {
+      "status": 204,
+      "body": ""
+    },
+    "mark_default_rows": [
+      {
+        "name": "Todo",
+        "default": true
+      }
+    ],
+    "destroy_default_400": {
+      "status": 400,
+      "body": {
+        "error": "Default state cannot be deleted"
+      }
+    },
+    "destroy_state": {
+      "status": 204,
+      "body": ""
+    },
+    "destroy_state_row": [
+      {
+        "gone": true
+      }
+    ],
+    "destroy_nonempty_400": {
+      "status": 400,
+      "body": {
+        "error": "The state is not empty, only empty states can be deleted"
+      }
+    },
+    "intake_state": {
+      "status": 200,
+      "body": {
+        "id": "8f88d9d9-cae1-41d3-b67f-ba9ad6e3795b",
+        "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+        "name": "Triage",
+        "color": "#4E5355",
+        "group": "triage",
+        "default": false,
+        "description": "",
+        "sequence": 65000.0
+      }
+    },
+    "intake_state_missing_404": {
+      "status": 404,
+      "body": {
+        "error": "Triage state not found"
+      }
+    }
+  },
+  "states_notes": [
+    "list injects order=index/count per group (state/base.py:92-96); grouped=true returns a group-keyed dict, any other value (incl. 'false'/absent) returns the flat list.",
+    "create/partial_update return explicit 200 (never 201); dup-name IntegrityError maps to {'name': 'The state name is already taken'}.",
+    "destroy excludes triage rows at lookup (is_triage=False, :126) and refuses default (:128) and non-empty (:135) states."
+  ],
+  "estimates": {
+    "project_estimates_empty": {
+      "status": 200,
+      "body": []
+    },
+    "project_estimates_active": {
+      "status": 200,
+      "body": [
+        {
+          "id": "c6d8bb61-6855-4f5d-879d-c9fcf737face",
+          "created_at": "2026-10-02T22:23:59.848386Z",
+          "updated_at": "2026-10-02T22:23:59.848419Z",
+          "deleted_at": null,
+          "key": 1,
+          "description": "",
+          "value": "1",
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "estimate": "dd543f35-910b-4876-9d4a-80d0c2d2635a"
+        }
+      ]
+    },
+    "bulk_create": {
+      "status": 200,
+      "body": {
+        "id": "6716edbb-7472-41e1-8775-950c7af9f921",
+        "points": [
+          {
+            "id": "2645d8cf-95b0-4eaa-9361-3e29f0ccfcef",
+            "created_at": "2026-10-02T22:23:58.993433Z",
+            "updated_at": "2026-10-02T22:23:58.993467Z",
+            "deleted_at": null,
+            "key": 1,
+            "description": "one",
+            "value": "1",
+            "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "estimate": "6716edbb-7472-41e1-8775-950c7af9f921"
+          },
+          {
+            "id": "ac80c0e1-6c2a-4b9a-af2a-fd8a6b075691",
+            "created_at": "2026-10-02T22:23:58.993589Z",
+            "updated_at": "2026-10-02T22:23:58.993603Z",
+            "deleted_at": null,
+            "key": 2,
+            "description": "two",
+            "value": "2",
+            "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "estimate": "6716edbb-7472-41e1-8775-950c7af9f921"
+          }
+        ],
+        "created_at": "2026-10-02T22:23:58.970585Z",
+        "updated_at": "2026-10-02T22:23:58.970617Z",
+        "deleted_at": null,
+        "name": "Est10",
+        "description": "",
+        "type": "points",
+        "last_used": false,
+        "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "updated_by": null,
+        "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+      }
+    },
+    "bulk_create_random_name": {
+      "status": 200,
+      "body": {
+        "id": "330747ee-2633-4ac8-b27a-2458e5f1a108",
+        "points": [],
+        "created_at": "2026-10-02T22:23:59.097466Z",
+        "updated_at": "2026-10-02T22:23:59.097498Z",
+        "deleted_at": null,
+        "name": "ijcabmitbl",
+        "description": "",
+        "type": "categories",
+        "last_used": false,
+        "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "updated_by": null,
+        "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+      }
+    },
+    "bulk_create_long_value_400": {
+      "status": 400,
+      "body": [
+        {
+          "non_field_errors": [
+            "Value can't be more than 20 characters"
+          ]
+        }
+      ]
+    },
+    "bulk_create_empty_points_200": {
+      "status": 200,
+      "body": {
+        "id": "ffa61bb9-c06e-477b-8047-daed583c4368",
+        "points": [],
+        "created_at": "2026-10-02T22:23:59.218954Z",
+        "updated_at": "2026-10-02T22:23:59.218961Z",
+        "deleted_at": null,
+        "name": "Empty10",
+        "description": "",
+        "type": "categories",
+        "last_used": false,
+        "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "updated_by": null,
+        "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+      }
+    },
+    "bulk_list": {
+      "status": 200,
+      "body": [
+        {
+          "id": "b6b03007-4a8b-45a1-b957-9fb0746ae74a",
+          "points": [],
+          "created_at": "2026-10-02T22:23:59.164504Z",
+          "updated_at": "2026-10-02T22:23:59.164513Z",
+          "deleted_at": null,
+          "name": "Bad",
+          "description": "",
+          "type": "categories",
+          "last_used": false,
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": null,
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+        },
+        {
+          "id": "ffa61bb9-c06e-477b-8047-daed583c4368",
+          "points": [],
+          "created_at": "2026-10-02T22:23:59.218954Z",
+          "updated_at": "2026-10-02T22:23:59.218961Z",
+          "deleted_at": null,
+          "name": "Empty10",
+          "description": "",
+          "type": "categories",
+          "last_used": false,
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": null,
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+        },
+        {
+          "id": "6716edbb-7472-41e1-8775-950c7af9f921",
+          "points": [
+            {
+              "id": "2645d8cf-95b0-4eaa-9361-3e29f0ccfcef",
+              "created_at": "2026-10-02T22:23:58.993433Z",
+              "updated_at": "2026-10-02T22:23:58.993467Z",
+              "deleted_at": null,
+              "key": 1,
+              "description": "one",
+              "value": "1",
+              "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+              "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+              "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+              "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+              "estimate": "6716edbb-7472-41e1-8775-950c7af9f921"
+            },
+            {
+              "id": "ac80c0e1-6c2a-4b9a-af2a-fd8a6b075691",
+              "created_at": "2026-10-02T22:23:58.993589Z",
+              "updated_at": "2026-10-02T22:23:58.993603Z",
+              "deleted_at": null,
+              "key": 2,
+              "description": "two",
+              "value": "2",
+              "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+              "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+              "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+              "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+              "estimate": "6716edbb-7472-41e1-8775-950c7af9f921"
+            }
+          ],
+          "created_at": "2026-10-02T22:23:58.970585Z",
+          "updated_at": "2026-10-02T22:23:58.970617Z",
+          "deleted_at": null,
+          "name": "Est10",
+          "description": "",
+          "type": "points",
+          "last_used": false,
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": null,
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+        },
+        {
+          "id": "330747ee-2633-4ac8-b27a-2458e5f1a108",
+          "points": [],
+          "created_at": "2026-10-02T22:23:59.097466Z",
+          "updated_at": "2026-10-02T22:23:59.097498Z",
+          "deleted_at": null,
+          "name": "ijcabmitbl",
+          "description": "",
+          "type": "categories",
+          "last_used": false,
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": null,
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+        }
+      ]
+    },
+    "bulk_retrieve": {
+      "status": 200,
+      "keys": [
+        "created_at",
+        "created_by",
+        "deleted_at",
+        "description",
+        "id",
+        "last_used",
+        "name",
+        "points",
+        "project",
+        "type",
+        "updated_at",
+        "updated_by",
+        "workspace"
+      ]
+    },
+    "bulk_retrieve_404": {
+      "status": 404,
+      "body": {
+        "error": "The required object does not exist."
+      }
+    },
+    "bulk_patch": {
+      "status": 200,
+      "body": {
+        "id": "6716edbb-7472-41e1-8775-950c7af9f921",
+        "points": [
+          {
+            "id": "ac80c0e1-6c2a-4b9a-af2a-fd8a6b075691",
+            "created_at": "2026-10-02T22:23:58.993589Z",
+            "updated_at": "2026-10-02T22:23:58.993603Z",
+            "deleted_at": null,
+            "key": 2,
+            "description": "two",
+            "value": "2",
+            "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "estimate": "6716edbb-7472-41e1-8775-950c7af9f921"
+          },
+          {
+            "id": "2645d8cf-95b0-4eaa-9361-3e29f0ccfcef",
+            "created_at": "2026-10-02T22:23:58.993433Z",
+            "updated_at": "2026-10-02T22:23:58.993467Z",
+            "deleted_at": null,
+            "key": 5,
+            "description": "one",
+            "value": "5",
+            "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+            "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "estimate": "6716edbb-7472-41e1-8775-950c7af9f921"
+          }
+        ],
+        "created_at": "2026-10-02T22:23:58.970585Z",
+        "updated_at": "2026-10-02T22:23:59.563749Z",
+        "deleted_at": null,
+        "name": "Renamed10",
+        "description": "",
+        "type": "points",
+        "last_used": false,
+        "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108"
+      }
+    },
+    "bulk_patch_no_points_400": {
+      "status": 400,
+      "body": {
+        "error": "Estimate points are required"
+      }
+    },
+    "bulk_destroy": {
+      "status": 204,
+      "body": ""
+    },
+    "bulk_destroy_row": [
+      {
+        "gone": true
+      }
+    ],
+    "point_create": {
+      "status": 200,
+      "body": {
+        "id": "3e0db108-e218-4041-b6a6-0a76bc13a179",
+        "created_at": "2026-10-02T22:24:00.179158Z",
+        "updated_at": "2026-10-02T22:24:00.179174Z",
+        "deleted_at": null,
+        "key": 3,
+        "description": "",
+        "value": "3",
+        "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "updated_by": null,
+        "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+        "estimate": "dd543f35-910b-4876-9d4a-80d0c2d2635a"
+      }
+    },
+    "point_create_missing_400": {
+      "status": 400,
+      "body": {
+        "error": "Key and value are required"
+      }
+    },
+    "point_create_zero_key_400": {
+      "status": 400,
+      "body": {
+        "error": "Key and value are required"
+      }
+    },
+    "point_patch": {
+      "status": 200,
+      "body": {
+        "id": "3e0db108-e218-4041-b6a6-0a76bc13a179",
+        "created_at": "2026-10-02T22:24:00.179158Z",
+        "updated_at": "2026-10-02T22:24:00.407790Z",
+        "deleted_at": null,
+        "key": 3,
+        "description": "",
+        "value": "three",
+        "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+        "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+        "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+        "estimate": "dd543f35-910b-4876-9d4a-80d0c2d2635a"
+      }
+    },
+    "point_destroy": {
+      "status": 200,
+      "body": [
+        {
+          "id": "881be4da-67be-4f97-9a50-461ad055fc9b",
+          "created_at": "2026-10-02T22:24:00.521724Z",
+          "updated_at": "2026-10-02T22:24:00.521737Z",
+          "deleted_at": null,
+          "key": 1,
+          "description": "",
+          "value": "2",
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "estimate": "e0f50c00-2243-42be-a46c-783ef57437bf"
+        },
+        {
+          "id": "ac7db813-8a9c-4ad4-b43d-7eb2f60b5c4e",
+          "created_at": "2026-10-02T22:24:00.521817Z",
+          "updated_at": "2026-10-02T22:24:00.521830Z",
+          "deleted_at": null,
+          "key": 2,
+          "description": "",
+          "value": "3",
+          "created_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df",
+          "project": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "estimate": "e0f50c00-2243-42be-a46c-783ef57437bf"
+        }
+      ]
+    }
+  },
+  "estimates_notes": [
+    "generate_random_name (estimate/base.py:29-31): 10 chars from string.ascii_lowercase; sample 'ijcabmitbl'.",
+    "BUG: bulk create persists the Estimate row BEFORE points validation (:69 vs :78-80), so a 400 on bad points still creates a point-less estimate (see 'Bad' row in bulk_list).",
+    "point create requires truthy key AND value (:157): key=0 is rejected with 400 even though the model default is 0.",
+    "point destroy loop (estimate/base.py:198-210): per issue it enqueues issue_activity THEN issues.update(estimate_point_id=new) inside the loop (re-evaluated queryset); without new_estimate_id no update runs. Afterwards higher keys decrement by 1 (:234-240) and the response is the decremented-points array (see FX-APROJ-08 for the issue_activity payloads)."
+  ]
+}

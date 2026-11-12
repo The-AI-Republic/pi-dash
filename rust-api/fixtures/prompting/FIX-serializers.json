@@ -1,0 +1,101 @@
+{
+  "bugs": ["PUT create returns 200 (not 201) with the read serializer body (views.py:243)."],
+  "data": {
+    "saved_row": {
+      "trace": "serializers.py:14-35 executed against a saved workspace-level row (PromptSectionOverrideSerializer, all read_only incl is_workspace_level property)",
+      "workspace_row_golden": {
+        "body": "WORKSPACE autonomy",
+        "created_at": "2026-09-28T04:50:34.391929Z",
+        "id": "03211c18-7c5d-4c8f-a8c0-610830b7151a",
+        "is_active": true,
+        "is_workspace_level": true,
+        "needs_attention": false,
+        "section_key": "autonomy",
+        "updated_at": "2026-09-28T04:50:34.391941Z",
+        "updated_by": "cdf35877-b085-4a02-bd92-872493fb553f",
+        "user": null,
+        "version": 2,
+        "workspace": "204fd67f-6485-47a0-98e2-079bd6b34202"
+      }
+    },
+    "shapes": {
+      "override_all_read_only": [
+        "id",
+        "workspace",
+        "user",
+        "section_key",
+        "body",
+        "is_active",
+        "version",
+        "needs_attention",
+        "is_workspace_level",
+        "updated_by",
+        "created_at",
+        "updated_at"
+      ],
+      "override_fields": [
+        "id",
+        "workspace",
+        "user",
+        "section_key",
+        "body",
+        "is_active",
+        "version",
+        "needs_attention",
+        "is_workspace_level",
+        "updated_by",
+        "created_at",
+        "updated_at"
+      ],
+      "override_golden_unsaved_row": {
+        "body": "Hello {{ issue.title }}",
+        "created_at": "2026-01-15T12:30:45Z",
+        "id": "22222222-2222-2222-2222-222222222222",
+        "is_active": true,
+        "is_workspace_level": true,
+        "needs_attention": true,
+        "section_key": "intro",
+        "updated_at": "2026-01-16T08:00:00Z",
+        "updated_by": null,
+        "user": null,
+        "version": 3,
+        "workspace": null
+      },
+      "resolved_fields": [
+        "key",
+        "title",
+        "customizable",
+        "body",
+        "default_body",
+        "source",
+        "version",
+        "needs_attention",
+        "editable_at_workspace",
+        "editable_at_personal"
+      ],
+      "resolved_golden": {
+        "body": "Hello",
+        "customizable": "overridable",
+        "default_body": "Default hello",
+        "editable_at_personal": true,
+        "editable_at_workspace": true,
+        "key": "intro",
+        "needs_attention": false,
+        "source": "workspace",
+        "title": "Intro",
+        "version": 2
+      },
+      "trace": "prompting/serializers.py:14-35 (PromptSectionOverrideSerializer: 12 fields incl read-only is_workspace_level property, all read_only), 38-54 (ResolvedSectionSerializer: 10 fields)"
+    }
+  },
+  "fixture_id": "FIX-serializers",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "is_workspace_level is a read-only model property surfaced as BooleanField; FKs render as PK strings; datetimes render with Z (DRF)."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/serializers.py:14-35 (PromptSectionOverrideSerializer)",
+    "prompting/serializers.py:38-54 (ResolvedSectionSerializer)"
+  ]
+}

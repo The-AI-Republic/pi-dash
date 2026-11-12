@@ -111,7 +111,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   // derived values
   const currentNetwork = NETWORK_CHOICES.find((n) => n.key === project?.network);
   const coverImage = watch("cover_image_url");
-  const cloudExecutorOption = project.agent_executor_options?.find((option) => option.kind === "cloud_agent");
   // The budget and cadence controls stay visible but inert while ticking is
   // off, so the configured policy is still readable at a glance.
   const isTickingEnabled = watch("agent_ticking_enabled") ?? true;
@@ -272,7 +271,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       logo_props: formData.logo_props,
       timezone: formData.timezone,
       base_branch: formData.base_branch ?? "",
-      default_agent_executor: formData.default_agent_executor ?? "local_runner",
       agent_ticking_enabled: formData.agent_ticking_enabled ?? true,
       agent_default_max_ticks: budget,
       agent_default_interval_seconds: cadenceSeconds,
@@ -324,8 +322,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   };
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)}>
-      <div className="relative h-44 w-full">
+    <form onSubmit={handleSubmit(onSubmit)} data-testid="general-form">
+      <div className="relative h-44 w-full" data-testid="general-banner">
         <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
         <CoverImage src={coverImage} alt="Project cover image" className="h-44 w-full rounded-md" />
         <div className="absolute bottom-4 z-5 flex w-full items-end justify-between gap-3 px-4">
@@ -425,7 +423,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               />
             )}
           />
-          <span className="text-11 text-danger-primary">{errors?.name?.message}</span>
+          <span className="text-11 text-danger-primary" data-testid="general-error-name">
+            {errors?.name?.message}
+          </span>
         </div>
         <div className="flex flex-col gap-1">
           <h4 className="text-13">{t("Description")}</h4>
@@ -437,7 +437,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 id="description"
                 name="description"
                 value={value}
-                placeholder={t("Enter project description")}
+                placeholder={t("Project Context (Will be shown to AI agents)")}
                 onChange={onChange}
                 className="min-h-[102px] text-13 font-medium"
                 hasError={Boolean(errors?.description)}
@@ -484,7 +484,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 {isAlreadyBound ? t("Bound") || "Bound" : t("Bind") || "Bind"}
               </Button>
             </div>
-            <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
+            <span className="text-11 text-danger-primary" data-testid="general-error-repoUrl">
+              {errors?.repo_url?.message}
+            </span>
             <p className="text-11 text-tertiary">
               {t(
                 "Bind verifies the URL with the connected Git provider and links this project to that repository. GitHub and GitLab URLs are supported. The URL is saved only when you click Bind."
@@ -521,49 +523,10 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 />
               )}
             />
-            <span className="text-11 text-danger-primary">{errors?.base_branch?.message}</span>
+            <span className="text-11 text-danger-primary" data-testid="general-error-baseBranch">
+              {errors?.base_branch?.message}
+            </span>
           </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <h4 className="text-13">{t("Default AI execution target")}</h4>
-          <div className="flex items-start justify-between gap-4">
-            <p className="text-11 text-tertiary">
-              {t(
-                "Choose where this project's new runs execute. Pi Dash Agent requires the user's desktop app to remain open. Work items can override this default."
-              )}
-            </p>
-            <Controller
-              name="default_agent_executor"
-              control={control}
-              render={({ field: { value, onChange } }) => (
-                <select
-                  aria-label={t("Default AI execution target")}
-                  value={value ?? "local_runner"}
-                  onChange={(event) => onChange(event.target.value)}
-                  disabled={!isAdmin}
-                  className="rounded-md border border-subtle bg-surface-1 px-2 py-1 text-13"
-                >
-                  <option value="local_runner">{t("Local runner")}</option>
-                  <option value="cloud_agent" disabled={cloudExecutorOption?.available === false}>
-                    {t("Pi Dash Cloud Agent")}
-                  </option>
-                  <option
-                    value="managed_runner"
-                    disabled={
-                      !project.agent_executor_options?.some(
-                        (option) => option.kind === "managed_runner" && option.available
-                      )
-                    }
-                  >
-                    {t("Pi Dash Agent (desktop)")}
-                  </option>
-                </select>
-              )}
-            />
-          </div>
-          <p className="text-11 text-tertiary">
-            {t("Changing this affects new runs only. Existing and queued runs keep their original executor.")}
-          </p>
         </div>
         <div className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-4">
@@ -642,7 +605,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                   );
                 }}
               />
-              <span className="text-11 text-danger-primary">{errors?.agent_default_max_ticks?.message}</span>
+              <span className="text-11 text-danger-primary" data-testid="general-error-budget">
+                {errors?.agent_default_max_ticks?.message}
+              </span>
               <p className="text-11 text-tertiary">
                 {t(
                   "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them."
@@ -732,7 +697,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 <Info className="absolute top-2.5 right-2 h-4 w-4 text-placeholder" />
               </Tooltip>
             </div>
-            <span className="text-11 text-danger-primary">
+            <span className="text-11 text-danger-primary" data-testid="general-error-identifier">
               <>{errors?.identifier?.message}</>
             </span>
           </div>

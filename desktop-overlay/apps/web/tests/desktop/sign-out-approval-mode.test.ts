@@ -56,7 +56,16 @@ async function bootSignedIn(userId: string) {
 
 async function signOut() {
   const { performSignOut } = await import("@/services/auth-signout");
-  await performSignOut({ requestCSRFToken: async () => ({ csrf_token: "csrf" }) }, "http://localhost:18002");
+  await performSignOut(
+    {
+      requestCSRFToken: async () => ({ csrf_token: "csrf" }),
+      // What the native transport answers once the server has signed the user out.
+      post: async () => {
+        throw new Error("API redirect is not allowed");
+      },
+    },
+    "http://localhost:18002"
+  );
 }
 
 beforeEach(() => {

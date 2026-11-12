@@ -138,6 +138,20 @@
     $env:Path = (@($installDirFull) + $otherEntries) -join ';'
     # pidash-install-test:end-session-path
 
+    # The release archive carries the built-in engine under engine\<version>\,
+    # but the cargo-dist installer only installs executables. Let pidash place
+    # the engine next to itself (<install dir>\engine\), which is not on PATH.
+    # Not fatal: sign-in still works without it, and `pidash engine install`
+    # can be re-run later.
+    Write-Host ''
+    Write-Host '==> Installing the built-in agent engine...'
+    & $pidashBin engine install
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ''
+        Write-Host 'Warning: the built-in agent engine was not installed (see above).'
+        Write-Host 'Run `pidash engine install` to retry.'
+    }
+
     Write-Host ''
     Write-Host '==> Starting authentication...'
     Write-Host ''

@@ -294,7 +294,6 @@ pub struct RunPayload {
     pub model: Option<String>,
 }
 
-
 /// Build the Pi Dash-controlled environment for this runner's agent.
 ///
 /// Empty for a user-enrolled runner, so its agent inherits the operator's
@@ -430,13 +429,35 @@ impl AgentBridge {
                 let engine_settings = mode
                     .map(crate::approval::engine_thread_settings)
                     .unwrap_or_default();
-                let b = crate::codex::bridge::Bridge::spawn_with_env(
+                let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
                     runner.codex.effort_default.clone(),
                     engine_settings,
                     &agent_env_for_config(runner),
+                    resume_session_id,
+                )
+                .await?;
+                Ok(AgentBridge::Codex(b))
+            }
+            AgentKind::Engine => {
+                // The built-in engine is Codex: the daemon supplies its
+                // binary, CODEX_HOME and auth helper (`engine::agent`).
+                let prepared = crate::engine::agent::prepare(runner)?;
+                let engine_settings = mode
+                    .map(crate::approval::engine_thread_settings)
+                    .unwrap_or_default();
+                let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
+                    &prepared.codex.binary,
+                    cwd,
+                    // The model is the profile's (CODEX_HOME/config.toml); a
+                    // per-run override could name one the gateway lacks.
+                    None,
+                    None,
+                    engine_settings,
+                    &agent_env_for_config(&prepared),
+                    resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))
