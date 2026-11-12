@@ -12,11 +12,20 @@ import { useTranslation } from "@pi-dash/i18n";
 import { Badge } from "@pi-dash/propel/badge";
 import type { TBadgeVariant } from "@pi-dash/propel/badge";
 import { Button } from "@pi-dash/propel/button";
-import type { TAgentRunStatus, TIssue, TIssueAgentRunSummary, TIssueAgentTicker } from "@pi-dash/types";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type {
+  TAgentRunStatus,
+  TIssue,
+  TIssueAgentRunSummary,
+  TIssueAgentStatus,
+  TIssueAgentTicker,
+} from "@pi-dash/types";
 import { AlertModalCore } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
 // components
 import { executorKindLabel } from "@/components/dropdowns/pod/execution-target";
+// hooks
+import { usePlatformOS } from "@/hooks/use-platform-os";
 // local imports
 import type { TIssueOperations } from "./root";
 import { useAbortRun } from "./use-abort-run";
@@ -129,6 +138,43 @@ export function formatNextTick(
   return formatUntil(ticker.next_run_at, now, t);
 }
 
+/** Tokens, abbreviated the way ``RunnerAgentStatusPanel`` abbreviates them:
+ * verbatim below a thousand, then ``12.8k`` / ``1.2M``. */
+export function formatTokenCount(total: number): string {
+  if (!Number.isFinite(total) || total <= 0) return "0";
+  const rounded = Math.round(total);
+  if (rounded < 1000) return String(rounded);
+  // Pick the unit against the *rounded* value so 999,950 reads "1.0M"
+  // rather than "1000.0k".
+  if (rounded < 999_950) return `${(rounded / 1000).toFixed(1)}k`;
+  return `${(rounded / 1_000_000).toFixed(1)}M`;
+}
+
+/** The issue's cumulative token total, including a run still in flight.
+ *
+ * ``status.total_tokens`` is summed server side over the issue's run rows,
+ * but a run's usage is only written to its row when it pauses or ends — so
+ * mid-run the sum usually omits the active run entirely, and for a *resumed*
+ * run the row carries a stale total while the live state races ahead. Adding
+ * only what the live state has beyond the row's own contribution covers both:
+ * the whole live total when the row is unwritten, just the delta when it is
+ * stale, and nothing once the row has caught up.
+ *
+ * Returns ``null`` when there is no figure at all (an older payload with no
+ * ``total_tokens`` and no live state), so the caller can drop the tile rather
+ * than assert a false zero.
+ */
+export function resolveIssueTokenTotal(status: TIssueAgentStatus | null | undefined): number | null {
+  if (!status) return null;
+  const stored =
+    typeof status.total_tokens === "number" && Number.isFinite(status.total_tokens) ? status.total_tokens : null;
+  const counted = status.active_run?.total_tokens ?? 0;
+  const live = status.active_run?.live_state?.total_tokens;
+  const liveDelta = typeof live === "number" && Number.isFinite(live) ? Math.max(0, live - counted) : 0;
+  if (stored === null) return liveDelta > 0 ? liveDelta : null;
+  return stored + liveDelta;
+}
+
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
   const value = payload?.[key];
   if (typeof value !== "string") return null;
@@ -167,6 +213,93 @@ function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn
   return null;
 }
 
+/** Dedicated-runner waiting reason (§14.3, §23.5). pause_reason wins. */
+export function formatDispatchWaitReason(
+  wait: { reason: string; pause_reason?: string | null; runner_last_seen_at?: string | null; runs_ahead?: number },
+  now: number,
+  t: TranslationFn
+): string {
+  const lastSeen = wait.runner_last_seen_at ? formatRelativePast(wait.runner_last_seen_at, now, t) : null;
+  switch (wait.reason) {
+    case "runner_offline": {
+      if (lastSeen) return t("offline, last seen {time}", { time: lastSeen });
+      return t("offline");
+    }
+    case "runner_paused": {
+      return formatPauseReason(wait.pause_reason ?? null, t);
+    }
+    case "runner_busy": {
+      const ahead = wait.runs_ahead ?? 0;
+      if (ahead > 0) return t("busy, {count} {runs} ahead", { count: ahead, runs: ahead === 1 ? t("run") : t("runs") });
+      return t("busy");
+    }
+    case "runner_not_permitted": {
+      return t("the runner can't take this issue");
+    }
+    case "dispatching": {
+      return t("dispatching");
+    }
+    default:
+      return wait.reason;
+  }
+}
+
+function formatPauseReason(reason: string | null, t: TranslationFn): string {
+  switch (reason) {
+    case "dispatch_paused":
+      return t("paused by its owner");
+    case "owner_paused":
+      return t("paused by its owner");
+    case "engine_sign_in_required":
+      return t("the engine's sign-in expired");
+    case "gateway_session_revoked":
+      return t("the gateway session was revoked");
+    case "wallet_empty":
+      return t("the wallet is empty");
+    case "profile_unavailable":
+      return t("the profile is unavailable");
+    case "engine_disabled":
+      return t("the engine is disabled");
+    default:
+      return reason ? t("paused: {reason}", { reason }) : t("paused");
+  }
+}
+
+export function formatWaitingRunRecord(
+  run: TIssueAgentRunSummary,
+  ticker: TIssueAgentTicker | null | undefined,
+  runCount: number,
+  now: number,
+  t: TranslationFn
+): AgentStatusView | null {
+  const wait = run.dispatch_wait;
+  if (!wait || run.status !== "queued") return null;
+  const runnerName = run.pinned_runner_name ?? wait.runner_name ?? run.runner_name ?? "runner";
+  const reason = formatDispatchWaitReason(wait, now, t);
+  const expires = wait.expires_at ? formatUntil(wait.expires_at, now, t) : null;
+  const isDedicated = wait.pin_kind === "dedicated";
+  const expiresSuffix =
+    isDedicated && wait.reason !== "runner_busy" && wait.reason !== "dispatching" && expires
+      ? t(" Fails at {time} if it does not reconnect.")
+      : expires && isDedicated
+        ? t(" Fails in {time}.")
+        : "";
+  const title = t("Waiting for runner {name}", { name: runnerName });
+  const detail = `${reason}.${expiresSuffix}`;
+  const badge =
+    wait.reason === "runner_offline"
+      ? t("Offline")
+      : wait.reason === "runner_paused"
+        ? t("Paused")
+        : wait.reason === "runner_busy"
+          ? wait.runs_ahead > 0
+            ? t("{count} ahead", { count: wait.runs_ahead })
+            : t("Busy")
+          : t("Waiting");
+  const badgeVariant = wait.reason === "runner_offline" || wait.reason === "runner_paused" ? "warning" : "neutral";
+  return { title, detail, badge, badgeVariant, icon: Clock3, iconClassName: "text-warning-primary" };
+}
+
 /** Exported for tests — the run view always outranks getTickerOnlyView on
  * the detail page, so the stop_signal precedence lives here. */
 export function getRunView(
@@ -176,6 +309,22 @@ export function getRunView(
   now: number,
   t: TranslationFn
 ): AgentStatusView {
+  // Cloud runs stay RUNNING while a cancel is pending (the worker holds
+  // capacity until it finalizes), so they show "Stopping" when the stamp
+  // is present even though the status has not yet moved to cancel_requested.
+  const isCloudCancelling = run.status === "running" && run.cancel_requested_at != null;
+  if (isCloudCancelling) {
+    const liveDetail = getLiveDetail(run, now, t);
+    const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : liveDetail;
+    return {
+      title: t("Stopping the AI agent"),
+      detail: runnerDetail ?? t("Waiting for the runner to confirm cancellation."),
+      badge: t("Stopping"),
+      badgeVariant: "warning" as const,
+      icon: LoaderCircle,
+      iconClassName: "animate-spin text-warning-primary",
+    };
+  }
   const liveDetail = getLiveDetail(run, now, t);
   const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : null;
   const nextTick = formatUntil(ticker?.next_run_at, now, t);
@@ -196,6 +345,8 @@ export function getRunView(
 
   switch (run.status) {
     case "queued": {
+      const waiting = formatWaitingRunRecord(run, ticker, runCount, now, t);
+      if (waiting) return waiting;
       // A managed run queues visibly when the owner's desktop is closed
       // (§8.5): it is waiting for that one machine, not for shared capacity.
       const queuedDetail =
@@ -438,13 +589,16 @@ function getAgentStatusView(issue: TIssue, now: number, t: TranslationFn): Agent
 
 export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue, issueOperations }: Props) {
   const { t } = useTranslation();
+  const { isMobile } = usePlatformOS();
   const [now, setNow] = useState(() => Date.now());
   const status = issue.agent_status;
   const ticker = status?.ticker ?? issue.agent_ticker;
   const activeRun = status?.active_run;
   const activeRunStatus = activeRun?.status;
   const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
-  const canAbortActiveRun = hasActiveAgentRun && activeRunStatus !== "cancel_requested";
+  const isCancelling =
+    activeRunStatus === "cancel_requested" || (activeRun?.cancel_requested_at != null && activeRunStatus === "running");
+  const canAbortActiveRun = hasActiveAgentRun && !isCancelling;
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
   const canReTick = Boolean(ticker?.can_re_tick);
   const { reTick, isSubmitting: isReTicking } = useReTick();
@@ -497,6 +651,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const Icon = view.icon;
   const nextTick = formatNextTick(ticker, now, t);
   const tickBudget = formatTickBudget(ticker, t);
+  const tokenTotal = resolveIssueTokenTotal(status);
 
   return (
     <section className="mt-5 rounded border border-subtle bg-surface-2 px-3 py-3">
@@ -515,7 +670,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
         </div>
       </div>
 
-      {(status?.run_count || nextTick || tickBudget) && (
+      {(status?.run_count || nextTick || tickBudget || tokenTotal !== null) && (
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption-sm-medium text-tertiary">
           {status?.run_count ? (
             <div className="rounded-sm bg-layer-2 px-2 py-1">
@@ -540,6 +695,19 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
               <span className="block text-placeholder">{t("Budget")}</span>
               <span className="text-primary">{tickBudget}</span>
             </div>
+          ) : null}
+          {tokenTotal !== null ? (
+            <Tooltip
+              tooltipContent={t(
+                "Tokens reported across this issue's runs, including one still in progress. A run that ended before reporting usage counts as nothing, so treat this as a floor rather than a billing figure."
+              )}
+              isMobile={isMobile}
+            >
+              <div className="rounded-sm bg-layer-2 px-2 py-1">
+                <span className="block text-placeholder">{t("Tokens")}</span>
+                <span className="text-primary">{formatTokenCount(tokenTotal)}</span>
+              </div>
+            </Tooltip>
           ) : null}
         </div>
       )}

@@ -69,7 +69,6 @@ from pi_dash.api.serializers import (
 from pi_dash.app.permissions import (
     ProjectEntityPermission,
     ProjectLitePermission,
-    ProjectMemberPermission,
 )
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.db.models import (
@@ -1169,6 +1168,12 @@ _RUN_AI_REASON_MESSAGES = {
     "active_run_exists": "the work item already has an active or queued run",
     "no_pod": "no pod is available to run this work item",
     "no_eligible_runner": "no eligible runner or execution principal is available for this work item",
+    "assigned_runner_offline": "the dedicated runner is offline; bring it online or run on the pod",
+    "assigned_runner_paused": "the dedicated runner is paused; resume it or run on the pod",
+    "assigned_runner_not_owner": "the dedicated runner cannot take this run; use pod_once or change the runner",
+    "pod_once_not_allowed": "only the issue's creator and assignees may use pod_once",
+    "pod_once_not_applicable": "pod_once requires a dedicated runner on the issue",
+    "no_eligible_runner_in_pod": "no eligible runner in the pod",
 }
 
 
@@ -1233,8 +1238,37 @@ class IssueRunAiAPIEndpoint(BaseAPIView):
         if refused is not None:
             return refused
 
-        run, reason = scheduling.run_ai_for_human(issue, actor=request.user)
+        pod_once = (request.data.get("pin") or "").strip() == "pod_once" if request.data else False
+        run, reason = scheduling.run_ai_for_human(issue, actor=request.user, pod_once=pod_once)
         if run is None:
+            # Dedicated refusals carry the full §11.2 body on v1 too.
+            if reason in (
+                scheduling.RUN_AI_DEDICATED_RUNNER_OFFLINE,
+                scheduling.RUN_AI_DEDICATED_RUNNER_PAUSED,
+                scheduling.RUN_AI_DEDICATED_NOT_OWNER,
+            ):
+                from pi_dash.runner.services.issue_assignment import dedicated_refusal_body
+
+                return Response(
+                    dedicated_refusal_body(issue, code=reason),
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if reason == scheduling.RUN_AI_POD_ONCE_NOT_ALLOWED:
+                return Response(
+                    {
+                        "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
+                        "reason": reason,
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if reason == scheduling.RUN_AI_POD_ONCE_NOT_APPLICABLE:
+                return Response(
+                    {
+                        "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
+                        "reason": reason,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             return Response(
                 {
                     "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
@@ -1263,6 +1297,14 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
     must be active and belong to this workspace; the caller must be a
     workspace member (the agent's CLI token resolves to the runner owner).
     See ``.ai_design/ticking_relevance/design.md`` §7.
+
+    A run with no work item yields too (PDASHOSS01-276): a scheduler run is
+    project-scoped (``work_item`` NULL, ``scheduler_binding`` set), and its
+    agent ends on the same command. The outcome is recorded on the run the
+    same way; ``run_kind`` in the response says which sort of run it was
+    (``issue`` | ``scheduler`` | ``direct``). Such a run has no ticking
+    clock, so ``stop_ticking`` is accepted but not stored — it never
+    disables the schedule — and the response's ``detail`` says so.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1295,7 +1337,7 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
             .filter(pk=run_id, workspace__slug=slug)
             .first()
         )
-        if run is None or run.work_item_id is None:
+        if run is None:
             return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
         if not is_workspace_member(request.user, run.workspace_id):
             return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1311,20 +1353,31 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
         payload["yielded_at"] = timezone.now().isoformat()
         if isinstance(note, str) and note.strip():
             payload["note"] = note.strip()[:2000]
-        if stop_ticking is not None:
+        # Only an issue run has a ticker for ``stop_ticking`` to stop.
+        has_clock = run.work_item_id is not None
+        if stop_ticking is not None and has_clock:
             payload["stop_ticking"] = stop_ticking
         run.done_payload = payload
         run.save(update_fields=["done_payload"])
-        return Response(
-            {
-                "ok": True,
-                "run_id": str(run.id),
-                "work_item_id": str(run.work_item_id),
-                "outcome": outcome,
-                "stop_ticking": bool(stop_ticking),
-            },
-            status=status.HTTP_200_OK,
-        )
+        body = {
+            "ok": True,
+            "run_id": str(run.id),
+            "work_item_id": str(run.work_item_id) if has_clock else None,
+            "outcome": outcome,
+            "stop_ticking": bool(stop_ticking) and has_clock,
+            "run_kind": "issue",
+        }
+        if not has_clock:
+            if run.scheduler_binding_id is not None:
+                body["run_kind"] = "scheduler"
+                body["scheduler_binding_id"] = str(run.scheduler_binding_id)
+                subject = "scheduled runs have"
+            else:
+                body["run_kind"] = "direct"
+                subject = "a run without a work item has"
+            if stop_ticking:
+                body["detail"] = f"outcome recorded; {subject} no ticking clock, so stop_ticking was ignored"
+        return Response(body, status=status.HTTP_200_OK)
 
 
 class LabelListCreateAPIEndpoint(BaseAPIView):
@@ -1332,7 +1385,9 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
 
     serializer_class = LabelSerializer
     model = Label
-    permission_classes = [ProjectMemberPermission]
+    # Labels are project entities: create must check the caller's *project*
+    # role like update/delete do, not the workspace role (PDASHOSS01-239).
+    permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     def get_queryset(self):
@@ -1458,7 +1513,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
 
     serializer_class = LabelSerializer
     model = Label
-    permission_classes = [ProjectMemberPermission]
+    permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     @label_docs(

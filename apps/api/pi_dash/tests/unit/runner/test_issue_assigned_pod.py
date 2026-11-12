@@ -19,9 +19,8 @@ See ``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.m
 from __future__ import annotations
 
 import pytest
-from django.urls import reverse
 
-from pi_dash.app.serializers.issue import IssueCreateSerializer, IssueSerializer
+from pi_dash.app.serializers.issue import IssueCreateSerializer
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.project import Project
 from pi_dash.db.models.state import State
