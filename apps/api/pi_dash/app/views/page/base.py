@@ -56,7 +56,8 @@ from pi_dash.bgtasks.page_transaction_task import page_transaction
 from pi_dash.bgtasks.page_version_task import track_page_version
 from pi_dash.bgtasks.recent_visited_task import recent_visited_task
 from pi_dash.bgtasks.copy_s3_object import copy_s3_objects_of_description_and_assets
-from pi_dash.app.permissions import ProjectPagePermission
+from pi_dash.app.permissions import ProjectEntityPermission, ProjectPagePermission
+from pi_dash.utils.page_move import PageMoveError, move_page
 
 
 def unarchive_archive_page_and_descendants(page_id, archived_at):
@@ -681,3 +682,39 @@ class PageDuplicateEndpoint(BaseAPIView):
         )
         serializer = PageDetailSerializer(page)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class PageMoveEndpoint(BaseAPIView):
+    """Move a page, with its sub-pages, to another project of the workspace
+    (``POST .../pages/<page_id>/move/`` with ``{"project_id": <target>}``).
+
+    Same rules and errors as the public API's ``PageMoveAPIEndpoint``; see
+    :mod:`pi_dash.utils.page_move`. Answers 204 on success.
+    """
+
+    permission_classes = [ProjectEntityPermission]
+
+    def post(self, request, slug, project_id, page_id):
+        page = (
+            Page.objects.filter(pk=page_id, workspace__slug=slug)
+            .filter(
+                Exists(
+                    ProjectPage.objects.filter(
+                        page_id=OuterRef("pk"),
+                        project_id=project_id,
+                        project__archived_at__isnull=True,
+                        project__project_projectmember__member=request.user,
+                        project__project_projectmember__is_active=True,
+                    )
+                )
+            )
+            .filter(Q(access=Page.PUBLIC_ACCESS) | Q(owned_by=request.user))
+            .first()
+        )
+        if page is None:
+            return Response({"error": "Page not found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            move_page(page=page, source_project_id=project_id, data=request.data, user=request.user)
+        except PageMoveError as exc:
+            return Response(exc.body, status=exc.http_status)
+        return Response(status=status.HTTP_204_NO_CONTENT)

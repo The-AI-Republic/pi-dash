@@ -10,6 +10,7 @@ import { useParams } from "next/navigation";
 import { ArchiveRestoreIcon, FileOutput, LockKeyhole, LockKeyholeOpen } from "lucide-react";
 // constants
 import { EPageAccess } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 // pi dash editor
 import { LinkIcon, CopyIcon, LockIcon, NewTabIcon, ArchiveIcon, TrashIcon, GlobeIcon } from "@pi-dash/propel/icons";
 // pi dash ui
@@ -58,6 +59,8 @@ export const PageActions = observer(function PageActions(props: Props) {
   const [movePageModal, setMovePageModal] = useState(false);
   // params
   const { workspaceSlug } = useParams();
+  // translation
+  const { t } = useTranslation();
   // page flag
   const { isMovePageEnabled } = usePageFlag({
     workspaceSlug: workspaceSlug?.toString() ?? "",
@@ -144,7 +147,7 @@ export const PageActions = observer(function PageActions(props: Props) {
         {
           key: "move",
           action: () => setMovePageModal(true),
-          title: "Move",
+          title: t("Move to project"),
           icon: FileOutput,
           shouldRender: canCurrentUserMovePage && isMovePageEnabled,
         },
@@ -167,6 +170,7 @@ export const PageActions = observer(function PageActions(props: Props) {
       canCurrentUserMovePage,
       isMovePageEnabled,
       pageOperations,
+      t,
     ]
   );
   // arrange options
@@ -180,7 +184,7 @@ export const PageActions = observer(function PageActions(props: Props) {
 
   return (
     <>
-      <MovePageModal isOpen={movePageModal} onClose={() => setMovePageModal(false)} page={page} />
+      <MovePageModal isOpen={movePageModal} onClose={() => setMovePageModal(false)} page={page} storeType={storeType} />
       <DeletePageModal
         isOpen={deletePageModal}
         onClose={() => setDeletePageModal(false)}

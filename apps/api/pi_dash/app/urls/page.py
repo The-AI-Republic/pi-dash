@@ -11,6 +11,7 @@ from pi_dash.app.views import (
     PagesDescriptionViewSet,
     PageVersionEndpoint,
     PageDuplicateEndpoint,
+    PageMoveEndpoint,
 )
 
 urlpatterns = [
@@ -72,5 +73,10 @@ urlpatterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/pages/<uuid:page_id>/duplicate/",
         PageDuplicateEndpoint.as_view(),
         name="page-duplicate",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/pages/<uuid:page_id>/move/",
+        PageMoveEndpoint.as_view(),
+        name="page-move",
     ),
 ]
