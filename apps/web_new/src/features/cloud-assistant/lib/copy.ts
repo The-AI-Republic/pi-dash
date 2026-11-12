@@ -115,3 +115,14 @@ export const NEEDS_CREDIT_NOTICE =
 export const MODEL_BLOCKED_TITLE = "Model needs credit";
 export const MODEL_BLOCKED_BODY =
   "Free plans can use free models only. Switch to a free model or top up to use this one.";
+
+// Free-quota reminder (NEWPIDASH-181). Informational only — never a
+// warning, never blocking. The toggle persists server-side; the note
+// re-fires once per UTC day while the allowance is exhausted.
+export const FREE_QUOTA_REMINDER_LABEL = "Remind me when today's free tokens are used up";
+export const FREE_QUOTA_REMINDER_HELP =
+  "Show one note per day when your free allowance runs out. Requests continue either way.";
+export const FREE_QUOTA_REMINDER_BODY = "Today's free tokens are used up. Requests now use your OpenHub credit.";
+export const FREE_QUOTA_REMINDER_DISMISS = "Dismiss";
+export const FREE_QUOTA_REMINDER_SAVE_FAILED_TITLE = "Could not save the reminder setting";
+export const FREE_QUOTA_REMINDER_SAVE_FAILED_MESSAGE = "The previous setting was restored.";
