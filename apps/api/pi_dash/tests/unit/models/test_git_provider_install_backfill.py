@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-# PDASHOSS01-356 (github_* sunset 3/6): the 0173 backfill moves GitHub App
+# PDASHOSS01-356 (github_* sunset 3/6): the 0177 backfill moves GitHub App
 # installations and install sessions off the legacy tables onto the
 # generic ones. These tests pin the idempotent mapping: installations
 # land on GitProviderAccount matched by external_account_id, sessions on
@@ -25,7 +25,7 @@ from pi_dash.db.models import (
 
 pytestmark = [pytest.mark.unit, pytest.mark.django_db]
 
-migration_module = importlib.import_module("pi_dash.db.migrations.0173_git_provider_app_columns")
+migration_module = importlib.import_module("pi_dash.db.migrations.0177_git_provider_app_columns")
 
 
 @pytest.fixture

@@ -126,7 +126,7 @@ def backfill_install_sessions(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0172_clidevicecode_engine_scope"),
+        ("db", "0176_update_timezone_choices_pytz_2025_2"),
         ("db", "0152_git_generalization"),
     ]
 
