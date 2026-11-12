@@ -1,0 +1,143 @@
+{
+ "_comment": "FX-GHA-01: GitHub App flow \u2014 install session, callback exchange, HMAC-SHA256 vectors, delivery dedupe. Views github.py:658-808,860-956; utils github_app_auth.py:33-210 (EXECUTED: normalize_private_key, parse_github_datetime, HMAC verify logic).",
+ "callback_get": {
+  "branch_table": [
+   {
+    "error": "actor_mismatch",
+    "when": "session.actor != request.user [github.py:770-771]"
+   },
+   {
+    "error": "expired",
+    "when": "expires_at <= now -> EXPIRED [github.py:765-769]"
+   },
+   {
+    "error": "github_verification_failed",
+    "when": "ANY exception in exchange/verify/fetch/upsert (broad except, logged) [github.py:780-793]"
+   },
+   {
+    "error": "installation_not_visible_to_user",
+    "when": "verify_user_can_access_installation None [github.py:782-783]"
+   },
+   {
+    "error": "login_required",
+    "when": "anonymous user (pre-check before session lookup) [github.py:741-742]"
+   },
+   {
+    "error": "missing_installation_id",
+    "when": "installation_id_raw not digits [github.py:774-775]"
+   },
+   {
+    "error": "missing_oauth_code",
+    "when": "empty code [github.py:776-777]"
+   },
+   {
+    "error": "missing_state",
+    "when": "empty state param [github.py:748-749]"
+   },
+   {
+    "error": "unknown_state",
+    "when": "no session row for state [github.py:751-755]"
+   },
+   {
+    "error": "workspace_admin_required",
+    "when": "requester lost admin since install-start [github.py:772-773]"
+   },
+   {
+    "terminal_passthrough": "session exists but status != STARTED -> redirect github_app=<status> (completed/expired/failed replay) [github.py:763-764]"
+   }
+  ],
+  "db_writes": "fail(): status=FAILED, error=<code>, save(update_fields=[status,error,updated_at]) [github.py:757-761]; success: installation_id/account_login/COMPLETED/completed_at/error='' [github.py:795-802]",
+  "exchange_order": "exchange_user_code(code) -> verify_user_can_access_installation -> get_installation -> _upsert_app_installation(require_verified=True) [github.py:781-790]",
+  "redirect_base": "WEB_URL or APP_BASE_URL or '' + /settings/profile/integrations/?<params> (urlencode) [github.py:140-147]; success params {github_app: connected, workspace_slug} [github.py:803-808]",
+  "route": "GET /integrations/github/app/callback/ AllowAny [github.py:730-734]"
+ },
+ "config": {
+  "get_github_app_config": "reads GITHUB_APP_ID/SLUG/PRIVATE_KEY/WEBHOOK_SECRET/CLIENT_ID/CLIENT_SECRET via get_configuration_value; strips; private key normalized [github_app_auth.py:33-51]",
+  "normalize_private_key": {
+   "executed": true,
+   "expr": "(value or '').replace('\\\\r\\\\n','\\n').replace('\\\\n','\\n').strip() [github_app_auth.py:54-60]",
+   "vectors": [
+    {
+     "in": "LINE1\\\\nLINE2",
+     "out": "LINE1\\nLINE2"
+    },
+    {
+     "in": "None",
+     "out": ""
+    }
+   ]
+  },
+  "require": "oauth adds client_id+client_secret; webhook adds webhook_secret; missing -> GithubAppConfigError('GitHub App config missing: ...') [github_app_auth.py:63-73]"
+ },
+ "delivery_dedupe": {
+  "dedupe_key": "delivery_id UUID (400 Missing/Invalid X-GitHub-Delivery; JSON 400 Invalid JSON) [github.py:878-889]",
+  "get_or_create": "GithubWebhookDelivery.objects.get_or_create(delivery_id, defaults={event, action, installation_id, payload, RECEIVED}) [github.py:894-903]",
+  "redeliver_rule": "REPEAT only when prior status PROCESSED/SKIPPED -> 202 {status} fast-return; RECEIVED/FAILED REPROCESSED (crash-safe; _refresh_pr_links idempotent + out-of-order guarded) [github.py:904-917]",
+  "terminal": "every path ends 202; status is processed|skipped|failed (RECEIVED never escapes: the save block always re-marks before responding) [github.py:917,956]"
+ },
+ "event_routing": {
+  "installation_deleted_suspend": "suspended_at=now, error set, revoke_installation_cache [github.py:935-939]",
+  "installation_repositories": "refresh installation [github.py:943-944]",
+  "installation_unsuspend": "suspended_at=None + refresh incl suspended_at field [github.py:940-942]",
+  "other_events": "SKIPPED [github.py:946-947]",
+  "ping": "PROCESSED [github.py:921-922]",
+  "pull_request": "PROCESSED if _refresh_pr_links matched else SKIPPED [github.py:923-927]",
+  "save": "status/error/processed_at/updated_at; exception -> FAILED + error[:2000] [github.py:948-955]",
+  "unknown_installation": "installation/installation_repositories with no local row -> SKIPPED [github.py:932-933]"
+ },
+ "hmac_vectors": {
+  "algo": "sha256= + hexdigest(hmac.new(webhook_secret, raw_body, sha256)); hmac.compare_digest [github_app_auth.py:201-210]",
+  "executed": true,
+  "probe": "/tmp/fx_d33_probe.py (real hmac/hashlib)",
+  "rejects": "missing signature or not startswith 'sha256=' -> False [github_app_auth.py:203-204]",
+  "sample": {
+   "raw_body": "{\"zen\":\"keep it simple\"}",
+   "secret": "whsec-test",
+   "sha256": "sha256=133e9393896b910ee36321e21c787ba11898b9ed3a71fb4abda214ed853311b3",
+   "tampered": false,
+   "verify_ok": true,
+   "wrong_prefix_sha1": false
+  }
+ },
+ "install_start": {
+  "db_write": "GithubAppInstallSession.objects.create(state=token_urlsafe(32), workspace, actor, expires_at=now+15min) [github.py:680-686]",
+  "errors": [
+   {
+    "error": "workspace_slug is required",
+    "status": 400
+   },
+   {
+    "error": "You must be a workspace admin...",
+    "status": 403,
+    "when": "non-admin [github.py:674-678]"
+   },
+   {
+    "error": "<config missing...>",
+    "status": 409,
+    "when": "GithubAppConfigError [github.py:666-668]"
+   }
+  ],
+  "response": "201 {state, expires_at iso, install_url: https://github.com/apps/<slug>/installations/new?state=...} [github.py:687-695]",
+  "route": "POST /users/me/integrations/github/app/install/ (authenticated, no role decorator \u2014 admin checked manually) [github.py:658-664]"
+ },
+ "jwt_headers": {
+  "app_headers": "{Authorization: Bearer <RS256 app JWT iat=now-60 exp=now+540 iss=app_id>, Accept: application/vnd.github+json, X-GitHub-Api-Version: 2022-11-28, User-Agent: pi-dash-github-app} [github_app_auth.py:76-94]",
+  "installation_token_cache": "key github_app_installation_token:<id>; ttl = max(60, expires_at-60s), default 55min (55*60); revoke deletes [github_app_auth.py:178-198]",
+  "user_headers": "Bearer <user token> + same Accept/Version/UA [github_app_auth.py:97-104]"
+ },
+ "parse_github_datetime": {
+  "executed": true,
+  "expr": "None when falsy else fromisoformat(value.replace('Z','+00:00')) [github_app_auth.py:106-109]",
+  "vectors": [
+   {
+    "in": "2026-09-29T12:00:00Z",
+    "out": "2026-09-29T12:00:00+00:00"
+   },
+   {
+    "in": null,
+    "out": null
+   }
+  ]
+ },
+ "webhook_route": "POST /integrations/github/app/webhook/ AllowAny, authentication=[], throttle=[] (signature IS the auth; AnonRateThrottle would 429 bursts) [github.py:863-867]; disabled-flag 404 BEFORE signature check [github.py:870-871]"
+}

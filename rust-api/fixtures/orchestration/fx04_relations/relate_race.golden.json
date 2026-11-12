@@ -1,0 +1,14 @@
+{
+  "_trace": "orchestration/relations.py:196-213 (create + IntegrityError re-read)",
+  "_method": "live relate with _pair_rows mocked to hide the pair once, so the real unique constraint raises IntegrityError and the except branch re-reads; pair pre-created via relate",
+  "pair_rows_calls": 2,
+  "race_result": {
+    "issue": "FX4A-4",
+    "relation_type": "relates_to",
+    "created": [],
+    "unchanged": [
+      "FX4A-5"
+    ],
+    "conflicts": []
+  }
+}

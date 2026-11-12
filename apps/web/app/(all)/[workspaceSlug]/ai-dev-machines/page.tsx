@@ -35,17 +35,22 @@ Start-Process msiexec.exe -Wait -ArgumentList "/i \`"$msi\`""`;
 
 const service = new RunnerService();
 
-type DevMachineStatus = "active" | "offline" | "registered" | "revoked";
+// Status describes the *machine's* own connection, not its runners. Runner
+// health lives in the separate active/total runner column. "Connected" means
+// the daemon holds a recently-seen machine control session (``control_online``)
+// and can execute cloud-pushed commands right now — independent of whether any
+// runners are registered.
+type DevMachineStatus = "connected" | "offline" | "registered" | "revoked";
 
 const DEV_MACHINE_STATUS_BADGE_VARIANT: Record<DevMachineStatus, TBadgeVariant> = {
-  active: "accent-success",
+  connected: "accent-success",
   offline: "accent-neutral",
   registered: "accent-primary",
   revoked: "accent-warning",
 };
 
 const DEV_MACHINE_STATUS_I18N_LABELS: Record<DevMachineStatus, string> = {
-  active: "Active",
+  connected: "Connected",
   offline: "Offline",
   registered: "Registered",
   revoked: "Revoked",
@@ -53,8 +58,8 @@ const DEV_MACHINE_STATUS_I18N_LABELS: Record<DevMachineStatus, string> = {
 
 function getDevMachineStatus(machine: IDevMachine): DevMachineStatus {
   if (machine.revoked_at) return "revoked";
-  if (machine.online_runner_count > 0) return "active";
-  if (machine.runner_count > 0) return "offline";
+  if (machine.control_online) return "connected";
+  if (machine.last_seen_at) return "offline";
   return "registered";
 }
 

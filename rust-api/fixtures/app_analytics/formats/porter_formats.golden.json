@@ -1,0 +1,51 @@
+{
+  "fixture": "FX-A-FMT-01",
+  "sources": ["utils/porters/formatters.py:25-274", "utils/porters/exporter.py:9-107", "utils/exporters/exporter.py:12-76", "utils/exporters/formatters.py:16-206", "utils/exporters/schemas/issue.py + base.py", "utils/csv_utils.py"],
+  "sample_row": {"project_identifier": "AN", "identifier": "AN-3", "name": "I3", "priority": "medium", "assignees": [], "labels": [], "estimate": 8, "is_draft": false},
+  "porters": {
+    "JSONFormatter:42-54": {"encode": "json.dumps(data, indent=2, default=str)", "decode": "json.loads(content)", "extension": "json", "golden_encode": "[\\n  {\\n    \\\"identifier\\\": \\\"AN-3\\\"...\\n  }\\n]"},
+    "CSVFormatter:57-165": {
+      "defaults": {"flatten": true, "delimiter": ",", "prettify_headers": true},
+      "flatten": "nested dicts -> parent__child keys; lists -> json.dumps; scalars verbatim",
+      "headers": "prettified (created_by_name -> Created By Name) written via csv.writer; raw keys via DictWriter when prettify off",
+      "sanitize": "every cell via sanitize_csv_row (formula triggers = + - @ tab CR LF prefixed with ')",
+      "decode": "DictReader -> normalize headers (strip/lower/space->_) -> unflatten (__ split; JSON-parse string cells back to list/dict)",
+      "golden_encode": "Identifier,Name,Priority,Estimate\\r\\nAN-3,I3,medium,8\\r\\n"
+    },
+    "XLSXFormatter:168-274": {
+      "cell": "None->\"\"; list -> join(', '); dict -> json.dumps; else verbatim",
+      "empty": "workbook with headers-less active sheet (no rows appended)",
+      "decode": "read_only load_workbook, first row headers normalized, JSON-parse attempt per string cell",
+      "extension": "xlsx"
+    },
+    "DataExporter:9-107": {
+      "formats": ["csv", "json", "xlsx"],
+      "ctor": "DataExporter(serializer_class, format_type=None); unknown format -> ValueError('Unsupported format: X. Available: [...]'); xlsx formatter built with list_joiner=', '",
+      "export": "serialize (serializer_class(queryset, many=True).data) -> formatter.encode -> (f'{filename}.{ext}', content); no format_type -> ValueError('format_type must be provided...')",
+      "legacy": "to_string(queryset, formatter); to_file writes text mode utf-8"
+    }
+  },
+  "exporters_utils": {
+    "Exporter:12-76": {"ctor": "Exporter(format_type, schema_class, options={}); unknown -> ValueError", "export": "QuerySet -> schema_class.serialize_queryset(data, fields) else records as-is; fields merged into options; formatter.format(filename, records, schema_class, options)", "register_formatter": "class method extends FORMATTERS"},
+    "CSV:62-114": {"empty": "('{f}.csv', '')", "quoting": "QUOTE_ALL via csv.writer; header = schema labels filtered to fields", "cell": "None->''; list join ', '; dict -> json.dumps; else str()"},
+    "JSON:117-147": {"empty": "('{f}.json', '[]')", "row": "{label: record[field]} preserving types; json.dumps no indent"},
+    "XLSX:150-206": {"empty": "workbook with zero rows (still a file)", "row": "same _format_field_value as CSV"},
+    "schema_labels": {"source": "schema._declared_fields order + field.label or name-title; missing -> ValueError", "note": "exporters JSON keys are LABELS ('Project Identifier'), porter CSV headers are prettified field names — same text, different code path"}
+  },
+  "IssueExportSchema_prepare": {
+    "source": "utils/exporters/schemas/issue.py:70-213",
+    "fields_in_order": ["id", "project_identifier", "project_name", "project_id", "sequence_id", "name", "description", "priority", "start_date", "target_date", "state_name", "created_at", "updated_at", "completed_at", "archived_at", "module_name", "created_by", "labels", "comments", "estimate", "link", "assignees", "subscribers_count", "attachment_count", "attachment_links", "cycle_name", "cycle_start_date", "cycle_end_date", "parent", "relations"],
+    "goldens": {
+      "id": "AN-3 (prepare_id, not the uuid)",
+      "description": "description_stripped source",
+      "dates": "DateField/DateTimeField rendering; comment dates '%a, %d %b %Y'",
+      "created_by": "'first last' or '' (broad except)",
+      "labels": "labels.all() names (unguarded — cf SER-04 label_issue guard)",
+      "comments": "[{comment: stripped, created_at: formatted, created_by: 'first last'}]",
+      "estimate": "estimate_point.value or ''",
+      "attachments": "context attachments_dict (FileAsset ISSUE_ATTACHMENT) count + /api/assets/v2/workspaces/<ws>/projects/<pid>/issues/<iid>/attachments/<asset>/ links",
+      "cycle": "last CycleIssue (issue order, -created_at) name/start/end or ''",
+      "relations": "{type: IDENT-seq} outgoing + REVERSE_MAPPING incoming (dict — duplicate types overwrite)"
+    }
+  }
+}

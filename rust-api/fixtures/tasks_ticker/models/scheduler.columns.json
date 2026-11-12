@@ -1,0 +1,413 @@
+{
+  "_trace": "db/models/scheduler.py:107-151 (Scheduler), 154-248 (SchedulerBinding)",
+  "_method": "model _meta introspection under pi_dash.settings.test, no DB",
+  "scheduler": {
+    "model": "db.Scheduler",
+    "db_table": "schedulers",
+    "ordering": [
+      "-created_at"
+    ],
+    "fields": [
+      {
+        "name": "created_at",
+        "type": "DateTimeField",
+        "column": "created_at",
+        "null": false,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "updated_at",
+        "type": "DateTimeField",
+        "column": "updated_at",
+        "null": false,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "created_by",
+        "type": "ForeignKey",
+        "column": "created_by_id",
+        "null": true,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.User",
+        "on_delete": "SET_NULL",
+        "related_name": "scheduler_created_by"
+      },
+      {
+        "name": "updated_by",
+        "type": "ForeignKey",
+        "column": "updated_by_id",
+        "null": true,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.User",
+        "on_delete": "SET_NULL",
+        "related_name": "scheduler_updated_by"
+      },
+      {
+        "name": "deleted_at",
+        "type": "DateTimeField",
+        "column": "deleted_at",
+        "null": true,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "id",
+        "type": "UUIDField",
+        "column": "id",
+        "null": false,
+        "blank": false,
+        "max_length": 32,
+        "default": "<callable uuid4>"
+      },
+      {
+        "name": "workspace",
+        "type": "ForeignKey",
+        "column": "workspace_id",
+        "null": false,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.Workspace",
+        "on_delete": "CASCADE",
+        "related_name": "schedulers"
+      },
+      {
+        "name": "slug",
+        "type": "CharField",
+        "column": "slug",
+        "null": false,
+        "blank": false,
+        "max_length": 64,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "name",
+        "type": "CharField",
+        "column": "name",
+        "null": false,
+        "blank": false,
+        "max_length": 255,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "description",
+        "type": "TextField",
+        "column": "description",
+        "null": false,
+        "blank": true,
+        "default": ""
+      },
+      {
+        "name": "prompt",
+        "type": "TextField",
+        "column": "prompt",
+        "null": false,
+        "blank": false,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "source",
+        "type": "CharField",
+        "column": "source",
+        "null": false,
+        "blank": false,
+        "max_length": 16,
+        "default": "builtin",
+        "choices": [
+          [
+            "builtin",
+            "Builtin"
+          ],
+          [
+            "manifest",
+            "Manifest"
+          ]
+        ]
+      },
+      {
+        "name": "is_enabled",
+        "type": "BooleanField",
+        "column": "is_enabled",
+        "null": false,
+        "blank": false,
+        "default": true
+      },
+      {
+        "name": "color",
+        "type": "CharField",
+        "column": "color",
+        "null": false,
+        "blank": false,
+        "max_length": 7,
+        "default": "#3b82f6"
+      }
+    ],
+    "reverse_relations": [
+      "bindings"
+    ],
+    "constraints": [
+      {
+        "name": "scheduler_unique_workspace_slug_when_active",
+        "type": "UniqueConstraint",
+        "fields": [
+          "workspace",
+          "slug"
+        ],
+        "condition": "<Q: (AND: ('deleted_at__isnull', True))>"
+      }
+    ],
+    "indexes": []
+  },
+  "scheduler_binding": {
+    "model": "db.SchedulerBinding",
+    "db_table": "scheduler_bindings",
+    "ordering": [
+      "-created_at"
+    ],
+    "fields": [
+      {
+        "name": "created_at",
+        "type": "DateTimeField",
+        "column": "created_at",
+        "null": false,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "updated_at",
+        "type": "DateTimeField",
+        "column": "updated_at",
+        "null": false,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "created_by",
+        "type": "ForeignKey",
+        "column": "created_by_id",
+        "null": true,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.User",
+        "on_delete": "SET_NULL",
+        "related_name": "schedulerbinding_created_by"
+      },
+      {
+        "name": "updated_by",
+        "type": "ForeignKey",
+        "column": "updated_by_id",
+        "null": true,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.User",
+        "on_delete": "SET_NULL",
+        "related_name": "schedulerbinding_updated_by"
+      },
+      {
+        "name": "deleted_at",
+        "type": "DateTimeField",
+        "column": "deleted_at",
+        "null": true,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "id",
+        "type": "UUIDField",
+        "column": "id",
+        "null": false,
+        "blank": false,
+        "max_length": 32,
+        "default": "<callable uuid4>"
+      },
+      {
+        "name": "workspace",
+        "type": "ForeignKey",
+        "column": "workspace_id",
+        "null": false,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.Workspace",
+        "on_delete": "CASCADE",
+        "related_name": "workspace_schedulerbinding"
+      },
+      {
+        "name": "project",
+        "type": "ForeignKey",
+        "column": "project_id",
+        "null": true,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.Project",
+        "on_delete": "CASCADE",
+        "related_name": "project_schedulerbinding"
+      },
+      {
+        "name": "scheduler",
+        "type": "ForeignKey",
+        "column": "scheduler_id",
+        "null": false,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.Scheduler",
+        "on_delete": "CASCADE",
+        "related_name": "bindings"
+      },
+      {
+        "name": "dtstart",
+        "type": "DateTimeField",
+        "column": "dtstart",
+        "null": false,
+        "blank": false,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "tzid",
+        "type": "CharField",
+        "column": "tzid",
+        "null": false,
+        "blank": false,
+        "max_length": 64,
+        "default": "UTC"
+      },
+      {
+        "name": "rrule",
+        "type": "TextField",
+        "column": "rrule",
+        "null": false,
+        "blank": true,
+        "default": ""
+      },
+      {
+        "name": "rdates",
+        "type": "JSONField",
+        "column": "rdates",
+        "null": false,
+        "blank": true,
+        "default": "<callable list>"
+      },
+      {
+        "name": "exdates",
+        "type": "JSONField",
+        "column": "exdates",
+        "null": false,
+        "blank": true,
+        "default": "<callable list>"
+      },
+      {
+        "name": "extra_context",
+        "type": "TextField",
+        "column": "extra_context",
+        "null": false,
+        "blank": true,
+        "default": ""
+      },
+      {
+        "name": "enabled",
+        "type": "BooleanField",
+        "column": "enabled",
+        "null": false,
+        "blank": false,
+        "default": true
+      },
+      {
+        "name": "outcome_mode",
+        "type": "CharField",
+        "column": "outcome_mode",
+        "null": false,
+        "blank": false,
+        "max_length": 16,
+        "default": "create_issue",
+        "choices": [
+          [
+            "create_issue",
+            "Create issues"
+          ],
+          [
+            "apply_fix",
+            "Apply fix (open PR)"
+          ],
+          [
+            "fix_and_review",
+            "Fix & open for review"
+          ]
+        ]
+      },
+      {
+        "name": "next_run_at",
+        "type": "DateTimeField",
+        "column": "next_run_at",
+        "null": true,
+        "blank": true,
+        "default": "<NOT_PROVIDED>"
+      },
+      {
+        "name": "last_run",
+        "type": "ForeignKey",
+        "column": "last_run_id",
+        "null": true,
+        "blank": true,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "runner.AgentRun",
+        "on_delete": "SET_NULL",
+        "related_name": "+"
+      },
+      {
+        "name": "last_error",
+        "type": "TextField",
+        "column": "last_error",
+        "null": false,
+        "blank": true,
+        "default": ""
+      },
+      {
+        "name": "actor",
+        "type": "ForeignKey",
+        "column": "actor_id",
+        "null": true,
+        "blank": false,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "db.User",
+        "on_delete": "SET_NULL",
+        "related_name": "scheduler_bindings_authored"
+      },
+      {
+        "name": "pod",
+        "type": "ForeignKey",
+        "column": "pod_id",
+        "null": true,
+        "blank": true,
+        "default": "<NOT_PROVIDED>",
+        "related_model": "runner.Pod",
+        "on_delete": "SET_NULL",
+        "related_name": "scheduler_bindings"
+      }
+    ],
+    "reverse_relations": [
+      "agent_runs"
+    ],
+    "constraints": [
+      {
+        "name": "scheduler_binding_unique_per_project_when_active",
+        "type": "UniqueConstraint",
+        "fields": [
+          "scheduler",
+          "project"
+        ],
+        "condition": "<Q: (AND: ('deleted_at__isnull', True))>"
+      }
+    ],
+    "indexes": [
+      {
+        "name": "sched_binding_due_idx",
+        "fields": [
+          "enabled",
+          "next_run_at"
+        ]
+      }
+    ]
+  }
+}

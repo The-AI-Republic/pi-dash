@@ -1,0 +1,38 @@
+{
+  "fixture": "FX-A-SER-02",
+  "source": "app/serializers/exporter.py:11-30",
+  "serializer": "ExporterHistorySerializer",
+  "meta": {
+    "model": "ExporterHistory",
+    "fields": ["id", "created_at", "updated_at", "project", "provider", "status", "url", "initiated_by", "initiated_by_detail", "token", "created_by", "updated_by"],
+    "read_only_fields": "all of fields (entire serializer is read-only)",
+    "nested": "initiated_by_detail = UserLiteSerializer(source=initiated_by, read_only=True)"
+  },
+  "golden_output": {
+    "id": "<uuid>",
+    "created_at": "<drf datetime>",
+    "updated_at": "<drf datetime>",
+    "project": ["<project uuid>"],
+    "provider": "csv",
+    "status": "completed",
+    "url": null,
+    "initiated_by": "<user uuid>",
+    "initiated_by_detail": {
+      "id": "<user uuid>",
+      "first_name": "an_admin",
+      "last_name": "User",
+      "avatar": "",
+      "avatar_url": null,
+      "is_bot": false,
+      "display_name": "an_admin"
+    },
+    "token": "<32-hex generate_token>",
+    "created_by": null,
+    "updated_by": null
+  },
+  "notes": [
+    "name/type/reason/key/filters/rich_filters are model columns but NOT serializer fields — never rendered.",
+    "url renders null until upload_to_s3 sets the presigned URL; created_by/updated_by render null on task-created rows.",
+    "oracle: contract-tests/app_analytics/test_exporter.py::test_export_history_list_shape (lines 18-43)."
+  ]
+}

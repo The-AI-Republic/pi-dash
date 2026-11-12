@@ -1,0 +1,94 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "notif_500_then_call",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 1.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/mcp"
+  },
+  "flow": [
+    "enter",
+    "call"
+  ],
+  "call": {
+    "tool": "mcp_probe_echo",
+    "args": {
+      "text": "hi"
+    },
+    "fabricate": true
+  },
+  "stub": {
+    "framing": "json",
+    "notif_status": 500
+  },
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    },
+    {
+      "method": "GET",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"notifications/initialized\",\"jsonrpc\":\"2.0\"}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "call": {
+      "absorbed": {
+        "class": "BrokenResourceError",
+        "text": "Tool server 'probe' was unavailable for this call (BrokenResourceError)."
+      }
+    },
+    "failures": {
+      "after_enter": null,
+      "after_list": null,
+      "after_call": "BrokenResourceError",
+      "at_exit": "BrokenResourceError"
+    },
+    "delete_seen": true
+  }
+}

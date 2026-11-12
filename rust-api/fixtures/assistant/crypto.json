@@ -1,0 +1,69 @@
+{
+  "trace": "apps/api/pi_dash/assistant/crypto.py:37-233",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "backend_registry": {
+    "source": "apps/api/pi_dash/assistant/crypto.py:193-214",
+    "backends": [
+      "aws-kms",
+      "fernet"
+    ],
+    "default": "aws-kms (ASSISTANT_CRYPTO_BACKEND unset, crypto.py:207)"
+  },
+  "get_backend_unknown": {
+    "source": "apps/api/pi_dash/assistant/crypto.py:204-214",
+    "vector": {
+      "raised": "AssistantNotConfigured",
+      "code": "assistant_not_configured"
+    }
+  },
+  "fernet": {
+    "source": "apps/api/pi_dash/assistant/crypto.py:134-190",
+    "config": "ASSISTANT_ENCRYPTION_KEY comma-separated; first encrypts, all decrypt (crypto.py:137-140)",
+    "round_trip": {
+      "backend": "FernetBackend",
+      "configured": true,
+      "ct_len": 100,
+      "ct_is_bytes": true,
+      "roundtrip": true,
+      "decrypt_empty": "''",
+      "rotate_ok": true
+    },
+    "key_prepend_still_decrypts_old": true,
+    "wrong_key_raises": {
+      "raised": "AssistantNotConfigured",
+      "code": "assistant_not_configured"
+    },
+    "no_key": {
+      "configured": false,
+      "encrypt_raises": {
+        "raised": "AssistantNotConfigured",
+        "code": "assistant_not_configured"
+      },
+      "source": "apps/api/pi_dash/assistant/crypto.py:153-159"
+    }
+  },
+  "aws_kms": {
+    "source": "apps/api/pi_dash/assistant/crypto.py:57-131",
+    "config": "ASSISTANT_KMS_KEY_ID + AWS_REGION + optional ASSISTANT_KMS_ENDPOINT_URL (crypto.py:62-64)",
+    "undecryptable_codes": [
+      "InvalidCiphertextException",
+      "IncorrectKeyException",
+      "NotFoundException"
+    ],
+    "unconfigured": {
+      "backend": "AwsKmsBackend",
+      "configured": false
+    },
+    "note": "decrypt pins KeyId; empty token decrypts to '' without KMS call (crypto.py:109-113)"
+  },
+  "public_api": {
+    "source": "apps/api/pi_dash/assistant/crypto.py:220-233",
+    "functions": [
+      "is_configured",
+      "encrypt",
+      "decrypt",
+      "rotate"
+    ]
+  },
+  "conventions": "undecryptable/not-configured -> AssistantNotConfigured; operational failures propagate (crypto.py:19-23)"
+}
