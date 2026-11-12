@@ -1044,12 +1044,30 @@ pub async fn default_pod_for_project(
     Ok(row.map(PodHit::from))
 }
 
-/// `_next_auto_runner_name` count (`:790-796`): ALL runners in the pod,
-/// revoked included. Django `.count()` rendering.
+/// `_next_auto_runner_name` count (`:846`): ALL runners on the dev
+/// machine, revoked included. Django `.count()` rendering. The daemon
+/// requires names unique per computer, so the pod-only count produced
+/// duplicate `runner_001` across pods/workspaces (#221).
 pub async fn count_pod_runners(pool: &sqlx::PgPool, pod_id: Uuid) -> Result<i64, Response> {
     let count = enroll_sql::count_pod_runners(&pidash_db::pool::sea_orm_connection(pool), pod_id)
         .await
         .map_err(|_| server_error())?;
+    i64::try_from(count).map_err(|_| server_error())
+}
+
+/// `#221` fix counterpart: count every runner on this dev machine.
+/// Used when a machine identity exists so the auto sequence is
+/// machine-wide; otherwise the caller falls back to pod counting.
+pub async fn count_machine_runners(
+    pool: &sqlx::PgPool,
+    dev_machine_id: Uuid,
+) -> Result<i64, Response> {
+    let count = enroll_sql::count_machine_runners(
+        &pidash_db::pool::sea_orm_connection(pool),
+        dev_machine_id,
+    )
+    .await
+    .map_err(|_| server_error())?;
     i64::try_from(count).map_err(|_| server_error())
 }
 
@@ -1747,12 +1765,17 @@ async fn create_attempt(
     } else if !params.body_name.is_empty() {
         params.body_name.to_owned()
     } else {
-        match enroll_sql::count_pod_runners(
-            &pidash_db::orm_tx::TxConn::new(&mut *tx),
-            params.pod_id,
-        )
-        .await
-        {
+        // #221: auto names must be unique per dev machine (daemon
+        // validates across the whole computer), not per pod. When a
+        // machine identity exists, count across the machine; otherwise
+        // fall back to the pod count for legacy callers with no
+        // host_label/machine id.
+        let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+        let count = match dev_machine_id {
+            Some(mid) => enroll_sql::count_machine_runners(&conn, mid).await,
+            None => enroll_sql::count_pod_runners(&conn, params.pod_id).await,
+        };
+        match count {
             Ok(count) => next_auto_runner_name(count as i64),
             Err(_) => return Attempt::Server,
         }
