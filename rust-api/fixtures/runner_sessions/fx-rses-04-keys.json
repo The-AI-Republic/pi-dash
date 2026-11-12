@@ -1,0 +1,71 @@
+{
+  "fixture": "FX-RSES-04",
+  "_trace": "outbox.py:89-115 key builders, :687-737 stream-id utils; machine_outbox.py:84-106, :339-340",
+  "_method": "direct calls to the key-builder and stream-id functions with fixed UUIDs/ids",
+  "runner_keys": {
+    "stream_key": "runner_stream:11111111-2222-4333-8444-555555555555",
+    "group_name": "runner-group:11111111-2222-4333-8444-555555555555",
+    "consumer_name": "consumer-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "offline_stream_key": "runner_offline_stream:11111111-2222-4333-8444-555555555555",
+    "session_eviction_channel": "session_eviction:11111111-2222-4333-8444-555555555555",
+    "session_pel_drained_key": "session_pel_drained:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "stream_cleanup_zset_key": "runner_stream_cleanup",
+    "runner_group_legacy_ws": "runner.11111111-2222-4333-8444-555555555555"
+  },
+  "machine_keys": {
+    "stream_key": "machine_stream:11111111-2222-4333-8444-555555555555",
+    "group_name": "machine-group:11111111-2222-4333-8444-555555555555",
+    "consumer_name": "machine-consumer-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "offline_stream_key": "machine_offline_stream:11111111-2222-4333-8444-555555555555",
+    "session_eviction_channel": "machine_session_eviction:11111111-2222-4333-8444-555555555555",
+    "session_pel_drained_key": "machine_session_pel_drained:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "command_result_key": "machine_cmd_result:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+  },
+  "stream_id_utils": {
+    "_split_id": {
+      "1714080000-0": [
+        1714080000,
+        0
+      ],
+      "1714080000123-45": [
+        1714080000123,
+        45
+      ],
+      "no-dash-here-x": null,
+      "empty": null,
+      "nodash": null,
+      "non-numeric": null,
+      "none_input": null
+    },
+    "_format_id": {
+      "(1714080000, 0)": "1714080000-0",
+      "(1714080000123, 45)": "1714080000123-45"
+    },
+    "_min_stream_id": {
+      "(a<b)": "1714080000-0",
+      "(b<a)": "1714080000-0",
+      "(equal)": "1714080000-5",
+      "(seq-order)": "1714080000-9",
+      "(a-None)": "1714080000-0",
+      "(b-None)": "1714080000-0",
+      "(malformed)": null
+    },
+    "_decrement_stream_id": {
+      "1714080000-5": "1714080000-4",
+      "1714080000-1": "1714080000-0",
+      "1714080000-0(ms-0 borrow)": "1714079999-0",
+      "0-0(floor)": "0-0",
+      "malformed-passthrough": "bogus"
+    },
+    "id_for_secs_ago_3600": "1790975921754-0",
+    "id_for_secs_ago_check": {
+      "value": "1790975921754-0",
+      "expected_ms_range": [
+        1790975921754,
+        1790975921754
+      ],
+      "within_range": true,
+      "seq_is_zero": true
+    }
+  }
+}

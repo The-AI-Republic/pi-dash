@@ -32,6 +32,9 @@ class PageSerializer(BaseSerializer):
     # Many to many
     label_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
     project_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
+    parent_id = serializers.UUIDField(read_only=True)
+    # Annotated by the page list / detail queryset; omitted elsewhere.
+    sub_pages_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Page
@@ -43,6 +46,8 @@ class PageSerializer(BaseSerializer):
             "color",
             "labels",
             "parent",
+            "parent_id",
+            "sub_pages_count",
             "is_favorite",
             "is_locked",
             "archived_at",
@@ -128,9 +133,12 @@ class PageSerializer(BaseSerializer):
 
 class PageDetailSerializer(PageSerializer):
     description_html = serializers.CharField()
+    # Read-only: the record PATCH reuses this serializer, and snapshots are
+    # written only through the description endpoint (NEWFRONT-932).
+    description_json = serializers.JSONField(read_only=True)
 
     class Meta(PageSerializer.Meta):
-        fields = PageSerializer.Meta.fields + ["description_html"]
+        fields = PageSerializer.Meta.fields + ["description_html", "description_json"]
 
 
 class PageVersionSerializer(BaseSerializer):

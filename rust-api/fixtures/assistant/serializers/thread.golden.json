@@ -1,0 +1,93 @@
+{
+  "trace": "apps/api/pi_dash/assistant/serializers.py:20-29 (AssistantThreadSerializer); message wire intentionally absent :32-34",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "serializer": "AssistantThreadSerializer",
+  "source": "apps/api/pi_dash/assistant/serializers.py:20",
+  "meta": {
+    "fields": [
+      "id",
+      "title",
+      "is_archived",
+      "has_active_turn",
+      "created_at",
+      "updated_at"
+    ],
+    "read_only": [
+      "id",
+      "created_at",
+      "updated_at",
+      "has_active_turn"
+    ]
+  },
+  "fields": {
+    "id": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "title": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 255
+    },
+    "is_archived": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "has_active_turn": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "created_at": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "updated_at": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    }
+  },
+  "cases": [
+    {
+      "name": "has_active_turn false when active_turn_id is null",
+      "source": "apps/api/pi_dash/assistant/serializers.py:28-29",
+      "given": {
+        "active_turn_id": null
+      },
+      "output": {
+        "has_active_turn": false
+      }
+    },
+    {
+      "name": "has_active_turn true when active_turn_id set",
+      "source": "apps/api/pi_dash/assistant/serializers.py:28-29",
+      "given": {
+        "active_turn_id": "<uuid>"
+      },
+      "output": {
+        "has_active_turn": true
+      }
+    },
+    {
+      "name": "no message serializer exists; list+SSE share events.message_envelope",
+      "source": "apps/api/pi_dash/assistant/serializers.py:32-34",
+      "note": "kind->role, display_content->content mapping lives in runtime/events.py:128-140"
+    }
+  ]
+}

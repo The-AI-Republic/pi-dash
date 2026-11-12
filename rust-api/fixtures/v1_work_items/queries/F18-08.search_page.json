@@ -1,0 +1,185 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-08",
+  "_method": "Shell-reconstructed querysets (same code path as views) + live HTTP (httpx) on scratch pidash_conv659. IDs/ranks volatile; SQL shape, envelopes, errors pinned.",
+  "_source": "apps/api/pi_dash/api/views/issue.py:2654-2917; api/views/page.py:173-232; pi_dash/search/issue.py",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "units": {
+    "legacy_search_queryset": {
+      "source": "api/views/issue.py:2682-2720; search/issue.py:128-186",
+      "sql": "SELECT DISTINCT \"issues\".\"name\", \"issues\".\"id\", \"issues\".\"sequence_id\", \"projects\".\"identifier\", \"issues\".\"project_id\", \"workspaces\".\"slug\", \"issues\".\"created_at\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"project_members\" ON (\"projects\".\"id\" = \"project_members\".\"project_id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"projects\".\"archived_at\" IS NULL AND \"project_members\".\"is_active\" AND \"project_members\".\"member_id\" = 79c81d76-5a93-4d3d-894d-5935576834b6 AND \"workspaces\".\"slug\" = ws-conv659-2 AND (to_tsvector(english::regconfig, COALESCE(\"issues\".\"name\", ) || ' ' || COALESCE(\"issues\".\"description_stripped\", )) @@ (websearch_to_tsquery(english::regconfig, zxcvsearchtoken)) OR UPPER(\"issues\".\"name\"::text) LIKE UPPER(%zxcvsearchtoken%) OR UPPER(\"projects\".\"identifier\"::text) LIKE UPPER(%zxcvsearchtoken%))) ORDER BY \"issues\".\"created_at\" DESC LIMIT 10",
+      "rows": [
+        {
+          "name": "zxcvsearchtoken login flow",
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "sequence_id": "1"
+        }
+      ]
+    },
+    "advanced_search_queryset": {
+      "source": "api/views/issue.py:2779-2915; search/issue.py:128-186",
+      "sql": "SELECT DISTINCT \"issues\".\"id\", \"issues\".\"sequence_id\", \"issues\".\"name\", \"states\".\"name\", \"states\".\"group\", \"issues\".\"project_id\", \"projects\".\"identifier\", \"projects\".\"name\", \"workspaces\".\"slug\", ts_rank(to_tsvector(english::regconfig, COALESCE(\"issues\".\"name\", ) || ' ' || COALESCE(\"issues\".\"description_stripped\", )), websearch_to_tsquery(english::regconfig, zxcvsearchtoken)) AS \"_rank\", ts_headline(english::regconfig, \"issues\".\"description_stripped\", websearch_to_tsquery(english::regconfig, zxcvsearchtoken), StartSel='<<', StopSel='>>', MaxWords=20, MinWords=10, ShortWord=3, HighlightAll=false) AS \"_headline\", \"issues\".\"created_at\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"project_members\" ON (\"projects\".\"id\" = \"project_members\".\"project_id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"projects\".\"archived_at\" IS NULL AND \"project_members\".\"is_active\" AND \"project_members\".\"member_id\" = 79c81d76-5a93-4d3d-894d-5935576834b6 AND \"workspaces\".\"slug\" = ws-conv659-2 AND (to_tsvector(english::regconfig, COALESCE(\"issues\".\"name\", ) || ' ' || COALESCE(\"issues\".\"description_stripped\", )) @@ (websearch_to_tsquery(english::regconfig, zxcvsearchtoken)) OR UPPER(\"issues\".\"name\"::text) LIKE UPPER(%zxcvsearchtoken%) OR \"issues\".\"id\" IN (SELECT U0.\"issue_id\" FROM \"issue_comments\" U0 WHERE (U0.\"deleted_at\" IS NULL AND to_tsvector(english::regconfig, COALESCE(U0.\"comment_stripped\", )) @@ (websearch_to_tsquery(english::regconfig, zxcvsearchtoken)))) OR UPPER(\"projects\".\"identifier\"::text) LIKE UPPER(%zxcvsearchtoken%))) ORDER BY 10 DESC, \"issues\".\"created_at\" DESC LIMIT 10",
+      "rows": [
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "sequence_id": "1",
+          "name": "zxcvsearchtoken login flow",
+          "created_at": "2026-10-02 23:17:12.025108+00:00",
+          "updated_at": "2026-10-02 23:17:12.025108+00:00",
+          "completed_at": "None",
+          "state__name": "Todo",
+          "state__group": "unstarted",
+          "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "project__identifier": "CT00003",
+          "project__name": "Conv659 Project",
+          "workspace__slug": "ws-conv659-2",
+          "_rank": "0.075990885",
+          "_headline": "<<zxcvsearchtoken>> the login flow breaks on retry with session expiry"
+        }
+      ]
+    },
+    "fts_parity_pins": {
+      "source": "search/issue.py:36,55-63; db/models/issue.py:261-264 (issues_fts_idx); rust-api/crates/services/src/app_views_search/fts.rs",
+      "config": "english",
+      "issue_vector_repr": "SearchVector(F(name) || ' ' || F(description_stripped))",
+      "comment_vector_repr": "SearchVector(F(comment_stripped))",
+      "index_expr": "GinIndex(SearchVector(\"name\", \"description_stripped\", config=\"english\"), name=\"issues_fts_idx\")",
+      "query_type": "SearchQuery(query, search_type=\"websearch\", config=\"english\")",
+      "rank": "SearchRank(ISSUE_SEARCH_VECTOR, search_query) -> ts_rank",
+      "headline": "SearchHeadline('description_stripped', q, config='english', start_sel='<<', stop_sel='>>', max_words=20, min_words=10, short_word=3, highlight_all=False)",
+      "snippet_no_match": "",
+      "snippet_null": "",
+      "snippet_match": "the login flow breaks",
+      "note": "Django renders to_tsvector('english', coalesce(name,'') || ' ' || coalesce(description_stripped,'')); compare fts.rs:56-57 byte for byte. Comment subquery: IssueComment SoftDeletionManager, .order_by() stripped, no access filter (known limitation search/issue.py:78-83)."
+    },
+    "legacy_search_live": {
+      "status": 200,
+      "body_keys": [
+        "issues"
+      ],
+      "issues": [
+        {
+          "name": "zxcvsearchtoken login flow",
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "sequence_id": "1",
+          "project__identifier": "CT00003",
+          "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "workspace__slug": "ws-conv659-2"
+        }
+      ],
+      "no_query": {
+        "status": 200,
+        "body": {
+          "issues": []
+        }
+      },
+      "limit_1_count": 1
+    },
+    "advanced_search_live": {
+      "status": 200,
+      "envelope_keys": [
+        "count",
+        "query",
+        "results"
+      ],
+      "count": 1,
+      "first": {
+        "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "sequence_id": "1",
+        "identifier": "CT00003-1",
+        "name": "zxcvsearchtoken login flow",
+        "snippet": "zxcvsearchtoken the login flow breaks on retry with session expiry",
+        "state": {
+          "name": "Todo",
+          "group": "unstarted"
+        },
+        "project": {
+          "id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "identifier": "CT00003",
+          "name": "Conv659 Project"
+        },
+        "workspace_slug": "ws-conv659-2",
+        "created_at": "2026-10-02T23:17:12.025108Z",
+        "updated_at": "2026-10-02T23:17:12.025108Z",
+        "completed_at": "None",
+        "rank": "0.075990885",
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1"
+      },
+      "no_q": {
+        "query": "",
+        "count": 0,
+        "results": []
+      },
+      "bad_sort": {
+        "status": 400,
+        "body": {
+          "error": "Unknown sort 'bogus'. Valid: rank, -created, -updated."
+        }
+      },
+      "bad_since": {
+        "status": 400,
+        "body": {
+          "error": "Invalid 'since' \u2014 expected ISO 8601 datetime (e.g. 2025-01-01T00:00:00Z)."
+        }
+      },
+      "status_open_count": 1,
+      "limit_clamp": 1,
+      "note": "Result dicts are built MANUALLY in the view (:2880-2910), not via IssueAdvancedSearchResultSerializer: state is always {'name','group'} (None-filled when stateless), url omitted when unconfigured."
+    },
+    "page_get_queryset": {
+      "source": "api/views/page.py:180-197",
+      "sql": "SELECT \"pages\".\"created_at\", \"pages\".\"updated_at\", \"pages\".\"created_by_id\", \"pages\".\"updated_by_id\", \"pages\".\"deleted_at\", \"pages\".\"id\", \"pages\".\"workspace_id\", \"pages\".\"name\", \"pages\".\"description_json\", \"pages\".\"description_binary\", \"pages\".\"description_html\", \"pages\".\"description_stripped\", \"pages\".\"owned_by_id\", \"pages\".\"access\", \"pages\".\"color\", \"pages\".\"parent_id\", \"pages\".\"archived_at\", \"pages\".\"is_locked\", \"pages\".\"view_props\", \"pages\".\"logo_props\", \"pages\".\"is_global\", \"pages\".\"moved_to_page\", \"pages\".\"moved_to_project\", \"pages\".\"sort_order\", \"pages\".\"external_id\", \"pages\".\"external_source\", \"workspaces\".\"created_at\", \"workspaces\".\"updated_at\", \"workspaces\".\"created_by_id\", \"workspaces\".\"updated_by_id\", \"workspaces\".\"deleted_at\", \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\", \"workspaces\".\"owner_id\", \"workspaces\".\"slug\", \"workspaces\".\"organization_size\", \"workspaces\".\"timezone\", \"workspaces\".\"background_color\", \"users\".\"password\", \"users\".\"last_login\", \"users\".\"id\", \"users\".\"username\", \"users\".\"mobile_number\", \"users\".\"email\", \"users\".\"display_name\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"cover_image\", \"users\".\"cover_image_asset_id\", \"users\".\"date_joined\", \"users\".\"created_at\", \"users\".\"updated_at\", \"users\".\"last_location\", \"users\".\"created_location\", \"users\".\"is_superuser\", \"users\".\"is_managed\", \"users\".\"is_password_expired\", \"users\".\"is_active\", \"users\".\"is_staff\", \"users\".\"is_email_verified\", \"users\".\"is_password_autoset\", \"users\".\"is_password_reset_required\", \"users\".\"token\", \"users\".\"last_active\", \"users\".\"last_login_time\", \"users\".\"last_logout_time\", \"users\".\"last_login_ip\", \"users\".\"last_logout_ip\", \"users\".\"last_login_medium\", \"users\".\"last_login_uagent\", \"users\".\"token_updated_at\", \"users\".\"is_bot\", \"users\".\"bot_type\", \"users\".\"user_timezone\", \"users\".\"is_email_valid\", \"users\".\"masked_at\" FROM \"pages\" INNER JOIN \"workspaces\" ON (\"pages\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"users\" ON (\"pages\".\"owned_by_id\" = \"users\".\"id\") WHERE (\"pages\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = ws-conv659-2 AND EXISTS(SELECT 1 AS \"a\" FROM \"project_pages\" U0 INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") INNER JOIN \"project_members\" U3 ON (U2.\"id\" = U3.\"project_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"page_id\" = (\"pages\".\"id\") AND U2.\"archived_at\" IS NULL AND U3.\"is_active\" AND U3.\"member_id\" = 79c81d76-5a93-4d3d-894d-5935576834b6 AND U0.\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e) LIMIT 1) AND (\"pages\".\"access\" = 0 OR \"pages\".\"owned_by_id\" = 79c81d76-5a93-4d3d-894d-5935576834b6)) ORDER BY \"pages\".\"created_at\" DESC",
+      "rows": [
+        {
+          "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+          "name": "Fixture page",
+          "access": "0"
+        }
+      ]
+    },
+    "validate_parent": {
+      "source": "api/views/page.py:199-220",
+      "none_ok": true,
+      "missing": {
+        "status": 400,
+        "body": {
+          "error": "Parent page not found in this project"
+        }
+      },
+      "self_nest": {
+        "status": 400,
+        "body": {
+          "error": "A page cannot be nested under itself"
+        }
+      }
+    },
+    "get_page_or_error": {
+      "source": "api/views/page.py:222-226",
+      "found": "255f3646-9ace-4f46-9620-788071f7a05e",
+      "missing": {
+        "status": 404,
+        "body": {
+          "error": "Page not found"
+        }
+      }
+    },
+    "detail_response": {
+      "source": "api/views/page.py:228-230",
+      "status": 200,
+      "keys": [
+        "access",
+        "archived_at",
+        "created_at",
+        "description_html",
+        "description_markdown",
+        "description_stripped",
+        "id",
+        "is_locked",
+        "name",
+        "owned_by",
+        "parent",
+        "updated_at"
+      ]
+    }
+  }
+}

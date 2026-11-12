@@ -1,0 +1,96 @@
+{
+  "_about": "D-09 dummy-data generation behaviour. Ported from 01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_method": "Values produced by executing the named Python code under pi_dash.settings.test with no DB/S3 (venv /tmp/ct100-django-venv). Generators: /tmp/fx_d09b.py, /tmp/fx_d09c.py (throwaway). Randomness protocol derived from source; Faker unavailable in this env so fake values are NOT recorded \u2014 only counts, seeds, ranges and row shapes.",
+  "_trace": [
+    "dummy_data_task.py:44-60 create_project protocol",
+    "dummy_data_task.py:63-79 create_project_members protocol",
+    "dummy_data_task.py:82-123 create_states 5-row literal",
+    "dummy_data_task.py:126-143 create_labels protocol (Faker.seed(0), 50 rows)",
+    "dummy_data_task.py:146-188 create_cycles protocol (<= off-by-one)",
+    "dummy_data_task.py:191-218 create_modules protocol",
+    "dummy_data_task.py:221-247 create_pages protocol",
+    "dummy_data_task.py:249-264 create_page_labels protocol",
+    "dummy_data_task.py:267-355 create_issues protocol",
+    "dummy_data_task.py:358-375 create_intake_issues protocol",
+    "dummy_data_task.py:378-388 create_issue_parent NO-OP bug",
+    "dummy_data_task.py:391-413 create_issue_assignees protocol",
+    "dummy_data_task.py:416-436 create_issue_labels protocol",
+    "dummy_data_task.py:439-454 create_cycle_issues protocol",
+    "dummy_data_task.py:457-484 create_module_issues protocol",
+    "dummy_data_task.py:488-553 create_dummy_data orchestration order"
+  ],
+  "create_project": "name=fake.name(); suffix=uuid4hex[:5]; name=f'{name}_{suffix}'; identifier=name[:randint(2, min(12, len-1))].upper(); intake_view=True; creator added as ProjectMember role 20.",
+  "create_project_members": "User filter(email__in=members); bulk role-20 rows with sort_order randint(0,65535), ignore_conflicts.",
+  "create_states": [
+    {
+      "name": "Backlog",
+      "color": "#A3A3A3",
+      "sequence": 15000,
+      "group": "backlog",
+      "default": true
+    },
+    {
+      "name": "Todo",
+      "color": "#3A3A3A",
+      "sequence": 25000,
+      "group": "unstarted",
+      "default": false
+    },
+    {
+      "name": "In Progress",
+      "color": "#F59E0B",
+      "sequence": 35000,
+      "group": "started",
+      "default": false
+    },
+    {
+      "name": "Done",
+      "color": "#16A34A",
+      "sequence": 45000,
+      "group": "completed",
+      "default": false
+    },
+    {
+      "name": "Cancelled",
+      "color": "#EF4444",
+      "sequence": 55000,
+      "group": "cancelled",
+      "default": false
+    }
+  ],
+  "create_labels": "Faker.seed(0); 50 x Label(color_name, hex_color, sort randint, ignore_conflicts).",
+  "create_cycles_BUG": "while len(cycles) <= cycle_count -> creates cycle_count+1 rows (off-by-one, port as-is). start None-or-date_this_year; end None iff start None; unique (start,end) enforced for dated pairs; ignore_conflicts.",
+  "create_modules": "Faker.seed(0); range(module_count); dated-or-None same as cycles.",
+  "create_pages": "Faker.seed(0); range(pages_count); text<=60000 chars; access randint(0,1); ProjectPage per page, batch 1000.",
+  "create_page_labels": "labels of project; sample int(pages_count/2) pages; per page sample(randint(0, len(labels)-1)) labels \u2014 never attaches ALL labels; batch 1000.",
+  "create_issues": "Faker.seed(0); states exclude TRIAGE group; creators = project members; sequence from Max+1 (1 when none); sort from Max+10000 (65535 when none) then += randint(0,1000) per row; priority in [urgent,high,medium,low,none]; name=text[:254] (~byte slice on PY str = code points); bulk_create batch 1000 ignore_conflicts; IssueSequence(sequence=sequence_id) batch 100; IssueActivity(verb/created) batch 100.",
+  "create_intake_issues": "calls create_issues(..., intake_issue_count) then links ALL returned issues to the default Intake (get_or_create name='Intake'); status in [-2,-1,0,1,2]; snoozed_till=now+randint(1,30)d IFF status==0; source IN_APP.",
+  "intake_statuses": [-2, -1, 0, 1, 2],
+  "create_issue_parent_BUG": "parent_count=issue_count/4; sub_issues slice issue_count/2; loop sets sub_issue.parent_id IN MEMORY but appends NOTHING to bulk_sub_issues, then bulk_update([], ['parent']) \u2014 NO parent is EVER persisted. Port as-is (no-op).",
+  "create_issue_assignees": "sample(issue_count/2 issues); per issue sample(randint(0, len(assignees)-1)) members; batch 1000 ignore_conflicts.",
+  "create_issue_labels": "ALL project issues (commented-out sampling left in place); per issue shuffle + sample(randint(0,5)) labels; batch 1000 ignore_conflicts.",
+  "create_cycle_issues": "sample(issue_count/2); one random cycle per issue (cycles[randint] \u2014 IndexError when project has NO cycles; port as-is).",
+  "create_module_issues": "ALL issues; per issue shuffle + sample(randint(0,5)) modules.",
+  "create_dummy_data_order": [
+    "create_project",
+    "create_project_members",
+    "create_states",
+    "create_labels",
+    "create_cycles",
+    "create_modules",
+    "create_pages",
+    "create_page_labels",
+    "create_issues",
+    "create_intake_issues",
+    "create_issue_parent",
+    "create_issue_assignees",
+    "create_issue_labels",
+    "create_cycle_issues",
+    "create_module_issues"
+  ],
+  "randomness_note": "Faker.seed(0) before labels/cycles/modules/pages/issues (seeded); the `random` module is NEVER seeded -> names/identifiers/counts/slices differ every run. Port the unseeded randomness as-is (ported bug per PIDASHCONV-191).",
+  "db_before_after": {
+    "before": "Workspace + one user; counts (issue, cycle, module, pages, intake_issue).",
+    "after": "1 project (+1 member row per member email); 5 states; 50 labels; cycle_count+1 cycles; module_count modules; pages_count pages (+links); issue_count issues (+sequences/activities) + intake_issue_count intake issues (+links); parent links ABSENT (bug); random assignee/label/cycle/module links as above."
+  }
+}

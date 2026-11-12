@@ -22,7 +22,7 @@ from rest_framework.response import Response
 from .. import BaseViewSet
 from pi_dash.app.serializers import CycleIssueSerializer
 from pi_dash.bgtasks.issue_activities_task import issue_activity
-from pi_dash.db.models import Cycle, CycleIssue, Issue, FileAsset, IssueLink
+from pi_dash.db.models import Cycle, CycleIssue, Issue, FileAsset, IssueLink, Project, ProjectMember
 from pi_dash.utils.grouper import (
     issue_group_values,
     issue_on_results,
@@ -105,15 +105,34 @@ class CycleIssueViewSet(BaseViewSet):
             .prefetch_related("assignees", "labels", "issue_module__module", "issue_cycle__cycle")
         )
 
-    @method_decorator(gzip_page)
-    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
-    def list(self, request, slug, project_id, cycle_id):
-        filters = issue_filters(request.query_params, "GET")
+    def cycle_issue_queryset(self, slug, project_id, cycle_id):
         issue_queryset = (
             Issue.issue_objects.filter(issue_cycle__cycle_id=cycle_id, issue_cycle__deleted_at__isnull=True)
             .filter(project_id=project_id)
             .filter(workspace__slug=slug)
         )
+
+        # Guests read cycle work items the way they read the project issues
+        # list: without guest_view_all_features they only see what they created.
+        if (
+            ProjectMember.objects.filter(
+                workspace__slug=slug,
+                project_id=project_id,
+                member=self.request.user,
+                role=ROLE.GUEST.value,
+                is_active=True,
+            ).exists()
+            and not Project.objects.filter(pk=project_id, workspace__slug=slug, guest_view_all_features=True).exists()
+        ):
+            issue_queryset = issue_queryset.filter(created_by=self.request.user)
+
+        return issue_queryset
+
+    @method_decorator(gzip_page)
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
+    def list(self, request, slug, project_id, cycle_id):
+        filters = issue_filters(request.query_params, "GET")
+        issue_queryset = self.cycle_issue_queryset(slug, project_id, cycle_id)
 
         # Apply filtering from filterset
         issue_queryset = self.filter_queryset(issue_queryset)
@@ -219,6 +238,28 @@ class CycleIssueViewSet(BaseViewSet):
                 total_count_queryset=total_issue_queryset,
                 on_results=lambda issues: issue_on_results(group_by=group_by, issues=issues, sub_group_by=sub_group_by),
             )
+
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
+    def retrieve(self, request, slug, project_id, cycle_id, issue_id):
+        issue_queryset = self.apply_annotations(
+            self.cycle_issue_queryset(slug, project_id, cycle_id).filter(pk=issue_id)
+        )
+        issue_queryset = issue_queryset_grouper(queryset=issue_queryset, group_by=None, sub_group_by=None)
+        issues = issue_on_results(issues=issue_queryset, group_by=None, sub_group_by=None)
+        if not issues:
+            return Response(
+                {"error": "The required object does not exist."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(issues[0], status=status.HTTP_200_OK)
+
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)
+
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    def partial_update(self, request, *args, **kwargs):
+        return super().partial_update(request, *args, **kwargs)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def create(self, request, slug, project_id, cycle_id):

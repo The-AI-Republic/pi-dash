@@ -1,0 +1,544 @@
+{
+  "_fixture": "F-SEND-MINIJINJA",
+  "_method": "executed: Django 4.2.30 render_to_string with minimal settings (no DB), same method as F-SEND.issue-updates.rendered.json; filter matrix via django.template.Template over edge values",
+  "_ported_from": "PIDASHCONV-865 probe (.probe-865-golden.py, throwaway)",
+  "_sources": [
+    "apps/api/templates/emails/notifications/issue-updates.html",
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:244-264 (context shape)",
+    "django/template/defaultfilters.py (slice/length/last/add semantics)"
+  ],
+  "filters": {
+    "add": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "django_template": "{{ x|length|add:\"-2\" }}|{{ x|length|add:\"-1\" }}",
+      "mini_template": "{{ x|length - 2 }}|{{ x|length - 1 }}",
+      "output": "1|2"
+    },
+    "cmp_missing": {
+      "context": {},
+      "django_template": "{% if x > 1 %}T{% else %}F{% endif %}{% if x == 'a' %}T{% else %}F{% endif %}{% if x != 'a' %}T{% else %}F{% endif %}",
+      "mini_template": "{% if x > 1 %}T{% else %}F{% endif %}{% if x == 'a' %}T{% else %}F{% endif %}{% if x != 'a' %}T{% else %}F{% endif %}",
+      "output": "FFT"
+    },
+    "index0_dict": {
+      "context": {
+        "x": {
+          "a": 1
+        }
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": ""
+    },
+    "index0_empty_list": {
+      "context": {
+        "x": []
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": ""
+    },
+    "index0_empty_str": {
+      "context": {
+        "x": ""
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": ""
+    },
+    "index0_list": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": "a"
+    },
+    "index0_missing": {
+      "context": {},
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": ""
+    },
+    "index0_none": {
+      "context": {
+        "x": null
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": ""
+    },
+    "index0_num": {
+      "context": {
+        "x": 5
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": ""
+    },
+    "index0_str": {
+      "context": {
+        "x": "abc"
+      },
+      "django_template": "{{ x.0 }}",
+      "mini_template": "{{ x.0 }}",
+      "output": "a"
+    },
+    "last_dict": {
+      "context": {
+        "x": {
+          "a": 1
+        }
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": "ERROR: KeyError: -1"
+    },
+    "last_empty_list": {
+      "context": {
+        "x": []
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": ""
+    },
+    "last_empty_str": {
+      "context": {
+        "x": ""
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": ""
+    },
+    "last_list": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": "c"
+    },
+    "last_missing": {
+      "context": {},
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": ""
+    },
+    "last_none": {
+      "context": {
+        "x": null
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": "ERROR: TypeError: 'NoneType' object is not subscriptable"
+    },
+    "last_num": {
+      "context": {
+        "x": 5
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": "ERROR: TypeError: 'int' object is not subscriptable"
+    },
+    "last_str": {
+      "context": {
+        "x": "abc"
+      },
+      "django_template": "{{ x|last }}",
+      "mini_template": "{{ x|last }}",
+      "output": "c"
+    },
+    "length_dict": {
+      "context": {
+        "x": {
+          "a": 1
+        }
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "1"
+    },
+    "length_empty_list": {
+      "context": {
+        "x": []
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "0"
+    },
+    "length_empty_str": {
+      "context": {
+        "x": ""
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "0"
+    },
+    "length_list": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "3"
+    },
+    "length_missing": {
+      "context": {},
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "0"
+    },
+    "length_none": {
+      "context": {
+        "x": null
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "0"
+    },
+    "length_num": {
+      "context": {
+        "x": 5
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "0"
+    },
+    "length_str": {
+      "context": {
+        "x": "abc"
+      },
+      "django_template": "{{ x|length }}",
+      "mini_template": "{{ x|length }}",
+      "output": "3"
+    },
+    "print_none": {
+      "context": {
+        "x": null
+      },
+      "django_template": "{{ x }}",
+      "mini_template": "{{ x }}",
+      "output": "None"
+    },
+    "print_true": {
+      "context": {
+        "x": true
+      },
+      "django_template": "{{ x }}",
+      "mini_template": "{{ x }}",
+      "output": "True"
+    },
+    "slicelen_bad": {
+      "context": {
+        "x": [
+          "a",
+          "b"
+        ]
+      },
+      "django_template": "{{ x|slice:\"nope\"|length }}",
+      "mini_template": "{{ x|dj_slice(\"nope\")|length }}",
+      "output": "2"
+    },
+    "slicelen_dict": {
+      "context": {
+        "x": {
+          "a": 1
+        }
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "ERROR: KeyError: slice(None, 2, None)"
+    },
+    "slicelen_empty_list": {
+      "context": {
+        "x": []
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "0"
+    },
+    "slicelen_empty_str": {
+      "context": {
+        "x": ""
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "0"
+    },
+    "slicelen_list": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "2"
+    },
+    "slicelen_missing": {
+      "context": {},
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "0"
+    },
+    "slicelen_none": {
+      "context": {
+        "x": null
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "0"
+    },
+    "slicelen_num": {
+      "context": {
+        "x": 5
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "0"
+    },
+    "slicelen_rev": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "django_template": "{{ x|slice:\"::-1\"|length }}",
+      "mini_template": "{{ x|dj_slice(\"::-1\")|length }}",
+      "output": "3"
+    },
+    "slicelen_step": {
+      "context": {
+        "x": [
+          "a",
+          "b",
+          "c",
+          "d"
+        ]
+      },
+      "django_template": "{{ x|slice:\"1::2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\"1::2\")|length }}",
+      "output": "2"
+    },
+    "slicelen_str": {
+      "context": {
+        "x": "abc"
+      },
+      "django_template": "{{ x|slice:\":2\"|length }}",
+      "mini_template": "{{ x|dj_slice(\":2\")|length }}",
+      "output": "2"
+    }
+  },
+  "multi": {
+    "context": {
+      "actors_involved": 2,
+      "comments": [
+        {
+          "actor_comments": {
+            "new_value": [
+              "<p>looks <b>good</b> & ready</p>"
+            ]
+          },
+          "actor_detail": {
+            "avatar_url": "http://localhost/avatars/ada.png",
+            "first_name": "Ada",
+            "last_name": "Lovelace"
+          }
+        },
+        {
+          "actor_comments": {
+            "new_value": null
+          },
+          "actor_detail": {
+            "avatar_url": "",
+            "first_name": "Grace",
+            "last_name": "Hopper"
+          }
+        }
+      ],
+      "data": [
+        {
+          "activity_time": "13:00 PM",
+          "actor_detail": {
+            "avatar_url": "http://localhost/avatars/ada.png",
+            "first_name": "Ada",
+            "last_name": "Lovelace"
+          },
+          "changes": {
+            "assignees": {
+              "new_value": [
+                "Ada",
+                "Grace",
+                "Hopper"
+              ],
+              "old_value": [
+                "Zed"
+              ]
+            },
+            "blocking": {
+              "new_value": [
+                "B-4"
+              ],
+              "old_value": [
+                "B-1",
+                "B-2",
+                "B-3"
+              ]
+            },
+            "duplicate": {
+              "new_value": [
+                "D-1",
+                "D-2",
+                "D-3"
+              ],
+              "old_value": []
+            },
+            "labels": {
+              "new_value": [
+                "bug"
+              ],
+              "old_value": []
+            },
+            "link": {
+              "new_value": [
+                "http://new.example/a?b=1&c=2"
+              ],
+              "old_value": [
+                "http://old.example/x"
+              ]
+            },
+            "name": {
+              "new_value": [
+                "New"
+              ],
+              "old_value": [
+                "Old"
+              ]
+            },
+            "priority": {
+              "new_value": [
+                "low"
+              ],
+              "old_value": [
+                "urgent"
+              ]
+            },
+            "state": {
+              "new_value": [
+                "Todo",
+                "Done"
+              ],
+              "old_value": [
+                "Todo"
+              ]
+            },
+            "target_date": {
+              "new_value": [],
+              "old_value": [
+                "2026-01-01"
+              ]
+            }
+          },
+          "issue_details": {
+            "identifier": "PROJ-12",
+            "name": "Fix <login> & \"auth\" / path's"
+          }
+        },
+        {
+          "activity_time": "09:05 AM",
+          "actor_detail": {
+            "avatar_url": "",
+            "first_name": "Grace",
+            "last_name": "Hopper"
+          },
+          "changes": {
+            "target_date": {
+              "new_value": [
+                "2026-12-31"
+              ],
+              "old_value": []
+            }
+          },
+          "issue_details": {
+            "identifier": "PROJ-12",
+            "name": "Fix <login> & \"auth\" / path's"
+          }
+        }
+      ],
+      "entity_type": "issue",
+      "issue": {
+        "issue_identifier": "PROJ-12",
+        "issue_url": "http://localhost/acme/projects/p1/issues/i1",
+        "name": "Fix <login> & \"auth\" / path's"
+      },
+      "issue_url": "http://localhost/acme/projects/p1/issues/i1",
+      "project": "Rocket",
+      "project_url": "http://localhost/acme/projects/p1/issues/",
+      "receiver": {
+        "email": "ada+test@example.com"
+      },
+      "summary": "Updates were made to the issue by",
+      "user_preference": "http://localhost/acme/settings/account/notifications/",
+      "workspace": "acme"
+    },
+    "html": "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\"> \n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" >\n  <head>\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>Updates on issue</title>\n    <style type=\"text/css\" emogrify=\"no\"> html { font-family: system-ui; } p, h1, h2, h3, h4, ol, ul { margin: 0; } h-full { height: 100%; } a:hover { color: #3358d4 !important; } </style>\n    <style> *[class=\"gmail-fix\"] { display: none !important; } </style>\n    <style type=\"text/css\" emogrify=\"no\"> @media (max-width: 600px) { .gmx-killpill { content: \" \\03D1\"; } } </style>\n  </head>\n  <body bgcolor=\"#ffffff\" text=\"#3b3f44\" link=\"#006399\" yahoo=\"fix\" style=\"background-color: #f7f9ff; margin: 20px\" >\n    <div style=\" width: 600px; table-layout: fixed; height: 100%; margin-left: auto; margin-right: auto; \" >\n      <!-- Header --> \n      <div>\n        <table style=\"width: 600px\" cellspacing=\"0\">\n          <tr>\n            <td>\n              <div style=\"margin-left: 30px; margin-bottom: 20px; margin-top: 20px\" > <img src=\"/static/logos/Logo.png\" width=\"150\" border=\"0\" /> </div>\n            </td>\n          </tr>\n        </table>\n      </div>\n      <!-- Body --> \n      <div style=\" color: #1f2d5c; padding: 30px; border-radius: 4px; background-color: #fcfcfd; max-width: 100%; \" >\n        <div>\n          <table style=\"width: 100%\">\n            <tr>\n              <td>\n                <p style=\"font-size: 1rem; color: #1f2d5c; font-weight: 600\"> PROJ-12 updates </p>\n                <p style=\"font-size: 1rem; font-weight: 500; color: #1f2d5c; line-height: 28px\"> acme/<a target=\"_blank\" style=\"color: #1f2d5c; text-decoration: none;\" href=\"http://localhost/acme/projects/p1/issues/\">Rocket</a>/<a style=\"color: #1f2d5c; text-decoration: none;\" target=\"_blank\" href=\"http://localhost/acme/projects/p1/issues/i1\">PROJ-12</a>: Fix &lt;login&gt; &amp; &quot;auth&quot; / path&#x27;s </p>\n              </td>\n            </tr>\n          </table>\n          <hr style=\" background-color: #f0f0f3; height: 1px; border: 0; margin-top: 15px; margin-bottom: 15px; \" />\n           \n          <p style=\"font-size: 1rem;color: #1f2d5c; line-height: 28px\"> Updates were made to the issue by <span style=\"font-size: 1rem; font-weight: 700; line-height: 28px\">  Ada Lovelace  </span>and others. </p>\n           <!--  <p style=\"font-size: 1rem;color: #1f2d5c; line-height: 28px\"> There are  new updates and  new comments on the issue. </p>  -->   <!-- Issue title updated --> \n          <p style=\"font-size: 1rem; line-height: 28px; color: #1f2d5c\"> The issue title has been updated to Fix &lt;login&gt; &amp; &quot;auth&quot; / path&#x27;s </p>\n           <!-- Outer update Box start -->  \n          <div style=\" background-color: #f7f9ff; border-radius: 8px; border-style: solid; border-width: 1px; border-color: #c1d0ff; padding: 20px; margin-top: 15px; max-width: 100%; \" >\n            <!-- Block Heading --> \n            <div style=\"padding-bottom: 20px\">\n              <p style=\"font-size: 0.8rem; font-weight: 600; color: #121a26\"> Updates </p>\n            </div>\n            <!-- Property Updates --> \n            <div style=\" background-color: white; max-width: 100%; overflow: hidden; overflow-wrap: break-word; word-wrap: break-word; padding-left: 15px; padding-bottom: 15px; border-radius: 8px; \" >\n              <!-- action performer --> \n              <table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" style=\"max-width: 100%\" >\n                <tr style=\"border-radius: 8px; margin-top: 20px\">\n                  <td style=\"width: 30px\">\n                     <img src=\"http://localhost/avatars/ada.png\" width=\"25\" height=\"25\" border=\"0\" />  \n                  </td>\n                  <td style=\"padding-top: 20px; padding-bottom: 20px\">\n                    <p style=\" font-weight: 500; font-size: 0.8rem; color: #1c2024; width: fit-content; margin-left: 5px; \" > Ada Lovelace </p>\n                  </td>\n                  <td>\n                    <p style=\" font-weight: 500; font-size: 0.6rem; color: #80838d; margin-left: 10px; \" > 13:00 PM </p>\n                  </td>\n                </tr>\n              </table>\n               <!-- due date changed --> \n              <table role=\"presentation\" style=\"max-width: 100%; padding-bottom: 15px\" >\n                <tr>\n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/due-date.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: block\" /> </td>\n                  <td style=\"padding: 0px; text-align: center\">\n                    <div>\n                      <p style=\" padding: 0px; margin: 0px; font-size: 0.8rem; font-weight: 500; color: #525252; \" > Due Date: </p>\n                    </div>\n                  </td>\n                  <td>\n                     \n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #171717; margin-left: 5px; padding: 0px; text-decoration: line-through; \" > 2026-01-01 </p>\n                     \n                  </td>\n                </tr>\n              </table>\n                <!-- duplicate changed --> \n              <table role=\"presentation\" style=\"max-width: 100%; padding-bottom: 15px\" >\n                <tr>\n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/duplicate.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: inline-block\" /> <span style=\" font-size: 0.8rem; font-weight: 500; color: #525252; \" > Duplicate: </span> </td>\n                   \n                  <td style=\"padding-left: 5px;overflow-wrap: break-word;\">  <span style=\" font-size: 0.8rem; font-weight: 500; color: #3a5bc7; margin-right: 3px; padding-top: 0px; \" > D-1 </span>  <span style=\" font-size: 0.8rem; font-weight: 500; color: #3a5bc7; margin-right: 3px; padding-top: 0px; \" > D-2 </span>  </td>\n                    \n                  <td> <span style=\" font-size: 0.8rem; font-weight: 500; color: #3a5bc7; margin-right: 3px; padding-top: 0px; \" > +1 more </span> </td>\n                     \n                </tr>\n              </table>\n               <!-- Assignee changed-->  \n              <table role=\"presentation\" style=\"padding-bottom: 15px; max-width: 100%; padding-right: 10px;\" >\n                <tr>\n                  <td valign=\"top\" style=\"white-space: nowrap; padding: 0px;\"> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/assignee.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: inline-block\" /> <span style=\" font-size: 0.8rem; font-weight: 500; color: #525252; padding-right: 5px; \" > Assignee: </span> </td>\n                  <td style=\"overflow-wrap: anywhere;word-break: break-all; padding: 0px;\">  <span style=\" font-size: 0.8rem; color: #0d74ce; background-color: #e6f4fe; margin-right: 5px; padding-left: 4px; padding-right: 4px; padding-bottom: 2px; padding-top: 2px; font-weight: 500; border-radius: 2px; max-lines: 1; \" > Ada </span>   <span style=\" font-size: 0.8rem; font-weight: 500; color: #0d74ce; margin-left: 2px; margin-right: 5px; white-space: nowrap; padding: 0px; \" > +2 more </span>   <span style=\" font-size: 0.8rem; padding-left: 4px; padding-right: 4px; padding-bottom: 2px; padding-top: 2px; font-weight: 500; text-decoration: line-through; color: #641723; background-color: #feebec; margin-right: 5px; border-radius: 2px; \" > Zed </span>   </td>\n                </tr>\n              </table>\n                <!-- Labels --> \n              <table role=\"presentation\" style=\"padding-bottom: 15px; max-width: 100%; padding-right: 10px;\" >\n                <tr>\n                  <td valign=\"top\" style=\"white-space: nowrap; padding: 0px;\"> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/labels.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: inline-block;\" /> <span style=\" font-size: 0.8rem; font-weight: 500; color: #525252; padding-right: 5px; \" > Labels: </span> </td>\n                  <td style=\"overflow-wrap: anywhere;word-break: break-all; padding: 0px;\">  <span style=\" font-size: 0.8rem; line-height: 1px; color: #0d74ce; background-color: #e6f4fe; margin-right: 5px; padding-left: 4px; padding-right: 4px; padding-bottom: 2px; padding-top: 2px; font-weight: 500; border-radius: 2px; max-lines: 1; \" > bug </span>     </td>\n                </tr>\n              </table>\n               <!-- State changed -->  \n              <table role=\"presentation\" style=\"padding-bottom: 15px; max-width: 100%\" >\n                <tr>\n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/state.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: block\" /> </td>\n                  <td>\n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #525252; \" > State: </p>\n                  </td>\n                   \n                  <td>\n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #60646C; \" > Todo </p>\n                  </td>\n                  <td style=\"padding-left: 10px; padding-right: 10px;\"> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/forward-arrow.png\" width=\"16\" height=\"16\" border=\"0\" style=\"display: block;\" /> </td>\n                   \n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/done.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: block;\" /> </td>\n                   \n                  <td>\n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #60646c; \" > Done </p>\n                  </td>\n                </tr>\n              </table>\n                <!-- Link Added --> \n              <table role=\"presentation\" style=\"padding-bottom: 15px; max-width: 100%\" >\n                <tr>\n                  <td valign=\"top\"> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/link.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: block; margin-top: 3px;\" /> </td>\n                  <td valign=\"top\">\n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #525252; margin-right: 5px; \" > Links: </p>\n                  </td>\n                  <td>\n                     <a href=\"http://new.example/a?b=1&amp;c=2\" style=\" font-size: 0.8rem; font-weight: 600; color: #3a5bc7; display: block; padding-bottom: 5px; \" > http://new.example/a?b=1&amp;c=2 </a>    \n                    <p href=\"\" style=\" font-size: 0.8rem; font-weight: 500; color: #60646c; \" > 2 Links were removed </p>\n                      \n                  </td>\n                </tr>\n              </table>\n                <!-- Priority changed --> \n              <table role=\"presentation\" style=\"padding-bottom: 15px; max-width: 100%\" >\n                <tr>\n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/priority.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: block; margin: 0px; padding: 0px\" /> </td>\n                  <td>\n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #525252; margin-right: 5px; \" > Priority: </p>\n                  </td>\n                  <td>\n                    <p style=\" font-size: 0.8rem; padding-left: 4px; padding-right: 4px; padding-bottom: 0px; font-weight: 500; border-radius: 2px; text-transform: capitalize; background-color: #FFDBDC; color: #CE2C31;    \" > urgent </p>\n                  </td>\n                  <td style=\"padding-left: 10px; padding-right: 10px;\"> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/forward-arrow.png\" width=\"16\" height=\"16\" border=\"0\" style=\"display: block;\" /> </td>\n                  <td>\n                    <p style=\" font-size: 0.8rem; padding-left: 4px; padding-right: 4px; padding-bottom: 0px; font-weight: 500; border-radius: 2px; text-transform: capitalize;    background-color: #E9F6E9; color: #2A7E3B; \" > low </p>\n                  </td>\n                </tr>\n              </table>\n                <!-- Blocking changed --> \n              <table role=\"presentation\" style=\"padding-bottom: 15px; max-width: 100%\" >\n                <tr style=\"overflow-wrap: break-word;\">\n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/blocking.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: inline-block;\" /> <span style=\" font-size: 0.8rem; font-weight: 500; color: #525252; margin-right: 5px; \" > Blocking: </span> </td>\n                   \n                  <td style=\"padding-left: 5px;overflow-wrap: break-word;\">  <span style=\" font-size: 0.8rem; font-weight: 500; color: #3a5bc7; margin-right: 3px; padding-top: 0px; \" > B-4 </span>  </td>\n                     \n                  <td style=\"padding-left: 8px;\">  <span style=\" font-size: 0.8rem; font-weight: 500; color: #641723; margin-right: 3px; padding-top: 0px; text-decoration: line-through; \" > B-1 </span>  <span style=\" font-size: 0.8rem; font-weight: 500; color: #641723; margin-right: 3px; padding-top: 0px; text-decoration: line-through; \" > B-2 </span>  </td>\n                    \n                  <td> <span style=\" font-size: 0.8rem; font-weight: 500; color: #641723; margin-right: 3px; padding-top: 0px; \" > +1 more </span> </td>\n                   \n                </tr>\n              </table>\n               \n            </div>\n          </div>\n           <!-- Outer update Box end -->   <!-- Outer update Box start -->  \n          <div style=\" background-color: #f7f9ff; border-radius: 8px; border-style: solid; border-width: 1px; border-color: #c1d0ff; padding: 20px; margin-top: 15px; max-width: 100%; \" >\n            <!-- Block Heading --> \n            <div style=\"padding-bottom: 20px\">\n              <p style=\"font-size: 0.8rem; font-weight: 600; color: #121a26\"> Updates </p>\n            </div>\n            <!-- Property Updates --> \n            <div style=\" background-color: white; max-width: 100%; overflow: hidden; overflow-wrap: break-word; word-wrap: break-word; padding-left: 15px; padding-bottom: 15px; border-radius: 8px; \" >\n              <!-- action performer --> \n              <table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" style=\"max-width: 100%\" >\n                <tr style=\"border-radius: 8px; margin-top: 20px\">\n                  <td style=\"width: 30px\">\n                     \n                    <table cellspacing=\"0\" cellpadding=\"0\">\n                      <tr>\n                        <td style=\" width: 25px; height: 25px; background-color: #4f3422; border-radius: 50%; text-align: center; \" > <span style=\" color: white; font-weight: 500; font-size: 13px; line-height: 25px; display: inline-block; \" > G </span> </td>\n                      </tr>\n                    </table>\n                     \n                  </td>\n                  <td style=\"padding-top: 20px; padding-bottom: 20px\">\n                    <p style=\" font-weight: 500; font-size: 0.8rem; color: #1c2024; width: fit-content; margin-left: 5px; \" > Grace Hopper </p>\n                  </td>\n                  <td>\n                    <p style=\" font-weight: 500; font-size: 0.6rem; color: #80838d; margin-left: 10px; \" > 09:05 AM </p>\n                  </td>\n                </tr>\n              </table>\n               <!-- due date changed --> \n              <table role=\"presentation\" style=\"max-width: 100%; padding-bottom: 15px\" >\n                <tr>\n                  <td> <img src=\"https://pi-dash-marketing.s3.ap-south-1.amazonaws.com/pi-dash-assets/emails/due-date.png\" width=\"12\" height=\"12\" border=\"0\" style=\"display: block\" /> </td>\n                  <td style=\"padding: 0px; text-align: center\">\n                    <div>\n                      <p style=\" padding: 0px; margin: 0px; font-size: 0.8rem; font-weight: 500; color: #525252; \" > Due Date: </p>\n                    </div>\n                  </td>\n                  <td>\n                     \n                    <p style=\" font-size: 0.8rem; font-weight: 500; color: #171717; margin-left: 5px; padding: 0px; \" > 2026-12-31 </p>\n                     \n                  </td>\n                </tr>\n              </table>\n                <!-- Assignee changed-->   <!-- State changed -->     \n            </div>\n          </div>\n           <!-- Outer update Box end -->   <!-- Comments outer update Box --> \n          <div style=\" max-width: 100%; background-color: #f7f9ff; border-radius: 8px; border-style: solid; border-width: 1px; border-color: #c1d0ff; padding: 20px; margin-top: 15px; \" >\n            <!-- Block Heading --> \n            <p style=\"font-size: 0.8rem; font-weight: 600; color: #121a26; padding-bottom: 20px;\"> Comments </p>\n            <!-- Comments -->  \n            <table cellspacing=\"0\">\n              <tr style=\"border-radius: 8px\">\n                <td valign=\"top\">\n                   <img src=\"http://localhost/avatars/ada.png\" width=\"25\" height=\"25\" border=\"0\" />  \n                </td>\n                <td style=\"padding-bottom: 15px\">\n                  <table>\n                    <tr>\n                      <td>\n                        <p style=\" font-weight: 500; font-size: 0.8rem; color: #1c2024; margin-left: 8px; \" > Ada Lovelace </p>\n                      </td>\n                    </tr>\n                     \n                    <tr>\n                      <td>\n                        <div style=\" padding: 6px 10px; margin-left: 10px; background-color: white; font-size: 0.8rem; color: #525252; margin-top: 5px; border-radius: 4px; overflow-x: scroll; max-width: 430px;\" >\n                          <p> <p>looks <b>good</b> & ready</p> </p>\n                        </div>\n                      </td>\n                    </tr>\n                     \n                  </table>\n                </td>\n              </tr>\n            </table>\n             \n            <table cellspacing=\"0\">\n              <tr style=\"border-radius: 8px\">\n                <td valign=\"top\">\n                   \n                  <table cellspacing=\"0\" cellpadding=\"0\">\n                    <tr>\n                      <td style=\" width: 25px; height: 25px; background-color: #4f3422; border-radius: 50%; text-align: center; \" > <span style=\" color: white; font-weight: 500; font-size: 13px; line-height: 25px; display: inline-block; \" > G </span> </td>\n                    </tr>\n                  </table>\n                   \n                </td>\n                <td style=\"padding-bottom: 15px\">\n                  <table>\n                    <tr>\n                      <td>\n                        <p style=\" font-weight: 500; font-size: 0.8rem; color: #1c2024; margin-left: 8px; \" > Grace Hopper </p>\n                      </td>\n                    </tr>\n                     \n                  </table>\n                </td>\n              </tr>\n            </table>\n             \n          </div>\n           \n        </div>\n        <a href=\"http://localhost/acme/projects/p1/issues/i1\" style=\"text-decoration: none;\">\n          <div style=\" max-width: min-content; white-space: nowrap; background-color: #3e63dd; padding: 10px 15px; border: 1px solid #2f4ba8; border-radius: 4px; margin-top: 15px; cursor: pointer; font-size: 0.8rem; color: white; \" > View issue </div>\n        </a>\n      </div>\n      <!-- Footer --> \n      <table style=\"width: 100%; padding: 20px; justify-content: center\">\n        <tr>\n          <td>\n            <div style=\"font-size: 0.8rem; color: #1c2024\">\n              This email was sent to <a href=\"mailto:ada+test@example.com\" style=\"color: #3a5bc7; font-weight: 500; text-decoration: none\" >ada+test@example.com.</a > If you'd rather not receive this kind of email, <a href=\"http://localhost/acme/projects/p1/issues/i1\" style=\"color: #3a5bc7; text-decoration: none\" >you can unsubscribe to the issue</a > or <a href=\"http://localhost/acme/settings/account/notifications/\" style=\"color: #3a5bc7; text-decoration: none\" >manage your email preferences</a >. <!-- Github | LinkedIn | Twitter --> \n              <div style=\"margin-top: 60px; float: right\"> <a href=\"https://github.com/The-AI-Republic/pi-dash\" target=\"_blank\" style=\"margin-left: 10px; text-decoration: none\" > <img src=\"https://creative-assets.mailinblue.com/editor/social-icons/rounded_colored/github_32px.png\" width=\"25\" height=\"25\" border=\"0\" style=\"display: inline-block\" /> </a> <a href=\"https://www.linkedin.com/company/the-ai-republic/\" target=\"_blank\" style=\"margin-left: 10px; text-decoration: none\" > <img src=\"https://creative-assets.mailinblue.com/editor/social-icons/rounded_colored/linkedin_32px.png\" width=\"25\" height=\"25\" border=\"0\" style=\"display: inline-block\" /> </a> <a href=\"https://x.com/ai_republic\" target=\"_blank\" style=\"margin-left: 10px; text-decoration: none\" > <img src=\"https://creative-assets.mailinblue.com/editor/social-icons/rounded_colored/twitter_32px.png\" width=\"25\" height=\"25\" border=\"0\" style=\"display: inline-block\" /> </a> </div>\n            </div>\n          </td>\n        </tr>\n      </table>\n    </div>\n  </body>\n</html>"
+  },
+  "single": {
+    "context": {
+      "actors_involved": 1,
+      "comments": [
+        {
+          "actor_comments": {
+            "new_value": [
+              "note with 'quotes' & <tags>"
+            ]
+          },
+          "actor_detail": {
+            "avatar_url": "http://localhost/x.png",
+            "first_name": "Al",
+            "last_name": "Ex"
+          }
+        }
+      ],
+      "data": [],
+      "entity_type": "issue",
+      "issue": {
+        "issue_identifier": "WEB-3",
+        "issue_url": "http://localhost/acme/projects/p2/issues/i9",
+        "name": "Plain name"
+      },
+      "issue_url": "http://localhost/acme/projects/p2/issues/i9",
+      "project": "Web",
+      "project_url": "http://localhost/acme/projects/p2/issues/",
+      "receiver": {
+        "email": null
+      },
+      "summary": "Updates were made to the issue by",
+      "user_preference": "http://localhost/acme/settings/account/notifications/",
+      "workspace": "acme"
+    },
+    "html": "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\"> \n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" >\n  <head>\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>Updates on issue</title>\n    <style type=\"text/css\" emogrify=\"no\"> html { font-family: system-ui; } p, h1, h2, h3, h4, ol, ul { margin: 0; } h-full { height: 100%; } a:hover { color: #3358d4 !important; } </style>\n    <style> *[class=\"gmail-fix\"] { display: none !important; } </style>\n    <style type=\"text/css\" emogrify=\"no\"> @media (max-width: 600px) { .gmx-killpill { content: \" \\03D1\"; } } </style>\n  </head>\n  <body bgcolor=\"#ffffff\" text=\"#3b3f44\" link=\"#006399\" yahoo=\"fix\" style=\"background-color: #f7f9ff; margin: 20px\" >\n    <div style=\" width: 600px; table-layout: fixed; height: 100%; margin-left: auto; margin-right: auto; \" >\n      <!-- Header --> \n      <div>\n        <table style=\"width: 600px\" cellspacing=\"0\">\n          <tr>\n            <td>\n              <div style=\"margin-left: 30px; margin-bottom: 20px; margin-top: 20px\" > <img src=\"/static/logos/Logo.png\" width=\"150\" border=\"0\" /> </div>\n            </td>\n          </tr>\n        </table>\n      </div>\n      <!-- Body --> \n      <div style=\" color: #1f2d5c; padding: 30px; border-radius: 4px; background-color: #fcfcfd; max-width: 100%; \" >\n        <div>\n          <table style=\"width: 100%\">\n            <tr>\n              <td>\n                <p style=\"font-size: 1rem; color: #1f2d5c; font-weight: 600\"> WEB-3 updates </p>\n                <p style=\"font-size: 1rem; font-weight: 500; color: #1f2d5c; line-height: 28px\"> acme/<a target=\"_blank\" style=\"color: #1f2d5c; text-decoration: none;\" href=\"http://localhost/acme/projects/p2/issues/\">Web</a>/<a style=\"color: #1f2d5c; text-decoration: none;\" target=\"_blank\" href=\"http://localhost/acme/projects/p2/issues/i9\">WEB-3</a>: Plain name </p>\n              </td>\n            </tr>\n          </table>\n          <hr style=\" background-color: #f0f0f3; height: 1px; border: 0; margin-top: 15px; margin-bottom: 15px; \" />\n           \n          <p style=\"font-size: 1rem;color: #1f2d5c; line-height: 28px\"> Updates were made to the issue by <span style=\"font-size: 1rem; font-weight: 700; line-height: 28px\">  Al Ex  </span>. </p>\n           <!--   <p style=\"font-size: 1rem;color: #1f2d5c; line-height: 28px\"> <span style=\"font-size: 1rem; font-weight: 700; line-height: 28px\"> Al Ex </span> added  new comment. </p>   -->   <!-- Comments outer update Box --> \n          <div style=\" max-width: 100%; background-color: #f7f9ff; border-radius: 8px; border-style: solid; border-width: 1px; border-color: #c1d0ff; padding: 20px; margin-top: 15px; \" >\n            <!-- Block Heading --> \n            <p style=\"font-size: 0.8rem; font-weight: 600; color: #121a26; padding-bottom: 20px;\"> Comments </p>\n            <!-- Comments -->  \n            <table cellspacing=\"0\">\n              <tr style=\"border-radius: 8px\">\n                <td valign=\"top\">\n                   <img src=\"http://localhost/x.png\" width=\"25\" height=\"25\" border=\"0\" />  \n                </td>\n                <td style=\"padding-bottom: 15px\">\n                  <table>\n                    <tr>\n                      <td>\n                        <p style=\" font-weight: 500; font-size: 0.8rem; color: #1c2024; margin-left: 8px; \" > Al Ex </p>\n                      </td>\n                    </tr>\n                     \n                    <tr>\n                      <td>\n                        <div style=\" padding: 6px 10px; margin-left: 10px; background-color: white; font-size: 0.8rem; color: #525252; margin-top: 5px; border-radius: 4px; overflow-x: scroll; max-width: 430px;\" >\n                          <p> note with 'quotes' & <tags> </p>\n                        </div>\n                      </td>\n                    </tr>\n                     \n                  </table>\n                </td>\n              </tr>\n            </table>\n             \n          </div>\n           \n        </div>\n        <a href=\"http://localhost/acme/projects/p2/issues/i9\" style=\"text-decoration: none;\">\n          <div style=\" max-width: min-content; white-space: nowrap; background-color: #3e63dd; padding: 10px 15px; border: 1px solid #2f4ba8; border-radius: 4px; margin-top: 15px; cursor: pointer; font-size: 0.8rem; color: white; \" > View issue </div>\n        </a>\n      </div>\n      <!-- Footer --> \n      <table style=\"width: 100%; padding: 20px; justify-content: center\">\n        <tr>\n          <td>\n            <div style=\"font-size: 0.8rem; color: #1c2024\">\n              This email was sent to <a href=\"mailto:None\" style=\"color: #3a5bc7; font-weight: 500; text-decoration: none\" >None.</a > If you'd rather not receive this kind of email, <a href=\"http://localhost/acme/projects/p2/issues/i9\" style=\"color: #3a5bc7; text-decoration: none\" >you can unsubscribe to the issue</a > or <a href=\"http://localhost/acme/settings/account/notifications/\" style=\"color: #3a5bc7; text-decoration: none\" >manage your email preferences</a >. <!-- Github | LinkedIn | Twitter --> \n              <div style=\"margin-top: 60px; float: right\"> <a href=\"https://github.com/The-AI-Republic/pi-dash\" target=\"_blank\" style=\"margin-left: 10px; text-decoration: none\" > <img src=\"https://creative-assets.mailinblue.com/editor/social-icons/rounded_colored/github_32px.png\" width=\"25\" height=\"25\" border=\"0\" style=\"display: inline-block\" /> </a> <a href=\"https://www.linkedin.com/company/the-ai-republic/\" target=\"_blank\" style=\"margin-left: 10px; text-decoration: none\" > <img src=\"https://creative-assets.mailinblue.com/editor/social-icons/rounded_colored/linkedin_32px.png\" width=\"25\" height=\"25\" border=\"0\" style=\"display: inline-block\" /> </a> <a href=\"https://x.com/ai_republic\" target=\"_blank\" style=\"margin-left: 10px; text-decoration: none\" > <img src=\"https://creative-assets.mailinblue.com/editor/social-icons/rounded_colored/twitter_32px.png\" width=\"25\" height=\"25\" border=\"0\" style=\"display: inline-block\" /> </a> </div>\n            </div>\n          </td>\n        </tr>\n      </table>\n    </div>\n  </body>\n</html>"
+  }
+}

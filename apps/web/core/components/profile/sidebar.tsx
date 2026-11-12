@@ -20,9 +20,9 @@ import { Loader } from "@pi-dash/ui";
 import { cn, renderFormattedDate, getFileURL } from "@pi-dash/utils";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
-import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
+import { useAppRouter } from "@/hooks/use-app-router";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // components
 import { ProfileSidebarTime } from "./time";
@@ -37,12 +37,12 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
   // refs
   const ref = useRef<HTMLDivElement>(null);
   // router
-  const { userId } = useParams();
+  const { workspaceSlug, userId } = useParams();
+  const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
   const { profileSidebarCollapsed, toggleProfileSidebar } = useAppTheme();
   const { getProjectById } = useProject();
-  const { toggleProfileSettingsModal } = useCommandPalette();
   const { isMobile } = usePlatformOS();
   const { t } = useTranslation();
   // derived values
@@ -92,7 +92,16 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
     >
       {userProjectsData ? (
         <>
-          <div className="flex items-start justify-between px-5 pt-5">
+          <div className="relative px-5 pt-5">
+            {currentUser?.id === userId && (
+              <div className="absolute top-5 right-3.5">
+                <IconButton
+                  variant="secondary"
+                  icon={EditIcon}
+                  onClick={() => router.push(`/${workspaceSlug}/settings/account/general`)}
+                />
+              </div>
+            )}
             <div className="h-[52px] w-[52px] rounded-sm">
               {userData?.avatar_url && userData?.avatar_url !== "" ? (
                 <img
@@ -106,21 +115,9 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                 </div>
               )}
             </div>
-            {currentUser?.id === userId && (
-              <IconButton
-                variant="secondary"
-                icon={EditIcon}
-                onClick={() =>
-                  toggleProfileSettingsModal({
-                    activeTab: "general",
-                    isOpen: true,
-                  })
-                }
-              />
-            )}
           </div>
           <div className="px-5">
-            <div className="mt-3">
+            <div className="mt-3.5">
               <h4 className="text-16 font-semibold">
                 {userData?.first_name} {userData?.last_name}
               </h4>

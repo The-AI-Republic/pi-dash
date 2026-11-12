@@ -1,0 +1,249 @@
+# Copyright (c) Pi Dash contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+# CI for the new frontend (NEWFRONT-12). Runs on PRs into main and on pushes
+# to it. Every PR into main gets a web-new-required result: PRs that touch no
+# frontend path skip the jobs and pass, so the check can be required on main.
+name: web-new
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+      - "desktop/scripts/dev-prep.sh"
+      - "desktop/tests/**"
+
+# A new push to a PR replaces its running CI. Pushes to main never
+# cancel a running push run: the next one waits, and newer merges collapse
+# into that one pending run, so every completed run covers all merges since
+# the previous one. Push runs no longer include the web_new unit suite; the
+# NEWFRONT full-suite scheduler runs it on main every 12 hours.
+concurrency:
+  group: web-new-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  changes:
+    name: frontend paths changed
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The PR merge commit plus its first parent, the base it merges onto.
+          fetch-depth: 2
+      - id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        # Keep this list in step with the push paths above.
+        run: |
+          frontend=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            pattern='^(apps/web_new/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml$|pnpm-lock\.yaml$|desktop/scripts/dev-prep\.sh$|desktop/tests/)'
+            git diff --name-only HEAD^1 HEAD | grep -Eq "$pattern" || frontend=false
+          fi
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+          echo "frontend paths changed: $frontend"
+
+  install:
+    name: install
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web_new typecheck
+      - run: pnpm --filter @pidash/kit typecheck
+      - run: pnpm --filter @pidash/api-client typecheck
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web_new lint
+      - run: pnpm --filter @pidash/kit lint
+      - run: pnpm --filter @pidash/api-client lint
+      - run: pnpm --filter web_new check:boundaries
+      - run: pnpm --filter web_new check:headers
+      - run: pnpm --filter web_new check:deps
+      - run: pnpm --filter web_new check:coexistence
+      - run: pnpm --filter web_new check:oracle-build
+
+  similarity:
+    name: similarity check (new vs old frontend)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node apps/web_new/checks/check-similarity.mjs
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The PR merge commit plus its first parent, the base it merges onto.
+          fetch-depth: 2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # A PR runs only the tests its change can affect. Pushes to main skip
+      # the web_new unit tests: the NEWFRONT full-suite scheduler runs the
+      # whole suite on main every 12 hours and files fix issues.
+      - name: unit tests affected by the PR
+        if: github.event_name == 'pull_request'
+        working-directory: apps/web_new
+        run: node checks/test-changed.mjs --base HEAD^1
+      - run: pnpm --filter web_new test:coexistence
+      - run: pnpm --filter web_new test:size-initial
+      - run: pnpm --filter web_new test:parity-report
+      - run: pnpm --filter web_new test:parity-stack
+      - run: pnpm --filter web_new test:parity-disk-check
+      - run: pnpm --filter @pidash/kit test
+      - run: pnpm --filter @pidash/api-client test
+
+  build:
+    name: build (web + desktop)
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint, unit, similarity]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @pidash/kit build
+      - run: pnpm --filter @pidash/api-client build
+      - run: pnpm --filter web_new build
+      - name: Show bundles
+        run: |
+          export WEB_DIR="apps/web_new/dist/web"
+          export DESKTOP_DIR="apps/web_new/dist/desktop"
+          ls -la "$WEB_DIR" "$DESKTOP_DIR"
+          test -f "$WEB_DIR/index.html"
+          test -f "$DESKTOP_DIR/index.html"
+      - name: Prove the web bundle contains no Tauri code (F-04)
+        run: pnpm --filter web_new check:no-tauri
+
+  size-limit:
+    name: size-limit
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @pidash/kit build
+      - run: pnpm --filter @pidash/api-client build
+      - run: pnpm --filter web_new build
+      # Fails only above the 265 KB initial-JS ceiling (and the CSS budget).
+      - run: pnpm --filter web_new size
+      # The 220 KB target is reported, never blocking; area gates act on it (NEWFRONT-248).
+      - name: initial JS against the 220 KB target (report only, never blocks)
+        working-directory: apps/web_new
+        env:
+          SIZE_TARGET: "1"
+        run: |
+          pnpm exec size-limit --json > "$RUNNER_TEMP/size.json" || true
+          node -e '
+            const fs = require("node:fs");
+            for (const entry of JSON.parse(fs.readFileSync(process.argv[1], "utf8"))) {
+              const line = `${entry.name}: ${(entry.size / 1000).toFixed(2)} kB${entry.passed ? "" : " (over the target)"}`;
+              console.log(line);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
+              if (!entry.passed) console.log(`::warning title=Size target::${line}. Not blocking; the area gate files a diet issue.`);
+            }
+          ' "$RUNNER_TEMP/size.json"
+
+  coverage-audit:
+    name: coverage audit (report only, never blocks)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run parity coverage audit
+        run: node apps/web_new/e2e/parity/tools/coverage-audit.mjs --root . --out /tmp/coverage-audit.md || true
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-audit
+          path: /tmp/coverage-audit.md
+
+  # The one check main requires, through a repository ruleset no one bypasses,
+  # so it binds `gh pr merge --admin` too. Skipped jobs pass; failed or
+  # cancelled ones do not.
+  required:
+    name: web-new-required
+    runs-on: ubuntu-latest
+    needs: [changes, install, typecheck, lint, similarity, unit, build, size-limit]
+    if: always()
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

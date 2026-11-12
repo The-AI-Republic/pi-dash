@@ -186,7 +186,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
       <form onSubmit={handleSubmit(onSubmit)} className="w-full">
         <div className="flex w-full flex-col gap-7">
           <div className="flex items-center gap-4">
-            <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg bg-surface-2">
+            <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-surface-2">
               <button type="button" onClick={() => setIsImageUploadModalOpen(true)}>
                 {!userAvatar || userAvatar === "" ? (
                   <div className="h-16 w-16 rounded-md bg-layer-1 p-2">
@@ -205,7 +205,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
                 )}
               </button>
             </div>
-            <div className="flex flex-col truncate">
+            <div className="flex flex-col">
               <div className="item-center flex text-16 font-medium text-secondary">
                 <span>{`${watch("first_name")} ${watch("last_name")}`}</span>
               </div>

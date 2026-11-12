@@ -7,6 +7,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/binfmt AS binfmt
 FROM node:22-alpine AS node
 
 FROM airepublic/pi-dash-frontend:${PI_DASH_VERSION} AS web-img
+FROM airepublic/pi-dash-web-new:${PI_DASH_VERSION} AS web-new-img
 FROM airepublic/pi-dash-backend:${PI_DASH_VERSION} AS backend-img
 FROM airepublic/pi-dash-space:${PI_DASH_VERSION} AS space-img
 FROM airepublic/pi-dash-admin:${PI_DASH_VERSION} AS admin-img
@@ -32,6 +33,7 @@ COPY --from=node /usr/local/include /usr/local/include
 COPY --from=node /usr/local/bin /usr/local/bin
 
 COPY --from=web-img /usr/share/nginx/html /app/web
+COPY --from=web-new-img /usr/share/nginx/html /app/web_new
 COPY --from=space-img /app /app/space
 COPY --from=admin-img /usr/share/nginx/html/god-mode /app/admin
 COPY --from=live-img /app /app/live
