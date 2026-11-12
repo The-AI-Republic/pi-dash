@@ -274,6 +274,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -5144,6 +5145,11 @@ export class WebNewDriver implements ParityDriver {
     }
     await this.page.locator(`[data-widget-action="${name}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+  async widgetActionDisabled(name: string): Promise<boolean> {
+    const button = this.page.locator(`[data-widget-action="${name}"]`).first();
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await button.isDisabled()) as boolean;
+  }
   async postComment(_text: string): Promise<void> {
     return todo("postComment");
   }
@@ -5787,6 +5793,18 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, {
       timeout: WebNewDriver.WAIT_MS,
     });
+  }
+
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    const buttons = this.page.locator('[data-widget-root="Code reviews"] [data-widget-row] button');
+    return (await buttons.count()) > 0;
   }
 
   async worklogCreateVisible(): Promise<boolean> {
@@ -16633,6 +16651,16 @@ export class WebNewDriver implements ParityDriver {
       tabs.push({ label, active: (await tab.getAttribute("aria-current").catch(() => null)) === "page" });
     }
     return tabs;
+  }
+
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The tab row is the element holding the "Scheduler views" navigation.
+    const row = this.schedulerTabs().locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
   }
 
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
@@ -51099,6 +51127,37 @@ export class WebNewDriver implements ParityDriver {
     if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
     const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
     return text === "" ? null : text;
+  }
+
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the
+  // --- OSS oracle has no free-quota picker, so the old-app driver throws.
+  async cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    const value = (await select.count()) > 0 ? await select.inputValue() : "";
+    const options = select.locator("option");
+    const optionCount = await options.count();
+    const facts = [];
+    for (let index = 0; index < optionCount; index++) {
+      const option = options.nth(index);
+      facts.push({
+        value: (await option.getAttribute("value")) ?? "",
+        text: this.cloudNorm(await option.innerText()),
+        // Locator.isDisabled() reports false for a disabled <option>
+        // (probed: property true, attribute present, isDisabled false),
+        // so read the attribute the picker renders.
+        disabled: (await option.getAttribute("disabled")) !== null,
+      });
+    }
+    const noticeLocator = card.getByText("needs credit on the free plan", { exact: false }).first();
+    let notice: string | null = null;
+    if ((await noticeLocator.count()) > 0 && (await noticeLocator.isVisible().catch(() => false))) {
+      // The match is the notice <p> itself, whose own text is the notice.
+      notice = this.cloudNorm(await noticeLocator.innerText());
+    }
+    const topUp = card.getByRole("link", { name: "Top up" }).first();
+    const topUpHref = (await topUp.count()) > 0 ? ((await topUp.getAttribute("href")) ?? null) : null;
+    return { title, value, options: facts, notice, topUpHref };
   }
 
   private cloudProfileTabLabels(): string[] {

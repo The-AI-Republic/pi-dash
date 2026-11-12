@@ -923,41 +923,19 @@ type IssueShapeRow = (
     String,
 );
 
-async fn fetch_issue_shape(
-    db_pool: &sqlx::PgPool,
-    issue_id: Uuid,
-) -> Result<IssueNotifShape, TaskSwallow> {
+/// The `ISSUE_SHAPE_SQL` lookup as a SeaORM `Select` (issues JOIN projects,
+/// states, workspaces; `select_only` + `column_as` with unique aliases per
+/// orm-migration.md §3.2). Extracted so the generated aliases can be pinned
+/// by a unit test without a database.
+fn issue_shape_select(issue_id: Uuid) -> sea_orm::Select<issues_entity::Entity> {
     use sea_orm::sea_query::JoinType;
-    use sea_orm::{
-        ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, RelationTrait,
-    };
-
-    #[derive(Debug, Clone, FromQueryResult)]
-    struct IssueShapeRowSea {
-        pub id: Uuid,
-        pub i_name: String,
-        pub i_sequence_id: i32,
-        pub i_created_by_id: Option<Uuid>,
-        pub p_id: Uuid,
-        pub p_identifier: String,
-        pub p_workspace_id: Uuid,
-        pub s_name: String,
-        pub s_group: String,
-        pub w_slug: String,
-    }
-
-    let db = pidash_db::pool::sea_orm_connection(db_pool);
-    // ISSUE_SHAPE_SQL: issues JOIN projects (deleted_at scope) JOIN states
-    // (deleted_at scope) JOIN workspaces (no scope). Use select_only +
-    // column_as with unique aliases per orm-migration.md §3.2.
-    let row = issues_entity::Entity::find()
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, RelationTrait};
+    issues_entity::Entity::find()
         .select_only()
-        .columns([
-            issues_entity::Column::Id,
-            issues_entity::Column::Name,
-            issues_entity::Column::SequenceId,
-            issues_entity::Column::CreatedById,
-        ])
+        .column_as(issues_entity::Column::Id, "id")
+        .column_as(issues_entity::Column::Name, "i_name")
+        .column_as(issues_entity::Column::SequenceId, "i_sequence_id")
+        .column_as(issues_entity::Column::CreatedById, "i_created_by_id")
         .column_as(projects_entity::Column::Id, "p_id")
         .column_as(projects_entity::Column::Identifier, "p_identifier")
         .column_as(projects_entity::Column::WorkspaceId, "p_workspace_id")
@@ -974,14 +952,35 @@ async fn fetch_issue_shape(
         .filter(issues_entity::Column::Id.eq(issue_id))
         .filter(projects_entity::Column::DeletedAt.is_null())
         .filter(states_entity::Column::DeletedAt.is_null())
+}
+
+async fn fetch_issue_shape(
+    db_pool: &sqlx::PgPool,
+    issue_id: Uuid,
+) -> Result<IssueNotifShape, TaskSwallow> {
+    use sea_orm::FromQueryResult;
+
+    #[derive(Debug, Clone, FromQueryResult)]
+    struct IssueShapeRowSea {
+        pub id: Uuid,
+        pub i_name: String,
+        pub i_sequence_id: i32,
+        pub i_created_by_id: Option<Uuid>,
+        pub p_id: Uuid,
+        pub p_identifier: String,
+        pub p_workspace_id: Uuid,
+        pub s_name: String,
+        pub s_group: String,
+        pub w_slug: String,
+    }
+
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let row = issue_shape_select(issue_id)
         .into_model::<IssueShapeRowSea>()
         .one(&db)
         .await?;
 
     if let Some(r) = row {
-        // The Entity path with column_as needs distinct column names for
-        // the base columns; we used i_name etc. above but the base columns
-        // produce ambiguous names, so fetch via direct model fields.
         return Ok(IssueNotifShape {
             id: r.id,
             name: r.i_name,
@@ -2330,6 +2329,130 @@ mod tests {
         assert!(ISSUE_SUBSCRIBER_INSERT_SQL.starts_with("INSERT INTO issue_subscribers (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, subscriber_id)"));
         assert_eq!(MESSAGE_HTML_DEFAULT, "<p></p>");
         assert_eq!(MENTION_SENDER, "in_app:issue_activities:mentioned");
+    }
+
+    // NEWPIDASH-137: `fetch_issue_shape` decodes into `IssueShapeRowSea`
+    // (`i_name`/`i_sequence_id`/`i_created_by_id`), so the generated SQL
+    // must project the base columns under exactly those aliases. With
+    // `.columns([...])` the query projects `name`/`sequence_id`/
+    // `created_by_id` and every notification task dies with
+    // `no column found for name: i_name`.
+    #[test]
+    fn issue_shape_query_projects_aliased_base_columns() {
+        use sea_orm::QueryTrait;
+        use sea_query::PostgresQueryBuilder;
+        let issue_id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").expect("test uuid");
+        let sql = issue_shape_select(issue_id)
+            .into_query()
+            .to_string(PostgresQueryBuilder);
+        for alias in [
+            "AS \"id\"",
+            "AS \"i_name\"",
+            "AS \"i_sequence_id\"",
+            "AS \"i_created_by_id\"",
+            "AS \"p_id\"",
+            "AS \"p_identifier\"",
+            "AS \"p_workspace_id\"",
+            "AS \"s_name\"",
+            "AS \"s_group\"",
+            "AS \"w_slug\"",
+        ] {
+            assert!(sql.contains(alias), "missing {alias} in:\n{sql}");
+        }
+    }
+
+    // NEWPIDASH-137: end-to-end decode against Postgres. Builds the four
+    // minimal tables the shape query touches, seeds one issue chain, and
+    // asserts every `IssueNotifShape` field — the pre-fix query fails here
+    // with `no column found for name: i_name`. Needs `DATABASE_URL`
+    // pointing at a scratch database (never the shared one); without it the
+    // test returns early the way the lazy-pool tests avoid a database.
+    #[tokio::test]
+    async fn fetch_issue_shape_decodes_aliased_columns() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect DATABASE_URL");
+        for stmt in [
+            "CREATE TABLE IF NOT EXISTS workspaces (id uuid PRIMARY KEY, slug text NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS projects (id uuid PRIMARY KEY, identifier text NOT NULL, workspace_id uuid NOT NULL, deleted_at timestamptz)",
+            "CREATE TABLE IF NOT EXISTS states (id uuid PRIMARY KEY, name text NOT NULL, \"group\" text NOT NULL, deleted_at timestamptz)",
+            "CREATE TABLE IF NOT EXISTS issues (id uuid PRIMARY KEY, name text NOT NULL, sequence_id int NOT NULL, created_by_id uuid, project_id uuid NOT NULL, state_id uuid, deleted_at timestamptz)",
+        ] {
+            sqlx::query(stmt)
+                .execute(&pool)
+                .await
+                .expect("create minimal table");
+        }
+        let ws = "10000000-0000-0000-0000-000000000137";
+        let proj = "20000000-0000-0000-0000-000000000137";
+        let state = "30000000-0000-0000-0000-000000000137";
+        let issue = "40000000-0000-0000-0000-000000000137";
+        let creator = "50000000-0000-0000-0000-000000000137";
+        for stmt in [
+            format!("DELETE FROM issues WHERE id = '{issue}'"),
+            format!("DELETE FROM projects WHERE id = '{proj}'"),
+            format!("DELETE FROM states WHERE id = '{state}'"),
+            format!("DELETE FROM workspaces WHERE id = '{ws}'"),
+        ] {
+            sqlx::query(&stmt)
+                .execute(&pool)
+                .await
+                .expect("clear seed rows");
+        }
+        sqlx::query(&format!(
+            "INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'pg-test-ws')"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(&format!(
+            "INSERT INTO projects (id, identifier, workspace_id, deleted_at) VALUES ('{proj}', 'PG', '{ws}', NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(&format!(
+            "INSERT INTO states (id, name, \"group\", deleted_at) VALUES ('{state}', 'Triage', 'triage', NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed state");
+        sqlx::query(&format!(
+            "INSERT INTO issues (id, name, sequence_id, created_by_id, project_id, state_id, deleted_at) VALUES ('{issue}', 'PG shape issue', 42, '{creator}', '{proj}', '{state}', NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+
+        let shape = fetch_issue_shape(&pool, Uuid::parse_str(issue).expect("test uuid"))
+            .await
+            .expect("fetch_issue_shape must decode");
+        assert_eq!(shape.id.to_string(), issue);
+        assert_eq!(shape.name, "PG shape issue");
+        assert_eq!(shape.sequence_id, 42);
+        assert_eq!(
+            shape.created_by_id,
+            Some(Uuid::parse_str(creator).expect("test uuid"))
+        );
+        assert_eq!(shape.project_id.to_string(), proj);
+        assert_eq!(shape.project_identifier, "PG");
+        assert_eq!(shape.workspace_id.to_string(), ws);
+        assert_eq!(shape.workspace_slug, "pg-test-ws");
+        assert_eq!(shape.state_name, "Triage");
+        assert_eq!(shape.state_group, "triage");
+
+        assert!(
+            fetch_issue_shape(
+                &pool,
+                Uuid::parse_str("99999999-0000-0000-0000-000000000137").expect("test uuid")
+            )
+            .await
+            .is_err(),
+            "unknown issue id must not decode"
+        );
     }
 
     #[test]

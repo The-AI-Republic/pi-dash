@@ -4,23 +4,24 @@
 
 """Regression guard: the *renamed* engine still enforces its sandbox.
 
-`prepare-agent.sh` ships the upstream Codex binary renamed to
-`pidash-agent-engine`. Codex re-execs helper copies of itself to build the
-sandbox that walls in the commands an agent runs, dispatching on `argv[0]` /
-`current_exe()`. If a renamed binary fails to self-locate, commands could run
-*without* the sandbox and nothing would say so — a silent safety-feature
-failure, not a crash (see design.md §24.8, PDASHOSS01-162).
+`stage_engine.py` ships the upstream Codex binary renamed to
+`pidash-agent-engine` in the CLI release's `engine/<version>/` tree. Codex
+re-execs helper copies of itself to build the sandbox that walls in the
+commands an agent runs, dispatching on `argv[0]` / `current_exe()`. If a
+renamed binary fails to self-locate, commands could run *without* the sandbox
+and nothing would say so — a silent safety-feature failure, not a crash
+(see design.md §24.8, PDASHOSS01-162).
 
 This script copies the engine under the name it ships as, then runs the probe
 from PDASHOSS01-162 against it: a no-sandbox control write must succeed, and the
 same write attempted through `pidash-agent-engine sandbox` must be refused. A
-future `CODEX_BUNDLE_VERSION` bump that breaks `arg0` dispatch makes this fail
+future `ENGINE_VERSION` bump that breaks `arg0` dispatch makes this fail
 the build instead of shipping an un-sandboxed engine.
 
 No model, session, or credential is used. The engine binary must already be
-staged (pass `--engine`), or `--stage` will download the pinned upstream release
-for the current host (needs `gh` + a token; used in CI where `bin/` is not
-committed).
+staged (pass `--engine`), or `--stage` will stage the pinned upstream release
+for the current host through `stage_engine.py` itself (needs `gh` + a token;
+used in CI).
 
 Two traps this method exists to avoid (from the ticket):
   1. CODEX_HOME must not live under the system temp dir — Codex refuses to
@@ -34,7 +35,6 @@ Two traps this method exists to avoid (from the ticket):
 
 import argparse
 import importlib.util
-import os
 from pathlib import Path
 import platform
 import shutil
@@ -43,56 +43,45 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-DESKTOP = HERE.parent
 
-# Reuse the exact download + checksum + archive-member logic the bundler uses,
-# so this guard and the shipped bundle can never disagree about which asset the
-# engine comes from.
+# Reuse the exact staging the CLI release uses, so this guard and the shipped
+# engine can never disagree about which asset the engine comes from.
 _SPEC = importlib.util.spec_from_file_location(
-    "bundle_agents", DESKTOP / "scripts/bundle_agents.py"
+    "stage_engine", HERE / "stage_engine.py"
 )
-bundle = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(bundle)
+stage_engine = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(stage_engine)
 
 START = "PROBE_START"
 WROTE = "WROTE"
 
 
 def resolve_engine_tag():
-    """The engine tag the bundle actually ships, resolved as prepare-agent.sh does.
-
-    Precedence matches the shell: `CODEX_BUNDLE_VERSION` if set, else the pinned
-    tag in `runner/ENGINE_VERSION`, the one file the desktop scripts and the CLI
-    release pipeline all read, so this guard tests the version that ships.
-    """
-    env = os.environ.get("CODEX_BUNDLE_VERSION")
-    if env:
-        return env
-    return bundle.default_engine_tag()
+    """The engine tag the CLI release ships, from `runner/ENGINE_VERSION`."""
+    return stage_engine.read_engine_tag()
 
 
 def host_target():
-    """bundle_agents target string for the machine running this script."""
+    """CLI release target string for the machine running this script."""
     machine = platform.machine().lower()
     if sys.platform == "darwin":
         return "aarch64-apple-darwin" if machine in ("arm64", "aarch64") else "x86_64-apple-darwin"
     if sys.platform.startswith("linux"):
-        if machine not in ("x86_64", "amd64"):
-            raise SystemExit(f"Unsupported Linux arch for this guard: {machine}")
-        return "x86_64-unknown-linux-gnu"
+        if machine in ("x86_64", "amd64"):
+            return "x86_64-unknown-linux-gnu"
+        if machine in ("aarch64", "arm64"):
+            return "aarch64-unknown-linux-gnu"
+        raise SystemExit(f"Unsupported Linux arch for this guard: {machine}")
     raise SystemExit(f"Unsupported platform for this guard: {sys.platform}")
 
 
-def stage_engine(tag, into):
-    """Download the pinned upstream engine for this host into `into` as raw bytes."""
+def stage_binary(tag, into):
+    """Stage the pinned upstream engine for this host via `stage_engine.py`."""
     target = host_target()
-    # assets() returns (runner_row, engine_row); the engine is the openai/codex row.
-    _, archive, member, _destination = bundle.assets(target)[1]
-    payload = bundle.executable_bytes(bundle.download("openai/codex", tag, archive), archive, member)
-    engine = Path(into) / "engine-download"
-    engine.write_bytes(payload)
-    engine.chmod(0o755)
-    return engine
+    pins = stage_engine.read_pins(tag)
+    directory = stage_engine.stage(target, into, tag, pins)
+    _, _, shipped = stage_engine.upstream_asset(target)
+    return directory / shipped
 
 
 def run_probe(engine_named, home, outside, label):
@@ -119,12 +108,12 @@ def main():
     parser.add_argument(
         "--stage",
         action="store_true",
-        help="Download the pinned upstream engine for this host (needs gh + token).",
+        help="Stage the pinned upstream engine for this host via stage_engine.py (needs gh + token).",
     )
     parser.add_argument(
         "--engine-tag",
         default=None,
-        help="Upstream release tag to stage; defaults to the version prepare-agent.sh ships.",
+        help="Upstream release tag to stage; defaults to runner/ENGINE_VERSION.",
     )
     args = parser.parse_args()
     engine_tag = args.engine_tag or resolve_engine_tag()
@@ -147,14 +136,14 @@ def main():
         source = args.engine
     elif args.stage:
         print(f"staging engine {engine_tag} for {host_target()} ...")
-        source = stage_engine(engine_tag, root)
+        source = stage_binary(engine_tag, root)
     else:
-        raise SystemExit("Provide --engine <path> or --stage to download the pinned engine.")
+        raise SystemExit("Provide --engine <path> or --stage to stage the pinned engine.")
     if not Path(source).exists():
         raise SystemExit(f"Engine binary not found: {source}")
 
     # The crux: run under the name the engine ships as, so arg0/current_exe
-    # self-location is exercised exactly as in the app bundle.
+    # self-location is exercised exactly as in the CLI release.
     suffix = ".exe" if sys.platform.startswith("win") else ""
     engine_named = root / f"pidash-agent-engine{suffix}"
     shutil.copy2(source, engine_named)

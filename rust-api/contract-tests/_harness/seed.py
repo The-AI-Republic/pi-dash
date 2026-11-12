@@ -120,6 +120,29 @@ class Seed:
                     "DELETE FROM engine_credential WHERE user_id = ANY(%s)",
                     (users,),
                 )
+                # Bound dev machines (runner.dev_machine_id) and live
+                # state (runner_live_state.runner_id) reference rows the
+                # tracked deletes below remove later; sweep every table
+                # keyed on runner (or on issues/runner joins) for owned
+                # runners first so neither the dev_machine nor the runner
+                # delete can hit foreign keys.
+                for table, col in (
+                    ("runner_live_state", "runner_id"),
+                    ("runner_session", "runner_id"),
+                    ("runner_force_refresh", "runner_id"),
+                    ("agent_run", "runner_id"),
+                    ("agent_run", "pinned_runner_id"),
+                    ("agent_chat_session", "runner_id"),
+                    ("issues", "assigned_runner_id"),
+                ):
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE {col} IN "
+                        "(SELECT id FROM runner WHERE owner_id = ANY(%s))",
+                        (users,),
+                    )
+                cur.execute(
+                    "DELETE FROM runner WHERE owner_id = ANY(%s)", (users,)
+                )
                 cur.execute(
                     "DELETE FROM dev_machine WHERE owner_id = ANY(%s)",
                     (users,),
@@ -424,6 +447,7 @@ class Seed:
             is_default=False,
             agent_review_default_interval_seconds=0,
             default_agent_executor="",
+            dedicated_runner_lost_action="fail_to_backlog",
             agent_test_default_interval_seconds=0,
             created_at=_now(),
             updated_at=_now(),
@@ -935,12 +959,13 @@ def create_project(
             repo_url, base_branch, agent_default_interval_seconds,
             agent_default_max_ticks, agent_ticking_enabled, is_default,
             agent_review_default_interval_seconds, default_agent_executor,
+            dedicated_runner_lost_action,
             agent_test_default_interval_seconds, created_at, updated_at,
             created_by_id)
         VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
-            60,'local_runner',60,%s,%s,%s)""",
+            60,'local_runner','fail_to_backlog',60,%s,%s,%s)""",
         (pid, name, identifier, workspace_id, now, now, created_by_id),
     )
     return {"id": pid, "identifier": identifier}
@@ -1184,6 +1209,7 @@ class Seeder:
                 agent_default_interval_seconds, agent_default_max_ticks,
                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
                 agent_ticking_enabled, default_agent_executor,
+                dedicated_runner_lost_action,
                 created_at, updated_at)
                VALUES (%s,%s,'',2,%s,%s,
                        false,false,false,true,false,
@@ -1191,7 +1217,7 @@ class Seeder:
                        false,true,
                        0,0,'{}','UTC','','main',
                        10800,10,10800,10800,
-                       true,'local_runner',
+                       true,'local_runner','fail_to_backlog',
                        now(),now())""",
             (
                 project_id,
@@ -2118,25 +2144,60 @@ class Seeder:
         workspace_id: str,
         created_by_id: str,
         pod_id: str,
-        work_item_id: str,
+        work_item_id: str | None,
         *,
         status: str = "running",
+        # A scheduler run (PDASHOSS01-276) passes work_item_id=None plus
+        # its binding; trigger follows, as dispatch_scheduler_run sets it.
+        scheduler_binding_id: str | None = None,
     ) -> dict[str, Any]:
         run_id = _uid()
+        trigger = "scheduler" if scheduler_binding_id else "human"
         self.db.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
                 error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
+                usage, pin_kind, scheduler_binding_id, created_at)
                VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}',
-                       %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
-                       '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
-            (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
+                       %s,%s,%s,%s,'contract-model', %s, 'local_runner', 0,
+                       '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality',
+                       %s, now())""",
+            (
+                run_id, status, workspace_id, work_item_id, pod_id, created_by_id,
+                trigger, scheduler_binding_id,
+            ),
         )
         self._put("agent_run", run_id)
         return {"id": run_id}
+
+    def create_scheduler_binding(
+        self, workspace_id: str, project_id: str, actor_id: str
+    ) -> dict[str, Any]:
+        """A workspace scheduler installed (enabled) on the project."""
+        scheduler_id = _uid()
+        self.db.execute(
+            """INSERT INTO schedulers
+               (id, workspace_id, slug, name, description, prompt, source,
+                is_enabled, color, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'contract scheduler','Scan the project.',
+                       'manifest', true, '#3b82f6', now(), now())""",
+            (scheduler_id, workspace_id, self._slug("ct-sched"), "Contract scheduler"),
+        )
+        self._put("schedulers", scheduler_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO scheduler_bindings
+               (id, workspace_id, project_id, scheduler_id, actor_id, dtstart,
+                tzid, rrule, rdates, exdates, extra_context, enabled, last_error,
+                outcome_mode, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,now(),'UTC','FREQ=HOURLY','[]','[]','',
+                       true,'','create_issue',now(),now())""",
+            (binding_id, workspace_id, project_id, scheduler_id, actor_id),
+        )
+        self._put("scheduler_bindings", binding_id)
+        return {"id": binding_id, "scheduler_id": scheduler_id}
 
     # -- runner daemon domain (PIDASHCONV-97) --------------------------------
     # Factories for the daemon-facing runner API (``/api/v1/runner/``):
@@ -2267,13 +2328,13 @@ class Seeder:
                 status, prompt, trigger, executor_kind, run_config,
                 required_capabilities, thread_id, agent_metadata, tool_plan,
                 usage, dispatch_attempts, error_details, llm_model,
-                cancel_reason, phase_kind,
+                cancel_reason, phase_kind, pin_kind,
                 created_at)
                VALUES (%s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
                        '{}',0,'{}','',
-                       '','',
+                       '','','locality',
                        now())""",
             (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),
         )
@@ -2450,6 +2511,7 @@ def issue_chain(conn, slug: str) -> dict:
             "agent_test_default_interval_seconds": 10800,
             "agent_ticking_enabled": True,
             "default_agent_executor": "local_runner",
+            "dedicated_runner_lost_action": "fail_to_backlog",
         },
     )
     state = insert_row(
@@ -2709,6 +2771,7 @@ def project(conn, workspace_id, name: str = "Contract Project", **over) -> dict:
         "is_default": False,
         "agent_review_default_interval_seconds": 0,
         "default_agent_executor": "",
+        "dedicated_runner_lost_action": "fail_to_backlog",
         "agent_test_default_interval_seconds": 0,
     }
     values.update(over)

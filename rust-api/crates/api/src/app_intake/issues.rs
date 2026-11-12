@@ -79,7 +79,6 @@ use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
-
 use pidash_services::app_issues::serializers_detail::{
     agent_status_to_representation, agent_ticker_to_representation, AgentTickerView,
 };
@@ -89,6 +88,7 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
 use super::{
@@ -138,6 +138,7 @@ pub struct IssueRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub git_work_branch: String,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
     pub complexity_score: i32,
@@ -178,6 +179,7 @@ impl IssueRow {
             deleted_at: row.try_get("deleted_at")?,
             git_work_branch: row.try_get("git_work_branch")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
+            assigned_runner_id: row.try_get("assigned_runner_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
             complexity_score: row.try_get("complexity_score")?,
@@ -222,6 +224,7 @@ impl IssueRow {
             workpad: self.workpad.clone(),
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
         }
     }
@@ -317,6 +320,7 @@ fn issue_row_from(model: issue_entity::Model) -> IssueRow {
         deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
         git_work_branch: model.git_work_branch,
         assigned_pod_id: model.assigned_pod_id,
+        assigned_runner_id: model.assigned_runner_id,
         created_via: model.created_via,
         agent_executor: model.agent_executor,
         complexity_score: model.complexity_score,
@@ -447,6 +451,7 @@ struct AnnotatedIssueRow {
     deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     git_work_branch: String,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     created_via: Option<String>,
     agent_executor: Option<String>,
     complexity_score: i32,
@@ -491,6 +496,7 @@ impl AnnotatedIssueRow {
                 deleted_at: self.deleted_at.map(|dt| dt.with_timezone(&Utc)),
                 git_work_branch: self.git_work_branch,
                 assigned_pod_id: self.assigned_pod_id,
+                assigned_runner_id: self.assigned_runner_id,
                 created_via: self.created_via,
                 agent_executor: self.agent_executor,
                 complexity_score: self.complexity_score,
@@ -543,6 +549,7 @@ pub async fn fetch_issue_annotated(
             issue_entity::Column::DeletedAt,
             issue_entity::Column::GitWorkBranch,
             issue_entity::Column::AssignedPodId,
+            issue_entity::Column::AssignedRunnerId,
             issue_entity::Column::CreatedVia,
             issue_entity::Column::AgentExecutor,
             issue_entity::Column::ComplexityScore,
@@ -556,9 +563,9 @@ pub async fn fetch_issue_annotated(
         )
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(
@@ -624,6 +631,7 @@ struct DetailRow {
     i_deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     i_git_work_branch: String,
     i_assigned_pod_id: Option<Uuid>,
+    i_assigned_runner_id: Option<Uuid>,
     i_created_via: Option<String>,
     i_agent_executor: Option<String>,
     i_complexity_score: i32,
@@ -684,6 +692,7 @@ impl DetailRow {
             deleted_at: self.i_deleted_at.map(|dt| dt.with_timezone(&Utc)),
             git_work_branch: self.i_git_work_branch,
             assigned_pod_id: self.i_assigned_pod_id,
+            assigned_runner_id: self.i_assigned_runner_id,
             created_via: self.i_created_via,
             agent_executor: self.i_agent_executor,
             complexity_score: self.i_complexity_score,
@@ -750,6 +759,10 @@ pub async fn fetch_detail(
         .column_as(issue_entity::Column::DeletedAt, "i_deleted_at")
         .column_as(issue_entity::Column::GitWorkBranch, "i_git_work_branch")
         .column_as(issue_entity::Column::AssignedPodId, "i_assigned_pod_id")
+        .column_as(
+            issue_entity::Column::AssignedRunnerId,
+            "i_assigned_runner_id",
+        )
         .column_as(issue_entity::Column::CreatedVia, "i_created_via")
         .column_as(issue_entity::Column::AgentExecutor, "i_agent_executor")
         .column_as(issue_entity::Column::ComplexityScore, "i_complexity_score")
@@ -759,9 +772,9 @@ pub async fn fetch_detail(
         .join(JoinType::InnerJoin, bridge_entity::Relation::Issues1.def())
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(
@@ -1339,6 +1352,25 @@ async fn default_state_fill(
     Ok((None, false))
 }
 
+/// `duplicate_to` is an *auto-generated* FK field
+/// (`serializers/intake.py:27-41` declares only `issue`), so DRF binds
+/// the model's `_default_manager` — `Issue.issue_objects`, which hides
+/// triage states, archived rows, drafts and archived projects
+/// (`db/models/issue.py:96-108`). A triage issue (every intake issue!)
+/// as `duplicate_to` answers `does_not_exist`, verified live.
+/// The normalized executor value this attempt wants stored, if any.
+pub struct ObjectExecutor {
+    /// `Some(stored)` = normalized value to write (`None` = explicit clear).
+    pub stored: Option<Option<String>>,
+}
+
+impl ObjectExecutor {
+    /// Whether this attempt pushed an `agent_executor` error.
+    pub fn has_error(errors: &FieldErrors, field: &str) -> bool {
+        errors.contains_key(field)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Issue field validation (`IssueCreateSerializer`, partial)
 // ---------------------------------------------------------------------------
@@ -1773,6 +1805,8 @@ pub struct IssueObjectValidation {
     pub assignee_ids: Option<Vec<Uuid>>,
     pub label_ids: Option<Vec<Uuid>>,
     pub description_html: Option<String>,
+    /// Normalized executor to store (#2903: deprecated → local_runner).
+    pub agent_executor: Option<Option<String>>,
 }
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
@@ -1864,6 +1898,7 @@ pub async fn validate_issue_object(
         assignee_ids: None,
         label_ids: None,
         description_html: None,
+        agent_executor: None,
     };
     // Read-only lock for actively-synced issues: only changed values
     // block (`serializers/issue.py:210-229`).
@@ -1919,9 +1954,16 @@ pub async fn validate_issue_object(
         }
     }
 
-    if let Some(_executor) = validated.agent_executor.as_ref() {
-        if validate_executor(pool, issue, &validated.agent_executor, errors).await? {
-            return Ok(empty());
+    let mut translated_executor: Option<Option<String>> = None;
+    if let Some(executor) = validated.agent_executor.as_ref() {
+        if let Some(translated) =
+            validate_executor(pool, issue, Some(executor.clone()), errors).await?
+        {
+            if ExecutorTranslation::has_error(errors, "agent_executor") {
+                return Ok(empty());
+            }
+            // Store the normalized value (`attrs["agent_executor"]`).
+            translated_executor = translated.stored;
         }
     }
 
@@ -2045,6 +2087,7 @@ pub async fn validate_issue_object(
         assignee_ids,
         label_ids,
         description_html: sanitized_html,
+        agent_executor: translated_executor,
     })
 }
 
@@ -2098,37 +2141,74 @@ async fn validate_pod(
     Ok(false)
 }
 
-/// Executor checks (`serializers/issue.py:275-321`): runner is the
-/// only executor (built_engine_as_runner §6). `normalize_issue_executor`
-/// translates deprecated `cloud_agent`/`managed_runner` writes to
-/// `local_runner` pod-level; the only remaining gate is the
-/// mid-flight rule (runs for explicit null too; `None == None` is
-/// unchanged like Django's `str(None) == str(None)`). The
-/// executor argument is the *normalized* value the caller already
-/// translated (see `validate_issue_object` caller).
+/// Executor checks (`issue_assignment.py:28-51`, #2903): unknown is a
+/// 400, deprecated writes translate to `local_runner` (the normalized
+/// value is stored — the caller writes `translated.stored`), and a
+/// translation CHANGED the value while the instance has an active run
+/// is the mid-flight 400. Returns whether an error was pushed.
+pub struct ExecutorTranslation {
+    /// `Some(v)` = stored value (`Some(None)` = explicit clear).
+    pub stored: Option<Option<String>>,
+}
+
+impl ExecutorTranslation {
+    /// Whether this attempt pushed an `agent_executor` error.
+    pub fn has_error(errors: &FieldErrors, field: &str) -> bool {
+        errors.contains_key(field)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn validate_executor(
     pool: &PgPool,
     issue: &IssueRow,
-    executor: &Option<Option<String>>,
+    executor: Option<Option<String>>,
     errors: &mut FieldErrors,
-) -> Result<bool, Denial> {
-    // The mid-flight rule runs for explicit null too (`None` clears
-    // the override); `None == None` is unchanged, like Django's
-    // `str(None) == str(None)`.
-    if let Some(normalized) = executor.as_ref() {
-        if normalized.as_deref() != issue.agent_executor.as_deref()
-            && has_active_run(pool, &issue.id).await?
-        {
+) -> Result<Option<ExecutorTranslation>, Denial> {
+    let Some(value) = executor else {
+        return Ok(None);
+    };
+    let Some(value) = value else {
+        // Explicit clear: `str(None)` vs the stored value.
+        if issue.agent_executor.is_some() && has_active_run(pool, &issue.id).await? {
             push_error(
                 errors,
                 "agent_executor",
                 "cannot change the execution target while the issue has an active run".to_owned(),
             );
-            return Ok(true);
         }
+        return Ok(Some(ExecutorTranslation { stored: None }));
+    };
+    // Field level (`AGENT_EXECUTORS`) already rejected unknown values
+    // with the `ChoiceField` message; the kernel still answers 400 for
+    // anything past it.
+    if AgentExecutorKind::from_value(&value).is_none() {
+        push_error(
+            errors,
+            "agent_executor",
+            "unknown agent executor".to_owned(),
+        );
+        return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    Ok(false)
+    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+        .expect("known value parses")
+        .value()
+        .to_owned();
+    // Django `normalize_issue_executor`: the normalized write is compared
+    // against the STORED value, not against the input.
+    if issue.agent_executor.as_deref() != Some(normalized.as_str())
+        && has_active_run(pool, &issue.id).await?
+    {
+        push_error(
+            errors,
+            "agent_executor",
+            "cannot change the execution target while the issue has an active run".to_owned(),
+        );
+        return Ok(Some(ExecutorTranslation { stored: None }));
+    }
+    Ok(Some(ExecutorTranslation {
+        stored: Some(Some(normalized)),
+    }))
 }
 
 /// `normalize_executor_write`: deprecated choices become
@@ -2257,10 +2337,10 @@ pub async fn apply_issue_update(
         .unwrap_or(issue.estimate_point_id);
     fields.type_id = validated.type_id.unwrap_or(issue.type_id);
     fields.assigned_pod_id = validated.assigned_pod_id.unwrap_or(issue.assigned_pod_id);
-    fields.agent_executor = validated
-        .agent_executor
-        .clone()
-        .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.agent_executor = match validated.agent_executor.clone() {
+        Some(inner) => object.agent_executor.clone().unwrap_or(inner),
+        None => issue.agent_executor.clone(),
+    };
     fields.git_work_branch = validated
         .git_work_branch
         .clone()
@@ -2791,33 +2871,43 @@ pub async fn blocker_summary(
                     )
                     .add(rel_entity::Column::WorkspaceId.eq(*workspace_id))
                     .add(
-                        Condition::any().add(
-                            Condition::all()
-                                .add(
-                                    Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
+                        Condition::any()
+                            .add(
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
                                         .eq(*issue_id),
-                                )
-                                .add(
-                                    Expr::col((
-                                        rel_entity::Entity,
-                                        rel_entity::Column::RelatedIssueId,
-                                    ))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                                )
-                                .add(rel_entity::Column::RelationType.eq("blocked_by")),
-                        ),
-                    )
-                    .add(
-                        Condition::all()
-                            .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::RelatedIssueId))
-                                    .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocked_by")),
                             )
                             .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                            )
-                            .add(rel_entity::Column::RelationType.eq("blocking")),
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocking")),
+                            ),
                     ),
             )
             .to_owned(),
@@ -3002,10 +3092,16 @@ pub async fn render_agent_status(
         .await
         .map_err(|_| Denial::ServerError)?;
     let run_count = runs.count;
+    let total_tokens = runs.total_tokens;
     let latest_row = runs.latest.as_ref().map(RenderedAgentRun::detail_row);
     let active_row = runs.active.as_ref().map(RenderedAgentRun::detail_row);
-    let status =
-        agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
+    let status = agent_status_to_representation(
+        ticker,
+        active_row.as_ref(),
+        latest_row.as_ref(),
+        run_count,
+        total_tokens,
+    );
     match status {
         None => Ok(serde_json::Value::Null),
         Some(view) => serde_json::to_value(&view).map_err(|_| Denial::ServerError),
@@ -3117,7 +3213,7 @@ pub async fn render_issue_detail(
     let status = render_agent_status(pool, issue, ticker_view).await?;
     let summary = blocker_summary(pool, &issue.id, &issue.workspace_id).await?;
     let is_epic = fetch_is_epic(pool, issue.type_id).await?;
-    let mut map = serde_json::Map::with_capacity(31);
+    let mut map = serde_json::Map::with_capacity(33);
     map.insert(
         "id".to_owned(),
         serde_json::Value::String(issue.id.to_string()),
@@ -3163,6 +3259,10 @@ pub async fn render_issue_detail(
     map.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_owned(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert(
         "agent_executor".to_owned(),
@@ -3214,6 +3314,18 @@ pub async fn render_issue_detail(
     map.insert(
         "has_open_blockers".to_owned(),
         serde_json::Value::Bool(summary.has_open),
+    );
+    // `assigned_runner_detail` last (`IssueDetailSerializer.Meta.fields`,
+    // design §14.1): the shared access helper, null when pod-assigned.
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &sea_conn(pool),
+        issue.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    map.insert(
+        "assigned_runner_detail".to_owned(),
+        assigned_runner_detail.unwrap_or(serde_json::Value::Null),
     );
     Ok(serde_json::Value::Object(map))
 }
@@ -4812,6 +4924,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -4856,6 +4969,7 @@ fn compile_text_predicate(
     };
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -5196,6 +5310,7 @@ pub async fn collection_create(
         workpad: String::new(),
         created_via: validated.created_via.clone(),
         assigned_pod_id: validated.assigned_pod_id,
+        assigned_runner_id: None,
         agent_executor: validated.agent_executor.clone(),
     };
     // The m2m plan resolves pre-save (pure reads of validated input).
@@ -5405,14 +5520,13 @@ async fn ensure_triage_state(
     // `save()`-filled columns (`description=""`, `slug="triage"`,
     // `is_triage=False`) and the crum `created_by`.
     match pidash_services::domain::projects::states::add_triage(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         gate.project_id,
         gate.workspace_id,
         sequence,
         gate.user_id,
         now,
         now,
-        pidash_services::domain::projects::states::TriageText::Quoted,
     )
     .await
     {
@@ -5485,6 +5599,8 @@ fn write_ctx(
 fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
     domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(*actor_id),
         moved_by_run: None,
         now,
@@ -5887,7 +6003,13 @@ async fn validate_issue_create(
         Some(serde_json::Value::String(executor))
             if ["local_runner", "cloud_agent", "managed_runner"].contains(&executor.as_str()) =>
         {
-            normalize_executor_write(Some(executor.clone()))
+            // #2903: deprecated writes translate to local_runner.
+            Some(
+                pidash_types::dispatch::normalize_executor_write(executor)
+                    .expect("choice passes")
+                    .value()
+                    .to_owned(),
+            )
         }
         Some(serde_json::Value::String(executor)) => {
             field_errors.insert(
@@ -6737,6 +6859,8 @@ struct CreatedRows {
     type_id: Option<Uuid>,
     is_epic: bool,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
+    assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -6805,9 +6929,9 @@ async fn render_created_detail(
         .column_as(label_ids_annotation(), "label_ids")
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(JoinType::LeftJoin, il_entity::Relation::Labels.def())
@@ -6832,9 +6956,9 @@ async fn render_created_detail(
         .join(JoinType::LeftJoin, ia_entity2::Relation::Users3.def())
         .join(
             JoinType::LeftJoin,
-            pm_entity::Entity::belongs_to(pidash_db::entity::users::Entity)
-                .from(pm_entity::Column::MemberId)
-                .to(pidash_db::entity::users::Column::Id)
+            pidash_db::entity::users::Entity::belongs_to(pm_entity::Entity)
+                .from(pidash_db::entity::users::Column::Id)
+                .to(pm_entity::Column::MemberId)
                 .into(),
         )
         .group_by(issue_entity::Column::Id)
@@ -6872,6 +6996,13 @@ async fn render_created_detail(
         type_id: created_type_id,
         is_epic: created_is_epic,
         assigned_pod_id: m.assigned_pod_id,
+        assigned_runner_id: m.assigned_runner_id,
+        assigned_runner_detail: crate::app_issues::access::fetch_assigned_runner_detail(
+            &db,
+            m.assigned_runner_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
@@ -6912,7 +7043,7 @@ async fn render_created_detail(
 /// them; ticker/runs/relations are null/empty on a fresh row.
 /// `type_id` and `is_epic` always render (NEWFRONT-984).
 fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_json::Value {
-    let mut issue = serde_json::Map::with_capacity(31);
+    let mut issue = serde_json::Map::with_capacity(33);
     issue.insert("id".to_owned(), uuid_string(&rows.issue_id));
     issue.insert(
         "name".to_owned(),
@@ -6963,6 +7094,10 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     issue.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&rows.assigned_pod_id),
+    );
+    issue.insert(
+        "assigned_runner_id".to_owned(),
+        opt_uuid(&rows.assigned_runner_id),
     );
     issue.insert(
         "agent_executor".to_owned(),
@@ -7017,6 +7152,12 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         "has_open_blockers".to_owned(),
         serde_json::Value::Bool(false),
     );
+    issue.insert(
+        "assigned_runner_detail".to_owned(),
+        rows.assigned_runner_detail
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
+    );
     serde_json::Value::Object(issue)
 }
 
@@ -7069,6 +7210,26 @@ mod tests {
             app_origin(&state).as_deref(),
             Some("https://app.example.invalid")
         );
+    }
+
+    #[test]
+    fn updated_at_predicates_hit_the_issue_updated_column() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let (mut binds, mut next) = (Vec::new(), 1);
+        let sql = compile_predicate(
+            "issue__updated_at__date__gte",
+            &FilterValue::Day(day),
+            &mut binds,
+            &mut next,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
+            .expect("compiles")
+            .expect("known key");
+        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
     }
 
     #[test]

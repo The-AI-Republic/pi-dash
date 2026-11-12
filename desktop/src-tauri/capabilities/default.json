@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-set-title",
     "updater:allow-check",
     "updater:allow-download-and-install",
     "dialog:allow-message",

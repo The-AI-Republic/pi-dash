@@ -11,13 +11,13 @@
 //!
 //! Recorded in `rust-api/fixtures/app_views_search/` (`FX-VIEW-ISSUES.sql`,
 //! the queryset halves of `FX-VIEW-CRUD.json` and `FX-FAV.json`).
-//! Builders return SQL text with PostgreSQL `$N` binds; execution owns to
-//! the `db` layer (`sqlx::query` at runtime — no `query!` macros, there is
-//! no build-time database, same as the merged `db` queries precedent).
-//! The services crate holds no `sea-query` dependency, so — like the D-26
-//! `OrderSpec` precedent in `crate::app_issues::ordering` — dynamic clauses
-//! arrive as caller-supplied fragments and ordering reuses
-//! [`crate::app_issues::ordering::order_sql`] verbatim; the F-04 filter
+//! The view-list querysets (`workspace_view_list_stmt`,
+//! `project_view_list_stmt`) are sea-query statements, executed through
+//! SeaORM by the `api` layer; the remaining builders return SQL text with
+//! PostgreSQL `$N` binds for their `api` composition boundaries (the
+//! view-issues list executes through the `app_issues` helpers).
+//! Dynamic clauses otherwise arrive as caller-supplied fragments and ordering
+//! reuses [`crate::app_issues::ordering::order_sql`] verbatim; the F-04 filter
 //! kernels (`pidash_db::{filter, filterset, issue_filters}`) and the F-07
 //! paginator kernel (`pidash_api::paginator`) likewise apply verbatim and
 //! are referenced, never re-ported.
@@ -71,6 +71,7 @@
 
 use crate::app_issues::ordering::{order_sql, OrderSpec};
 use pidash_db::app_views_search::models::{issue_ref, issue_view, user_favorite};
+use sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement};
 
 // ---------------------------------------------------------------------------
 // Shared vocabulary
@@ -162,13 +163,34 @@ pub const LIST_PIPELINE_STAGES: &[&str] = &[
 ];
 
 /// `SELECT` every `issue_views` column, table-qualified, in Django `_meta`
-/// order (`issue_view::COLUMNS`).
-fn select_view_columns(alias: &str) -> String {
-    issue_view::COLUMNS
-        .iter()
-        .map(|col| format!("{alias}.{col}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+/// order (`issue_view::COLUMNS`), under the `v` alias.
+fn select_view_columns(stmt: &mut SelectStatement) {
+    for column in issue_view::COLUMNS {
+        stmt.expr(Expr::col((Alias::new("v"), Alias::new(*column))));
+    }
+}
+
+/// Resolved `ORDER BY` for the workspace view list: the bare column name
+/// (one of `issue_view::COLUMNS` or the handler-mapped FK names) plus the
+/// sort direction. The statement applies it as `v.<column> DESC/ASC`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewOrder {
+    pub column: String,
+    pub descending: bool,
+}
+
+impl ViewOrder {
+    fn apply(self, stmt: &mut SelectStatement) {
+        let direction = if self.descending {
+            Order::Desc
+        } else {
+            Order::Asc
+        };
+        stmt.order_by(
+            (Alias::new("v"), Alias::new(self.column.as_str())),
+            direction,
+        );
+    }
 }
 
 /// `Issue.issue_objects` scope (`db/models/issue.py:95-104`) as a `WHERE`
@@ -197,26 +219,61 @@ pub fn issue_manager_scope(issue_alias: &str, project_alias: &str) -> String {
 /// `.filter(Q(owned_by=user) | Q(access=1))`
 /// `.order_by(GET order_by default -created_at).distinct()`.
 ///
-/// Binds: `$1` workspace slug, `$2` user id. `order_by_sql` is the raw
-/// `ORDER BY` fragment — Django splices the `order_by` query param
-/// verbatim (default `-created_at`); validation owns to the handler.
+/// `order` is the handler-validated ordering (Django splices the `order_by`
+/// query param verbatim, default `-created_at`); the retrieve path passes
+/// `None` (the pk constraint replaces the ordering). `guest_scoped` applies
+/// the guest `owned_by` narrowing; `pk` adds the retrieve pk constraint.
 /// `filter_queryset` is a pass-through here: the viewset declares no
 /// `filter_backends` / `filterset_class`, so the default backends filter
 /// on `filterset_fields = []` and change nothing.
-pub fn workspace_view_list_sql(order_by_sql: &str) -> String {
-    format!(
-        "SELECT DISTINCT {cols} FROM {view} AS v \
-         JOIN {ws} AS w ON w.id = v.workspace_id AND w.deleted_at IS NULL \
-         WHERE w.slug = ($1) \
-         AND v.project_id IS NULL \
-         AND (v.owned_by_id = ($2) OR v.access = {public}) \
-         AND v.deleted_at IS NULL \
-         ORDER BY {order_by_sql}",
-        cols = select_view_columns("v"),
-        view = ISSUE_VIEW_TABLE,
-        ws = WORKSPACE_TABLE,
-        public = VIEW_ACCESS_PUBLIC,
-    )
+pub fn workspace_view_list_stmt(
+    slug: &str,
+    user_id: uuid::Uuid,
+    order: Option<ViewOrder>,
+    guest_scoped: bool,
+    pk: Option<uuid::Uuid>,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    select_view_columns(&mut stmt);
+    stmt.distinct()
+        .from_as(ISSUE_VIEW_TABLE, Alias::new("v"))
+        .join_as(
+            JoinType::InnerJoin,
+            WORKSPACE_TABLE,
+            Alias::new("w"),
+            Expr::col((Alias::new("w"), Alias::new("id")))
+                .equals((Alias::new("v"), Alias::new("workspace_id")))
+                .and(Expr::col((Alias::new("w"), Alias::new("deleted_at"))).is_null()),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((Alias::new("w"), Alias::new("slug"))).eq(Expr::val(slug)))
+                .add(Expr::col((Alias::new("v"), Alias::new("project_id"))).is_null())
+                .add(
+                    Condition::any()
+                        .add(
+                            Expr::col((Alias::new("v"), Alias::new("owned_by_id")))
+                                .eq(Expr::val(user_id)),
+                        )
+                        .add(
+                            Expr::col((Alias::new("v"), Alias::new("access")))
+                                .eq(Expr::val(VIEW_ACCESS_PUBLIC)),
+                        ),
+                )
+                .add(Expr::col((Alias::new("v"), Alias::new("deleted_at"))).is_null()),
+        );
+    if guest_scoped {
+        stmt.and_where(
+            Expr::col((Alias::new("v"), Alias::new("owned_by_id"))).eq(Expr::val(user_id)),
+        );
+    }
+    if let Some(pk) = pk {
+        stmt.and_where(Expr::col((Alias::new("v"), Alias::new("id"))).eq(Expr::val(pk)));
+    }
+    if let Some(order) = order {
+        order.apply(&mut stmt);
+    }
+    stmt
 }
 
 // ---------------------------------------------------------------------------
@@ -230,40 +287,111 @@ pub fn workspace_view_list_sql(order_by_sql: &str) -> String {
 /// already fetches the filtered row), `Exists(UserFavorite …)` as
 /// `is_favorite`, `.order_by("-is_favorite", "name").distinct()`.
 ///
-/// Binds: `$1` workspace slug, `$2` project id, `$3` user id.
-pub fn project_view_list_sql() -> String {
-    format!(
-        "SELECT DISTINCT {cols}, \
-         EXISTS(SELECT 1 FROM {fav} AS uf \
-          JOIN {ws} AS fws ON fws.id = uf.workspace_id AND fws.deleted_at IS NULL \
-          WHERE uf.user_id = ($3) \
-            AND uf.entity_identifier = v.id \
-            AND uf.entity_type = '{entity}' \
-            AND uf.project_id = ($2) \
-            AND fws.slug = ($1) \
-            AND uf.deleted_at IS NULL) AS is_favorite \
-         FROM {view} AS v \
-         JOIN {ws} AS w ON w.id = v.workspace_id AND w.deleted_at IS NULL \
-         JOIN {proj} AS p ON p.id = v.project_id AND p.deleted_at IS NULL \
-         JOIN {pm} AS pm ON pm.project_id = v.project_id \
-            AND pm.member_id = ($3) \
-            AND pm.is_active \
-            AND pm.deleted_at IS NULL \
-         WHERE w.slug = ($1) \
-         AND v.project_id = ($2) \
-         AND p.archived_at IS NULL \
-         AND (v.owned_by_id = ($3) OR v.access = {public}) \
-         AND v.deleted_at IS NULL \
-         ORDER BY is_favorite DESC, v.name ASC",
-        cols = select_view_columns("v"),
-        fav = FAVORITE_TABLE,
-        ws = WORKSPACE_TABLE,
-        entity = ENTITY_TYPE_VIEW,
-        view = ISSUE_VIEW_TABLE,
-        proj = PROJECT_TABLE,
-        pm = PROJECT_MEMBER_TABLE,
-        public = VIEW_ACCESS_PUBLIC,
-    )
+/// `guest_scoped` applies the guest `owned_by` narrowing; `ordered` applies
+/// the fixed list ordering; `pk` adds the retrieve pk constraint.
+pub fn project_view_list_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    guest_scoped: bool,
+    ordered: bool,
+    pk: Option<uuid::Uuid>,
+) -> SelectStatement {
+    let mut favorite = Query::select();
+    favorite
+        .expr(Expr::val(1))
+        .from_as(FAVORITE_TABLE, Alias::new("uf"))
+        .join_as(
+            JoinType::InnerJoin,
+            WORKSPACE_TABLE,
+            Alias::new("fws"),
+            Expr::col((Alias::new("fws"), Alias::new("id")))
+                .equals((Alias::new("uf"), Alias::new("workspace_id")))
+                .and(Expr::col((Alias::new("fws"), Alias::new("deleted_at"))).is_null()),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((Alias::new("uf"), Alias::new("user_id"))).eq(Expr::val(user_id)))
+                .add(
+                    Expr::col((Alias::new("uf"), Alias::new("entity_identifier")))
+                        .equals((Alias::new("v"), Alias::new("id"))),
+                )
+                .add(
+                    Expr::col((Alias::new("uf"), Alias::new("entity_type")))
+                        .eq(Expr::val(ENTITY_TYPE_VIEW)),
+                )
+                .add(
+                    Expr::col((Alias::new("uf"), Alias::new("project_id")))
+                        .eq(Expr::val(project_id)),
+                )
+                .add(Expr::col((Alias::new("fws"), Alias::new("slug"))).eq(Expr::val(slug)))
+                .add(Expr::col((Alias::new("uf"), Alias::new("deleted_at"))).is_null()),
+        );
+    let mut stmt = Query::select();
+    select_view_columns(&mut stmt);
+    stmt.expr_as(Expr::exists(favorite), Alias::new("is_favorite"))
+        .distinct()
+        .from_as(ISSUE_VIEW_TABLE, Alias::new("v"))
+        .join_as(
+            JoinType::InnerJoin,
+            WORKSPACE_TABLE,
+            Alias::new("w"),
+            Expr::col((Alias::new("w"), Alias::new("id")))
+                .equals((Alias::new("v"), Alias::new("workspace_id")))
+                .and(Expr::col((Alias::new("w"), Alias::new("deleted_at"))).is_null()),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            PROJECT_TABLE,
+            Alias::new("p"),
+            Expr::col((Alias::new("p"), Alias::new("id")))
+                .equals((Alias::new("v"), Alias::new("project_id")))
+                .and(Expr::col((Alias::new("p"), Alias::new("deleted_at"))).is_null()),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            PROJECT_MEMBER_TABLE,
+            Alias::new("pm"),
+            Expr::col((Alias::new("pm"), Alias::new("project_id")))
+                .equals((Alias::new("v"), Alias::new("project_id")))
+                .and(Expr::col((Alias::new("pm"), Alias::new("member_id"))).eq(Expr::val(user_id)))
+                .and(Expr::col((Alias::new("pm"), Alias::new("is_active"))).eq(Expr::val(true)))
+                .and(Expr::col((Alias::new("pm"), Alias::new("deleted_at"))).is_null()),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((Alias::new("w"), Alias::new("slug"))).eq(Expr::val(slug)))
+                .add(
+                    Expr::col((Alias::new("v"), Alias::new("project_id")))
+                        .eq(Expr::val(project_id)),
+                )
+                .add(Expr::col((Alias::new("p"), Alias::new("archived_at"))).is_null())
+                .add(
+                    Condition::any()
+                        .add(
+                            Expr::col((Alias::new("v"), Alias::new("owned_by_id")))
+                                .eq(Expr::val(user_id)),
+                        )
+                        .add(
+                            Expr::col((Alias::new("v"), Alias::new("access")))
+                                .eq(Expr::val(VIEW_ACCESS_PUBLIC)),
+                        ),
+                )
+                .add(Expr::col((Alias::new("v"), Alias::new("deleted_at"))).is_null()),
+        );
+    if guest_scoped {
+        stmt.and_where(
+            Expr::col((Alias::new("v"), Alias::new("owned_by_id"))).eq(Expr::val(user_id)),
+        );
+    }
+    if let Some(pk) = pk {
+        stmt.and_where(Expr::col((Alias::new("v"), Alias::new("id"))).eq(Expr::val(pk)));
+    }
+    if ordered {
+        stmt.order_by(Alias::new("is_favorite"), Order::Desc)
+            .order_by((Alias::new("v"), Alias::new("name")), Order::Asc);
+    }
+    stmt
 }
 
 // ---------------------------------------------------------------------------
@@ -546,21 +674,32 @@ mod tests {
     // (base.py:60-69): tenant + project-null + creator-or-public.
     #[test]
     fn workspace_queryset_scopes_tenant_creator_and_public() {
-        let sql = workspace_view_list_sql("-created_at");
-        assert!(sql.contains("FROM issue_views AS v"), "{sql}");
-        assert!(sql.contains("w.slug = ($1)"), "{sql}");
-        assert!(sql.contains("v.project_id IS NULL"), "{sql}");
+        let stmt = workspace_view_list_stmt(
+            "ws",
+            uuid::Uuid::nil(),
+            Some(ViewOrder {
+                column: "created_at".to_owned(),
+                descending: true,
+            }),
+            false,
+            None,
+        );
+        let sql = sea_orm::DbBackend::Postgres.build(&stmt).sql.to_lowercase();
+        assert!(sql.contains("from \"issue_views\""), "{sql}");
+        assert!(sql.contains("\"w\".\"slug\" = "), "{sql}");
+        assert!(sql.contains("\"v\".\"project_id\" is null"), "{sql}");
         assert!(
-            sql.contains("v.owned_by_id = ($2) OR v.access = 1"),
+            sql.contains("\"v\".\"owned_by_id\" = ") && sql.contains("or \"v\".\"access\""),
             "{sql}"
         );
-        assert!(sql.contains("v.deleted_at IS NULL"), "{sql}");
-        assert!(sql.contains("w.deleted_at IS NULL"), "{sql}");
-        assert!(sql.starts_with("SELECT DISTINCT"), "{sql}");
-        assert!(sql.ends_with("ORDER BY -created_at"), "{sql}");
+        assert!(sql.contains("\"v\".\"deleted_at\" is null"), "{sql}");
+        assert!(sql.contains("\"w\".\"deleted_at\" is null"), "{sql}");
+        assert!(sql.starts_with("select distinct"), "{sql}");
+        assert!(sql.ends_with("order by \"v\".\"created_at\" desc"), "{sql}");
+        assert!(sql.contains("join \"workspaces\""), "{sql}");
         // Full view column list, `_meta` order.
         for col in issue_view::COLUMNS {
-            assert!(sql.contains(&format!("v.{col}")), "{sql}");
+            assert!(sql.contains(&format!("\"v\".\"{col}\"")), "{sql}");
         }
     }
 
@@ -568,24 +707,32 @@ mod tests {
     // membership + not-archived + creator-or-public + is_favorite first.
     #[test]
     fn project_queryset_scopes_membership_and_favorites_first() {
-        let sql = project_view_list_sql();
-        assert!(sql.contains("w.slug = ($1)"), "{sql}");
-        assert!(sql.contains("v.project_id = ($2)"), "{sql}");
-        assert!(sql.contains("pm.member_id = ($3)"), "{sql}");
-        assert!(sql.contains("pm.is_active"), "{sql}");
-        assert!(sql.contains("p.archived_at IS NULL"), "{sql}");
+        let stmt = project_view_list_stmt(
+            "ws",
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            false,
+            true,
+            None,
+        );
+        let sql = sea_orm::DbBackend::Postgres.build(&stmt).sql.to_lowercase();
+        assert!(sql.contains("\"w\".\"slug\" = "), "{sql}");
+        assert!(sql.contains("\"v\".\"project_id\" = "), "{sql}");
+        assert!(sql.contains("\"pm\".\"member_id\" = "), "{sql}");
+        assert!(sql.contains("\"pm\".\"is_active\""), "{sql}");
+        assert!(sql.contains("\"p\".\"archived_at\" is null"), "{sql}");
         assert!(
-            sql.contains("v.owned_by_id = ($3) OR v.access = 1"),
+            sql.contains("\"v\".\"owned_by_id\" = ") && sql.contains("or \"v\".\"access\""),
             "{sql}"
         );
-        assert!(sql.contains("uf.entity_identifier = v.id"), "{sql}");
-        assert!(sql.contains("uf.entity_type = 'view'"), "{sql}");
-        assert!(sql.contains("uf.project_id = ($2)"), "{sql}");
-        assert!(sql.contains("uf.user_id = ($3)"), "{sql}");
+        assert!(sql.contains("exists("), "{sql}");
         assert!(
-            sql.contains("ORDER BY is_favorite DESC, v.name ASC"),
+            sql.contains("\"uf\".\"entity_identifier\" = \"v\".\"id\""),
             "{sql}"
         );
+        assert!(sql.contains("join \"project_members\""), "{sql}");
+        assert!(sql.contains("join \"projects\""), "{sql}");
+        assert!(sql.contains("order by \"is_favorite\" desc"), "{sql}");
     }
 
     // FX-FAV.json `bugs.B4`: every list evaluation raises FieldError.

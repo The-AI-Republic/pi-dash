@@ -185,12 +185,14 @@ pub trait AssetStore: Send + Sync {
         &self,
         asset_id: Uuid,
     ) -> impl std::future::Future<Output = Result<Option<String>, String>> + Send;
-    /// `save(update_fields=["storage_metadata"])` (+ the `auto_now` bump).
+    /// `save(update_fields=["storage_metadata"])`: the named column
+    /// only — `update_fields` restricts the UPDATE to it, so the
+    /// `auto_now` `updated_at` (and `updated_by`) are not written
+    /// (PIDASHCONV-1731).
     fn save_storage_metadata(
         &self,
         asset_id: Uuid,
         metadata: Option<Value>,
-        now: DateTime<Utc>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
     /// `Page/Issue.objects.get(id)`, live rows only.
     fn entity(
@@ -479,7 +481,7 @@ impl LiveS3ObjectStore {
 /// `exponential`/`rand`/`growth_factor 2`). Measured against boto3
 /// 1.34.96 / botocore 1.34.162; the stub contract suite
 /// (`tasks_cleanup/test_s3_retry.py`) pins the attempt counts.
-const S3_MAX_ATTEMPTS: u32 = 5;
+pub(crate) const S3_MAX_ATTEMPTS: u32 = 5;
 
 /// One HEAD attempt's outcome. `Refused` is the swallowed `ClientError`
 /// (stored as NULL); `Transport` escapes to the task's broad `except`
@@ -528,7 +530,7 @@ fn s3_retryable_code(code: &str) -> bool {
 }
 
 /// The legacy retry decision for one service answer.
-fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
+pub(crate) fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
     if s3_retryable_status(status) {
         return true;
     }
@@ -536,7 +538,7 @@ fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
 }
 
 /// Extract the `<Code>` from an S3 error body, if any.
-fn s3_error_code(body: &str) -> Option<&str> {
+pub(crate) fn s3_error_code(body: &str) -> Option<&str> {
     let (_, after) = body.split_once("<Code>")?;
     let (code, _) = after.split_once("</Code>")?;
     let code = code.trim();
@@ -576,7 +578,7 @@ fn retry_backoff(failed_attempt: u32, rand01: f64) -> std::time::Duration {
 }
 
 /// Sleep the legacy backoff after failed attempt `n` (1-based).
-async fn sleep_backoff(failed_attempt: u32) {
+pub(crate) async fn sleep_backoff(failed_attempt: u32) {
     let rand01 = rand::random_range(0.0..1.0);
     tokio::time::sleep(retry_backoff(failed_attempt, rand01)).await;
 }
@@ -885,12 +887,7 @@ pub async fn run_sweep<S: AssetStore>(
 /// UUID text (`ValidationError` → the broad `except`), an unbuildable
 /// client, a refused head (stored as `NULL`, like the `ClientError`), a
 /// failed head (the save is skipped, like the `BotoCoreError`).
-pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
-    store: &S,
-    s3: &O,
-    asset_id_raw: &str,
-    now: DateTime<Utc>,
-) {
+pub async fn run_metadata<S: AssetStore, O: ObjectStore>(store: &S, s3: &O, asset_id_raw: &str) {
     let asset_id = match Uuid::parse_str(asset_id_raw) {
         Ok(id) => id,
         Err(_) => {
@@ -920,7 +917,7 @@ pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
             return;
         }
     };
-    if let Err(error) = store.save_storage_metadata(asset_id, metadata, now).await {
+    if let Err(error) = store.save_storage_metadata(asset_id, metadata).await {
         tracing::warn!(%asset_id, %error, "metadata save failed: silent skip");
     }
 }
@@ -1180,17 +1177,12 @@ impl AssetStore for PgAssetStore {
         &self,
         asset_id: Uuid,
         metadata: Option<Value>,
-        now: DateTime<Utc>,
     ) -> Result<(), String> {
         let conn = pidash_db::pool::sea_orm_connection(&self.pool);
         file_assets::Entity::update_many()
             .col_expr(
                 file_assets::Column::StorageMetadata,
                 sea_orm::sea_query::Expr::value(metadata),
-            )
-            .col_expr(
-                file_assets::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now),
             )
             .filter(file_assets::Column::Id.eq(asset_id))
             .exec(&conn)
@@ -1505,7 +1497,7 @@ pub fn register_metadata<S: ObjectStore + 'static>(
                 .unwrap_or_default()
                 .to_string();
             let store = PgAssetStore::new(pool);
-            run_metadata(&store, s3.as_ref(), &asset_id, Utc::now()).await;
+            run_metadata(&store, s3.as_ref(), &asset_id).await;
             Ok(Verdict::Ack)
         })
     });
@@ -1731,12 +1723,10 @@ mod tests {
             &self,
             asset_id: Uuid,
             metadata: Option<Value>,
-            now: DateTime<Utc>,
         ) -> Result<(), String> {
             let mut state = self.state.lock().unwrap();
             let asset = state.assets.get_mut(&asset_id).ok_or("missing")?;
             asset.storage = metadata;
-            asset.updated_at = now;
             state.saves.push(format!("metadata:{asset_id}"));
             Ok(())
         }
@@ -2040,7 +2030,10 @@ mod tests {
                 uploaded: false,
                 deleted_at: None,
                 created_at: now,
-                updated_at: now,
+                // Distinct from the run time so the save's updated_at
+                // behaviour is observable (`save(update_fields)` never
+                // bumps it; PIDASHCONV-1731).
+                updated_at: utc(2020, 1, 1),
                 created_by: None,
                 workspace_id: ws,
                 user_id: None,
@@ -2064,22 +2057,26 @@ mod tests {
             down: false,
             client_ok: true,
         };
-        run_metadata(&store, &s3, &id.to_string(), now).await;
+        run_metadata(&store, &s3, &id.to_string()).await;
         {
             let state = store.state.lock().unwrap();
             assert_eq!(state.assets[&id].storage, Some(head.to_json()));
-            assert_eq!(state.assets[&id].updated_at, now);
+            assert_eq!(state.assets[&id].updated_at, utc(2020, 1, 1));
         }
 
         // Unknown head answers None → stored as NULL.
         let empty = FakeS3::up();
-        run_metadata(&store, &empty, &id.to_string(), now).await;
+        run_metadata(&store, &empty, &id.to_string()).await;
         assert_eq!(store.state.lock().unwrap().assets[&id].storage, None);
+        assert_eq!(
+            store.state.lock().unwrap().assets[&id].updated_at,
+            utc(2020, 1, 1)
+        );
 
         // Missing rows and bad UUIDs are silent: no further saves.
         let saves = store.state.lock().unwrap().saves.len();
-        run_metadata(&store, &empty, &Uuid::new_v4().to_string(), now).await;
-        run_metadata(&store, &empty, "not-a-uuid", now).await;
+        run_metadata(&store, &empty, &Uuid::new_v4().to_string()).await;
+        run_metadata(&store, &empty, "not-a-uuid").await;
         assert_eq!(store.state.lock().unwrap().saves.len(), saves);
     }
 
@@ -2118,7 +2115,7 @@ mod tests {
             down: true,
             ..FakeS3::up()
         };
-        run_metadata(&store, &down, &id.to_string(), now).await;
+        run_metadata(&store, &down, &id.to_string()).await;
         let state = store.state.lock().unwrap();
         assert_eq!(state.assets[&id].storage, Some(json!({})));
         assert!(state.saves.is_empty());
@@ -2157,7 +2154,7 @@ mod tests {
             client_ok: false,
             ..FakeS3::up()
         };
-        run_metadata(&store, &unbuilt, &id.to_string(), now).await;
+        run_metadata(&store, &unbuilt, &id.to_string()).await;
         let state = store.state.lock().unwrap();
         assert_eq!(state.assets[&id].storage, Some(json!({})));
         assert!(state.saves.is_empty());

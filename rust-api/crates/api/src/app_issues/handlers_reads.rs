@@ -800,7 +800,7 @@ async fn fetch_or_create_property(
     let rich = Value::Object(Map::new());
     let preferences = default_preferences();
     pidash_services::domain::projects::members::get_or_create_property(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::members::NewMemberProperty {
             workspace_id,
             project_id: gate.project_id,
@@ -1807,7 +1807,8 @@ async fn render_full(
     let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (latest, active, run_count) = (runs.latest, runs.active, runs.count);
+    let (latest, active, run_count, run_total_tokens) =
+        (runs.latest, runs.active, runs.count, runs.total_tokens);
     let blockers = fetch_relations_summary(pool, issue_id).await?;
     let ticker_row = decode_ticker(row)?;
     let policy = ProjectClockPolicy {
@@ -1859,6 +1860,7 @@ async fn render_full(
         type_id: get_str(row, "i_type_id"),
         is_epic,
         assigned_pod_id: get_str(row, "i_assigned_pod_id"),
+        assigned_runner_id: get_str(row, "i_assigned_runner_id"),
         agent_executor: get_str(row, "i_agent_executor"),
         module_ids: Some(str_refs(&module_ids)),
         label_ids: Some(str_refs(&label_ids)),
@@ -1874,6 +1876,14 @@ async fn render_full(
         archived_at: get_str(row, "i_archived_at"),
         is_synced,
     };
+    let runner_uuid = get_str(row, "i_assigned_runner_id")
+        .map(|raw| raw.parse::<uuid::Uuid>())
+        .transpose()
+        .map_err(|_| Denial::ServerError)?;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let assigned_runner_detail = super::access::fetch_assigned_runner_detail(&orm, runner_uuid)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let detail = IssueDetailRow {
         base,
         description_html: req_str(row, "i_description_html")?,
@@ -1883,7 +1893,9 @@ async fn render_full(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
+        assigned_runner_detail,
     };
     let view = issue_detail_to_representation(&detail);
     let body = serde_json::to_string(&view).map_err(|_| Denial::ServerError)?;
@@ -2555,6 +2567,7 @@ async fn render_post_row(
         type_id: get_str(row, "type_id"),
         is_epic,
         assigned_pod_id: get_str(row, "assigned_pod_id"),
+        assigned_runner_id: get_str(row, "assigned_runner_id"),
         agent_executor: get_str(row, "agent_executor"),
         module_ids: None,
         label_ids: None,

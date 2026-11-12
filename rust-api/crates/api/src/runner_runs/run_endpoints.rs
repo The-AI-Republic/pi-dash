@@ -63,6 +63,7 @@ use pidash_services::domain::comments as comment_domain;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
+use pidash_services::runner_sessions::live_drains;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
@@ -388,7 +389,7 @@ pub async fn resolve_run(
     })
 }
 
-type LockedRunRow = (Uuid, Option<Uuid>, Uuid, Option<Uuid>, String);
+type LockedRunRow = (Uuid, Option<Uuid>, Uuid, Option<Uuid>, String, String);
 
 /// The `_lock_non_terminal` fetch (`run_endpoints.py:93-99`): the
 /// locked row's identity, status, and the requeue facts.
@@ -398,6 +399,7 @@ pub struct LockedRun {
     pub pod_id: Option<Uuid>,
     pub parent_run_id: Option<Uuid>,
     pub status: String,
+    pub pin_kind: String,
 }
 
 /// `_lock_non_terminal`: re-read under `FOR UPDATE`, answering
@@ -416,6 +418,7 @@ pub async fn lock_non_terminal(
             Column::PodId,
             Column::ParentRunId,
             Column::Status,
+            Column::PinKind,
         ])
         .filter(Column::Id.eq(run_id))
         .limit(1)
@@ -424,7 +427,7 @@ pub async fn lock_non_terminal(
         .one(&TxConn::new(tx))
         .await
         .map_err(|_| server_error())?;
-    let Some((id, runner_id, pod_id, parent_run_id, status)) = row else {
+    let Some((id, runner_id, pod_id, parent_run_id, status, pin_kind)) = row else {
         return Err(json_response(
             StatusCode::NOT_FOUND,
             r#"{"error":"run_not_found"}"#.to_owned(),
@@ -442,6 +445,7 @@ pub async fn lock_non_terminal(
         pod_id: Some(pod_id),
         parent_run_id,
         status,
+        pin_kind,
     })
 }
 
@@ -787,6 +791,7 @@ pub async fn execute_requeue(
         pod_id: locked.pod_id,
         parent_run_id: locked.parent_run_id,
         parent_thread_id,
+        pin_kind: locked.pin_kind.clone(),
     });
     // The parent thread clears *before* the run row, in the same
     // transaction (`run_lifecycle.py:279-290`).
@@ -800,9 +805,16 @@ pub async fn execute_requeue(
             return Err(server_error());
         }
     }
-    let updated = lifecycle_kernel::requeue_update(&conn, locked.id)
-        .await
-        .map_err(|_| server_error())?;
+    // A dedicated pin is kept (§9.3); a locality pin is dropped.
+    let updated = if plan.keep_pin {
+        lifecycle_kernel::requeue_update_keep_pin(&conn, locked.id)
+            .await
+            .map_err(|_| server_error())?
+    } else {
+        lifecycle_kernel::requeue_update(&conn, locked.id)
+            .await
+            .map_err(|_| server_error())?
+    };
     if updated == 0 {
         return Err(server_error());
     }
@@ -1004,6 +1016,12 @@ pub async fn execute_terminal_effects(
                 .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
         } else {
             if let Some(runner_id) = capacity.runner_id {
+                // `release_runner_if_idle` (PDASHOSS01-231): every
+                // finalization path frees a stale `busy` runner before
+                // the drains, or they can never assign it.
+                live_drains::release_runner_if_idle(&orm_pool, runner_id)
+                    .await
+                    .map_err(orm_err)?;
                 ports
                     .drain_for_runner_by_id(runner_id)
                     .await

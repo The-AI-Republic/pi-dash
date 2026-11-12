@@ -562,9 +562,17 @@ pub(crate) async fn enqueue_task(
 /// detail"}` (D-28 precedent for `<uuid:>` path params).
 pub(crate) const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 
-pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
-    raw.parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+/// Parse a `<uuid:...>` path segment the way Django's converter routes it:
+/// only the canonical lowercase hyphenated spelling reaches the view;
+/// anything else is the resolver 404 before auth (`UUIDConverter`
+/// matches `[0-9a-f]{8}-…` lowercase-only, PIDASHCONV-1713).
+pub(crate) fn parse_uuid_path(raw: &str) -> Result<uuid::Uuid, Denial> {
+    match crate::uuid_path::classify_uuid_segment(raw) {
+        crate::uuid_path::UuidSegment::Canonical(id) => Ok(id),
+        crate::uuid_path::UuidSegment::NonCanonical | crate::uuid_path::UuidSegment::Garbage => {
+            Err(Denial::PageNotFound)
+        }
+    }
 }
 
 /// The authenticated 403 of the `permission_classes` entries
@@ -4315,14 +4323,14 @@ pub async fn create_theme(
 }
 
 /// Fetch one slug-scoped theme (`get_object`): miss renders DRF's
-/// `NotFound`, a malformed `pk` the `ValidationError` 400.
+/// `NotFound`. The `pk` is already classified at the route boundary
+/// (PIDASHCONV-1713), so a malformed segment never reaches here.
 #[allow(clippy::result_large_err)]
 async fn get_theme_object(
     pool: &sqlx::PgPool,
     slug: &str,
-    pk: &str,
+    theme_id: uuid::Uuid,
 ) -> Result<ThemeRowTuple, Response> {
-    let theme_id = parse_uuid_or_invalid(pk).map_err(|denial| denial.into_response())?;
     let rows = fetch_theme_rows(pool, slug, Some(theme_id))
         .await
         .map_err(|denial| denial.into_response())?;
@@ -4337,6 +4345,8 @@ pub async fn retrieve_theme(
     Path((slug, pk)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let theme_id = parse_uuid_path(&pk)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(
@@ -4346,7 +4356,7 @@ pub async fn retrieve_theme(
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
         return Ok(response);
     }
-    let tuple = match get_theme_object(&pool, &slug, &pk).await {
+    let tuple = match get_theme_object(&pool, &slug, theme_id).await {
         Ok(tuple) => tuple,
         Err(response) => return Ok(response),
     };
@@ -4364,6 +4374,8 @@ pub async fn partial_update_theme(
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let theme_id = parse_uuid_path(&pk)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(
@@ -4381,7 +4393,7 @@ pub async fn partial_update_theme(
         let scalar = input.json_scalar().clone();
         return Ok(non_object_body_response(&scalar));
     }
-    let mut tuple = match get_theme_object(&pool, &slug, &pk).await {
+    let mut tuple = match get_theme_object(&pool, &slug, theme_id).await {
         Ok(tuple) => tuple,
         Err(response) => return Ok(response),
     };
@@ -4453,6 +4465,8 @@ pub async fn destroy_theme(
     Path((slug, pk)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let theme_id = parse_uuid_path(&pk)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(
@@ -4462,7 +4476,7 @@ pub async fn destroy_theme(
     if let Err(response) = check_class_admin(&pool, &slug, &user_id).await {
         return Ok(response);
     }
-    let tuple = match get_theme_object(&pool, &slug, &pk).await {
+    let tuple = match get_theme_object(&pool, &slug, theme_id).await {
         Ok(tuple) => tuple,
         Err(response) => return Ok(response),
     };
@@ -4495,6 +4509,8 @@ pub async fn export_activity(
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth.
+    let target_id = parse_uuid_path(&user_id_text)?;
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
     debug_assert!(matches!(*gate_for_export(), gates::Gate::ClassEntity));
@@ -4529,7 +4545,6 @@ pub async fn export_activity(
     let Some(date) = parse_export_date(date_text) else {
         return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned()));
     };
-    let target_id = parse_uuid_or_invalid(&user_id_text)?;
     let zone = actor_timezone(&pool, &user_id).await?;
     let zone_name = zone.name().to_owned();
     let sea_rows = export_select(&slug, user_id, target_id, &zone_name, date)
@@ -4726,6 +4741,30 @@ mod tests {
             EXPORT_PATH,
             "/api/workspaces/{slug}/user-activity/{user_id}/export/"
         );
+    }
+
+    #[test]
+    fn uuid_spelling_follows_the_converter() {
+        // PIDASHCONV-1713: only the canonical lowercase hyphenated spelling
+        // routes; uppercase/simple/braced/urn/garbage 404 at resolution.
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert_eq!(
+            parse_uuid_path(canonical).unwrap(),
+            uuid::Uuid::parse_str(canonical).unwrap()
+        );
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "xyz",
+            "",
+        ] {
+            assert!(
+                matches!(parse_uuid_path(raw), Err(Denial::PageNotFound)),
+                "{raw}"
+            );
+        }
     }
 
     // -- gate rows + outcomes ------------------------------------------------

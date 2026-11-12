@@ -4,7 +4,7 @@
 //! from the modules the split issues shipped: the agent loop
 //! ([`super::agent`], 863 phase 6), the `ModelMessage` codec
 //! ([`super::history`], 1110), provider streaming ([`super::streaming`],
-//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 17 local
+//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 18 local
 //! tools ([`super::tools_local`], 1113), plus the D-11 model runtime in the
 //! jobs crate (`Lane`, `ProviderTable`, `WireTool`) and the ported decision
 //! surfaces in `pidash_services` (BYOK gates, key cache, MCP planning,
@@ -337,7 +337,7 @@ impl McpLeg {
     }
 }
 
-/// One turn's tool boundary: the 17 local function tools (1113's schemas
+/// One turn's tool boundary: the 18 local function tools (1113's schemas
 /// and executors) followed by the user's enabled MCP toolsets (1112's
 /// resilient sessions), in the registration order the captures pin
 /// (`tool_local`/`tool_mcp`: local functions in `@assistant.tool` import
@@ -934,6 +934,84 @@ impl LiveTurnSeam {
         }
     }
 
+    /// Record a turn's resolved model so `open_stream` can run it.
+    ///
+    /// `resolve_model` calls this with the BYOK lane it resolves. It is
+    /// public for a seam that wraps this one and resolves the model itself
+    /// (the hosted build routes OpenHub and BYOK through its own provider
+    /// code): that seam resolves, then hands the finished lane here, and
+    /// every later step (`install_toolsets`, `open_stream`, the terminal
+    /// writes) runs on this seam unchanged. The lane carries the decrypted
+    /// credential; the record is reclaimed when the turn's stream drops or
+    /// `open_stream` returns without one.
+    pub fn prepare_turn(
+        &self,
+        turn_id: Uuid,
+        lane: Lane,
+        model_label: String,
+    ) -> Result<(), SeamError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|error| SeamError(error.to_string()))?;
+        runs.insert(
+            turn_id,
+            PreparedTurn {
+                lane,
+                model_label,
+                tools: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Attach a prepared turn's toolset: the local Pi Dash tools plus one
+    /// MCP leg per session. Returns the handles `runtime_failures` reads
+    /// (`<turn id>|<server name>`), or none when the turn has no prepared
+    /// record (its model was never resolved).
+    ///
+    /// `resolve_toolsets` calls this with the sessions it builds from the
+    /// user's enabled MCP servers. It is public for the same wrapping seam
+    /// as [`Self::prepare_turn`], which plans its own server list; pass an
+    /// empty list to run the turn with the local tools only.
+    pub fn install_toolsets(
+        &self,
+        ctx: &TurnContext,
+        sessions: Vec<ResilientSession>,
+    ) -> Result<Vec<ToolsetHandle>, SeamError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|error| SeamError(error.to_string()))?;
+        let Some(prepared) = runs.get_mut(&ctx.turn_id) else {
+            return Ok(Vec::new());
+        };
+        let mut toolset = self.empty_toolset(ctx, &prepared.lane);
+        toolset.legs = sessions
+            .into_iter()
+            .map(|session| {
+                // `server_name or url` (`mcp.py:209`); the ported
+                // session carries the resolved name.
+                let server_name = session.server_name().to_owned();
+                McpLeg {
+                    server_name,
+                    session: tokio::sync::Mutex::new(session),
+                    defs: Mutex::new(Vec::new()),
+                }
+            })
+            .collect();
+        // `_resolve_toolsets` returns the constructed toolsets themselves;
+        // the handle names the turn and the server so
+        // `runtime_failures` can read the session's recorded failure back.
+        let handles = toolset
+            .legs
+            .iter()
+            .map(|leg| format!("{}|{}", ctx.turn_id, leg.server_name))
+            .collect();
+        prepared.tools = Some(Arc::new(toolset));
+        Ok(handles)
+    }
+
     /// Decrypt one stored ciphertext (`crypto.decrypt`) as the turn's
     /// resolution failure shape.
     async fn decrypt(&self, token: &[u8]) -> Result<String, ModelError> {
@@ -1333,15 +1411,8 @@ impl TurnSeam for LiveTurnSeam {
         let api_key = self.decrypt(&token).await?;
         let lane = provider::lane_for(&model, &api_key);
         let label = llm_service::model_label(&provider_kind, &model_name);
-        let mut runs = self.runs.lock().map_err(internal_model_error)?;
-        runs.insert(
-            ctx.turn_id,
-            PreparedTurn {
-                lane,
-                model_label: label.clone(),
-                tools: None,
-            },
-        );
+        self.prepare_turn(ctx.turn_id, lane, label.clone())
+            .map_err(internal_model_error)?;
         Ok(label)
     }
 
@@ -1434,42 +1505,7 @@ impl TurnSeam for LiveTurnSeam {
         );
         let mut skipped: Vec<SkippedServer> = skipped.iter().map(port_skipped).collect();
         skipped.extend(skipped_auth.iter().map(port_skipped));
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|error| SeamError(error.to_string()))?;
-        let Some(prepared) = runs.get_mut(&ctx.turn_id) else {
-            return Ok((Vec::new(), skipped));
-        };
-        let mut toolset = self.empty_toolset(ctx, &prepared.lane);
-        toolset.legs = sessions
-            .into_iter()
-            .map(|session| {
-                // `server_name or url` (`mcp.py:209`); the ported
-                // session carries the resolved name.
-                let server_name = session.server_name().to_owned();
-                McpLeg {
-                    server_name,
-                    session: tokio::sync::Mutex::new(session),
-                    defs: Mutex::new(Vec::new()),
-                }
-            })
-            .collect();
-        prepared.tools = Some(Arc::new(toolset));
-        // `_resolve_toolsets` returns the constructed toolsets themselves;
-        // the handle names the turn and the server so
-        // `runtime_failures` can read the session's recorded failure back.
-        let handles = prepared
-            .tools
-            .as_ref()
-            .map(|tools| {
-                tools
-                    .legs
-                    .iter()
-                    .map(|leg| format!("{}|{}", ctx.turn_id, leg.server_name))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let handles = self.install_toolsets(ctx, sessions)?;
         Ok((handles, skipped))
     }
 
@@ -2285,7 +2321,7 @@ mod tests {
             .iter()
             .map(|schema| schema.name.to_owned())
             .collect();
-        assert_eq!(local.len(), 17, "the 17 local tools");
+        assert_eq!(local.len(), 18, "the 18 local tools");
         assert_eq!(
             &expected[..local.len()],
             local.as_slice(),

@@ -61,7 +61,6 @@ use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::admission::{managed_runner_probe, ManagedRunnerProbe};
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
 };
@@ -743,25 +742,6 @@ where
         })
     }
 
-    async fn enrolled_managed_exists(
-        &mut self,
-        project_id: Uuid,
-        user_id: Uuid,
-        workspace_id: Uuid,
-    ) -> Result<bool, DispatchError> {
-        let conn = TxConn::new(self.dispatch_tx().inner());
-        managed_runner_probe(
-            &conn,
-            ManagedRunnerProbe::Enrolled,
-            user_id,
-            project_id,
-            workspace_id,
-        )
-        .await
-        .map(|probe| probe.is_some())
-        .map_err(|error| db(into_sqlx(error)))
-    }
-
     fn managed_runner_enabled(&self) -> bool {
         self.dispatch_managed_runner_enabled()
     }
@@ -871,6 +851,8 @@ dispatch_driver!(
     issue_id: Uuid,
     triggered_by: &str,
     actor: Option<Uuid>,
+    pod_once: bool,
+    held_entry: bool,
 );
 
 dispatch_driver!(
@@ -880,6 +862,7 @@ dispatch_driver!(
     |_: &RunAiOutcome| false,
     issue_id: Uuid,
     actor: Option<Uuid>,
+    pod_once: bool,
 );
 
 dispatch_driver!(
@@ -895,6 +878,7 @@ dispatch_driver!(
 /// [`bounce_issue_no_eligible_runner`][pidash_services::orchestration::dispatch::bounce_issue_no_eligible_runner],
 /// commit. (Explicit rather than macro-generated: the bounce takes no
 /// matcher.)
+#[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     pool: &PgPool,
     deps: StoreDeps<C, H, P>,
@@ -903,6 +887,7 @@ pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     issue_id: Uuid,
     triggered_by: &str,
     reason: &str,
+    reason_name: &str,
 ) -> Result<DispatchOutcome<BounceOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -917,6 +902,7 @@ where
         issue_id,
         triggered_by,
         reason,
+        reason_name,
         now,
         jitter_secs,
     )
@@ -969,6 +955,7 @@ pub async fn run_ai_for_human<C, H, P>(
     issue_id: Uuid,
     actor: Option<Uuid>,
     created_by: Option<Uuid>,
+    pod_once: bool,
 ) -> Result<DispatchOutcome<HumanRunAiOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -986,6 +973,7 @@ where
         now,
         jitter_secs,
         created_by,
+        pod_once,
     )
     .await?;
     let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
@@ -1249,6 +1237,8 @@ where
                 issue_id,
                 &triggered_by,
                 actor,
+                false,
+                false,
             )
             .await
             .map_err(|err| match err {
@@ -1524,6 +1514,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -1642,6 +1633,8 @@ mod tests {
             _pod_id: Uuid,
             _issue_id: Uuid,
             _creator_id: Option<Uuid>,
+            _human: bool,
+            _pod_once: bool,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
             let answer = self.answer;
             Box::pin(async move { Ok(answer) })
@@ -2001,6 +1994,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -2051,6 +2046,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -2116,6 +2113,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -2155,6 +2154,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -2207,6 +2208,7 @@ mod tests {
             JITTER,
             graph.issue,
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -2236,6 +2238,7 @@ mod tests {
             JITTER,
             graph.issue,
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -2297,6 +2300,7 @@ mod tests {
             graph.issue,
             Some(graph.user),
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -2362,6 +2366,7 @@ mod tests {
             graph.issue,
             Some(graph.user),
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -2668,6 +2673,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");
@@ -2705,6 +2711,7 @@ mod tests {
             issue2,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");
@@ -2735,6 +2742,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .unwrap_err();
@@ -2778,6 +2786,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");
@@ -2966,6 +2975,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");

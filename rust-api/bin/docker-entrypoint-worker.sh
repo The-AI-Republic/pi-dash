@@ -32,7 +32,18 @@ if [ -z "$concurrency" ]; then
   fi
 fi
 
+# Phase 2: the queue label and the scheduler flag. The general worker
+# keeps the default `celery` queue and runs the scheduler; the agent
+# worker (`cloud_agent` queue) sets WORKER_QUEUE=cloud_agent and
+# WORKER_NO_SCHEDULER=1. `PIDASH_BEAT_ONLY` is read inside the worker
+# builder, not here; DATABASE_MAX_CONNECTIONS and
+# PIDASH_WORKER_SHUTDOWN_GRACE_SECS likewise.
+queue="${WORKER_QUEUE:-celery}"
+worker_args=(--concurrency "$concurrency" --queue "$queue")
+if [ "${WORKER_NO_SCHEDULER:-}" = "1" ] || [ "${WORKER_NO_SCHEDULER:-}" = "true" ]; then
+  worker_args+=(--no-scheduler)
+fi
 # ``exec`` so celery is PID 1 of the container and receives SIGTERM directly:
 # as a bash child it does not, and a redeploy then leaves its connections to be
 # reaped by timeout instead of closed on shutdown.
-exec pidash-api worker --concurrency "$concurrency"
+exec pidash-api worker "${worker_args[@]}"

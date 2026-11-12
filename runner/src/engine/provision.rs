@@ -23,6 +23,7 @@ use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner
 use crate::config::file;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
 use crate::ipc::protocol::{EngineRunnerInfo, EngineState, EngineStatusInfo};
+use crate::util::fs::create_dir_all_private;
 use crate::util::paths::Paths;
 
 /// What to turn the engine on for.
@@ -165,7 +166,7 @@ pub async fn add_engine_runner(
             None => super::workdir::allocate_engine_folder(paths, &ws, &project_id)?,
         };
 
-        std::fs::create_dir_all(&working_dir)
+        create_dir_all_private(&working_dir)
             .with_context(|| format!("creating {}", working_dir.display()))?;
         let applied = apply_enroll_response(
             paths,

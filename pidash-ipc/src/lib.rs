@@ -17,6 +17,8 @@
 pub mod client;
 pub mod dto;
 pub mod protocol;
+#[cfg(windows)]
+pub mod windows_pipe;
 
 // Convenience flat re-exports so downstream clients can `use pidash_ipc::{...}`
 // without threading through the submodule layout.

@@ -110,7 +110,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use sea_orm::sea_query::extension::postgres::PgFunc;
@@ -598,14 +598,6 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
 // ---------------------------------------------------------------------------
 // Lookups
 // ---------------------------------------------------------------------------
-
-fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
 
 /// Run a built statement into typed rows, decoded by name.
 async fn query_built<T: FromQueryResult>(
@@ -1542,9 +1534,8 @@ async fn workpad_get_inner(
     let Some(row) = row else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
-    let workpad = row_string(&row, "workpad")?;
-    let updated_at: DateTime<Utc> = row_datetime(&row, "updated_at")?;
-    let updated_at = crate::serializer::render_datetime_in(&updated_at, &tz);
+    let workpad = row.workpad;
+    let updated_at = crate::serializer::render_datetime_in(&row.updated_at, &tz);
     let body = render_workpad(&WorkpadRow {
         body: &workpad,
         updated_at: &updated_at,

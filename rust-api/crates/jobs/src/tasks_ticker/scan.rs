@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend};
 use sea_query::{Condition, Expr, Order, PostgresQueryBuilder, Query, SelectStatement};
 use serde_json::json;
@@ -101,13 +101,6 @@ pub fn beat_entries() -> Vec<BeatEntry> {
         .collect()
 }
 
-/// Render `now` the way the fixture goldens record it: whole seconds, explicit
-/// `+00:00` offset. The literal is generated from our own clock, never from
-/// caller input, so inlining it into the sea-query statement is safe.
-fn now_literal(now: &DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(SecondsFormat::Secs, false)
-}
-
 /// Due-ticker id set (`agent_ticker.py:57-69`).
 ///
 /// `enabled AND next_run_at <= now AND (pending_entry OR project pool = -1
@@ -118,7 +111,6 @@ fn now_literal(now: &DateTime<Utc>) -> String {
 /// two must agree or a waited issue is admitted here and refused in
 /// `fire_tick`. A row owing a pending entry is admitted regardless of cap.
 pub fn due_tickers_stmt(now: &DateTime<Utc>) -> SelectStatement {
-    let now = now_literal(now);
     let mut query = Query::select();
     query
         .column(("issue_agent_ticker", "id"))
@@ -133,7 +125,9 @@ pub fn due_tickers_stmt(now: &DateTime<Utc>) -> SelectStatement {
         )
         .and_where(Expr::col(("issue_agent_ticker", "deleted_at")).is_null())
         .and_where(Expr::col(("issue_agent_ticker", "enabled")).eq(true))
-        .and_where(Expr::col(("issue_agent_ticker", "next_run_at")).lte(now))
+        .and_where(
+            Expr::col(("issue_agent_ticker", "next_run_at")).lte(Expr::val(now.fixed_offset())),
+        )
         .cond_where(
             Condition::any()
                 .add(Expr::col(("issue_agent_ticker", "pending_entry")).eq(true))
@@ -170,7 +164,6 @@ pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
 /// where a binding is still un-tombstoned but its parent is not
 /// (`db/mixins.py soft_delete_related_objects.delay`).
 pub fn due_bindings_stmt(now: &DateTime<Utc>) -> SelectStatement {
-    let now = now_literal(now);
     let mut query = Query::select();
     query
         .column(("scheduler_bindings", "id"))
@@ -190,7 +183,10 @@ pub fn due_bindings_stmt(now: &DateTime<Utc>) -> SelectStatement {
         .and_where(Expr::col(("schedulers", "is_enabled")).eq(true))
         .cond_where(
             Condition::any()
-                .add(Expr::col(("scheduler_bindings", "next_run_at")).lte(now))
+                .add(
+                    Expr::col(("scheduler_bindings", "next_run_at"))
+                        .lte(Expr::val(now.fixed_offset())),
+                )
                 .add(Expr::col(("scheduler_bindings", "next_run_at")).is_null()),
         )
         .order_by(("scheduler_bindings", "next_run_at"), Order::Asc);
@@ -397,7 +393,7 @@ mod tests {
             // golden has none either (pinned below).
             "issue_agent_ticker.deleted_at is null",
             "issue_agent_ticker.enabled = true",
-            "issue_agent_ticker.next_run_at <= '2026-09-28t12:00:00+00:00'",
+            "issue_agent_ticker.next_run_at <= '2026-09-28 12:00:00.000000 +00:00'",
             // The three admission arms: pending entry, infinite pool,
             // under-cap. Exactly two ORs.
             "issue_agent_ticker.pending_entry = true",
@@ -466,7 +462,7 @@ mod tests {
             "schedulers.is_enabled = true",
             // NULL next_run_at = never fired = due immediately; Postgres
             // excludes NULLs from `<=`, hence the explicit OR.
-            "scheduler_bindings.next_run_at <= '2026-09-28t12:00:00+00:00'",
+            "scheduler_bindings.next_run_at <= '2026-09-28 12:00:00.000000 +00:00'",
             "scheduler_bindings.next_run_at is null",
             "order by scheduler_bindings.next_run_at asc",
         ] {
@@ -486,14 +482,12 @@ mod tests {
         );
     }
 
-    // The frozen instant renders whole-second with an explicit offset and
-    // matches the fixture clock both rows files record.
+    // The frozen instant pins the fixture clocks both rows files record.
     #[test]
-    fn now_literal_matches_fixture_clock() {
-        assert_eq!(now_literal(&frozen()), "2026-09-28T12:00:00+00:00");
+    fn frozen_matches_fixture_clock() {
         assert_eq!(
-            now_literal(&frozen()).parse::<DateTime<Utc>>().unwrap(),
-            frozen()
+            frozen().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+            "2026-09-28T12:00:00+00:00"
         );
         for name in [
             "scanners/scan_due_tickers.rows.json",
@@ -690,10 +684,43 @@ mod tests {
             // The shape string still carries the recorded literal.
             let shape = stmt.to_string(sea_query::PostgresQueryBuilder);
             assert!(
-                shape.contains("2026-09-28T12:00:00+00:00"),
+                shape.contains("2026-09-28 12:00:00.000000 +00:00"),
                 "shape keeps literal:\n{shape}"
             );
         }
+    }
+
+    // NEWPIDASH-136: due-scans must bind `now` as timestamptz, not text.
+    // The SQL-text fixtures above cannot catch a wrong bind type — a String
+    // renders as `'...'` and passes, but Postgres rejects
+    // `timestamptz <= text` at execution (every scan failed, nothing fired).
+    // This test executes both statements against a real migrated Postgres
+    // (via `DATABASE_URL`) and fails pre-fix with
+    // `operator does not exist: timestamp with time zone <= text`.
+    // Follows the repo live-db convention (`assistant/sweep.rs`): skips
+    // when `DATABASE_URL` is unset; when set it must point at a migrated
+    // scratch database (print the target before any destructive SQL).
+    #[tokio::test]
+    async fn due_scans_bind_now_as_timestamptz_on_postgres() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        for stmt in [due_tickers_stmt(&frozen()), due_bindings_stmt(&frozen())] {
+            let built = DbBackend::Postgres.build(&stmt);
+            let result = db.query_all(built).await;
+            let rows = result.expect(
+                "due scan must execute (timestamptz bind, not text): operator does not exist: timestamp with time zone <= text",
+            );
+            // Empty is fine on a quiet scratch DB; the proof is executing
+            // without the operator error, not the row count.
+            let _ = rows;
+        }
+        pool.close().await;
     }
 
     // Registry layer: the two scan names are locally owned once

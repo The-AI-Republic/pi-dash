@@ -446,25 +446,18 @@ pub fn terminal_event_payload(new_status: AgentRunStatus, error_code: &str) -> V
 /// "error_code"}` payload); `kind` binds `terminal`, `created_at`
 /// binds the caller's own `now` (each driver stamps its own clock,
 /// never hoisted across legs). The existence guard and max-seq read
-/// stay driver-side.
-pub async fn insert_terminal_event<'e, E>(
-    ex: E,
+/// stay driver-side. Runs on a SeaORM connection via
+/// [`insert_terminal_event_orm`]; `sqlx::Error` is kept via
+/// `orm_tx::into_sqlx` so callers' classification is unchanged.
+pub async fn insert_terminal_event(
+    db: &impl sea_orm::ConnectionTrait,
     run_id: Uuid,
     plan: TerminalEventPlan,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(&terminal_event_insert_sql())
-        .bind(run_id)
-        .bind(plan.seq)
-        .bind("terminal")
-        .bind(plan.payload)
-        .bind(now)
-        .execute(ex)
+) -> Result<(), sqlx::Error> {
+    insert_terminal_event_orm(db, run_id, plan, now)
         .await
-        .map(|_| ())
+        .map_err(pidash_db::orm_tx::into_sqlx)
 }
 
 /// `_publish_effects` (`agent_run_finalization.py:89-103`): the Celery
@@ -1990,7 +1983,7 @@ mod tests {
     #[test]
     fn finalize_lock_sql_variants() {
         let bare = lock_run_for_finalize_sql(false, false);
-        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 39)]);
+        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 40)]);
         assert!(
             bare.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND NOT \
@@ -2087,7 +2080,7 @@ mod tests {
         assert_eq!(
             select_runs(&fetch),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -2108,7 +2101,7 @@ mod tests {
         assert_eq!(
             select_runs(&capacity),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"pod\"".to_owned(), 10),
                 ("\"runner\"".to_owned(), 31),
             ]

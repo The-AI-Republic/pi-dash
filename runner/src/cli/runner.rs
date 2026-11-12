@@ -18,6 +18,7 @@ use crate::cloud::runners::{delete_runner, probe_cloud_reachable};
 use crate::config::file;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
 use crate::util::confirm::maybe_confirm;
+use crate::util::fs::create_dir_all_private;
 use crate::util::paths::Paths;
 use crate::util::runner_name;
 
@@ -103,7 +104,7 @@ pub async fn set_working_dir(args: SetWorkingDirArgs, paths: &Paths) -> Result<(
     }
 
     // No daemon: nothing is running, so rewrite the block directly.
-    std::fs::create_dir_all(&path)
+    create_dir_all_private(&path)
         .with_context(|| format!("creating working dir {}", path.display()))?;
     file::mutate_config(paths, |cfg| {
         let runner = cfg

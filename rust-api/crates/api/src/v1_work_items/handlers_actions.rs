@@ -12,7 +12,10 @@
 //!   with `{error, reason}`, 403 from inside an agent run.
 //! * `AgentRunYieldAPIEndpoint.post` (`:1255-1327`, `3869a226`) — record the run outcome
 //!   plus the optional `stop_ticking` flag
-//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write).
+//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write). A run
+//!   with no work item (a scheduler run, or a direct run) yields too
+//!   (PDASHOSS01-276): `run_kind` says which, and `stop_ticking` is not
+//!   stored for it — it has no ticking clock.
 //!
 //! Registered by [`super::routes`] at the four
 //! `apps/api/pi_dash/api/urls/work_item.py:133-151` paths.
@@ -95,7 +98,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
 use pidash_db::entity::{
-    agent_run, assistant_user_llm_config, issue_assignees, issues, projects, runner, states, users,
+    agent_run, assistant_user_llm_config, issue_assignees, issues, projects, states, users,
     workspaces,
 };
 use pidash_db::pool::sea_orm_connection;
@@ -147,6 +150,11 @@ pub const RUN_AI_NO_POD_MESSAGE: &str = "no pod is available to run this work it
 pub const RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE: &str =
     "no eligible runner or execution principal is available for this work item";
 pub const RUN_AI_FALLBACK_MESSAGE: &str = "could not dispatch a run";
+pub const RUN_AI_POD_ONCE_NOT_ALLOWED_MESSAGE: &str =
+    "only the issue's creator and assignees may use pod_once";
+pub const RUN_AI_POD_ONCE_NOT_APPLICABLE_MESSAGE: &str =
+    "pod_once requires a dedicated runner on the issue";
+pub const RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD_MESSAGE: &str = "no eligible runner in the pod";
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -409,6 +417,7 @@ async fn resolve_machine_token(
         workspace_id,
         revoked_at,
         dev_revoked,
+        expires_at,
         ..
     }) = row
     else {
@@ -418,11 +427,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
     let member = super::auth_reads::is_active_workspace_member(
@@ -697,6 +711,8 @@ pub struct YieldRun {
     pub facts: RunFacts,
     pub workspace_id: Uuid,
     pub done_payload: Option<Value>,
+    /// `AgentRun.scheduler_binding_id` (nullable; set on scheduler runs).
+    pub scheduler_binding_id: Option<Uuid>,
 }
 
 async fn fetch_yield_run(
@@ -711,6 +727,7 @@ async fn fetch_yield_run(
         facts: row.facts(),
         workspace_id: row.workspace_id,
         done_payload: row.done_payload,
+        scheduler_binding_id: row.scheduler_binding_id,
     }))
 }
 
@@ -894,63 +911,19 @@ fn live_assignee_ids_subquery(issue_id: Uuid) -> sea_orm::sea_query::SelectState
         .to_owned()
 }
 
-/// `ISSUE_ASSIGNEE_IDS_SQL` (`runner_sessions::guards`) on SeaORM: the live
-/// through-table assignee ids of the issue, `-created_at`
-/// (`IssueAssignee.Meta.ordering`).
-async fn issue_assignee_ids<C: ConnectionTrait>(
-    db: &C,
-    issue_id: Uuid,
-) -> Result<Vec<Uuid>, DbErr> {
-    issue_assignees::Entity::find()
-        .select_only()
-        .column(issue_assignees::Column::AssigneeId)
-        .filter(issue_assignees::Column::DeletedAt.is_null())
-        .filter(issue_assignees::Column::IssueId.eq(issue_id))
-        .order_by_desc(issue_assignees::Column::CreatedAt)
-        .into_tuple()
-        .all(db)
-        .await
-}
-
-/// `POD_HAS_RUNNER_MANAGED_SQL` (`runner_sessions::guards`) on SeaORM: a
-/// desktop-bundled runner owned by the run creator, in this pod, not
-/// revoked (transient status ignored), `LIMIT 1`.
-fn pod_has_runner_managed_select(creator: Uuid, pod_id: Uuid) -> sea_orm::Select<runner::Entity> {
-    runner::Entity::find()
-        .select_only()
-        .column(runner::Column::Id)
-        .filter(runner::Column::OwnerId.eq(creator))
-        .filter(runner::Column::PodId.eq(pod_id))
-        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
-        .filter(runner::Column::Status.ne("revoked"))
-        .limit(1)
-}
-
-/// `pod_has_runner_general_sql` (`runner_sessions::guards`) on SeaORM: a
-/// non-revoked, non-desktop runner in this pod owned by anyone in the
-/// eligible owner set, `LIMIT 1`. The caller short-circuits an empty set
-/// (no query), as Python does.
-fn pod_has_runner_general_select(owners: &[Uuid], pod_id: Uuid) -> sea_orm::Select<runner::Entity> {
-    runner::Entity::find()
-        .select_only()
-        .column(runner::Column::Id)
-        .filter(runner::Column::OwnerId.is_in(owners.iter().copied()))
-        .filter(runner::Column::PodId.eq(pod_id))
-        .filter(runner::Column::Status.ne("revoked"))
-        .filter(runner::Column::Provisioning.ne("desktop_bundled"))
-        .limit(1)
-}
-
-/// Live `PodRunnerMatcher` over the merged D-14 guards helpers
-/// (`runner/services/matcher.py:375-412`): the managed narrow branch or
-/// the general owner-set branch, with the same no-query short-circuits.
+/// Live `PodRunnerMatcher`: the single SeaORM implementation shared
+/// with jobs (alias kept for the v1 actions call sites).
 pub struct LiveMatcher {
-    pool: PgPool,
+    inner: pidash_services::runner_sessions::SeaOrmPodMatcher,
 }
 
 impl LiveMatcher {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            inner: pidash_services::runner_sessions::SeaOrmPodMatcher::new(
+                pidash_db::pool::sea_orm_connection(&pool),
+            ),
+        }
     }
 }
 
@@ -960,6 +933,8 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
+        pod_once: bool,
     ) -> Pin<
         Box<
             dyn Future<
@@ -968,68 +943,8 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
                 + '_,
         >,
     > {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            use pidash_services::orchestration::dispatch::DispatchError;
-            use pidash_services::runner_sessions::guards as g;
-            let db = |e: DbErr| DispatchError::Db(e.to_string());
-            let conn = sea_orm_connection(&pool);
-            let issue: Option<(Option<String>, Option<Uuid>, Option<Uuid>)> =
-                issues::Entity::find()
-                    .select_only()
-                    .columns([
-                        issues::Column::AgentExecutor,
-                        issues::Column::CreatedById,
-                        issues::Column::ProjectId,
-                    ])
-                    .filter(issues::Column::Id.eq(issue_id))
-                    .into_tuple()
-                    .one(&conn)
-                    .await
-                    .map_err(db)?;
-            let Some((agent_executor, created_by_id, project_id)) = issue else {
-                return Ok(false);
-            };
-            let project_id = project_id.ok_or_else(|| {
-                DispatchError::Store(
-                    pidash_services::orchestration::creation::CreationError::MissingRow(
-                        "issue has no project".to_owned(),
-                    ),
-                )
-            })?;
-            let default_executor: Option<String> = projects::Entity::find()
-                .select_only()
-                .column(projects::Column::DefaultAgentExecutor)
-                .filter(projects::Column::Id.eq(project_id))
-                .into_tuple()
-                .one(&conn)
-                .await
-                .map_err(db)?;
-            let default_executor = default_executor.unwrap_or_default();
-            if g::is_managed_runner_issue(agent_executor.as_deref(), &default_executor) {
-                let Some(creator) = creator_id else {
-                    return Ok(false);
-                };
-                let hit: Option<Uuid> = pod_has_runner_managed_select(creator, pod_id)
-                    .into_tuple()
-                    .one(&conn)
-                    .await
-                    .map_err(db)?;
-                return Ok(hit.is_some());
-            }
-            let assignees = issue_assignee_ids(&conn, issue_id).await.map_err(db)?;
-            let owners = g::eligible_owner_ids(creator_id, created_by_id, &assignees);
-            if owners.is_empty() {
-                // `:438-439`: an empty owner set answers `false`, no query.
-                return Ok(false);
-            }
-            let hit: Option<Uuid> = pod_has_runner_general_select(&owners, pod_id)
-                .into_tuple()
-                .one(&conn)
-                .await
-                .map_err(db)?;
-            Ok(hit.is_some())
-        })
+        self.inner
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human, pod_once)
     }
 }
 
@@ -1331,13 +1246,31 @@ pub fn wait_response(
 /// `_RUN_AI_REASON_MESSAGES` text, or the `.get` default. `None` (creation
 /// refused after preflight passed, so `dispatch_run_ai_run_with_reason`
 /// returns `(None, None)`) renders `"reason":null`, exactly as the view's
-/// `{"error": ..., "reason": reason}` does for `reason=None`.
+/// `{"error": ..., "reason": reason}` does for `reason=None`. The two
+/// `pod_once` codes ride 403/400 with the same shape (`:1227-1241`).
 pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
     let message = match reason {
         Some("active_run_exists") => RUN_AI_ACTIVE_RUN_MESSAGE,
         Some("no_pod") => RUN_AI_NO_POD_MESSAGE,
         Some("no_eligible_runner") => RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE,
+        Some("assigned_runner_offline") => {
+            "the dedicated runner is offline; bring it online or run on the pod"
+        }
+        Some("assigned_runner_paused") => {
+            "the dedicated runner is paused; resume it or run on the pod"
+        }
+        Some("assigned_runner_not_owner") => {
+            "the dedicated runner cannot take this run; use pod_once or change the runner"
+        }
+        Some("pod_once_not_allowed") => RUN_AI_POD_ONCE_NOT_ALLOWED_MESSAGE,
+        Some("pod_once_not_applicable") => RUN_AI_POD_ONCE_NOT_APPLICABLE_MESSAGE,
+        Some("no_eligible_runner_in_pod") => RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD_MESSAGE,
         _ => RUN_AI_FALLBACK_MESSAGE,
+    };
+    let status = match reason {
+        Some("pod_once_not_allowed") => StatusCode::FORBIDDEN,
+        Some("pod_once_not_applicable") => StatusCode::BAD_REQUEST,
+        _ => StatusCode::CONFLICT,
     };
     let mut map = serde_json::Map::with_capacity(2);
     map.insert("error".to_owned(), Value::String(message.to_owned()));
@@ -1348,7 +1281,31 @@ pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
             .unwrap_or(Value::Null),
     );
     let body = serde_json::to_string(&Value::Object(map)).expect("run-ai body");
-    (StatusCode::CONFLICT, body)
+    (status, body)
+}
+
+/// The v1 dedicated refusal (`:1244-1251`): the full §11.2 body.
+async fn dedicated_refusal_response(
+    pool: &PgPool,
+    issue_id: Uuid,
+    code: &'static str,
+) -> Result<Response, Denial> {
+    use pidash_db::entity::issues;
+    use sea_orm::EntityTrait;
+
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    let Some(issue) = issues::Entity::find_by_id(issue_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|error| db_error(error, "dedicated-refusal-issue"))?
+    else {
+        return Err(Denial::ServerError);
+    };
+    let body =
+        pidash_services::domain::issue_assignment::dedicated_refusal_body(&orm_pool, &issue, code)
+            .await
+            .map_err(|error| db_error(error, "dedicated-refusal-body"))?;
+    Ok(json_response(StatusCode::CONFLICT, body.to_string()))
 }
 
 /// The run-ai success (`:1245-1252`): 201 `{"id","status","executor"}`.
@@ -1364,23 +1321,78 @@ pub fn run_ai_created(run_id: Uuid, status: &str, executor_kind: &str) -> (Statu
     (StatusCode::CREATED, body)
 }
 
-/// The yield success (`:1318-1327`, `3869a226`):
-/// `{"ok","run_id","work_item_id","outcome","stop_ticking"}`. Always 200.
+/// Which sort of run yielded — the response's `run_kind`
+/// (`views/issue.py`, PDASHOSS01-276).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YieldRunKind {
+    /// An issue run: the only kind with a ticking clock.
+    Issue(Uuid),
+    /// A scheduler run, carrying its `scheduler_binding_id`.
+    Scheduler(Uuid),
+    /// A run with neither a work item nor a scheduler binding.
+    Direct,
+}
+
+impl YieldRunKind {
+    /// `work_item_id` first, then `scheduler_binding_id`, as Python checks
+    /// `run.work_item_id is not None` before `run.scheduler_binding_id`.
+    pub fn of(work_item_id: Option<Uuid>, scheduler_binding_id: Option<Uuid>) -> Self {
+        match (work_item_id, scheduler_binding_id) {
+            (Some(work_item_id), _) => YieldRunKind::Issue(work_item_id),
+            (None, Some(binding_id)) => YieldRunKind::Scheduler(binding_id),
+            (None, None) => YieldRunKind::Direct,
+        }
+    }
+
+    /// Only an issue run has a ticker for `stop_ticking` to stop.
+    pub fn has_clock(self) -> bool {
+        matches!(self, YieldRunKind::Issue(_))
+    }
+}
+
+/// The yield success (`:1318-1346`, PDASHOSS01-276):
+/// `{"ok","run_id","work_item_id","outcome","stop_ticking","run_kind"}`,
+/// plus `scheduler_binding_id` for a scheduler run and a `detail` when a
+/// run without a clock was sent `stop_ticking: true`. Always 200.
 pub fn yield_response(
     run_id: Uuid,
-    work_item_id: Uuid,
+    kind: YieldRunKind,
     outcome: &str,
     stop_ticking: bool,
 ) -> (StatusCode, String) {
-    let mut map = serde_json::Map::with_capacity(5);
+    let mut map = serde_json::Map::with_capacity(8);
     map.insert("ok".to_owned(), Value::Bool(true));
     map.insert("run_id".to_owned(), Value::String(run_id.to_string()));
-    map.insert(
-        "work_item_id".to_owned(),
-        Value::String(work_item_id.to_string()),
-    );
+    let work_item_id = match kind {
+        YieldRunKind::Issue(work_item_id) => Value::String(work_item_id.to_string()),
+        _ => Value::Null,
+    };
+    map.insert("work_item_id".to_owned(), work_item_id);
     map.insert("outcome".to_owned(), Value::String(outcome.to_owned()));
-    map.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
+    map.insert(
+        "stop_ticking".to_owned(),
+        Value::Bool(stop_ticking && kind.has_clock()),
+    );
+    let (run_kind, subject) = match kind {
+        YieldRunKind::Issue(_) => ("issue", None),
+        YieldRunKind::Scheduler(_) => ("scheduler", Some("scheduled runs have")),
+        YieldRunKind::Direct => ("direct", Some("a run without a work item has")),
+    };
+    map.insert("run_kind".to_owned(), Value::String(run_kind.to_owned()));
+    if let YieldRunKind::Scheduler(binding_id) = kind {
+        map.insert(
+            "scheduler_binding_id".to_owned(),
+            Value::String(binding_id.to_string()),
+        );
+    }
+    if let (Some(subject), true) = (subject, stop_ticking) {
+        map.insert(
+            "detail".to_owned(),
+            Value::String(format!(
+                "outcome recorded; {subject} no ticking clock, so stop_ticking was ignored"
+            )),
+        );
+    }
     let body = serde_json::to_string(&Value::Object(map)).expect("yield body");
     (StatusCode::OK, body)
 }
@@ -1662,10 +1674,22 @@ pub async fn post_run_ai(
     }
     let pk = pk.parse::<Uuid>().expect("checked segment");
     let (_parts, body) = req.into_parts();
-    if read_body(body).await.is_err() {
-        return Denial::ServerError.into_response();
-    }
-    match run_ai_inner(&state, &headers, &slug, &project_id, &pk).await {
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    // `pod_once = (request.data.get("pin") or "").strip() == "pod_once"`
+    // (`views/issue.py:1242`).
+    let pod_once = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("pin")
+                .and_then(|value| value.as_str())
+                .map(|v| v.trim() == "pod_once")
+        })
+        .unwrap_or(false);
+    match run_ai_inner(&state, &headers, &slug, &project_id, &pk, pod_once).await {
         Ok(response) => response,
         Err(denial) => denial.into_response(),
     }
@@ -1677,6 +1701,7 @@ async fn run_ai_inner(
     slug: &str,
     project_id_raw: &str,
     pk: &Uuid,
+    pod_once: bool,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
@@ -1736,12 +1761,37 @@ async fn run_ai_inner(
         issue.id,
         Some(pre.actor.id),
         Some(pre.actor.id),
+        pod_once,
     )
     .await
     .map_err(|error| db_error(error, "run-ai-driver"))?;
     let outcome = out.outcome;
+    let reason = outcome.reason.clone();
     let Some(run_id) = outcome.run_id else {
-        let (status, body) = run_ai_refusal(outcome.reason.as_deref());
+        // Dedicated refusals carry the full §11.2 body on v1 too
+        // (`views/issue.py:1244-1251`).
+        let reason: Option<&'static str> = match reason.as_deref() {
+            Some("assigned_runner_offline") => Some("assigned_runner_offline"),
+            Some("assigned_runner_paused") => Some("assigned_runner_paused"),
+            Some("assigned_runner_not_owner") => Some("assigned_runner_not_owner"),
+            _ => None,
+        };
+        let (status, body) = match reason {
+            Some(code)
+                if matches!(
+                    code,
+                    "assigned_runner_offline"
+                        | "assigned_runner_paused"
+                        | "assigned_runner_not_owner"
+                ) =>
+            {
+                match dedicated_refusal_response(&pre.pool, issue.id, code).await {
+                    Ok(response) => return Ok(response),
+                    Err(denial) => return Err(denial),
+                }
+            }
+            _ => run_ai_refusal(outcome.reason.as_deref()),
+        };
         return Ok(json_response(status, body));
     };
     let row: Option<(Uuid, String, String)> = agent_run::Entity::find()
@@ -1859,7 +1909,6 @@ async fn yield_inner(
     }
     let run = fetch_yield_run(&pre.pool, slug, run_id)
         .await?
-        .filter(|run| run.facts.work_item_id.is_some())
         .ok_or(Denial::NotFoundError("run not found".to_owned()))?;
     if !is_workspace_member(&pre.pool, &pre.actor.id, &run.workspace_id).await? {
         return Err(Denial::NotFoundError("run not found".to_owned()));
@@ -1884,7 +1933,8 @@ async fn yield_inner(
             payload.insert("note".to_owned(), Value::String(note));
         }
     }
-    if let Some(stop_ticking) = stop_ticking {
+    let kind = YieldRunKind::of(run.facts.work_item_id, run.scheduler_binding_id);
+    if let (Some(stop_ticking), true) = (stop_ticking, kind.has_clock()) {
         payload.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
     }
     write_done_payload(
@@ -1894,13 +1944,7 @@ async fn yield_inner(
     )
     .await
     .map_err(|error| db_error(error, "yield-write"))?;
-    let work_item_id = run.facts.work_item_id.expect("checked above");
-    let (status, body) = yield_response(
-        run.facts.id,
-        work_item_id,
-        outcome,
-        stop_ticking.unwrap_or(false),
-    );
+    let (status, body) = yield_response(run.facts.id, kind, outcome, stop_ticking.unwrap_or(false));
     Ok(json_response(status, body))
 }
 
@@ -2004,7 +2048,12 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "progressed", false);
+        let (status, body) = yield_response(
+            run_id,
+            YieldRunKind::Issue(work_item_id),
+            "progressed",
+            false,
+        );
         let (fx_status, fx_body) = call_body("yield_ok");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
@@ -2018,10 +2067,67 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "done", true);
+        let (status, body) =
+            yield_response(run_id, YieldRunKind::Issue(work_item_id), "done", true);
         let (fx_status, fx_body) = call_body("yield_stop_true");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
+    }
+
+    // Runs with no work item (PDASHOSS01-276): byte pins of the Django
+    // bodies (`views/issue.py` dict order: the base five keys, `run_kind`,
+    // then `scheduler_binding_id`, then `detail`).
+
+    #[test]
+    fn yield_scheduler_run_body() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let binding_id: Uuid = "427731d7-0000-4000-8000-000000000001"
+            .parse()
+            .expect("uuid");
+        let kind = YieldRunKind::of(None, Some(binding_id));
+        assert_eq!(kind, YieldRunKind::Scheduler(binding_id));
+        let (status, body) = yield_response(run_id, kind, "done", false);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"427731d7-0000-4000-8000-000000000001"}"#
+        );
+        let (_, body) = yield_response(run_id, kind, "done", true);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"427731d7-0000-4000-8000-000000000001","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#
+        );
+    }
+
+    #[test]
+    fn yield_direct_run_body() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let kind = YieldRunKind::of(None, None);
+        assert_eq!(kind, YieldRunKind::Direct);
+        assert!(!kind.has_clock());
+        let (_, body) = yield_response(run_id, kind, "progressed", false);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"progressed","stop_ticking":false,"run_kind":"direct"}"#
+        );
+        let (_, body) = yield_response(run_id, kind, "progressed", true);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"progressed","stop_ticking":false,"run_kind":"direct","detail":"outcome recorded; a run without a work item has no ticking clock, so stop_ticking was ignored"}"#
+        );
+    }
+
+    #[test]
+    fn yield_work_item_wins_over_binding() {
+        // `has_clock = run.work_item_id is not None` is checked first.
+        let work_item_id = Uuid::nil();
+        let kind = YieldRunKind::of(Some(work_item_id), Some(Uuid::nil()));
+        assert_eq!(kind, YieldRunKind::Issue(work_item_id));
+        assert!(kind.has_clock());
     }
 
     #[test]
@@ -2283,35 +2389,6 @@ mod tests {
         assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
     }
 
-    #[test]
-    fn pod_runner_statements_mirror_the_guards_constants() {
-        let managed = pod_has_runner_managed_select(Uuid::nil(), Uuid::nil())
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(
-            managed.contains(r#""runner"."provisioning" = 'desktop_bundled'"#),
-            "{managed}"
-        );
-        assert!(
-            managed.contains(r#""runner"."status" <> 'revoked'"#),
-            "{managed}"
-        );
-        assert!(managed.ends_with("LIMIT 1"), "{managed}");
-        let general = pod_has_runner_general_select(&[Uuid::nil(), Uuid::new_v4()], Uuid::nil())
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(general.contains(r#""runner"."owner_id" IN ("#), "{general}");
-        assert!(
-            general.contains(r#""runner"."provisioning" <> 'desktop_bundled'"#),
-            "{general}"
-        );
-        assert!(
-            general.contains(r#""runner"."status" <> 'revoked'"#),
-            "{general}"
-        );
-        assert!(general.ends_with("LIMIT 1"), "{general}");
-    }
-
     /// Every new read/write against constraint-free temp copies on one
     /// connection (skips without `DATABASE_URL`).
     #[tokio::test]
@@ -2471,12 +2548,6 @@ mod tests {
                 .expect("cands"),
             expected
         );
-        // ISSUE_ASSIGNEE_IDS_SQL twin: newest first.
-        assert_eq!(
-            issue_assignee_ids(&db, issue).await.expect("ids"),
-            vec![assignee_b, assignee_a]
-        );
-
         // creator universes: actor, creator, lead, (no default assignee), assignees.
         let actor = Uuid::new_v4();
         let universe = creator_universe(&pool, actor, &found, &proj)
@@ -2497,32 +2568,6 @@ mod tests {
             .await
             .expect("universe");
         assert_eq!(dup.iter().filter(|id| **id == creator).count(), 1);
-
-        // Pod runner probes.
-        let managed: Option<Uuid> = pod_has_runner_managed_select(creator, pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("managed");
-        assert!(managed.is_some());
-        let revoked_desktop: Option<Uuid> = pod_has_runner_managed_select(assignee_a, pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("managed");
-        assert!(revoked_desktop.is_none());
-        let general: Option<Uuid> = pod_has_runner_general_select(&[assignee_a, assignee_b], pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("general");
-        assert!(general.is_some(), "assignee_b's cloud runner qualifies");
-        let none: Option<Uuid> = pod_has_runner_general_select(&[creator, lead], pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("general");
-        assert!(none.is_none(), "desktop and revoked runners do not");
 
         // The run-ai readback tuple.
         let readback: Option<(Uuid, String, String)> = agent_run::Entity::find()

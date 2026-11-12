@@ -210,8 +210,19 @@ impl From<operations::Error> for Denial {
     }
 }
 
-/// Wrap an operation outcome in the v1 response.
-fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+/// Wrap an operation outcome in the v1 response. A re-pointed QUEUED run
+/// drains its pod on commit (design §13.2), exactly Django's
+/// `transaction.on_commit(_drain)`.
+async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<Response, Denial> {
+    if let Some(pod_id) = outcome.drain_pod {
+        let pool = pool_of(state).map_err(|_| Denial::ServerError)?;
+        if crate::runner_enroll::teardown::drain_pod_by_id(&pool, state, pod_id)
+            .await
+            .is_err()
+        {
+            return Err(Denial::ServerError);
+        }
+    }
     let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
     Ok(json_response(status, outcome.body))
 }
@@ -423,6 +434,7 @@ async fn resolve_machine_token(
         workspace_id,
         revoked_at,
         dev_revoked,
+        expires_at,
         ..
     }) = row
     else {
@@ -432,11 +444,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
     let member = super::auth_reads::is_active_workspace_member(
@@ -1480,6 +1497,7 @@ async fn create_issue_inner(
             state.settings().urls.app_base_url.as_deref(),
         ),
     };
+    let pod_once = pidash_services::orchestration::creation::pod_once_requested(&parsed_body.value);
     let outcome = operations::issues::create(
         &deps,
         &ctx,
@@ -1487,10 +1505,11 @@ async fn create_issue_inner(
         operations::issues::CreateOptions {
             emit_activity: true,
             emit_model_activity: true,
+            pod_once,
         },
     )
     .await?;
-    op_response(outcome)
+    op_response(state, outcome).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1622,6 +1641,7 @@ async fn patch_issue_inner(
         current_instance: current_text,
         moved_by_run,
     };
+    let pod_once = pidash_services::orchestration::creation::pod_once_requested(&parsed_body.value);
     let outcome = operations::issues::update(
         &deps,
         &ctx,
@@ -1630,10 +1650,11 @@ async fn patch_issue_inner(
         &target,
         operations::issues::UpdateOptions {
             emit_activity: true,
+            pod_once,
         },
     )
     .await?;
-    op_response(outcome)
+    op_response(state, outcome).await
 }
 
 async fn delete_issue_inner(
@@ -1742,6 +1763,8 @@ async fn delete_issue_inner(
                     prev_state: prev_state_id,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(actor_id),
                         moved_by_run: None,
                         now: Utc::now(),
@@ -1867,6 +1890,8 @@ mod signal_tests {
             prev_state_id: Some(uid(3)),
             current_state_id: Some(uid(3)),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: Some(uid(7)),
             now,
             jitter_secs: 0.0,
@@ -1895,6 +1920,8 @@ mod signal_tests {
             prev_state_id: Some(uid(3)),
             current_state_id: Some(uid(4)),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: Some(uid(7)),
             now,
             jitter_secs: 0.0,

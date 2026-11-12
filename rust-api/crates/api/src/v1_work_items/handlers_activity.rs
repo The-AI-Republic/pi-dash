@@ -442,6 +442,7 @@ async fn resolve_machine_token(
         workspace_id,
         revoked_at,
         dev_revoked,
+        expires_at,
         ..
     }) = row
     else {
@@ -451,11 +452,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
     let member = super::auth_reads::is_active_workspace_member(
@@ -2420,6 +2426,13 @@ async fn expand_issue(
     let state = row.state_id.map(|id| id.to_string());
     let estimate_point = row.estimate_point_id.map(|id| id.to_string());
     let assigned_pod = row.assigned_pod_id.map(|id| id.to_string());
+    let assigned_runner = row.assigned_runner_id.map(|id| id.to_string());
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     let type_id = row.type_id.map(|id| id.to_string());
     // `get_url` (`serializers/issue.py:423-434`): present and absolute, or
     // the key is omitted — never null, never relative.
@@ -2479,6 +2492,9 @@ async fn expand_issue(
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
         assigned_pod: assigned_pod.as_deref(),
+        assigned_runner: assigned_runner.as_deref(),
+        assigned_runner_detail: assigned_runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let assignee_ids = fetch_assignee_ids(pool, issue_id).await?;
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();

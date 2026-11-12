@@ -70,10 +70,6 @@
 //!   `UniqueValidator` only covers the project-NULL constraint, so a
 //!   within-project rename sails through validation and 400s on the bare
 //!   `IntegrityError` (`handle_exception`: "The payload is not valid").
-//! * BUG-5 (`app/permissions/project.py:62-65`): label GET gates on a
-//!   workspace-scoped membership (no `project_id`), so a member of any
-//!   project in the workspace passes the gate and then reads whatever the
-//!   project-scoped queryset yields.
 //!
 //! Deliberate edges (all unpinned — no fixture or contract case sends them):
 //!
@@ -511,6 +507,7 @@ async fn resolve_machine_token(
         workspace_id,
         revoked_at,
         dev_revoked,
+        expires_at,
         ..
     }) = row
     else {
@@ -520,11 +517,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
     let member = super::auth_reads::is_active_workspace_member(
@@ -643,10 +645,9 @@ pub async fn rewrite_project_id(
     }
 }
 
-/// Fetch the project-permission facts for the Entity (page) and Member
-/// (label) gates (`app/permissions/project.py:56-116`); [`decide`] applies
-/// the per-route arm. The trailing bool is the workspace-scoped project
-/// membership the Member-SAFE arm reads (BUG-5).
+/// Fetch the project-permission facts for the Entity gate the label and
+/// page routes carry (`app/permissions/project.py:85-116`); [`decide`]
+/// applies the per-method arm.
 ///
 /// `role` is `smallint`: sqlx does not widen `INT2` into `i32` on decode,
 /// so read `i16` and compare as integers. `deleted_at IS NULL` is the
@@ -657,54 +658,30 @@ async fn gate_facts(
     workspace_slug: &str,
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
-) -> Result<(project::ProjectFacts, bool), Denial> {
+) -> Result<project::ProjectFacts, Denial> {
     let db = sea_orm_connection(pool);
     // Project-scoped roles (Entity SAFE + every unsafe arm).
     let roles = super::auth_reads::project_member_roles(&db, *workspace_id, *user_id, *project_id)
         .await
         .map_err(|error| db_error(error, "gate-roles"))?;
-    // Workspace-scoped project membership (Member SAFE, BUG-5 —
-    // `project.py:62-65` deliberately omits `project_id`).
-    let workspace_scoped_member = super::auth_reads::project_membership_exists(
-        &db,
-        *user_id,
-        super::auth_reads::MembershipScope {
-            workspace_id: Some(*workspace_id),
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(|error| db_error(error, "gate-ws-member"))?;
-    // Workspace admin-or-member (Member POST, `project.py:67-73`).
-    let workspace_admin_or_member =
-        super::auth_reads::workspace_role_exists(&db, *workspace_id, *user_id, &[20, 15])
-            .await
-            .map_err(|error| db_error(error, "gate-ws-roles"))?;
-    Ok((
-        project::ProjectFacts {
-            workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
-            project_id: pidash_types::ProjectId::from(project_id.to_string()),
-            authenticated: true,
-            is_workspace_member: false,
-            has_workspace_admin_or_member: workspace_admin_or_member,
-            is_workspace_admin: false,
-            // The Member-SAFE arm reads the workspace-scoped fact while
-            // the Entity-SAFE arm reads the project-scoped one; the two
-            // are split in `require_gate`, which patches this field per
-            // route.
-            is_project_member: !roles.is_empty(),
-            is_project_admin: roles.contains(&20),
-            has_project_admin_or_member: roles.iter().any(|r| *r == 20 || *r == 15),
-            has_identifier_membership: false,
-            has_project_identifier: false,
-        },
-        workspace_scoped_member,
-    ))
+    Ok(project::ProjectFacts {
+        workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
+        project_id: pidash_types::ProjectId::from(project_id.to_string()),
+        authenticated: true,
+        is_workspace_member: false,
+        has_workspace_admin_or_member: false,
+        is_workspace_admin: false,
+        is_project_member: !roles.is_empty(),
+        is_project_admin: roles.contains(&20),
+        has_project_admin_or_member: roles.iter().any(|r| *r == 20 || *r == 15),
+        has_identifier_membership: false,
+        has_project_identifier: false,
+    })
 }
 
-/// Run the route's gate; deny 403 on failure. The label routes carry
-/// `ProjectMemberPermission`, the page routes `ProjectEntityPermission`
-/// (see [`gate_for`]).
+/// Run the route's gate; deny 403 on failure. The label and page routes
+/// all carry `ProjectEntityPermission` (see [`gate_for`]); label create
+/// checks the project role like update/delete (PDASHOSS01-239).
 async fn require_gate(
     pool: &PgPool,
     workspace_id: &uuid::Uuid,
@@ -715,16 +692,7 @@ async fn require_gate(
     method: &str,
 ) -> Result<(), Denial> {
     let gate = gate_for(route, method);
-    let (mut facts, workspace_scoped_member) =
-        gate_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
-    if matches!(
-        route,
-        V1WorkItemsRoute::LabelList | V1WorkItemsRoute::LabelDetail
-    ) && pidash_auth::permissions::is_safe_method(method)
-    {
-        // BUG-5: Member SAFE reads the workspace-scoped membership.
-        facts.is_project_member = workspace_scoped_member;
-    }
+    let facts = gate_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
     if decide(gate, method, &scope, &facts) {
         Ok(())

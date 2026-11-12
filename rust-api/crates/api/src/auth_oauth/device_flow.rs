@@ -77,8 +77,39 @@ use crate::auth_session::throttle_ident;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::auth_oauth::models::{api_token_device_flow, cli_device_code};
+use pidash_db::redis::client_from_settings;
 use pidash_services::auth_session::guards::{allow_request, throttle_denied_json, throttle_wait};
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+/// Drain post-commit pause effects after the credential-clear transaction commits.
+async fn drain_pause_effects(
+    pool: &sqlx::PgPool,
+    state: &AppState,
+    effects: &pidash_services::runner_enroll::dispatch_rules::PauseEffects,
+) {
+    if effects.drain_pod_ids.is_empty() && effects.drain_runner_ids.is_empty() {
+        return;
+    }
+    let redis = client_from_settings(state.settings());
+    for pod_id in &effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner_id,
+        )
+        .await;
+    }
+}
 
 use super::guards::{
     device_start_cache_key, device_start_throttle_rate, verification_uri,
@@ -888,7 +919,7 @@ async fn post_approve(
                         now,
                     );
                 let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                    &db, &machine, now,
+                    &db, machine.id, now,
                 )
                 .await
                 .unwrap_or(false);
@@ -1201,7 +1232,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 now,
             );
             let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                &db_conn, &machine, now,
+                &db_conn, machine.id, now,
             )
             .await
             .unwrap_or(false);
@@ -1248,18 +1279,16 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         let secret = state.settings().secret_key.clone();
         let issued = pidash_services::domain::engine_credential::issue_engine_credential(
             &db_conn,
+            secret.as_bytes(),
             user_id,
             machine_id,
-            secret.as_bytes(),
             !row_interactive,
             now,
         )
         .await;
         let issued = match issued {
             Ok(i) => i,
-            Err(e)
-                if e.code == pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED =>
-            {
+            Err(pidash_services::domain::engine_credential::IssueError::SilentRenewalRefused) => {
                 // Lost race: reuse silent-refused body with fresh state.
                 let fresh = {
                     use sea_orm::EntityTrait;
@@ -1319,6 +1348,9 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         if consumed.is_err() || tx.commit().await.is_err() {
             return Denial::ServerError.into_response();
         }
+        // Post-commit: the issue cleared an engine_sign_in_required pause;
+        // fire its drains (resume drains each engine runner).
+        drain_pause_effects(&pool, &state, &issued.pause_effects).await;
         let state_after = {
             use sea_orm::EntityTrait;
             let m = pidash_db::entity::dev_machine::Entity::find_by_id(machine_id)

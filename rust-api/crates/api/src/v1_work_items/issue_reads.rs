@@ -58,7 +58,7 @@ fn sub(stmt: SelectStatement) -> SimpleExpr {
 
 /// The `issues.*` columns every read path selects
 /// (`read::work_items::ISSUE_SELECT_COLS`, F18-05 column order).
-const ISSUE_COLUMNS: [issues::Column; 31] = [
+const ISSUE_COLUMNS: [issues::Column; 32] = [
     issues::Column::Id,
     issues::Column::CreatedAt,
     issues::Column::UpdatedAt,
@@ -90,6 +90,7 @@ const ISSUE_COLUMNS: [issues::Column; 31] = [
     issues::Column::EstimatePointId,
     issues::Column::TypeId,
     issues::Column::AssignedPodId,
+    issues::Column::AssignedRunnerId,
 ];
 
 /// Select [`ISSUE_COLUMNS`].
@@ -965,6 +966,7 @@ struct IssueRow {
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     project_identifier: String,
     workspace_slug: String,
     state_group: Option<String>,
@@ -1008,6 +1010,7 @@ impl IssueRow {
             estimate_point: self.estimate_point_id.map(|id| id.to_string()),
             type_id: self.type_id.map(|id| id.to_string()),
             assigned_pod: self.assigned_pod_id.map(|id| id.to_string()),
+            assigned_runner: self.assigned_runner_id.map(|id| id.to_string()),
             project_identifier: self.project_identifier,
             workspace_slug: self.workspace_slug,
             state_group: self.state_group,

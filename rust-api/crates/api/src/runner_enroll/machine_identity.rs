@@ -304,8 +304,31 @@ pub async fn daemon_machine_patch(
     };
     match updated {
         Ok(updated) => {
+            let effects = updated.effects.clone();
             if tx.commit().await.is_err() {
                 return server_error();
+            }
+            // Post-commit drains for the owner-pause flip.
+            if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                let redis = pidash_db::redis::client_from_settings(state.settings());
+                for pod_id in &effects.drain_pod_ids {
+                    let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                        &pool,
+                        redis.as_ref(),
+                        &state.settings().runner,
+                        *pod_id,
+                    )
+                    .await;
+                }
+                for runner_id in &effects.drain_runner_ids {
+                    let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                        &pool,
+                        redis.as_ref(),
+                        &state.settings().runner,
+                        *runner_id,
+                    )
+                    .await;
+                }
             }
             match daemon_payload(&pool, &updated.model, auth.token.workspace_id).await {
                 Ok(body) => json_response(StatusCode::OK, body),
@@ -560,6 +583,13 @@ pub async fn merge_into_post(
             );
         }
     }
+    // The §13.1/§23.4 comments are system-attributed (Django
+    // `get_agent_system_user()`); resolved on the pool like the
+    // revoke store before the merge transaction begins.
+    let system_actor = match pidash_services::domain::identity::agent_system_user_id(&pool).await {
+        Ok(actor) => actor,
+        Err(_) => return server_error(),
+    };
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -567,7 +597,8 @@ pub async fn merge_into_post(
     let now = now_micros();
     let outcome = {
         let conn = TxConn::new(&mut tx);
-        machine_merge::merge_dev_machine(&conn, user_id, source_id, target_id, now).await
+        machine_merge::merge_dev_machine(&conn, user_id, source_id, target_id, system_actor, now)
+            .await
     };
     let outcome = match outcome {
         Ok(outcome) => {
@@ -586,7 +617,9 @@ pub async fn merge_into_post(
         }
     };
     // Post-commit effects in Django registration order:
-    // publishes (per finalized run) → handoffs → drains → cleanup.
+    // publishes (per finalized run) → handoffs → drains → bounces →
+    // recreates → cleanup (the revoke bundle's firing order; the
+    // §23.4 bounces/recreates mirror `fire_revoke_bundle`).
     let ports = crate::runner_runs::LivePorts::new(pool.clone(), &state);
     for run_id in &outcome.publish_run_ids {
         for effect in [
@@ -634,6 +667,79 @@ pub async fn merge_into_post(
             *pod_id,
         )
         .await;
+    }
+    // §23.4: E2/E4-failed dedicated issues get the lost-runner bounce
+    // (`_bounce_issue_no_eligible_runner`), then the recreate
+    // (`_create_and_dispatch_run` via the continuation driver).
+    for bounce in &outcome.bounce_effects {
+        let name = bounce
+            .runner_name
+            .clone()
+            .unwrap_or_else(|| "the dedicated runner".to_owned());
+        let now = chrono::Utc::now();
+        match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+            &state,
+            &pool,
+            uuid::Uuid::nil(),
+            bounce.issue_id,
+            now.timestamp(),
+        )
+        .await
+        {
+            Ok((deps, _)) => {
+                if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                    &pool,
+                    deps,
+                    now,
+                    0.0,
+                    bounce.issue_id,
+                    &bounce.triggered_by,
+                    &bounce.reason,
+                    &name,
+                )
+                .await
+                {
+                    tracing::error!(%error, %bounce.issue_id, "dedicated-runner bounce failed");
+                }
+            }
+            Err(_) => {
+                tracing::error!(%bounce.issue_id, "dedicated-runner bounce: dispatch deps failed");
+            }
+        }
+    }
+    for recreate in &outcome.recreate_effects {
+        let now = chrono::Utc::now();
+        match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+            &state,
+            &pool,
+            recreate.creator.unwrap_or(uuid::Uuid::nil()),
+            recreate.issue_id,
+            now.timestamp(),
+        )
+        .await
+        {
+            Ok((deps, matcher)) => {
+                if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                    &pool,
+                    deps,
+                    &matcher,
+                    now,
+                    0.0,
+                    recreate.issue_id,
+                    &recreate.trigger,
+                    recreate.creator,
+                    false,
+                    false,
+                )
+                .await
+                {
+                    tracing::error!(%error, %recreate.issue_id, "dedicated-runner recreate failed");
+                }
+            }
+            Err(_) => {
+                tracing::error!(%recreate.issue_id, "dedicated-runner recreate: dispatch deps failed");
+            }
+        }
     }
     for runner_id in &outcome.cleanup_runner_ids {
         let redis = pidash_db::redis::client_from_settings(state.settings());

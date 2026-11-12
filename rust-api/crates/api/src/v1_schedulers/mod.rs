@@ -341,6 +341,8 @@ struct MachineTokenLookupRow {
     user_id: uuid::Uuid,
     workspace_id: uuid::Uuid,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (`NEWPIDASH-50`); judged by the token kernel.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
     dev_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -361,6 +363,7 @@ async fn resolve_machine_token(
             machine_token::Column::UserId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .column_as(
             sea_query::Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
@@ -387,11 +390,16 @@ async fn resolve_machine_token(
         token_hash: row.token_hash,
         revoked_at_unix: row.revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: row.dev_revoked_at.is_some(),
+        expires_at_unix: row.expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: active row, any role. A
     // non-member is revoked first, then denied — exactly like Python.
     let member = workspace_members::Entity::find()

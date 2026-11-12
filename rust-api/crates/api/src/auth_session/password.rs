@@ -66,6 +66,7 @@ use serde_json::Value;
 
 use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
 use pidash_services::domain::identity;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::auth_session::render::disallowed_redirect;
 use crate::auth_session::throttle_ident;
@@ -897,12 +898,9 @@ async fn relogin(
         session.key.take()
     };
     if let Some(old) = old {
-        if sqlx::query("DELETE FROM sessions WHERE session_key = $1")
-            .bind(&old)
-            .execute(pool)
-            .await
-            .is_err()
-        {
+        use pidash_db::entity::sessions;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        if sessions::Entity::delete_by_id(old).exec(&db).await.is_err() {
             return None;
         }
     }
@@ -945,23 +943,20 @@ fn user_agent_of(headers: &HeaderMap) -> String {
 async fn password_row(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<(String, bool, bool)>, sqlx::Error> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT password, is_password_autoset, token_updated_at FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>((
-            row.try_get("password")?,
-            row.try_get("is_password_autoset")?,
-            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("token_updated_at")?
-                .is_some(),
-        ))
-    })
-    .transpose()
+) -> Result<Option<(String, bool, bool)>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id)
+        .select_only()
+        .columns([
+            users::Column::Password,
+            users::Column::IsPasswordAutoset,
+            users::Column::TokenUpdatedAt,
+        ])
+        .into_tuple::<(String, bool, Option<chrono::DateTime<chrono::FixedOffset>>)>()
+        .one(&db)
+        .await?;
+    Ok(user.map(|(password, autoset, token_at)| (password, autoset, token_at.is_some())))
 }
 
 /// Change/set/reset-password write: the encoded password plus the
@@ -1309,32 +1304,40 @@ struct ForgotUser {
 async fn forgot_user_by_email(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Option<ForgotUser>, sqlx::Error> {
+) -> Result<Option<ForgotUser>, sea_orm::DbErr> {
     // `User.objects.filter(email=email).first()` (exact match, default
     // `-created_at` ordering).
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, first_name, email, password, last_login FROM users WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::Email,
+            users::Column::Password,
+            users::Column::LastLogin,
+        ])
+        .into_tuple::<(
+            uuid::Uuid,
+            String,
+            Option<String>,
+            String,
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+        )>()
+        .one(&db)
+        .await?;
+    Ok(
+        user.map(|(id, first_name, email, password, last_login)| ForgotUser {
+            id,
+            first_name,
+            email: email.unwrap_or_default(),
+            password,
+            last_login_unix: last_login.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+        }),
     )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>(ForgotUser {
-            id: row.try_get("id")?,
-            first_name: row
-                .try_get::<Option<String>, _>("first_name")?
-                .unwrap_or_default(),
-            email: row
-                .try_get::<Option<String>, _>("email")?
-                .unwrap_or_default(),
-            password: row.try_get("password")?,
-            last_login_unix: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login")?
-                .map(|dt| dt.timestamp()),
-        })
-    })
-    .transpose()
 }
 
 /// `EMAIL_HOST` through the legacy resolver
@@ -1560,26 +1563,29 @@ struct ResetUser {
 async fn reset_user_by_id(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<ResetUser>, sqlx::Error> {
+) -> Result<Option<ResetUser>, sea_orm::DbErr> {
     // `User.objects.get(id=id)`.
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT password, last_login, email FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>(ResetUser {
-            password: row.try_get("password")?,
-            last_login_unix: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login")?
-                .map(|dt| dt.timestamp()),
-            email: row
-                .try_get::<Option<String>, _>("email")?
-                .unwrap_or_default(),
-        })
-    })
-    .transpose()
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id)
+        .select_only()
+        .columns([
+            users::Column::Password,
+            users::Column::LastLogin,
+            users::Column::Email,
+        ])
+        .into_tuple::<(
+            String,
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+            Option<String>,
+        )>()
+        .one(&db)
+        .await?;
+    Ok(user.map(|(password, last_login, email)| ResetUser {
+        password,
+        last_login_unix: last_login.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+        email: email.unwrap_or_default(),
+    }))
 }
 
 /// Shared reset-password flow; `is_space` selects the view twin. Plain
@@ -1794,108 +1800,60 @@ async fn reset_password_space(
 async fn user_snapshot(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<pw::UserSnapshot>, sqlx::Error> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT last_login, id, username, mobile_number, email, display_name, first_name, \
-         last_name, avatar, avatar_asset_id, cover_image, cover_image_asset_id, date_joined, \
-         created_at, updated_at, last_location, created_location, is_superuser, is_managed, \
-         is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, \
-         is_password_reset_required, token, last_active, last_login_time, last_logout_time, \
-         last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, token_updated_at, \
-         is_bot, bot_type, user_timezone, is_email_valid, masked_at \
-         FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|row| {
-        let dt = |value: chrono::DateTime<chrono::Utc>| {
-            (value.timestamp(), value.timestamp_subsec_micros())
-        };
-        Ok::<_, sqlx::Error>(pw::UserSnapshot {
-            last_login: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login")?
-                .map(dt),
-            id: row.try_get::<uuid::Uuid, _>("id")?.to_string(),
-            username: row.try_get("username")?,
-            mobile_number: row.try_get("mobile_number")?,
-            email: row.try_get("email")?,
-            display_name: row
-                .try_get::<Option<String>, _>("display_name")?
-                .unwrap_or_default(),
-            first_name: row
-                .try_get::<Option<String>, _>("first_name")?
-                .unwrap_or_default(),
-            last_name: row
-                .try_get::<Option<String>, _>("last_name")?
-                .unwrap_or_default(),
-            avatar: row
-                .try_get::<Option<String>, _>("avatar")?
-                .unwrap_or_default(),
-            avatar_asset: row
-                .try_get::<Option<uuid::Uuid>, _>("avatar_asset_id")?
-                .map(|id| id.to_string()),
-            cover_image: row.try_get("cover_image")?,
-            cover_image_asset: row
-                .try_get::<Option<uuid::Uuid>, _>("cover_image_asset_id")?
-                .map(|id| id.to_string()),
-            date_joined: dt(row.try_get("date_joined")?),
-            created_at: dt(row.try_get("created_at")?),
-            updated_at: dt(row.try_get("updated_at")?),
-            last_location: row
-                .try_get::<Option<String>, _>("last_location")?
-                .unwrap_or_default(),
-            created_location: row
-                .try_get::<Option<String>, _>("created_location")?
-                .unwrap_or_default(),
-            is_superuser: row.try_get("is_superuser")?,
-            is_managed: row.try_get("is_managed")?,
-            is_password_expired: row.try_get("is_password_expired")?,
-            is_active: row.try_get("is_active")?,
-            is_staff: row.try_get("is_staff")?,
-            is_email_verified: row.try_get("is_email_verified")?,
-            is_password_autoset: row.try_get("is_password_autoset")?,
-            is_password_reset_required: row.try_get("is_password_reset_required")?,
-            token: row
-                .try_get::<Option<String>, _>("token")?
-                .unwrap_or_default(),
-            last_active: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_active")?
-                .map(dt),
-            last_login_time: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_login_time")?
-                .map(dt),
-            last_logout_time: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_logout_time")?
-                .map(dt),
-            last_login_ip: row
-                .try_get::<Option<String>, _>("last_login_ip")?
-                .unwrap_or_default(),
-            last_logout_ip: row
-                .try_get::<Option<String>, _>("last_logout_ip")?
-                .unwrap_or_default(),
-            last_login_medium: row
-                .try_get::<Option<String>, _>("last_login_medium")?
-                .unwrap_or_else(|| "email".to_owned()),
-            last_login_uagent: row
-                .try_get::<Option<String>, _>("last_login_uagent")?
-                .unwrap_or_default(),
-            token_updated_at: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("token_updated_at")?
-                .map(dt),
-            is_bot: row.try_get("is_bot")?,
-            bot_type: row.try_get("bot_type")?,
-            user_timezone: row
-                .try_get::<Option<String>, _>("user_timezone")?
-                .unwrap_or_else(|| "UTC".to_owned()),
-            is_email_valid: row.try_get("is_email_valid")?,
-            masked_at: row
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("masked_at")?
-                .map(dt),
-        })
-    })
-    .transpose()
+) -> Result<Option<pw::UserSnapshot>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id).one(&db).await?;
+    Ok(user.map(|model| {
+        fn dt(value: &chrono::DateTime<chrono::FixedOffset>) -> (i64, u32) {
+            let utc = value.with_timezone(&chrono::Utc);
+            (utc.timestamp(), utc.timestamp_subsec_micros())
+        }
+        fn opt_dt(value: &Option<chrono::DateTime<chrono::FixedOffset>>) -> Option<(i64, u32)> {
+            value.as_ref().map(dt)
+        }
+        pw::UserSnapshot {
+            last_login: opt_dt(&model.last_login),
+            id: model.id.to_string(),
+            username: model.username,
+            mobile_number: model.mobile_number,
+            email: model.email,
+            display_name: model.display_name,
+            first_name: model.first_name,
+            last_name: model.last_name,
+            avatar: model.avatar,
+            avatar_asset: model.avatar_asset_id.map(|id| id.to_string()),
+            cover_image: model.cover_image,
+            cover_image_asset: model.cover_image_asset_id.map(|id| id.to_string()),
+            date_joined: dt(&model.date_joined),
+            created_at: dt(&model.created_at),
+            updated_at: dt(&model.updated_at),
+            last_location: model.last_location,
+            created_location: model.created_location,
+            is_superuser: model.is_superuser,
+            is_managed: model.is_managed,
+            is_password_expired: model.is_password_expired,
+            is_active: model.is_active,
+            is_staff: model.is_staff,
+            is_email_verified: model.is_email_verified,
+            is_password_autoset: model.is_password_autoset,
+            is_password_reset_required: model.is_password_reset_required,
+            token: model.token,
+            last_active: opt_dt(&model.last_active),
+            last_login_time: opt_dt(&model.last_login_time),
+            last_logout_time: opt_dt(&model.last_logout_time),
+            last_login_ip: model.last_login_ip,
+            last_logout_ip: model.last_logout_ip,
+            last_login_medium: model.last_login_medium,
+            last_login_uagent: model.last_login_uagent,
+            token_updated_at: opt_dt(&model.token_updated_at),
+            is_bot: model.is_bot,
+            bot_type: model.bot_type,
+            user_timezone: model.user_timezone,
+            is_email_valid: model.is_email_valid,
+            masked_at: opt_dt(&model.masked_at),
+        }
+    }))
 }
 
 /// `base_host(request, ...)` over the process settings.
@@ -1940,6 +1898,83 @@ mod tests {
         // No pools: every handler answers 500 through `pool_of`, which
         // proves the failure is closed, never a panic.
         AppState::new("0.1.0")
+    }
+
+    #[test]
+    fn migrated_user_read_shapes() {
+        // Pin the SeaORM statement shapes for the migrated reads (no DB,
+        // per orm-migration.md §3.2): columns, filters and ordering must
+        // stay byte-identical to the Django lookups they replaced.
+        use pidash_db::entity::users;
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let id = uuid::Uuid::nil();
+        let password_row = users::Entity::find_by_id(id)
+            .select_only()
+            .columns([
+                users::Column::Password,
+                users::Column::IsPasswordAutoset,
+                users::Column::TokenUpdatedAt,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            password_row.contains("\"users\".\"password\"")
+                && password_row.contains("\"users\".\"is_password_autoset\"")
+                && password_row.contains("\"users\".\"token_updated_at\"")
+                && password_row.contains("\"users\".\"id\" = "),
+            "password_row shape: {password_row}"
+        );
+        let forgot = users::Entity::find()
+            .filter(users::Column::Email.eq("a@b.c"))
+            .order_by_desc(users::Column::CreatedAt)
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::FirstName,
+                users::Column::Email,
+                users::Column::Password,
+                users::Column::LastLogin,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            forgot.contains("\"users\".\"email\" = 'a@b.c'")
+                && forgot.contains("ORDER BY \"users\".\"created_at\" DESC"),
+            "forgot shape: {forgot}"
+        );
+        let reset = users::Entity::find_by_id(id)
+            .select_only()
+            .columns([
+                users::Column::Password,
+                users::Column::LastLogin,
+                users::Column::Email,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            reset.contains("\"users\".\"password\"")
+                && reset.contains("\"users\".\"last_login\"")
+                && reset.contains("\"users\".\"email\""),
+            "reset shape: {reset}"
+        );
+    }
+
+    #[test]
+    fn migrated_session_delete_shape() {
+        // `relogin` deletes the abandoned row by primary key
+        // (`DELETE FROM sessions WHERE session_key = $1`).
+        use pidash_db::entity::sessions;
+        use sea_orm::sea_query::{DeleteStatement, Expr, PostgresQueryBuilder};
+        let stmt = DeleteStatement::new()
+            .from_table(sessions::Entity)
+            .and_where(Expr::col((sessions::Entity, sessions::Column::SessionKey)).eq("k"))
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            stmt.contains("DELETE FROM \"sessions\"") && stmt.contains("\"session_key\""),
+            "session delete shape: {stmt}"
+        );
     }
 
     #[test]

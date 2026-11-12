@@ -110,7 +110,7 @@ export function CommentEditForm({
     void upload
       .mutateAsync({ file, commentId: comment.id })
       .then((image) => {
-        handleRef.current?.insertImage(image.src, {
+        handleRef.current?.insertImage(resolveAsset(image.src), {
           storedSrc: image.assetId,
           status: COMMENT_IMAGE_UPLOADED_STATUS,
         });

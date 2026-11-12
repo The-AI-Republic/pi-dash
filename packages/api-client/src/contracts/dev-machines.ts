@@ -185,20 +185,69 @@ export async function signOutDevMachineEngine(
 }
 
 /**
+ * The merge endpoint's answer (`machine_identity.merge_dev_machine`).
+ */
+export const MergeResult = z.object({
+  source_dev_machine_id: uuid(),
+  target_dev_machine_id: uuid(),
+  merged_at: z.optional(z.string()),
+  moved_runner_ids: z.array(z.string()),
+  collisions: z.array(
+    z.object({
+      revoked_runner_id: z.string(),
+      survivor_runner_id: z.string(),
+    })
+  ),
+});
+export type MergeResult = z.infer<typeof MergeResult>;
+
+/**
  * Merge an offline machine into the computer that replaced it (design
  * §4.10, §13): its runners, pins and pod membership move to the target
  * and the source is revoked with `merged_into` set. Both machines must
  * be the caller's; the source must have no live session. Retrying into
- * the same target answers the same result. Answers the target row.
+ * the same target answers the same result.
  */
 export async function mergeDevMachineInto(
   client: ApiClient,
   sourceMachineId: string,
   targetMachineId: string
-): Promise<unknown> {
+): Promise<MergeResult> {
   const path = `/api/v1/runner/dev-machines/${sourceMachineId}/merge-into/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: { target: targetMachineId } });
-  return envelope.data;
+  return client.parse(MergeResult, envelope.data, `POST ${path}`);
+}
+
+/**
+ * One offline machine the app may offer to replace (design §4.10).
+ * Ordered most recently seen first.
+ */
+export const ReplaceCandidate = z.object({
+  id: uuid(),
+  label: z.string(),
+  host_label: z.string(),
+  display_name: z.optional(z.nullable(z.string())),
+  last_seen_at: nullableDateTime(),
+  created_at: z.optional(nullableDateTime()),
+  provisioning: z.optional(z.nullable(z.string())),
+  live_runner_count: z.optional(z.number()),
+});
+export type ReplaceCandidate = z.infer<typeof ReplaceCandidate>;
+
+export const ReplaceCandidates = z.object({
+  candidates: z.array(ReplaceCandidate),
+});
+export type ReplaceCandidates = z.infer<typeof ReplaceCandidates>;
+
+/**
+ * The caller's offline machines with the same host label as `machineId`
+ * and no live session: candidates for the "Is this <label>? Replace it"
+ * prompt. The server never guesses; it only lists.
+ */
+export async function listReplaceCandidates(client: ApiClient, machineId: string): Promise<ReplaceCandidates> {
+  const path = `/api/v1/runner/dev-machines/${machineId}/replace-candidates/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(ReplaceCandidates, body, `GET ${path}`);
 }
 
 export interface CreateRunnerOnMachineInput {

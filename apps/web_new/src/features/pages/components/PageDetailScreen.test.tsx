@@ -745,7 +745,9 @@ describe("PageDetailScreen title and body", () => {
     await screen.findByText("This page is locked and read-only.");
     await waitFor(() => {
       const image = document.querySelector(".editor-container img");
-      expect(image?.getAttribute("src")).toBe("/api/assets/v2/workspaces/acme/projects/" + PROJECT + "/asset-4/");
+      expect(image?.getAttribute("src")).toBe(
+        "https://api.test/api/assets/v2/workspaces/acme/projects/" + PROJECT + "/asset-4/"
+      );
     });
   });
 

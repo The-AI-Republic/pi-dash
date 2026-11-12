@@ -220,8 +220,22 @@ export interface IRunner {
    * the cloud assigns it no new work. Null = not paused. */
   paused_at: string | null;
   paused_by: string | null;
+  /** Eligibility read (§7.4), present only with `assignable_for`. */
+  assignable?: boolean;
+  not_assignable_code?: string;
+  is_busy?: boolean;
+  queue_depth?: number;
   created_at: string;
   updated_at: string;
+}
+
+/** Assignable-runner row (§7.4): the eligibility answer when the list was
+ * read with `assignable_for`. Optional so plain list reads still parse. */
+export interface IRunnerAssignable {
+  assignable?: boolean;
+  not_assignable_code?: string;
+  is_busy?: boolean;
+  queue_depth?: number;
 }
 
 /** ``POST /api/runners/<id>/pause/`` response: the runner plus the runs it

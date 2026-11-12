@@ -121,6 +121,20 @@ pub const RUN_NOT_QUEUED_BODY: &str = r#"{"error":"run not queued"}"#;
 /// Release-pin on an unpinned run (`runs.py:677-681`).
 pub const RUN_NOT_PINNED_BODY: &str = r#"{"error":"run not pinned"}"#;
 
+/// Release-pin on a dedicated run (H-13, `runs.py:682-700`): the
+/// exact refusal names runner and pod so the person can act.
+pub fn dedicated_release_body(runner_name: &str, pod_name: &str) -> String {
+    serde_json::json!({
+        "error": format!(
+            "This run is dedicated to runner {runner_name} and cannot be released. \
+             Change the issue's runner, or cancel the run and use Run on any \
+             runner in {pod_name} once."
+        ),
+        "code": "dedicated_pin_not_releasable",
+    })
+    .to_string()
+}
+
 /// Default cancel reason (`runs.py:560`).
 pub const DEFAULT_CANCEL_REASON: &str = "cancelled by user";
 /// `reason[:512]` counts code points (`runs.py:560`).
@@ -746,6 +760,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         pod_id: model.pod_id,
         runner_id: model.runner_id,
         pinned_runner_id: model.pinned_runner_id,
+        pin_kind: model.pin_kind,
         work_item_id: model.work_item_id,
         scheduler_binding_id: model.scheduler_binding_id,
         parent_run_id: model.parent_run_id,
@@ -787,18 +802,18 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
     })
 }
 
-/// Decode the 39-column run image at `base..base+39` into the L2 row.
+/// Decode the 40-column run image at `base..base+40` into the L2 row.
 /// Kept for the `app_scheduler` binding-runs list, whose hand-written
 /// `SELECT` still opens with [`run_select_list`]; every reader here
 /// goes through [`run_from_model`].
 pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, RowError> {
     use sqlx::Row;
-    let status: String = row.try_get(base + 10)?;
+    let status: String = row.try_get(base + 11)?;
     let status = AgentRunStatus::from_value(&status).ok_or_else(|| RowError::Choice {
         column: "status",
         value: status,
     })?;
-    let executor_kind: String = row.try_get(base + 11)?;
+    let executor_kind: String = row.try_get(base + 12)?;
     let executor_kind =
         AgentExecutorKind::from_value(&executor_kind).ok_or_else(|| RowError::Choice {
             column: "executor_kind",
@@ -808,7 +823,7 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
     // are choices-only (no DB check), so the stored value may sit
     // outside the trigger enum (runner migration 0029) and every
     // read path must tolerate it.
-    let trigger: String = row.try_get(base + 19)?;
+    let trigger: String = row.try_get(base + 20)?;
     Ok(AgentRun {
         id: row.try_get(base)?,
         workspace_id: row.try_get(base + 1)?,
@@ -817,38 +832,39 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         pod_id: row.try_get(base + 4)?,
         runner_id: row.try_get(base + 5)?,
         pinned_runner_id: row.try_get(base + 6)?,
-        work_item_id: row.try_get(base + 7)?,
-        scheduler_binding_id: row.try_get(base + 8)?,
-        parent_run_id: row.try_get(base + 9)?,
+        pin_kind: row.try_get(base + 7)?,
+        work_item_id: row.try_get(base + 8)?,
+        scheduler_binding_id: row.try_get(base + 9)?,
+        parent_run_id: row.try_get(base + 10)?,
         status,
         executor_kind,
-        dispatch_attempts: row.try_get(base + 12)?,
-        cancel_requested_at: row.try_get(base + 13)?,
-        cancel_reason: row.try_get(base + 14)?,
-        tool_plan: row.try_get(base + 15)?,
-        terminal_hooks_applied_at: row.try_get(base + 16)?,
-        terminal_capacity_released_at: row.try_get(base + 17)?,
-        prompt: row.try_get(base + 18)?,
+        dispatch_attempts: row.try_get(base + 13)?,
+        cancel_requested_at: row.try_get(base + 14)?,
+        cancel_reason: row.try_get(base + 15)?,
+        tool_plan: row.try_get(base + 16)?,
+        terminal_hooks_applied_at: row.try_get(base + 17)?,
+        terminal_capacity_released_at: row.try_get(base + 18)?,
+        prompt: row.try_get(base + 19)?,
         trigger,
-        prompt_manifest: row.try_get(base + 20)?,
-        phase_kind: row.try_get(base + 21)?,
-        run_config: row.try_get(base + 22)?,
-        required_capabilities: row.try_get(base + 23)?,
-        thread_id: row.try_get(base + 24)?,
-        agent_metadata: row.try_get(base + 25)?,
-        lease_expires_at: row.try_get(base + 26)?,
-        done_payload: row.try_get(base + 27)?,
-        error_details: row.try_get(base + 28)?,
-        refusal_category: row.try_get(base + 29)?,
-        llm_model: row.try_get(base + 30)?,
-        usage: row.try_get(base + 31)?,
-        input_tokens: row.try_get(base + 32)?,
-        output_tokens: row.try_get(base + 33)?,
-        total_tokens: row.try_get(base + 34)?,
-        created_at: row.try_get(base + 35)?,
-        assigned_at: row.try_get(base + 36)?,
-        started_at: row.try_get(base + 37)?,
-        ended_at: row.try_get(base + 38)?,
+        prompt_manifest: row.try_get(base + 21)?,
+        phase_kind: row.try_get(base + 22)?,
+        run_config: row.try_get(base + 23)?,
+        required_capabilities: row.try_get(base + 24)?,
+        thread_id: row.try_get(base + 25)?,
+        agent_metadata: row.try_get(base + 26)?,
+        lease_expires_at: row.try_get(base + 27)?,
+        done_payload: row.try_get(base + 28)?,
+        error_details: row.try_get(base + 29)?,
+        refusal_category: row.try_get(base + 30)?,
+        llm_model: row.try_get(base + 31)?,
+        usage: row.try_get(base + 32)?,
+        input_tokens: row.try_get(base + 33)?,
+        output_tokens: row.try_get(base + 34)?,
+        total_tokens: row.try_get(base + 35)?,
+        created_at: row.try_get(base + 36)?,
+        assigned_at: row.try_get(base + 37)?,
+        started_at: row.try_get(base + 38)?,
+        ended_at: row.try_get(base + 39)?,
     })
 }
 
@@ -1151,34 +1167,89 @@ pub(crate) async fn tool_calls_for_many(
     Ok(grouped)
 }
 
+/// Read-time pin/wait fields for a run (design §14.3): the pinned
+/// runner's name and the dispatch-wait object (null unless QUEUED and
+/// pinned — `dispatch_wait` itself runs the §14.3 logic). Shared by
+/// the detail and list renderers, which fetch extras the sync shape
+/// layer cannot query for.
+async fn extras_for(
+    pool: &PgPool,
+    run: &AgentRun,
+    viewer_id: Option<Uuid>,
+) -> Result<shape::AgentRunExtras, Response> {
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let pinned_runner_name = match run.pinned_runner_id {
+        None => None,
+        Some(id) => {
+            let row = pidash_db::entity::runner::Entity::find_by_id(id)
+                .one(&orm)
+                .await
+                .map_err(|_| server_error())?;
+            row.map(|runner| runner.name)
+        }
+    };
+    let inputs = pidash_services::domain::issue_assignment::RunWaitInputs {
+        id: run.id,
+        status: run.status.value().to_owned(),
+        pinned_runner_id: run.pinned_runner_id,
+        pin_kind: run.pin_kind.clone(),
+        work_item_id: run.work_item_id,
+        pod_id: run.pod_id,
+        created_by_id: run.created_by_id,
+        trigger: run.trigger.clone(),
+        created_at: run.created_at.fixed_offset(),
+    };
+    let dispatch_wait =
+        pidash_services::domain::issue_assignment::build_dispatch_wait(&orm, &inputs, viewer_id)
+            .await
+            .map_err(|_| server_error())?;
+    Ok(shape::AgentRunExtras {
+        pinned_runner_name,
+        dispatch_wait,
+    })
+}
+
 /// Render one run through the detail shape (single-object serializer:
 /// `error_diagnostic` runs the classifier). `binding` is `Some` exactly
 /// when `run.scheduler_binding_id` is set (resolved by
 /// [`binding_detail_for`] / [`binding_details_for_many`]).
-pub(crate) fn render_detail(
+pub(crate) async fn render_detail(
+    pool: &PgPool,
     run: &AgentRun,
     pod: &PodMiniStrings,
     tool_calls: &[AgentRunToolCall],
     binding: Option<&SchedulerBindingStrings>,
-) -> Value {
+    viewer_id: Option<Uuid>,
+) -> Result<Value, Response> {
+    let extras = extras_for(pool, run, viewer_id).await?;
     let pod_row = pod.as_row();
     let binding_row = binding.map(SchedulerBindingStrings::as_row);
-    let view = shape::run_detail_to_representation(run, &pod_row, tool_calls, binding_row.as_ref());
-    serde_json::to_value(&view).expect("serializable run view")
+    let view = shape::run_detail_to_representation(
+        run,
+        &pod_row,
+        tool_calls,
+        binding_row.as_ref(),
+        &extras,
+    );
+    Ok(serde_json::to_value(&view).expect("serializable run view"))
 }
 
 /// Render one run through the list shape (`error_diagnostic` is null).
 /// Shared with the scheduler binding-runs endpoint (PIDASHCONV-1059).
-pub(crate) fn render_list_row(
+pub(crate) async fn render_list_row(
+    pool: &PgPool,
     run: &AgentRun,
     pod: &PodMiniStrings,
     tool_calls: &[AgentRunToolCall],
     binding: Option<&SchedulerBindingStrings>,
-) -> Value {
+    viewer_id: Option<Uuid>,
+) -> Result<Value, Response> {
+    let extras = extras_for(pool, run, viewer_id).await?;
     let pod_row = pod.as_row();
     let binding_row = binding.map(SchedulerBindingStrings::as_row);
-    let view = shape::run_list_to_representation(run, &pod_row, tool_calls, binding_row.as_ref());
-    serde_json::to_value(&view).expect("serializable run view")
+    let view =
+        shape::run_list_to_representation(run, &pod_row, tool_calls, binding_row.as_ref(), &extras);
+    Ok(serde_json::to_value(&view).expect("serializable run view"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,7 +1376,10 @@ async fn list_runs_inner(
                 None => return server_error(),
             },
         };
-        results.push(render_list_row(run, pod, calls, binding));
+        match render_list_row(pool, run, pod, calls, binding, None).await {
+            Ok(value) => results.push(value),
+            Err(response) => return response,
+        }
     }
     // `count` is the page length, not the total (`runs.py:248`).
     let count = results.len();
@@ -1497,7 +1571,19 @@ async fn run_detail_inner(
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    let mut payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
+    let mut payload = match render_detail(
+        pool,
+        &guarded.run,
+        &pod,
+        &tool_calls,
+        binding.as_ref(),
+        None,
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
     if query_last(&query, "include_events").as_deref() == Some("1") {
         let records = match run_events_select(guarded.run.id)
             .all(&sea_orm_connection(pool))
@@ -1786,7 +1872,19 @@ async fn render_cancelled(pool: &PgPool, run_id: Uuid, status: StatusCode) -> Re
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    let payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
+    let payload = match render_detail(
+        pool,
+        &guarded.run,
+        &pod,
+        &tool_calls,
+        binding.as_ref(),
+        None,
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
     json_response(status, payload.to_string())
 }
 
@@ -2023,6 +2121,33 @@ async fn release_pin_inner(
     if locked.pinned_runner_id.is_none() {
         let _ = tx.rollback().await;
         return json_response(StatusCode::CONFLICT, RUN_NOT_PINNED_BODY.to_owned());
+    }
+    // H-13: a dedicated pin is owned by the issue, not the queue;
+    // only the assignment save or revoke can move it (§12.2). The
+    // check is made on the locked row, after the permission and
+    // still-QUEUED checks, before any unpin. Answered locally (a
+    // read-only refusal); the locality unpin below stays proxied.
+    if locked.pin_kind == "dedicated" {
+        let orm = pidash_db::pool::sea_orm_connection(pool);
+        let runner_name = match locked.pinned_runner_id {
+            Some(id) => pidash_db::entity::runner::Entity::find_by_id(id)
+                .one(&orm)
+                .await
+                .ok()
+                .flatten()
+                .map(|runner| runner.name),
+            None => None,
+        }
+        .unwrap_or_else(|| "the dedicated runner".to_owned());
+        let pod_name = match pod_mini_for(pool, locked.pod_id).await {
+            Ok(pod) => pod.name,
+            Err(_) => "the pod".to_owned(),
+        };
+        let _ = tx.rollback().await;
+        return json_response(
+            StatusCode::CONFLICT,
+            dedicated_release_body(&runner_name, &pod_name),
+        );
     }
     // Queued + pinned: Django owns the unpin + parent-thread clear +
     // pod drain. Roll back and proxy before any write.
@@ -2459,7 +2584,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 39);
+        assert_eq!(agent_run::COLUMNS.len(), 40);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
@@ -2511,6 +2636,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dedicated_release_body_matches_fx08_golden() {
+        let fx = fx08();
+        let golden = fx.pointer("/release_pin/dedicated/body").expect("golden");
+        let rendered = dedicated_release_body("gpu-box", "Default");
+        let value: Value = serde_json::from_str(&rendered).expect("json");
+        assert_eq!(&value, golden);
+    }
+
     // -- live scratch-DB tests (env-gated) -------------------------------
     // Same convention as pidash-db's orchestration runs: unset
     // DATABASE_URL (plain `cargo test`) skips these.
@@ -2529,12 +2663,13 @@ mod tests {
         }
     }
 
-    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 39-column
+    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 40-column
     /// positional image [`decode_run`] reads).
     const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
         id UUID PRIMARY KEY, workspace_id UUID, owner_id UUID,
         created_by_id UUID, pod_id UUID, runner_id UUID,
-        pinned_runner_id UUID, work_item_id UUID,
+        pinned_runner_id UUID, pin_kind TEXT DEFAULT 'locality',
+        work_item_id UUID,
         scheduler_binding_id UUID, parent_run_id UUID, status TEXT,
         executor_kind TEXT, dispatch_attempts INTEGER,
         cancel_requested_at TIMESTAMPTZ, cancel_reason TEXT,

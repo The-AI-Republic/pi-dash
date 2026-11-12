@@ -205,7 +205,8 @@ def test_issue_cloud_agent_write_becomes_pod_level_runner(session_client, worksp
     assert resp.status_code in (200, 204), resp.content
     issue.refresh_from_db()
     assert issue.agent_executor == AgentExecutorKind.LOCAL_RUNNER
-    assert not hasattr(issue, "assigned_runner_id")
+    # The dedicated-runner column exists (§6) but the write names no runner.
+    assert issue.assigned_runner_id is None
 
 
 def test_issue_managed_write_from_old_build_is_pod_level(session_client, workspace, project, issue, engine, other_pod):

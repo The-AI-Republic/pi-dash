@@ -9,6 +9,7 @@ vi.mock("./toaster.js", async (importOriginal) => {
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
 });
 
+import { platform } from "../../core/platform/index.js";
 import { PAGE_URL_COPIED_TITLE, PAGE_URL_COPY_FAILED_TITLE, copyCurrentPageUrl } from "./clipboard.js";
 import { notifyError, notifySuccess } from "./toaster.js";
 
@@ -32,5 +33,46 @@ describe("copy current page URL", () => {
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     await copyCurrentPageUrl();
     expect(notifyError).toHaveBeenCalledWith(PAGE_URL_COPY_FAILED_TITLE, "denied");
+  });
+
+  it("copies the hosted address on the desktop bundle, keeping query and fragment", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("window", {
+      location: {
+        origin: "http://tauri.localhost",
+        href: "http://tauri.localhost/acme/browse/ACME-1/?pane=info#comment-3",
+        pathname: "/acme/browse/ACME-1/",
+        search: "?pane=info",
+        hash: "#comment-3",
+      },
+    });
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    await copyCurrentPageUrl();
+    expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/ACME-1/?pane=info#comment-3");
+    expect(notifySuccess).toHaveBeenCalledWith(PAGE_URL_COPIED_TITLE);
+  });
+
+  it("toasts a refused shareable link instead of writing a bundle address", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("window", {
+      location: {
+        origin: "http://tauri.localhost",
+        href: "http://tauri.localhost/acme/",
+        pathname: "/acme/",
+        search: "",
+        hash: "",
+      },
+    });
+    vi.spyOn(platform, "shareableUrl").mockImplementation(() => {
+      throw new Error("A hosted web origin is required to create a shareable link.");
+    });
+    await copyCurrentPageUrl();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith(
+      PAGE_URL_COPY_FAILED_TITLE,
+      "A hosted web origin is required to create a shareable link."
+    );
   });
 });

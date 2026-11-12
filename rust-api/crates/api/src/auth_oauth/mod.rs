@@ -43,6 +43,7 @@ pub mod oauth_github;
 pub mod oauth_gitlab;
 pub mod oauth_google;
 
+use pidash_db::entity::file_assets;
 use pidash_services::domain::identity;
 
 pub use guards::{
@@ -54,6 +55,28 @@ pub use guards::{
     OAUTH_SPACE_GITEA_INITIATE_SESSION_KEYS, OAUTH_SPACE_INITIATE_SESSION_KEYS, OAUTH_VIEW_BASE,
     OAUTH_VIEW_METHOD,
 };
+
+/// Bounded S3 client for the avatar flow (`PIDASHCONV-1728`).
+///
+/// `S3Storage` via boto3 carries botocore's defaults — 60s connect and 60s
+/// read, plus retries — and the avatar adapters swallow any failure to the
+/// provider-URL fallback (`adapter/base.py:198-215,236-254`). `Client::new()`
+/// has no connect/read timeout, so a stalled S3/MinIO (including a hung
+/// reverse proxy on the public MinIO host, `is_server=False`) hangs the OAuth
+/// callback forever. This helper mirrors `build_s3_client` in
+/// `crates/jobs/src/tasks_cleanup/expiry.rs:205-210` (PIDASHCONV-1291): the
+/// same 60s/60s pair bounds PUT/HEAD/DELETE while the provider image
+/// download keeps its tighter 10s per-request timeout. Construction never
+/// fails in practice (no custom TLS config); on the unreachable build error
+/// we fall back to `Client::new()` rather than panic — the call then hangs
+/// instead of 500ing, which the fallback contract treats as a failure.
+pub(crate) fn avatar_s3_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(60))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// Routes for the ported device families (PIDASHCONV-342 + PIDASHCONV-343).
 pub fn routes() -> axum::Router<crate::state::AppState> {
@@ -77,17 +100,29 @@ pub(crate) async fn soft_delete_avatar_asset(
     asset_id: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    if sqlx::query(
-        r#"UPDATE "file_assets"
-           SET "deleted_at" = $1, "updated_at" = $1,
-               "created_by_id" = NULL, "updated_by_id" = NULL
-           WHERE "id" = $2"#,
-    )
-    .bind(now)
-    .bind(asset_id)
-    .execute(pool)
-    .await
-    .is_err()
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    if file_assets::Entity::update_many()
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            file_assets::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            file_assets::Column::CreatedById,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            file_assets::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .filter(file_assets::Column::Id.eq(asset_id))
+        .exec(&db)
+        .await
+        .is_err()
     {
         return;
     }
@@ -123,8 +158,8 @@ pub(crate) async fn soft_delete_avatar_asset(
 /// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE` (`FILE_SIZE_LIMIT`, default
 /// `5242880`). `storage` / `scheme` / `host` mirror the
 /// `S3Storage(request)` server-side call the avatar flow makes
-/// (`base.py:198`, `is_server=False`). The google and gitea callbacks keep
-/// their own older copies; github and gitlab share this one.
+/// (`base.py:198`, `is_server=False`). The google callback keeps its own
+/// older copy; gitea, github and gitlab share this one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_and_upload_avatar(
     client: &reqwest::Client,
@@ -353,7 +388,8 @@ pub(crate) async fn head_storage_metadata(
 
 /// Shared new `FileAsset` row (`base.py:197-206`):
 /// `attributes={name, type, size}` (`{provider}-avatar.{extension}`),
-/// `asset` the bare filename, `user` + `created_by` set, entity
+/// `asset` the bare filename, `user` set (both audit columns NULL —
+/// anonymous callback, PIDASHCONV-1730), entity
 /// `USER_AVATAR`, uploaded flag, S3 head metadata (`None` → NULL when the
 /// HEAD failed, like boto3's `None`). Every other column rides its Django
 /// default (the reviewed column list mirrors the D-17 google port of the
@@ -371,31 +407,43 @@ pub(crate) async fn insert_avatar_file_asset(
     storage_metadata: Option<serde_json::Value>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
+    use sea_orm::{ActiveModelTrait, Set};
     let attributes =
         pidash_storage::avatar_attributes(provider, extension, content_type, file_size);
-    sqlx::query(
-        r#"INSERT INTO file_assets
-           (id, created_at, updated_at, attributes, asset,
-            created_by_id, updated_by_id, workspace_id,
-            is_deleted, deleted_at, is_archived,
-            comment_id, entity_type, external_id, external_source,
-            is_uploaded, issue_id, page_id, project_id,
-            size, storage_metadata, user_id, draft_issue_id, entity_identifier)
-           VALUES ($1,$2,$2,$3,$4,$5,NULL,NULL,
-                   FALSE,NULL,FALSE,
-                   NULL,'USER_AVATAR',NULL,NULL,
-                   TRUE,NULL,NULL,NULL,
-                   $6,$7,$5,NULL,NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(attributes)
-    .bind(stored_key)
-    .bind(user_id)
-    .bind(file_size as f64)
-    .bind(storage_metadata)
-    .execute(pool)
-    .await?;
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    file_assets::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_tz),
+        updated_at: Set(now_tz),
+        attributes: Set(attributes),
+        asset: Set(stored_key.to_owned()),
+        // Django's BaseModel.save overwrites created_by with NULL on the
+        // anonymous OAuth callback (login() runs after sign-up), so both
+        // audit columns are NULL — same as soft_delete_avatar_asset.
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        workspace_id: Set(None),
+        is_deleted: Set(false),
+        deleted_at: Set(None),
+        is_archived: Set(false),
+        comment_id: Set(None),
+        entity_type: Set(Some("USER_AVATAR".to_owned())),
+        external_id: Set(None),
+        external_source: Set(None),
+        is_uploaded: Set(true),
+        issue_id: Set(None),
+        page_id: Set(None),
+        project_id: Set(None),
+        size: Set(file_size as f64),
+        storage_metadata: Set(storage_metadata),
+        user_id: Set(Some(user_id)),
+        draft_issue_id: Set(None),
+        entity_identifier: Set(None),
+    }
+    .insert(&db)
+    .await
+    .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(())
 }
 
@@ -427,15 +475,19 @@ pub(crate) async fn delete_old_avatar(
     avatar_asset_id: Option<uuid::Uuid>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let Some(asset_id) = avatar_asset_id else {
         return;
     };
-    let row: Option<(String,)> = match sqlx::query_as(
-        "SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<String> = match file_assets::Entity::find_by_id(asset_id)
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .column(file_assets::Column::Asset)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
     {
         Ok(row) => row,
         Err(error) => {
@@ -443,7 +495,7 @@ pub(crate) async fn delete_old_avatar(
             return;
         }
     };
-    let Some((key,)) = row else {
+    let Some(key) = row else {
         return;
     };
     if pidash_storage::validate_storage(storage).is_err() {
@@ -473,4 +525,20 @@ pub(crate) async fn delete_old_avatar(
         }
     }
     soft_delete_avatar_asset(pool, user_id, asset_id, now).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::avatar_s3_client;
+
+    /// The avatar S3 client must be bounded like botocore (60s/60s,
+    /// PIDASHCONV-1728): construction is infallible and the client is
+    /// usable for S3 without hanging forever on a stalled store. This
+    /// pins the helper's existence; the contract suite's static test
+    /// pins the exact timeout values and wiring (a unit test cannot read
+    /// `reqwest`'s private timeout fields).
+    #[test]
+    fn avatar_s3_client_is_constructible() {
+        let _client = avatar_s3_client();
+    }
 }

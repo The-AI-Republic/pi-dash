@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
-use crate::util::paths::Paths;
+use crate::util::paths::{Paths, SERVICE_ERR_LOG, SERVICE_OUT_LOG};
 
 const LABEL: &str = "so.pidash.daemon";
 
@@ -107,12 +107,14 @@ fn render_plist(
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>{logs}/runner.out.log</string>
-  <key>StandardErrorPath</key><string>{logs}/runner.err.log</string>
+  <key>StandardOutPath</key><string>{logs}/{out_log}</string>
+  <key>StandardErrorPath</key><string>{logs}/{err_log}</string>
 </dict>
 </plist>
 "#,
         label = LABEL,
+        out_log = SERVICE_OUT_LOG,
+        err_log = SERVICE_ERR_LOG,
     )
 }
 

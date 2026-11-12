@@ -23,9 +23,11 @@
 
 use axum::http::header;
 use axum::response::Response;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use pidash_db::entity::sessions;
 use pidash_services::domain::identity;
 
 use crate::middleware::SessionHandle;
@@ -47,6 +49,18 @@ const CSRF_COOKIE_MAX_AGE: i64 = 31_449_600;
 /// the provider path stable.
 pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
     pidash_compat::http::session_auth_hash(password_field, secret_key)
+}
+
+/// Delete the abandoned session row (`flush()`/`cycle_key()` in
+/// `django.contrib.auth`: the old row is deleted, never kept).
+async fn delete_session_row(pool: &PgPool, key: &str) -> Result<(), sqlx::Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    sessions::Entity::delete_many()
+        .filter(sessions::Column::SessionKey.eq(key))
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(())
 }
 
 /// `django.contrib.auth.login()` (`auth/__init__.py:107-143`) for an OAuth
@@ -97,20 +111,14 @@ pub async fn login_session_keys(
     if flush {
         handle.lock().clear();
         if let Some(old) = old_key {
-            sqlx::query("DELETE FROM \"sessions\" WHERE \"session_key\" = $1")
-                .bind(&old)
-                .execute(pool)
-                .await?;
+            delete_session_row(pool, &old).await?;
         }
     } else if current_user.is_none() {
         // Anonymous `cycle_key()`: fresh key on save, data kept, the
         // pre-login row deleted.
         handle.lock().key = None;
         if let Some(old) = old_key {
-            sqlx::query("DELETE FROM \"sessions\" WHERE \"session_key\" = $1")
-                .bind(&old)
-                .execute(pool)
-                .await?;
+            delete_session_row(pool, &old).await?;
         }
     }
     {

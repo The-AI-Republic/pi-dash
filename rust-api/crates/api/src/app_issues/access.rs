@@ -178,6 +178,26 @@ pub async fn project_role_any_slug(
         .await
 }
 
+/// `assigned_runner_detail` by runner id (`issue_assignment.py`,
+/// design §14.1): `None` when the issue is pod-assigned.
+pub async fn fetch_assigned_runner_detail(
+    db: &impl ConnectionTrait,
+    runner_id: Option<Uuid>,
+) -> Result<Option<serde_json::Value>, DbErr> {
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    pidash_services::domain::issue_assignment::assigned_runner_detail(db, &runner)
+        .await
+        .map(Some)
+}
+
 /// `IssueType.is_epic` by id.
 pub async fn issue_type_is_epic(
     db: &impl ConnectionTrait,

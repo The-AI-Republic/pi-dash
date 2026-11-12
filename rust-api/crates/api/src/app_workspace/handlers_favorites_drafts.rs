@@ -51,8 +51,7 @@
 //!   at the project's workspace; a missing project row 404s (not the FK 400).
 //! * Draft list `issue_filters` run over the DraftIssue queryset, so `labels`,
 //!   `assignees`, `cycle`, `module`, `mentions`, `subscriber`, `intake_status`,
-//!   `inbox_status` and `logged_by` params raise `FieldError` → the generic 500; the
-//!   `updated_at` param filters `created_at` (`issue_filters.py:236`).
+//!   `inbox_status` and `logged_by` params raise `FieldError` → the generic 500.
 //! * The draft cycle subquery is `[:1]` with NO `ORDER BY` (nondeterministic pick);
 //!   the assignee `ArrayAgg` guard accepts ANY active project membership of the
 //!   assignee (no project scoping) (`draft.py:55-60`, `:76`).
@@ -61,9 +60,10 @@
 //!   → `IntegrityError`); the
 //!   `project` input key is validated and then silently overwritten by the context
 //!   `project_id` (`DraftIssue(project=…, project_id=…)` keeps the latter).
-//! * Draft patch/retrieve creator gates look the draft pk up in the `Issue` table
-//!   (`model=Issue`), so the creator bypass ~never fires and the role check decides
-//!   (`draft.py:159`, `:186`; ported as-is per [`gates::CreatorModel::Issue`]).
+//! * Draft patch/retrieve/destroy creator gates look the draft pk up in the
+//!   `DraftIssue` table (`model=DraftIssue`, `draft.py:158`, `:185`, `:198`), so a
+//!   draft's creator passes at any workspace role (PDASHOSS01-320; patch/retrieve
+//!   used to read `Issue`, which made the bypass dead).
 //! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404);
 //!   the cycle activity's `project_id` is the string `"None"` (the route carries no
 //!   `project_id` kwarg); the module activity fires once per `module_ids` entry.
@@ -456,8 +456,8 @@ async fn check_allow_gate(
 
 /// The creator probe behind the draft creator gates
 /// (`app/permissions/base.py:36`): `model.objects.filter(id=pk,
-/// created_by=user).exists()` over `table` (`issues` — the dead branch — or
-/// `draft_issues`), default soft-delete scope.
+/// created_by=user).exists()` over `table` (`draft_issues` for every draft
+/// gate since PDASHOSS01-320), default soft-delete scope.
 async fn creator_exists(
     pool: &sqlx::PgPool,
     table: &str,
@@ -2714,6 +2714,30 @@ async fn project_row(pool: &sqlx::PgPool, id: &Uuid) -> Result<Option<ProjectRow
     }))
 }
 
+/// NEWPIDASH-185 (DIFF-14): `draft_create` / `draft_to_issue` refuse a
+/// `project_id` the caller is not an active member of. Django allowed any
+/// workspace member to name any project; the Rust port fixes it so a non-member
+/// cannot write into a private project (or any project they are not in).
+/// Returns `true` when the caller is an active, non-deleted member.
+async fn is_project_member(
+    pool: &sqlx::PgPool,
+    project_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<bool, Denial> {
+    let hit: Option<Uuid> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
+}
+
 /// A JSON float: CPython `repr` for finite values (`1e+16`, `65535.0`),
 /// `Infinity`/`-Infinity`/`NaN` tokens for the non-finite ones (`json.dumps`
 /// emits the tokens; `serde_json` would mistranslate them to `null` — and its
@@ -2778,36 +2802,6 @@ impl From<FavoriteDbRow> for FavoriteRow {
             project_id: row.project_id.map(|id| id.to_string()),
         }
     }
-}
-
-pub(crate) fn favorite_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<FavoriteRow, Denial> {
-    use sqlx::Row;
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let entity_type: String = row
-        .try_get("entity_type")
-        .map_err(|_| Denial::ServerError)?;
-    let entity_identifier: Option<Uuid> = row
-        .try_get("entity_identifier")
-        .map_err(|_| Denial::ServerError)?;
-    let name: Option<String> = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let is_folder: bool = row.try_get("is_folder").map_err(|_| Denial::ServerError)?;
-    let sequence: f64 = row.try_get("sequence").map_err(|_| Denial::ServerError)?;
-    let parent: Option<Uuid> = row.try_get("parent_id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    Ok(FavoriteRow {
-        id: id.to_string(),
-        entity_type,
-        entity_identifier: entity_identifier.map(|id| id.to_string()),
-        name,
-        is_folder,
-        sequence,
-        parent: parent.map(|id| id.to_string()),
-        workspace_id: workspace_id.to_string(),
-        project_id: project_id.map(|id| id.to_string()),
-    })
 }
 
 /// The rendered favorite columns over the ported scope (`favorite_list_sql`
@@ -3228,8 +3222,8 @@ async fn favorite_list(
 
 /// Dispatcher order (`issue_filters.py:437-465`): presence-based, each filter
 /// inserts its predicates; shared keys keep FIRST position with the LATER
-/// value (`updated_at` overwrites `created_at`'s `created_at__date__*`;
-/// `inbox_status` overwrites `intake_status`'s `issue_intake__status__in`).
+/// value (`inbox_status` overwrites `intake_status`'s
+/// `issue_intake__status__in`).
 /// `.filter(**filters)` then builds predicates in final-dict order and the
 /// FIRST failure wins: `FieldError` → generic 500, `ValidationError` → 400
 /// `{"error": "Please provide valid detail"}`.
@@ -3293,6 +3287,7 @@ fn draft_zoned_date(column: draft_issues::Column, timezone: &Tz) -> SimpleExpr {
 fn draft_date_term(term: &str, timezone: &Tz) -> SimpleExpr {
     match term {
         "created_at__date" => draft_zoned_date(draft_issues::Column::CreatedAt, timezone),
+        "updated_at__date" => draft_zoned_date(draft_issues::Column::UpdatedAt, timezone),
         "completed_at__date" => draft_zoned_date(draft_issues::Column::CompletedAt, timezone),
         "start_date" => draft_col(draft_issues::Column::StartDate).into(),
         "target_date" => draft_col(draft_issues::Column::TargetDate).into(),
@@ -3483,9 +3478,7 @@ fn compile_draft_filters(
                 }
             }
             "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
-            // BUG: the `updated_at` param filters `created_at`
-            // (`issue_filters.py:236`), overwriting that param's keys.
-            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
+            "updated_at" => compile_date_param(&mut insert, "updated_at__date", raw, now, timezone),
             "start_date" => compile_date_param(&mut insert, "start_date", raw, now, timezone),
             "target_date" => compile_date_param(&mut insert, "target_date", raw, now, timezone),
             "completed_at" => {
@@ -4835,23 +4828,16 @@ async fn draft_object_leg(
         );
         bad(errors)
     };
-    // Start/target order (`:72-79`): presence-keyed — explicit nulls on
-    // both sides `TypeError` (`None > None`) → the generic 500.
+    // Start/target order (`:71-77`): compared only when both values are
+    // non-null; a null on either side passes validation and is stored
+    // (an explicit null clears the date on PATCH).
     if has_key(values, "start_date") && has_key(values, "target_date") {
-        match (
+        if let (Some(start), Some(target)) = (
             opt_date(values, "start_date"),
             opt_date(values, "target_date"),
         ) {
-            (Some(start), Some(target)) => {
-                if start > target {
-                    return Err(non_field("Start date cannot exceed target date"));
-                }
-            }
-            _ => {
-                return Err(json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    SERVER_ERROR_BODY.to_owned(),
-                ));
+            if start > target {
+                return Err(non_field("Start date cannot exceed target date"));
             }
         }
     }
@@ -5196,6 +5182,8 @@ async fn draft_create(
     // input (`DraftIssue(project=…, project_id=…)` keeps the latter —
     // probed live); `save()` fetches it (miss → 404) and re-points
     // `workspace` at the project's workspace.
+    // NEWPIDASH-185 (DIFF-14): Django allowed any workspace member to name
+    // any project; refuse when the caller is not an active project member.
     let row_project = context_project;
     let row_workspace = match row_project {
         None => workspace_id,
@@ -5206,7 +5194,15 @@ async fn draft_create(
                     OBJECT_NOT_FOUND_BODY.to_owned(),
                 ))
             }
-            Some(row) => row.workspace_id,
+            Some(row) => {
+                if !is_project_member(&pool, &project, &user_id).await? {
+                    return Ok(json_response(
+                        StatusCode::FORBIDDEN,
+                        gates::FORBIDDEN_BODY.to_owned(),
+                    ));
+                }
+                row.workspace_id
+            }
         },
     };
     let now = utc_now_micros();
@@ -5566,7 +5562,7 @@ async fn insert_draft_modules(
                     now.into(),
                     Some(*created_by).into(),
                     (*updated_by).into(),
-                    None::<Uuid>.into(),
+                    None::<DateTimeWithTimeZone>.into(),
                     (*workspace_id).into(),
                     (*project_id).into(),
                     (*draft_id).into(),
@@ -5731,12 +5727,12 @@ async fn draft_patch(
     };
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
-    // The creator bypass looks the draft pk up in the ISSUE table
-    // (`model=Issue`, `draft.py:159`) — ported as-is.
-    let is_creator = creator_exists(&pool, "issues", &draft_pk, &user_id).await?;
+    // The creator bypass looks the draft pk up in the draft table
+    // (`model=DraftIssue`, `draft.py:158`, PDASHOSS01-320).
+    let is_creator = creator_exists(&pool, "draft_issues", &draft_pk, &user_id).await?;
     let gate = gates::Gate::WorkspaceCreator {
         roles: &[ROLE_ADMIN, ROLE_MEMBER],
-        model: gates::CreatorModel::Issue,
+        model: gates::CreatorModel::DraftIssue,
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);
@@ -6158,12 +6154,12 @@ async fn draft_retrieve(
     };
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
-    // The creator bypass looks the draft pk up in the ISSUE table
-    // (`model=Issue`, `draft.py:186`) — ported as-is.
-    let is_creator = creator_exists(&pool, "issues", &draft_pk, &user_id).await?;
+    // The creator bypass looks the draft pk up in the draft table
+    // (`model=DraftIssue`, `draft.py:185`, PDASHOSS01-320).
+    let is_creator = creator_exists(&pool, "draft_issues", &draft_pk, &user_id).await?;
     let gate = gates::Gate::WorkspaceCreator {
         roles: &[ROLE_ADMIN],
-        model: gates::CreatorModel::Issue,
+        model: gates::CreatorModel::DraftIssue,
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);
@@ -6603,6 +6599,9 @@ async fn run_issue_create_validate(
             _ => None,
         }),
         assigned_pod,
+        // Drafts convert to issues without a runner (design §7: the
+        // web app and v1 surfaces own the write path).
+        assigned_runner: None,
         agent_executor,
         description_html: text("description_html"),
         description_binary: None,
@@ -6766,6 +6765,7 @@ async fn run_issue_create_validate(
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
         paused_exists: &|| paused_exists,
+        runner_error: &|| None,
     };
     let ctx = ValidateContext {
         project_id: Some(*project_id),
@@ -6850,6 +6850,7 @@ fn assemble_new_issue(
         workpad: String::new(),
         created_via: opt_text(values, "created_via"),
         assigned_pod_id: pod,
+        assigned_runner_id: None,
         agent_executor: opt_text(values, "agent_executor"),
     };
     Ok((
@@ -7042,8 +7043,33 @@ async fn fetch_issue_m2m(
     ))
 }
 
+/// Re-read the persisted issue row for the 201 body (NEWPIDASH-184):
+/// the save hooks assign the default state/pods and the post-commit
+/// chain may stamp other columns, so Django's post-save `serializer.data`
+/// reflects the stored row while the in-memory `outcome.issue` does not.
+/// Falls back to the in-memory row when the scoped lookup misses, as the
+/// PUT path does (`fetch_put_issue`).
+async fn fetch_draft_issue_row(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+) -> Result<Option<IssueSaveRow>, Denial> {
+    let db = orm(pool);
+    let row = issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.eq(*issue_id))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.as_ref().map(IssueSaveRow::from))
+}
+
 /// Render `serializer.data` after the draft-to-issue save: the 41-key
-/// create representation off the in-memory row (no re-read) plus the
+/// create representation off the stored row (re-read) plus the
 /// fresh m2m members, datetimes in DRF `Z` form in the actor zone,
 /// `assignee_ids`/`label_ids` echoed from the raw input (falsy → `[]`).
 async fn render_draft_to_issue_body(
@@ -7062,6 +7088,7 @@ async fn render_draft_to_issue_body(
     let estimate_point = row.estimate_point_id.map(|value| value.to_string());
     let issue_type = row.type_id.map(|value| value.to_string());
     let assigned_pod_id = row.assigned_pod_id.map(|value| value.to_string());
+    let assigned_runner_id = row.assigned_runner_id.map(|value| value.to_string());
     let created_at = render_datetime_in(&row.created_at, timezone);
     let updated_at = render_datetime_in(&row.updated_at, timezone);
     let deleted_at = row
@@ -7092,6 +7119,7 @@ async fn render_draft_to_issue_body(
         parent_id: parent.as_deref(),
         issue_type: issue_type.as_deref(),
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         assignees: &assignee_refs,
         labels: &label_refs,
         name: row.name.as_str(),
@@ -7154,6 +7182,8 @@ async fn draft_to_issue(
     // `.filter(pk=draft_id).first()` — NO `created_by` scoping (any
     // member's draft converts); a miss leaves `None`, and
     // `None.project_id` raises `AttributeError` → the generic 500.
+    // NEWPIDASH-185 (DIFF-14): only the creator may publish (`draft_created_by`
+    // check below) and the caller must be an active member of `draft_project`.
     #[derive(Debug, FromQueryResult)]
     struct DraftConvertRow {
         project_id: Option<Uuid>,
@@ -7197,6 +7227,14 @@ async fn draft_to_issue(
     else {
         return Err(Denial::ServerError);
     };
+    // NEWPIDASH-185 (DIFF-14): scope to the caller — another user's draft
+    // 404s (Django would have converted it).
+    if draft_created_by != Some(user_id) {
+        return Ok(json_response(
+            StatusCode::NOT_FOUND,
+            OBJECT_NOT_FOUND_BODY.to_owned(),
+        ));
+    }
     let Some(draft_project) = draft_project_opt else {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -7214,6 +7252,14 @@ async fn draft_to_issue(
             ))
         }
     };
+    // NEWPIDASH-185 (DIFF-14): refuse when the caller is not an active
+    // member of the draft's project (403, not 201 as Django does).
+    if !is_project_member(&pool, &draft_project, &user_id).await? {
+        return Ok(json_response(
+            StatusCode::FORBIDDEN,
+            gates::FORBIDDEN_BODY.to_owned(),
+        ));
+    }
     let input = match negotiate_input(&headers, &body) {
         Ok(input) => input,
         Err(response) => return Ok(response),
@@ -7319,6 +7365,8 @@ async fn draft_to_issue(
                     labels,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -7344,8 +7392,9 @@ async fn draft_to_issue(
     // A `None` origin stopped the chain above, so this is `Some` — the
     // `ok_or` is unreachable, kept for the type.
     let origin = origin.ok_or(Denial::ServerError)?;
-    // The 201 body renders off the saved row (hook outputs included),
-    // exactly the in-memory row the direct save used to leave behind.
+    // The 201 body renders off the stored row (re-read after the legs);
+    // this in-memory row drives the cycle/module/asset legs and is the
+    // fallback when the scoped re-read misses.
     let row = IssueSaveRow::from(&outcome.issue);
     let issue_text = row.id.to_string();
     let project_text = draft_project.to_string();
@@ -7476,7 +7525,7 @@ async fn draft_to_issue(
                         updated.into(),
                         draft_created_by.into(),
                         draft_updated_by.into(),
-                        None::<Uuid>.into(),
+                        None::<DateTimeWithTimeZone>.into(),
                         draft_project.into(),
                         draft_workspace.into(),
                         row.id.into(),
@@ -7534,11 +7583,18 @@ async fn draft_to_issue(
         .map_err(|_| Denial::ServerError)?;
     // The draft delete (`:308`) — after all three publishes.
     soft_delete_draft(&pool, &draft_pk, Some(draft_project), draft_state, &user_id).await?;
+    // NEWPIDASH-184: render from the stored row (hook outputs included),
+    // as Django's post-save `serializer.data` does; the in-memory row
+    // carries the requested state_id.
+    let render_row = match fetch_draft_issue_row(&pool, &slug, &draft_project, &row.id).await? {
+        Some(fresh) => fresh,
+        None => row.clone(),
+    };
     Ok(json_response(
         StatusCode::CREATED,
         render_draft_to_issue_body(
             &pool,
-            &row,
+            &render_row,
             &timezone,
             input.get("assignee_ids"),
             input.get("label_ids"),
@@ -7794,6 +7850,7 @@ mod tests {
             description_html: None,
             assignee_ids: None,
             label_ids: None,
+            agent_executor: None,
         };
         let project = uuid("33333333-3333-3333-3333-333333333333");
         let workspace = uuid("44444444-4444-4444-4444-444444444444");
@@ -7824,6 +7881,7 @@ mod tests {
             description_html: Some("<p>clean</p>".to_owned()),
             assignee_ids: None,
             label_ids: None,
+            agent_executor: None,
         };
         let values = vec![
             ("name".to_owned(), FieldValue::Text("n".to_owned())),

@@ -205,6 +205,14 @@ class RunnerSerializer(serializers.ModelSerializer):
     dispatch_paused = serializers.SerializerMethodField()
     # "Built-in engine · <machine>" is rendered from this.
     machine_display_name = serializers.CharField(read_only=True)
+    # Dedicated-runner eligibility read (design §7.4): added to each row
+    # only when the list was asked with ``?assignable_for=``. Populated in
+    # ``to_representation`` from the serializer context so plain list reads
+    # keep their current shape.
+    assignable = serializers.SerializerMethodField()
+    not_assignable_code = serializers.SerializerMethodField()
+    is_busy = serializers.SerializerMethodField()
+    queue_depth = serializers.SerializerMethodField()
 
     class Meta:
         model = Runner
@@ -245,6 +253,13 @@ class RunnerSerializer(serializers.ModelSerializer):
             "paused_by",
             "created_at",
             "updated_at",
+            # Eligibility read (§7.4). Declared so the OpenAPI schema
+            # documents them; values are gated by context in
+            # ``to_representation`` below.
+            "assignable",
+            "not_assignable_code",
+            "is_busy",
+            "queue_depth",
         ]
         read_only_fields = [
             "id",
@@ -273,10 +288,64 @@ class RunnerSerializer(serializers.ModelSerializer):
             "paused_by",
             "created_at",
             "updated_at",
+            "assignable",
+            "not_assignable_code",
+            "is_busy",
+            "queue_depth",
         ]
 
     def get_dispatch_paused(self, obj) -> bool:
         return obj.paused_at is not None
+
+    def _assignable_context(self):
+        ctx = self.context or {}
+        user = ctx.get("user")
+        issue = ctx.get("assignable_issue")
+        return user, issue
+
+    def _assignable_result(self, obj):
+        from pi_dash.runner.services.issue_assignment import assignable_for_runner
+
+        user, issue = self._assignable_context()
+        return assignable_for_runner(obj, user=user, issue=issue)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        ctx = self.context or {}
+        if "assignable_issue" not in ctx and "user" not in ctx:
+            # Plain list read: keep the pre-§7.4 shape (keys absent, as
+            # ``listRunners`` without ``assignableFor`` expects).
+            for key in ("assignable", "not_assignable_code", "is_busy", "queue_depth"):
+                data.pop(key, None)
+            return data
+        ok, code = self._assignable_result(instance)
+        from pi_dash.runner.services.issue_assignment import is_busy as _is_busy
+
+        from pi_dash.runner.services.issue_assignment import queue_depth as _queue_depth
+
+        data["assignable"] = ok
+        data["not_assignable_code"] = code
+        data["is_busy"] = _is_busy(instance)
+        data["queue_depth"] = _queue_depth(instance)
+        return data
+
+    def get_assignable(self, obj):
+        ok, _code = self._assignable_result(obj)
+        return ok
+
+    def get_not_assignable_code(self, obj):
+        _ok, code = self._assignable_result(obj)
+        return code
+
+    def get_is_busy(self, obj):
+        from pi_dash.runner.services.issue_assignment import is_busy as _is_busy
+
+        return _is_busy(obj)
+
+    def get_queue_depth(self, obj):
+        from pi_dash.runner.services.issue_assignment import queue_depth as _queue_depth
+
+        return _queue_depth(obj)
 
 
 class RunnerEnrollRequestSerializer(serializers.Serializer):
@@ -321,6 +390,10 @@ class AgentRunSerializer(serializers.ModelSerializer):
     error_diagnostic = serializers.SerializerMethodField()
     tool_calls = AgentRunToolCallSerializer(many=True, read_only=True)
     scheduler_binding_detail = serializers.SerializerMethodField()
+    # Pin + waiting state (design §14.3): on every run, with
+    # ``dispatch_wait`` computed only for QUEUED pinned runs.
+    pinned_runner_name = serializers.SerializerMethodField()
+    dispatch_wait = serializers.SerializerMethodField()
 
     def get_error_diagnostic(self, run: AgentRun):
         # Only the per-run detail drawer renders this block. Skip the
@@ -330,6 +403,27 @@ class AgentRunSerializer(serializers.ModelSerializer):
         if isinstance(self.parent, serializers.ListSerializer):
             return None
         return classify_run_error(run.error)
+
+    def get_pinned_runner_name(self, run: AgentRun):
+        if run.pinned_runner_id is None:
+            return None
+        pinned = getattr(run, "pinned_runner", None)
+        if pinned is not None:
+            return pinned.name
+        from pi_dash.runner.models import Runner
+
+        row = Runner.objects.filter(pk=run.pinned_runner_id).first()
+        return row.name if row else None
+
+    def get_dispatch_wait(self, run: AgentRun):
+        from pi_dash.runner.services.issue_assignment import build_dispatch_wait
+
+        ctx = self.context or {}
+        viewer = ctx.get("user")
+        if viewer is None:
+            request = ctx.get("request")
+            viewer = getattr(request, "user", None) if request is not None else None
+        return build_dispatch_wait(run, viewer=viewer)
 
     def get_scheduler_binding_detail(self, run: AgentRun):
         # "Fired by scheduler X" for scheduler-triggered runs, so run views
@@ -361,6 +455,10 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "thread_id",
             "agent_metadata",
             "runner",
+            "pinned_runner",
+            "pinned_runner_name",
+            "pin_kind",
+            "dispatch_wait",
             "work_item",
             "scheduler_binding",
             "scheduler_binding_detail",

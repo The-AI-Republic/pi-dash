@@ -110,8 +110,8 @@ use pidash_auth::scope::TenantScope;
 use pidash_db::entity::{
     assistant_user_llm_config, cycle_issues, estimate_points, file_assets, issue_assignees,
     issue_labels, issue_links, issue_reactions, issue_subscribers, issue_types, issues, labels,
-    module_issues, modules, pod, project_issue_types, project_members, projects, states, users,
-    workspaces,
+    module_issues, modules, pod, project_issue_types, project_members, projects, runner, states,
+    users, workspaces,
 };
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{tickers_for_issue, IssueAgentTicker};
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
@@ -1534,6 +1534,8 @@ enum PkQueryset {
     Issues,
     /// `Pod.all_objects`.
     PodsAll,
+    /// `Runner.objects` (the runner table carries no soft-delete column).
+    Runners,
     /// `Label.objects` (no soft-deleted).
     Labels,
     /// `User.objects` (the users table has no soft-delete column).
@@ -1562,6 +1564,11 @@ const FIELD_TABLE: &[FieldSpec] = &[
     FieldSpec {
         name: "assigned_pod_id",
         shape: FieldShape::UuidPk(PkQueryset::PodsAll),
+        allow_null: true,
+    },
+    FieldSpec {
+        name: "assigned_runner_id",
+        shape: FieldShape::UuidPk(PkQueryset::Runners),
         allow_null: true,
     },
     FieldSpec {
@@ -2247,6 +2254,15 @@ async fn pk_exists(pool: &sqlx::PgPool, queryset: PkQueryset, id: &Uuid) -> Resu
                 .one(&db)
                 .await?
         }
+        PkQueryset::Runners => {
+            runner::Entity::find()
+                .select_only()
+                .column(runner::Column::Id)
+                .filter(runner::Column::Id.eq(id))
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
         PkQueryset::Users => {
             users::Entity::find()
                 .select_only()
@@ -2531,6 +2547,15 @@ async fn run_validate(
         Some(Validated::Pod(pod)) => Some(Some(*pod)),
         _ => None,
     };
+    // `attrs["assigned_runner"]` (design §7.1): outer `None` = key absent
+    // (a pod-only request skips the E-checks entirely), inner `None` =
+    // explicit clear (E8 applies), `Some(id)` = the dedicated choice.
+    let assigned_runner: Option<Option<Uuid>> = match validated.get("assigned_runner_id") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Uuid(id)) => Some(Some(*id)),
+        _ => None,
+    };
     let agent_executor: Option<Option<&str>> = match validated.get("agent_executor") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2566,6 +2591,7 @@ async fn run_validate(
             _ => None,
         }),
         assigned_pod,
+        assigned_runner,
         agent_executor,
         description_html: text("description_html"),
         description_binary: None,
@@ -2755,11 +2781,11 @@ async fn run_validate(
     }
     // The executor mid-flight `has_active_run` probe: Django evaluates the
     // property per access, so pod-reassign + mid-flight issue the SAME
-    // query TWICE when both arms are reached.
-    let midflight_reached = !pod_returns
-        && agent_executor.is_some()
-        && instance.is_some_and(|row| Some(row.agent_executor.as_deref()) != agent_executor)
-        && !executor_returns;
+    // query TWICE when both arms are reached. #2903 compares the
+    // normalized write against the stored value, so the probe issues on
+    // any executor write against an instance (even on caller normalization).
+    let midflight_reached =
+        !pod_returns && agent_executor.is_some() && instance.is_some() && !executor_returns;
     let run_probe_two = if midflight_reached {
         Some(
             has_active_run(pool, &instance_id)
@@ -2770,6 +2796,37 @@ async fn run_validate(
         None
     };
     let run_value = run_probe_one.or(run_probe_two).unwrap_or(false);
+
+    // The dedicated-runner E-check (`validate_execution_target`): precomputed
+    // here (async) and raised by the kernel in order — after the pod
+    // checks, before the executor normalize, exactly Django's order. A
+    // pod failure returns first, so the runner never queries then.
+    let runner_error = if !pod_returns && assigned_runner.is_some() {
+        let write = pidash_services::domain::issue_assignment::ExecutionTargetWrite {
+            issue_id: instance.map(|row| row.id),
+            runner_present: true,
+            runner_id: assigned_runner.flatten(),
+            pod_id: assigned_pod.flatten().map(|pod| pod.id),
+            project_id: project_id.or_else(|| instance.map(|row| row.project_id)),
+            user_id: Some(actor.user_id),
+        };
+        match pidash_services::domain::issue_assignment::validate_execution_target(
+            &orm(pool),
+            &write,
+        )
+        .await
+        {
+            Ok(()) => None,
+            Err(pidash_services::domain::issue_assignment::ValidateError::Field(error)) => {
+                Some(error)
+            }
+            Err(pidash_services::domain::issue_assignment::ValidateError::Db(_)) => {
+                return Err(db_error());
+            }
+        }
+    } else {
+        None
+    };
 
     // Steps 7-8. The assignee arm `KeyError`s (no probe) when the context
     // project is `None`; empty lists skip both filters.
@@ -2845,6 +2902,7 @@ async fn run_validate(
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
         paused_exists: &|| paused_exists,
+        runner_error: &|| runner_error,
     };
     let ctx = ValidateContext {
         project_id,
@@ -3650,17 +3708,18 @@ async fn fetch_clock_policy(
     })
 }
 
-/// The issue's latest and active runs plus the run count through the
+/// The issue's latest and active runs, the run count and the cumulative
+/// token total (`issue.py:1376-1421`) through the
 /// SeaORM agent-run reader. The live-state rule (`include_live_state`, the
 /// observed-run guard) is applied by `agent_status_to_representation`.
 async fn fetch_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
-) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64), Denial> {
+) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64, i64), Denial> {
     let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok((runs.latest, runs.active, runs.count))
+    Ok((runs.latest, runs.active, runs.count, runs.total_tokens))
 }
 
 /// The cached blocker summary via the public read service: both
@@ -3713,7 +3772,8 @@ async fn render_detail_map(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    let (latest, active, run_count) = fetch_agent_runs(pool, &row.save.id).await?;
+    let (latest, active, run_count, run_total_tokens) =
+        fetch_agent_runs(pool, &row.save.id).await?;
     let blockers = fetch_blocker_summary(pool, &row.save.id).await?;
     let synced = if row
         .save
@@ -3738,6 +3798,12 @@ async fn render_detail_map(
     let type_id = save.type_id.map(|value| value.to_string());
     let is_epic = fetch_is_epic(pool, save.type_id).await?;
     let assigned_pod_id = save.assigned_pod_id.map(|value| value.to_string());
+    let assigned_runner_id = save.assigned_runner_id.map(|value| value.to_string());
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let assigned_runner_detail =
+        super::access::fetch_assigned_runner_detail(&orm, save.assigned_runner_id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     let module_ids: Vec<String> = row.module_ids.iter().map(ToString::to_string).collect();
     let label_ids: Vec<String> = row.label_ids.iter().map(ToString::to_string).collect();
     let assignee_ids: Vec<String> = row.assignee_ids.iter().map(ToString::to_string).collect();
@@ -3776,6 +3842,7 @@ async fn render_detail_map(
         type_id: type_id.as_deref(),
         is_epic,
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
@@ -3807,7 +3874,9 @@ async fn render_detail_map(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
+        assigned_runner_detail,
     };
     let view = issue_detail_to_representation(&detail);
     let value = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
@@ -4001,7 +4070,12 @@ fn assemble_new_issue(
             Some(Validated::Pod(pod)) => Some(pod.id),
             _ => None,
         },
-        agent_executor: v_text(validated, "agent_executor").map(str::to_owned),
+        // Design §7.1: the dedicated choice the (already validated) field
+        // pass accepted; `apply_execution_target` stamps the pod +
+        // activity after the create commit.
+        assigned_runner_id: v_uuid(validated, "assigned_runner_id"),
+        // The normalized write (#2903): deprecated choices land local.
+        agent_executor: filtered.agent_executor.clone().flatten(),
     };
     Ok((
         row,
@@ -4043,8 +4117,16 @@ fn apply_validated_to_existing(
             _ => None,
         };
     }
+    if validated.contains_key("assigned_runner_id") {
+        row.assigned_runner_id = match validated.get("assigned_runner_id") {
+            Some(Validated::Uuid(id)) => Some(*id),
+            _ => None,
+        };
+    }
     if validated.contains_key("agent_executor") {
-        row.agent_executor = v_text(validated, "agent_executor").map(str::to_owned);
+        // `attrs["agent_executor"]` holds the normalized write (#2903):
+        // deprecated values land as local_runner.
+        row.agent_executor = filtered.agent_executor.clone().flatten();
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -4280,6 +4362,7 @@ async fn render_put_body(
     let estimate_point = row.estimate_point_id.map(|value| value.to_string());
     let issue_type = row.type_id.map(|value| value.to_string());
     let assigned_pod_id = row.assigned_pod_id.map(|value| value.to_string());
+    let assigned_runner_id = row.assigned_runner_id.map(|value| value.to_string());
     // `DateTimeField` output like the detail body: request-user zone.
     let created_at = render_datetime_in(&row.created_at, timezone);
     let updated_at = render_datetime_in(&row.updated_at, timezone);
@@ -4311,6 +4394,7 @@ async fn render_put_body(
         parent_id: parent_id.as_deref(),
         issue_type: issue_type.as_deref(),
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         assignees: &assignee_refs,
         labels: &label_refs,
         name: row.name.as_str(),
@@ -4513,6 +4597,8 @@ async fn create_issue_inner(
                     labels,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -4536,6 +4622,18 @@ async fn create_issue_inner(
         return Err(Denial::ServerError);
     }
     let issue_id = outcome.issue.id;
+    // A named dedicated choice: persist + activity (design §13.2). No
+    // queued run can exist on a just-created issue, so there is never a
+    // re-point or a drain. Django runs this in its own transaction after
+    // the create commit; mirror that.
+    if validated.contains_key("assigned_runner_id") {
+        let runner_id = outcome.issue.assigned_runner_id;
+        pidash_services::domain::issue_assignment::apply_execution_target(
+            orm, issue_id, runner_id, user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     let Some(post) = fetch_create_response_row(&pool, &slug, &tenant.project_id, &issue_id).await?
     else {
         // `user_timezone_converter(None)` → `TypeError` → the generic 500,
@@ -4716,6 +4814,9 @@ async fn partial_update_inner(
     let ctx = write_ctx(&tenant, &user_id);
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    // The post-overlay dedicated choice, captured before the domain
+    // write moves the row: the apply/pick below runs on it.
+    let overlay_runner_id = row.assigned_runner_id;
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
@@ -4740,6 +4841,7 @@ async fn partial_update_inner(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate,
+                        pod_once: false,
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -4754,6 +4856,40 @@ async fn partial_update_inner(
     .map_err(domain_denial)?;
     if outcome.chain.stopped().is_some() {
         return Err(Denial::ServerError);
+    }
+    // The dedicated choice (design §13.2): the row already moved, so the
+    // apply re-points the QUEUED run (if any) and writes the activity;
+    // a re-pointed run drains its pod on commit, exactly as Django's
+    // `transaction.on_commit(_drain)`.
+    if validated.contains_key("assigned_runner_id") {
+        let apply = pidash_services::domain::issue_assignment::apply_execution_target(
+            orm,
+            pk,
+            overlay_runner_id,
+            user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        if let Some(pod_id) = apply.drain_pod {
+            if crate::runner_enroll::teardown::drain_pod_by_id(&pool, &state, pod_id)
+                .await
+                .is_err()
+            {
+                return Err(Denial::ServerError);
+            }
+        }
+    } else if validated.contains_key("assigned_pod_id") && overlay_runner_id.is_some() {
+        // §13.1: the issue's pod changed with no runner in the request —
+        // the dedicated assignment clears (the old pod's runner can no
+        // longer serve it).
+        pidash_services::domain::issue_assignment::clear_dedicated_runner(
+            orm,
+            pk,
+            "pod changed",
+            Some(user_id),
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
     }
     Ok(empty_response())
 }
@@ -4838,6 +4974,7 @@ pub async fn put_update_issue(
     let ctx = write_ctx(&tenant, &user_id);
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let put_runner_id = row.assigned_runner_id;
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
@@ -4858,6 +4995,8 @@ pub async fn put_update_issue(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -4872,9 +5011,49 @@ pub async fn put_update_issue(
     if outcome.chain.stopped().is_some() {
         return Err(Denial::ServerError);
     }
+    // The dedicated choice (design §13.2), before the render so the
+    // response body carries the post-apply image, exactly as Django's
+    // `update()` → `apply_execution_target` → serialize.
+    if validated.contains_key("assigned_runner_id") {
+        let apply = pidash_services::domain::issue_assignment::apply_execution_target(
+            orm,
+            pk,
+            put_runner_id,
+            user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        if let Some(pod_id) = apply.drain_pod {
+            if crate::runner_enroll::teardown::drain_pod_by_id(&pool, &state, pod_id)
+                .await
+                .is_err()
+            {
+                return Err(Denial::ServerError);
+            }
+        }
+    } else if validated.contains_key("assigned_pod_id") && put_runner_id.is_some() {
+        // §13.1: the pod changed with no runner in the request.
+        pidash_services::domain::issue_assignment::clear_dedicated_runner(
+            orm,
+            pk,
+            "pod changed",
+            Some(user_id),
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // The representation renders from the saved row (hook outputs
-    // included), as it rendered from the post-legs row before.
-    let row = IssueSaveRow::from(&outcome.issue);
+    // included), as it rendered from the post-legs row before. The
+    // dedicated apply stamped pod + runner, so re-read the row the
+    // way Django serializes the post-apply in-memory instance.
+    let row = if validated.contains_key("assigned_runner_id") {
+        match fetch_put_issue(&pool, &slug, &project_id, &pk).await? {
+            Some(fresh) => fresh,
+            None => IssueSaveRow::from(&outcome.issue),
+        }
+    } else {
+        IssueSaveRow::from(&outcome.issue)
+    };
     let initial = data.value.as_object();
     let body = render_put_body(
         &pool,
@@ -4978,6 +5157,8 @@ async fn destroy_issue_inner(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -5949,10 +6130,10 @@ mod tests {
                 "INSERT INTO pod (id, project_id, deleted_at) VALUES ('{the_pod}', '{project}', now())"
             ),
             format!(
-                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, provisioning, status, \
+                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, provisioning, pod_dispatch, status, \
                  last_heartbeat_at, revoked_at, paused_at) VALUES \
-                 (gen_random_uuid(), '{member}', '{ws}', '{the_pod}', 'desktop_bundled', 'online', now(), NULL, NULL), \
-                 (gen_random_uuid(), '{admin}', '{ws}', '{the_pod}', 'desktop_bundled', 'online', now() - interval '1 hour', NULL, now())"
+                 (gen_random_uuid(), '{member}', '{ws}', '{the_pod}', 'desktop_bundled', 'pinned_only', 'online', now(), NULL, NULL), \
+                 (gen_random_uuid(), '{admin}', '{ws}', '{the_pod}', 'desktop_bundled', 'pinned_only', 'online', now() - interval '1 hour', NULL, now())"
             ),
             format!(
                 "INSERT INTO agent_run (id, work_item_id, status) VALUES \

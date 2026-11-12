@@ -18,9 +18,11 @@
 //!   while a Python worker lives, and a known switchover dependency
 //!   on PIDASHCONV-840 afterwards.
 //! * `normalize_usage`: the ported pure function, delegated.
-//! * `has_usable_llm_config` / `creator_llm_facts`: one mirrored row
-//!   read (`assistant_user_llm_config`, the `get_config` query) plus
-//!   the ported presence gate and SSRF check.
+//! * `has_usable_llm_config` / `resolve_model_for_run`: one mirrored row
+//!   read (`assistant_user_llm_config`, the `get_config` query) plus the
+//!   SSRF re-check, answered through the installed assistant seam
+//!   (PIDASHCONV-1725) — CE keeps the BYOK path, the overlay routes
+//!   the creator's selected connection.
 //! * `invoke_model`: the live model runtime
 //!   ([`model_runtime`][crate::oss_worker::model_runtime], PIDASHCONV-866): the
 //!   pydantic-ai `Agent.run` port over the Anthropic +
@@ -31,23 +33,30 @@
 #![forbid(unsafe_code)]
 
 use crate::dispatch_execute::{
-    CreatorLlmFacts, ExecuteSeams, FinalizeCall, InvokeError, ModelInvocation, RawUsage, SeamError,
+    ExecuteSeams, FinalizeCall, InvokeError, ModelInvocation, RawUsage, ResolveError, SeamError,
 };
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use pidash_services::extensions::{AssistantModelSeam, ExecuteModelInputs};
 
 /// Live execute seams over the worker's primary pool.
 ///
 /// `block_private_urls` is `ASSISTANT_BLOCK_PRIVATE_URLS`
 /// (`CloudAgentSettings::block_private_urls`): the SSRF gate input.
 /// `invoke` carries the model runtime's static inputs (tool context +
-/// key resolver).
+/// key resolver). `assistant` is the installed assistant model-provider
+/// seam (`OssWorkerCtx::assistant_seam` — the CE default on OSS, the
+/// cloud overlay's OpenHub/Codex/BYOK routing on the hosted build,
+/// PIDASHCONV-1725): the execute gate and model resolution consult it
+/// exactly as Django consults `ee/assistant/model_provider.py`.
 #[derive(Clone)]
 pub struct LiveExecuteSeams {
     pool: PgPool,
     block_private_urls: bool,
     invoke: crate::oss_worker::model_runtime::invoke::InvokeCtx,
+    assistant: std::sync::Arc<dyn AssistantModelSeam>,
 }
 
 impl LiveExecuteSeams {
@@ -55,12 +64,31 @@ impl LiveExecuteSeams {
         pool: PgPool,
         block_private_urls: bool,
         invoke: crate::oss_worker::model_runtime::invoke::InvokeCtx,
+        assistant: std::sync::Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
             block_private_urls,
             invoke,
+            assistant,
         }
+    }
+
+    /// The creator's BYOK row as [`ExecuteModelInputs`]: the mirrored
+    /// `get_config` read plus the execution-time SSRF re-check
+    /// (`llm.py:78-84`). A missing row yields key-less inputs, which the
+    /// resolve gates map to `llm_config_missing`, exactly like the
+    /// source's `cfg is None` arm. The installed assistant seam takes
+    /// these inputs: CE resolves them through the BYOK gates; the
+    /// overlay routes the user's selected connection instead.
+    async fn execute_model_inputs(
+        &self,
+        creator_id: Uuid,
+    ) -> Result<ExecuteModelInputs, SeamError> {
+        let row = Self::llm_row(&self.pool, creator_id)
+            .await
+            .map_err(|error| SeamError(error.to_string()))?;
+        Ok(inputs_from_row(row.as_ref(), self.block_private_urls))
     }
 
     /// Mirror of `get_config` (`llm.py:67-68`): the creator's BYOK row,
@@ -97,6 +125,38 @@ pub(crate) struct LlmRow {
     pub(crate) base_url: String,
     pub(crate) model_name: String,
     pub(crate) api_key_encrypted: Option<Vec<u8>>,
+}
+
+/// One read row as [`ExecuteModelInputs`] (pure, so it stays unit
+/// testable without a database): the caller's BYOK reads plus the
+/// execution-time SSRF re-check (`llm.py:78-84`). A missing row yields
+/// key-less inputs, which the resolve gates map to
+/// `llm_config_missing`, exactly like the source's `cfg is None` arm.
+fn inputs_from_row(row: Option<&LlmRow>, block_private_urls: bool) -> ExecuteModelInputs {
+    let Some(row) = row else {
+        return ExecuteModelInputs {
+            has_api_key: false,
+            model_name: String::new(),
+            provider_kind: String::new(),
+            base_url: String::new(),
+            base_url_blocked: false,
+            api_key_encrypted: None,
+        };
+    };
+    let blocked = !row.base_url.is_empty()
+        && pidash_services::assistant::ssrf::is_blocked(
+            &row.base_url,
+            block_private_urls,
+            &pidash_services::assistant::ssrf::SystemResolver,
+        );
+    ExecuteModelInputs {
+        has_api_key: row.has_api_key(),
+        model_name: row.model_name.clone(),
+        provider_kind: row.provider_kind.clone(),
+        base_url: row.base_url.clone(),
+        base_url_blocked: blocked,
+        api_key_encrypted: row.api_key_encrypted.clone(),
+    }
 }
 
 impl LlmRow {
@@ -394,48 +454,38 @@ impl ExecuteSeams for LiveExecuteSeams {
         )))
     }
 
-    /// `has_usable_llm_config` (`model_provider.py:45-53`): the row
-    /// exists and holds a key. Pure gate over the mirrored read.
+    /// `user_has_llm_config` (`tasks.py:119-124` →
+    /// `agent_execution.py:93-104` → `has_usable_llm_config`,
+    /// `model_provider.py:45-53`): consulted through the installed
+    /// assistant seam, so the hosted build's overlay (OpenHub gateway,
+    /// Codex, BYOK, unselected default) admits runs exactly as Django
+    /// admits them. CE answers the row's key bit.
     async fn has_usable_llm_config(&self, creator_id: Uuid) -> Result<bool, SeamError> {
-        let row = Self::llm_row(&self.pool, creator_id)
-            .await
-            .map_err(|error| SeamError(error.to_string()))?;
-        Ok(pidash_services::assistant::seams::has_usable_llm_config(
-            row.as_ref().is_some_and(|row| row.has_api_key()),
-        ))
+        let inputs = self.execute_model_inputs(creator_id).await?;
+        Ok(self
+            .assistant
+            .has_usable_llm_config(creator_id, inputs.has_api_key)
+            .await)
     }
 
-    /// The creator's provider row as presence bits: the mirrored
-    /// `get_config` read plus the execution-time SSRF re-check
-    /// (`llm.py:78-84`). A missing row yields empty facts (no key),
-    /// which the resolve gates map to `llm_config_missing`, exactly
-    /// like the source's `cfg is None` arm.
-    async fn creator_llm_facts(&self, creator_id: Uuid) -> Result<CreatorLlmFacts, SeamError> {
-        let row = Self::llm_row(&self.pool, creator_id)
+    /// `resolve_model_for_run`
+    /// (`ee/cloud_agent/model_provider.py:6-7` → `model.py:11-22` →
+    /// `resolve_model_for_user`): the row read above feeds the
+    /// installed assistant seam; CE resolves the BYOK gates and answers
+    /// the row's ciphertext, the overlay routes the selected connection
+    /// and answers its minted credential (OpenHub/Codex).
+    async fn resolve_model_for_run(
+        &self,
+        creator_id: Uuid,
+    ) -> Result<pidash_services::extensions::ResolvedRunModel, ResolveError> {
+        let inputs = self
+            .execute_model_inputs(creator_id)
             .await
-            .map_err(|error| SeamError(error.to_string()))?;
-        let Some(row) = row else {
-            return Ok(CreatorLlmFacts {
-                has_api_key: false,
-                model_name: String::new(),
-                provider_kind: String::new(),
-                base_url: String::new(),
-                base_url_blocked: false,
-            });
-        };
-        let blocked = !row.base_url.is_empty()
-            && pidash_services::assistant::ssrf::is_blocked(
-                &row.base_url,
-                self.block_private_urls,
-                &pidash_services::assistant::ssrf::SystemResolver,
-            );
-        Ok(CreatorLlmFacts {
-            has_api_key: row.has_api_key(),
-            model_name: row.model_name,
-            provider_kind: row.provider_kind,
-            base_url: row.base_url,
-            base_url_blocked: blocked,
-        })
+            .map_err(ResolveError::from)?;
+        self.assistant
+            .resolve_model_for_user(creator_id, inputs)
+            .await
+            .map_err(ResolveError::from)
     }
 
     /// The live model runtime (PIDASHCONV-866): delegate to the
@@ -466,6 +516,65 @@ mod tests {
         assert!(!llm_row_with(None).has_api_key());
         assert!(!llm_row_with(Some(Vec::new())).has_api_key());
         assert!(llm_row_with(Some(vec![1, 2, 3])).has_api_key());
+    }
+
+    #[test]
+    fn inputs_from_row_maps_the_byok_row_verbatim() {
+        let row = LlmRow {
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "https://8.8.8.8/v1".to_owned(),
+            model_name: "claude-x".to_owned(),
+            api_key_encrypted: Some(vec![7, 8, 9]),
+        };
+        let inputs = inputs_from_row(Some(&row), true);
+        assert!(inputs.has_api_key);
+        assert_eq!(inputs.model_name, "claude-x");
+        assert_eq!(inputs.provider_kind, "openai_compatible");
+        assert_eq!(inputs.base_url, "https://8.8.8.8/v1");
+        // A public literal IP is never blocked.
+        assert!(!inputs.base_url_blocked);
+        // The ciphertext rides through for invoke to decrypt.
+        assert_eq!(inputs.api_key_encrypted, Some(vec![7, 8, 9]));
+    }
+
+    #[test]
+    fn inputs_from_row_reports_a_missing_row_as_keyless() {
+        let inputs = inputs_from_row(None, true);
+        assert!(!inputs.has_api_key);
+        assert!(inputs.model_name.is_empty());
+        assert!(inputs.provider_kind.is_empty());
+        assert!(inputs.base_url.is_empty());
+        assert!(!inputs.base_url_blocked);
+        assert_eq!(inputs.api_key_encrypted, None);
+    }
+
+    #[test]
+    fn inputs_from_row_reruns_the_ssrf_gate_at_execution_time() {
+        let mut row = LlmRow {
+            provider_kind: "openai_compatible".to_owned(),
+            base_url: "http://127.0.0.1:9/v1".to_owned(),
+            model_name: "m".to_owned(),
+            api_key_encrypted: Some(vec![1]),
+        };
+        // Loopback is blocked when the guard blocks private URLs (an
+        // IP literal: no DNS, deterministic), and passes when it does
+        // not.
+        assert!(inputs_from_row(Some(&row), true).base_url_blocked);
+        assert!(!inputs_from_row(Some(&row), false).base_url_blocked);
+        // An empty base URL is never guarded (nothing to block).
+        row.base_url = String::new();
+        assert!(!inputs_from_row(Some(&row), true).base_url_blocked);
+    }
+
+    #[test]
+    fn inputs_from_row_reports_an_empty_key_column_as_keyless() {
+        let row = LlmRow {
+            provider_kind: "anthropic".to_owned(),
+            base_url: String::new(),
+            model_name: "claude-x".to_owned(),
+            api_key_encrypted: Some(Vec::new()),
+        };
+        assert!(!inputs_from_row(Some(&row), true).has_api_key);
     }
 
     #[test]

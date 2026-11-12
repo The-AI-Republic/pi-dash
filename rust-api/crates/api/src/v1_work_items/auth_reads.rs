@@ -78,6 +78,8 @@ pub struct MachineTokenLookup {
     pub dev_machine_id: Option<Uuid>,
     pub workspace_id: Uuid,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// 60-day idle expiry (`NEWPIDASH-50`); judged by the token kernel.
+    pub expires_at: Option<DateTime<Utc>>,
     /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
     /// when the token has no device.
     pub dev_revoked: Option<bool>,
@@ -98,6 +100,7 @@ pub async fn machine_token_with_device<C: ConnectionTrait>(
             machine_token::Column::DevMachineId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .column_as(
             Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
@@ -342,8 +345,8 @@ pub async fn newest_run_facts_on_issue<C: ConnectionTrait>(
         .await
 }
 
-/// A yield run row: [`RunFactsRow`] plus the run's workspace and
-/// `done_payload`.
+/// A yield run row: [`RunFactsRow`] plus the run's workspace,
+/// `done_payload` and scheduler binding.
 #[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct YieldRunRow {
     pub id: Uuid,
@@ -355,6 +358,8 @@ pub struct YieldRunRow {
     pub status: String,
     pub workspace_id: Uuid,
     pub done_payload: Option<serde_json::Value>,
+    /// Set on scheduler runs (PDASHOSS01-276).
+    pub scheduler_binding_id: Option<Uuid>,
 }
 
 impl YieldRunRow {
@@ -385,6 +390,7 @@ pub async fn yield_run_by_id<C: ConnectionTrait>(
         .columns([
             agent_run::Column::WorkspaceId,
             agent_run::Column::DonePayload,
+            agent_run::Column::SchedulerBindingId,
         ])
         .join(
             JoinType::InnerJoin,

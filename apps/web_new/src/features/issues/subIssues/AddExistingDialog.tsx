@@ -78,6 +78,11 @@ export function AddExistingDialog({
   projectName,
 }: AddExistingDialogProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
+  // The search field takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close
+  // button and can land after the reader has clicked into the field, eating
+  // their keystrokes on a busy host (NEWFRONT-1055, 1058).
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
   const [picked, setPicked] = React.useState<string[]>([]);
   const debounced = useDebouncedValue(query.trim(), ADD_EXISTING_DEBOUNCE_MS);
   const search = useSubIssueSearch(scope.workspaceSlug, scope.projectId, debounced, open);
@@ -108,6 +113,7 @@ export function AddExistingDialog({
       title="Add existing work items"
       description={`Pick work items from ${projectName} to place under this one.`}
       className="max-w-lg"
+      initialFocus={searchRef}
       actions={
         <>
           <Button variant="ghost" onClick={close} disabled={attach.isPending}>
@@ -128,6 +134,7 @@ export function AddExistingDialog({
         <label className="flex items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) px-(--space-2)">
           <Search size={14} strokeWidth={1.5} aria-hidden="true" className="text-(--text-muted)" />
           <input
+            ref={searchRef}
             type="search"
             aria-label="Search work items"
             placeholder="Search work items"

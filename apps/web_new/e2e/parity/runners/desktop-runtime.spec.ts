@@ -259,8 +259,15 @@ test(
 
       await test.step("browsing the runners area calls no runtime endpoint", async () => {
         await driver.desktopRuntimeOpenRunners(seed.workspaceSlug);
+        // The runtime endpoints are the engine profile and credential plus
+        // machine enrollment — not the whole /ai-assistant/ prefix, which
+        // the cloud assistant's thread list shares without being a runtime
+        // call (NEWFRONT-1056).
         const hits = (await driver.desktopRuntimeSpyUrls()).filter(
-          (url) => url.includes("/ai-assistant/") || url.includes("/desktop-enroll/")
+          (url) =>
+            url.includes("/desktop-enroll/") ||
+            url.includes("/ai-assistant/agent-profile") ||
+            url.includes("/ai-assistant/agent-token")
         );
         expect(hits).toEqual([]);
       });
