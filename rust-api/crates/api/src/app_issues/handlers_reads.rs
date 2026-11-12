@@ -96,10 +96,10 @@ use super::{page_denial, query_last, shape_row, Denial, QueryMap, NOT_FOUND_BODY
 use crate::paginator::{
     apply_offset_window, max_hits, next_cursor, offset_window, parse_per_page, prev_cursor, Cursor,
 };
-use pidash_services::app_issues::{envelope_head};
 use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
+use pidash_services::app_issues::envelope_head;
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
 };
@@ -1998,15 +1998,11 @@ async fn sub_issues_get_inner(
     parent_id: uuid::Uuid,
     query: &QueryMap,
 ) -> Result<Response, Response> {
-    use crate::paginator::{
-        apply_offset_window, max_hits, next_cursor, offset_window, parse_per_page, prev_cursor,
-        Cursor,
-    };
     let order_param = query_last(query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
     // Distribution over the full set in default ordering, so paging never
     // changes its buckets.
     let mut dist_stmt = queries_core::sub_issues_select(slug, parent_id);
-    use sea_orm::{QueryOrder, sea_query::Order};
+    use sea_orm::sea_query::Order;
     dist_stmt.order_by(
         (list_engine::a("issue"), issues::Column::CreatedAt),
         Order::Desc,
@@ -2042,12 +2038,14 @@ async fn sub_issues_get_inner(
     let offset = window.offset;
     let limit_val = window.stop - window.offset;
     if limit_val > 0 {
-        use sea_orm::QueryTrait;
         stmt.limit(limit_val as u64).offset(offset as u64);
     }
-    let fetched = fetch_rows(pool, stmt).await.map_err(IntoResponse::into_response)?;
+    let fetched = fetch_rows(pool, stmt)
+        .await
+        .map_err(IntoResponse::into_response)?;
     let has_more = fetched.len() as i64 > limit;
-    let rows = apply_offset_window(&fetched, limit).map_err(|error| page_denial(error).into_response())?;
+    let rows =
+        apply_offset_window(&fetched, limit).map_err(|error| page_denial(error).into_response())?;
     let fields: Vec<String> = queries_core::SUB_ISSUES_KEYS
         .iter()
         .map(|key| (*key).to_owned())
@@ -2059,7 +2057,9 @@ async fn sub_issues_get_inner(
     let sub_issues = match query_last(query, "group_by") {
         None => render_sub_list_str(&shaped),
         Some(param) if param.is_empty() => render_sub_list_str(&shaped),
-        Some(param) if param == "assignees__ids" => render_sub_grouped_assignees_str(&rows, &shaped),
+        Some(param) if param == "assignees__ids" => {
+            render_sub_grouped_assignees_str(&rows, &shaped)
+        }
         Some(param) => {
             if !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
                 return Err(
@@ -2086,7 +2086,7 @@ async fn sub_issues_get_inner(
     Ok(json_response(
         StatusCode::OK,
         format!(
-            "{head},\"sub_issues\":{sub_issues},\"state_distribution\":{}}}", 
+            "{head},\"sub_issues\":{sub_issues},\"state_distribution\":{}}}",
             render_string_list_map(&distribution)
         ),
     ))
@@ -2166,6 +2166,9 @@ fn render_sub_list_str(shaped: &[String]) -> String {
     format!("[{}]", shaped.join(","))
 }
 
+/// `group_by=assignees__ids` (`:183-189`): one bucket per assignee id,
+/// `None` for the unassigned. A null list falls through both branches, so
+/// the row is dropped (unreachable — the column is `COALESCE`d).
 fn render_sub_grouped_assignees_str(rows: &[Map<String, Value>], shaped: &[String]) -> String {
     let mut groups: Buckets = Vec::new();
     for (row, rendered) in rows.iter().zip(shaped.iter()) {
@@ -2182,84 +2185,24 @@ fn render_sub_grouped_assignees_str(rows: &[Map<String, Value>], shaped: &[Strin
             None => {}
         }
     }
-    format!("{{{}}}", groups.iter().map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(","))).collect::<Vec<_>>().join(","))
-}
-
-fn render_sub_grouped_str(rows: &[Map<String, Value>], shaped: &[String], key: &str, timezone: &Tz) -> String {
-    let mut groups: Buckets = Vec::new();
-    for (row, rendered) in rows.iter().zip(shaped.iter()) {
-        let bucket = match key {
-            "created_at" | "updated_at" => {
-                py_moment_str(row.get(key).unwrap_or(&Value::Null), timezone)
-            }
-            _ => py_str(row.get(key).unwrap_or(&Value::Null)),
-        };
-        bucket_push(&mut groups, bucket, rendered.clone());
-    }
-    format!("{{{}}}", groups.iter().map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(","))).collect::<Vec<_>>().join(","))
-}
-
-fn render_sub_list(shaped: &[String], distribution: &Buckets) -> Response {
-    json_response(
-        StatusCode::OK,
-        format!(
-            "{{\"sub_issues\":[{}],\"state_distribution\":{}}}",
-            shaped.join(","),
-            render_string_list_map(distribution)
-        ),
-    )
-}
-
-/// `group_by=assignees__ids` (`:183-189`): one bucket per assignee id,
-/// `None` for the unassigned. A null list falls through both branches, so
-/// the row is dropped (unreachable — the column is `COALESCE`d).
-fn render_sub_grouped_assignees(
-    rows: &[Map<String, Value>],
-    shaped: &[String],
-    distribution: &Buckets,
-) -> Response {
-    let mut groups: Buckets = Vec::new();
-    for (row, rendered) in rows.iter().zip(shaped.iter()) {
-        match row.get("assignee_ids").and_then(Value::as_array) {
-            Some(items) if !items.is_empty() => {
-                for item in items {
-                    let bucket = item.as_str().unwrap_or("None").to_owned();
-                    bucket_push(&mut groups, bucket, rendered.clone());
-                }
-            }
-            Some(_) => {
-                bucket_push(&mut groups, "None".to_owned(), rendered.clone());
-            }
-            None => {}
-        }
-    }
-    render_sub_buckets(&groups, distribution)
-}
-
-fn render_sub_buckets(groups: &Buckets, distribution: &Buckets) -> Response {
-    let buckets: Vec<String> = groups
-        .iter()
-        .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
-        .collect();
-    json_response(
-        StatusCode::OK,
-        format!(
-            "{{\"sub_issues\":{{{}}},\"state_distribution\":{}}}",
-            buckets.join(","),
-            render_string_list_map(distribution)
-        ),
+    format!(
+        "{{{}}}",
+        groups
+            .iter()
+            .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
 /// Generic `group_by=<values key>` (`:191-192`): `str()` of the CONVERTED
 /// row value (datetimes render in the actor zone, space-separated).
-fn render_sub_grouped(
+fn render_sub_grouped_str(
     rows: &[Map<String, Value>],
     shaped: &[String],
     key: &str,
     timezone: &Tz,
-    distribution: &Buckets,
-) -> Response {
+) -> String {
     let mut groups: Buckets = Vec::new();
     for (row, rendered) in rows.iter().zip(shaped.iter()) {
         let bucket = match key {
@@ -2270,7 +2213,14 @@ fn render_sub_grouped(
         };
         bucket_push(&mut groups, bucket, rendered.clone());
     }
-    render_sub_buckets(&groups, distribution)
+    format!(
+        "{{{}}}",
+        groups
+            .iter()
+            .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 /// Python `str()` for JSON scalars (the `group_by` / assignee-bucket keys).
