@@ -60,8 +60,10 @@ def noop_reverse(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    # Numbered 0175 and chained after 0174_legacy_creation_defaults so the db
+    # app keeps a single leaf migration.
     dependencies = [
-        ("db", "0172_clidevicecode_engine_scope"),
+        ("db", "0174_legacy_creation_defaults"),
     ]
 
     operations = [
