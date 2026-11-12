@@ -67,6 +67,23 @@ axoupdater = { version = "0.10", default-features = false, features = [
     "tokio",
 ] }
 fs2 = "0.4"
+# Built-in engine install (`src/engine/install.rs`): verify the release
+# archive against its `.sha256`, and order engine version directories.
+sha2 = "0.10"
+semver = "1"
+
+# OS credential store for the daemon and engine credentials
+# (`[auth] credentials_store`, design §4.3). Pure-Rust backends only, so no
+# system dev library is needed at build time: Secret Service over zbus on
+# Linux, the Keychain on macOS, Credential Manager on Windows.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["async-secret-service", "crypto-rust", "async-io"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "signal", "user", "hostname", "net"] }

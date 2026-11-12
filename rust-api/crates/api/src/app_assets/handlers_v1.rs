@@ -69,7 +69,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -77,7 +76,10 @@ use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_compat::response::{
     json_response as raw, json_value as json_status, no_content, server_error,
 };
+use pidash_db::entity::{file_assets, workspaces};
 use pidash_services::app_assets::{queries_v1, shape};
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 // ---------------------------------------------------------------------------
 // Small responders (exact Django bytes)
@@ -106,6 +108,13 @@ fn page_not_found() -> Response {
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
     state.pools().map(|pools| pools.primary())
+}
+
+fn orm_connection(state: &AppState) -> Option<pidash_db::DatabaseConnection> {
+    state
+        .orm()
+        .cloned()
+        .or_else(|| pool(state).map(pidash_db::pool::sea_orm_connection))
 }
 
 /// `IsAuthenticated` (the v1 default): anonymous answers DRF
@@ -330,45 +339,43 @@ fn absolute_asset_url(base: &str, stored: &str) -> String {
 /// keeps the stored key (Django would rebuild from `SERVER_NAME`,
 /// which Rust cannot know).
 fn file_asset_record(
-    row: &sqlx::postgres::PgRow,
+    model: &file_assets::Model,
     tz: &chrono_tz::Tz,
     asset_base: Option<&str>,
-) -> Result<shape::FileAssetRecord, sqlx::Error> {
-    let created_at: DateTime<Utc> = row.try_get("created_at")?;
-    let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
-    let deleted_at: Option<DateTime<Utc>> = row.try_get("deleted_at")?;
-    let attributes: Option<Value> = row.try_get("attributes")?;
-    let storage_metadata: Option<Value> = row.try_get("storage_metadata")?;
-    let stored: String = row.try_get("asset")?;
-    Ok(shape::FileAssetRecord {
-        id: row.try_get::<Uuid, _>("id")?.to_string(),
-        created_at: dt_in(created_at, tz),
-        updated_at: dt_in(updated_at, tz),
-        deleted_at: deleted_at.map(|dt| dt_in(dt, tz)),
-        attributes: attributes.unwrap_or(Value::Null),
+) -> shape::FileAssetRecord {
+    let stored = &model.asset;
+    shape::FileAssetRecord {
+        id: model.id.to_string(),
+        created_at: dt_in(model.created_at.with_timezone(&Utc), tz),
+        updated_at: dt_in(model.updated_at.with_timezone(&Utc), tz),
+        deleted_at: model
+            .deleted_at
+            .as_ref()
+            .map(|dt| dt_in(dt.with_timezone(&Utc), tz)),
+        attributes: model.attributes.clone(),
         asset: match asset_base {
-            Some(base) => absolute_asset_url(base, &stored),
-            None => stored,
+            Some(base) => absolute_asset_url(base, stored),
+            None => stored.clone(),
         },
-        entity_type: row.try_get("entity_type")?,
-        entity_identifier: row.try_get("entity_identifier")?,
-        is_deleted: row.try_get("is_deleted")?,
-        is_archived: row.try_get("is_archived")?,
-        external_id: row.try_get("external_id")?,
-        external_source: row.try_get("external_source")?,
-        size: row.try_get("size")?,
-        is_uploaded: row.try_get("is_uploaded")?,
-        storage_metadata: storage_metadata.unwrap_or(Value::Null),
-        created_by: uuid_opt(row.try_get::<Option<Uuid>, _>("created_by_id")?),
-        updated_by: uuid_opt(row.try_get::<Option<Uuid>, _>("updated_by_id")?),
-        user: uuid_opt(row.try_get::<Option<Uuid>, _>("user_id")?),
-        workspace: uuid_opt(row.try_get::<Option<Uuid>, _>("workspace_id")?),
-        draft_issue: uuid_opt(row.try_get::<Option<Uuid>, _>("draft_issue_id")?),
-        project: uuid_opt(row.try_get::<Option<Uuid>, _>("project_id")?),
-        issue: uuid_opt(row.try_get::<Option<Uuid>, _>("issue_id")?),
-        comment: uuid_opt(row.try_get::<Option<Uuid>, _>("comment_id")?),
-        page: uuid_opt(row.try_get::<Option<Uuid>, _>("page_id")?),
-    })
+        entity_type: model.entity_type.clone(),
+        entity_identifier: model.entity_identifier.clone(),
+        is_deleted: model.is_deleted,
+        is_archived: model.is_archived,
+        external_id: model.external_id.clone(),
+        external_source: model.external_source.clone(),
+        size: model.size,
+        is_uploaded: model.is_uploaded,
+        storage_metadata: model.storage_metadata.clone().unwrap_or(Value::Null),
+        created_by: uuid_opt(model.created_by_id),
+        updated_by: uuid_opt(model.updated_by_id),
+        user: uuid_opt(model.user_id),
+        workspace: uuid_opt(model.workspace_id),
+        draft_issue: uuid_opt(model.draft_issue_id),
+        project: uuid_opt(model.project_id),
+        issue: uuid_opt(model.issue_id),
+        comment: uuid_opt(model.comment_id),
+        page: uuid_opt(model.page_id),
+    }
 }
 
 /// 200 `{"data": [...], "status": true}` (`base.py:28`).
@@ -420,13 +427,15 @@ async fn workspace_get(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
     let key = queries_v1::workspace_asset_key(&workspace_id.to_string(), &asset_key);
-    let rows = match sqlx::query(&queries_v1::workspace_filter_sql())
-        .bind(&key)
-        .fetch_all(pool)
+    let rows: Vec<file_assets::Model> = match file_assets::Entity::find()
+        .filter(file_assets::Column::Asset.eq(key.as_str()))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .all(&db)
         .await
     {
         Ok(rows) => rows,
@@ -451,11 +460,9 @@ async fn workspace_get(
             )
         });
     let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        match file_asset_record(row, &actor.timezone, asset_base.as_deref()) {
-            Ok(record) => items.push(shape::row_to_json(&record)),
-            Err(_) => return server_error(),
-        }
+    for model in &rows {
+        let record = file_asset_record(model, &actor.timezone, asset_base.as_deref());
+        items.push(shape::row_to_json(&record));
     }
     found_envelope(items)
 }
@@ -475,7 +482,7 @@ async fn workspace_post(
         Err(denial) => return denial.into_response(),
     };
     let _ = actor;
-    let Some(pool) = pool(&state) else {
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
     match classify_workspace_post(content_type_of(&headers).as_deref(), &body) {
@@ -484,10 +491,14 @@ async fn workspace_post(
         other => return other.into_response().expect("rejection renders"),
     }
     // `Workspace.objects.get(slug=slug)` (`base.py:39`): a miss raises
-    // into the 404 branch of `handle_exception`.
-    let workspace = match sqlx::query(&queries_v1::workspace_lookup_sql())
-        .bind(&slug)
-        .fetch_optional(pool)
+    // into the 404 branch of `handle_exception` (default-manager scoped).
+    let workspace = match workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspaces::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&db)
         .await
     {
         Ok(workspace) => workspace,
@@ -511,31 +522,29 @@ async fn workspace_flip(
     asset_key: &str,
     deleted: bool,
 ) -> Response {
-    let Some(pool) = pool(state) else {
+    let Some(db) = orm_connection(state) else {
         return server_error();
     };
     let key = queries_v1::workspace_asset_key(&workspace_id.to_string(), asset_key);
-    let row = match sqlx::query(&queries_v1::workspace_get_sql())
-        .bind(&key)
-        .fetch_optional(pool)
+    let model = match file_assets::Entity::find()
+        .filter(file_assets::Column::Asset.eq(key.as_str()))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
-        Ok(row) => row,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    let Some(row) = row else {
+    let Some(model) = model else {
         return does_not_exist();
     };
-    let id: Uuid = match row.try_get("id") {
-        Ok(id) => id,
-        Err(_) => return server_error(),
-    };
-    match sqlx::query(&queries_v1::set_deleted_sql())
-        .bind(deleted)
-        .bind(id)
-        .execute(pool)
-        .await
-    {
+    let id = model.id;
+    let result = file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsDeleted, Expr::value(deleted))
+        .filter(file_assets::Column::Id.eq(id))
+        .exec(&db)
+        .await;
+    match result {
         Ok(_) => no_content(),
         Err(_) => server_error(),
     }
@@ -590,13 +599,15 @@ async fn user_get(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let rows = match sqlx::query(&queries_v1::user_filter_sql())
-        .bind(&asset_key)
-        .bind(actor.id)
-        .fetch_all(pool)
+    let rows: Vec<file_assets::Model> = match file_assets::Entity::find()
+        .filter(file_assets::Column::Asset.eq(asset_key.as_str()))
+        .filter(file_assets::Column::CreatedById.eq(actor.id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .all(&db)
         .await
     {
         Ok(rows) => rows,
@@ -645,31 +656,29 @@ async fn user_delete(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let row = match sqlx::query(&queries_v1::user_get_sql())
-        .bind(&asset_key)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let model = match file_assets::Entity::find()
+        .filter(file_assets::Column::Asset.eq(asset_key.as_str()))
+        .filter(file_assets::Column::CreatedById.eq(actor.id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
-        Ok(row) => row,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    let Some(row) = row else {
+    let Some(model) = model else {
         return does_not_exist();
     };
-    let id: Uuid = match row.try_get("id") {
-        Ok(id) => id,
-        Err(_) => return server_error(),
-    };
-    match sqlx::query(&queries_v1::set_deleted_sql())
-        .bind(true)
-        .bind(id)
-        .execute(pool)
-        .await
-    {
+    let id = model.id;
+    let result = file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsDeleted, Expr::value(true))
+        .filter(file_assets::Column::Id.eq(id))
+        .exec(&db)
+        .await;
+    match result {
         Ok(_) => no_content(),
         Err(_) => server_error(),
     }
@@ -915,5 +924,120 @@ mod tests {
                 "v1 gate is default auth: {name}"
             );
         }
+    }
+
+    // -- SeaORM statement-shape pins (orm-migration.md §7) -------------------
+    // These pin the converted query shapes without a database: filter,
+    // soft-delete scope, ordering and column selection must match the
+    // previous sqlx text (`queries_v1` builders) byte for byte in meaning.
+
+    #[test]
+    fn workspace_filter_shape_pins_scope_and_ordering() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let key = "ws-uuid/f.txt";
+        let select = file_assets::Entity::find()
+            .filter(file_assets::Column::Asset.eq(key))
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .order_by_desc(file_assets::Column::CreatedAt);
+        let sql = select.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""asset" = "#), "asset predicate: {sql}");
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "soft-delete scope: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "ordering present: {sql}");
+        assert!(
+            sql.contains(r#""created_at" DESC"#),
+            "model -created_at order: {sql}"
+        );
+    }
+
+    #[test]
+    fn workspace_get_shape_pins_single_row_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let key = "ws-uuid/f.txt";
+        let select = file_assets::Entity::find()
+            .filter(file_assets::Column::Asset.eq(key))
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .limit(1u64);
+        let sql = select.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""asset" = "#), "asset predicate: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains("LIMIT 1"), "single-row get: {sql}");
+    }
+
+    #[test]
+    fn user_filter_shape_pins_creator_scope_and_ordering() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let asset_key = "f.txt";
+        let user_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let select = file_assets::Entity::find()
+            .filter(file_assets::Column::Asset.eq(asset_key))
+            .filter(file_assets::Column::CreatedById.eq(user_id))
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .order_by_desc(file_assets::Column::CreatedAt);
+        let sql = select.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""asset" = "#), "raw key: {sql}");
+        assert!(
+            sql.contains(r#""created_by_id" = "#),
+            "creator scope: {sql}"
+        );
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "soft-delete: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "ordering: {sql}");
+    }
+
+    #[test]
+    fn user_get_shape_pins_creator_single_row() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let asset_key = "f.txt";
+        let user_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let select = file_assets::Entity::find()
+            .filter(file_assets::Column::Asset.eq(asset_key))
+            .filter(file_assets::Column::CreatedById.eq(user_id))
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .limit(1u64);
+        let sql = select.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""asset" = "#), "asset: {sql}");
+        assert!(sql.contains(r#""created_by_id" = "#), "creator: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains("LIMIT 1"), "single row: {sql}");
+    }
+
+    #[test]
+    fn workspace_lookup_shape_pins_slug_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let slug = "my-slug";
+        let select = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .select_only()
+            .column(workspaces::Column::Id)
+            .limit(1u64);
+        let sql = select.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""slug" = "#), "slug predicate: {sql}");
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "soft-delete scope: {sql}"
+        );
+        assert!(sql.contains(r#""id""#), "id column: {sql}");
+    }
+
+    #[test]
+    fn set_deleted_shape_pins_is_deleted_only() {
+        // `save(update_fields=["is_deleted"])` must name ONLY is_deleted —
+        // never deleted_at (ported bug, base.py:47-48). The SeaORM
+        // `update_many` in workspace_flip/user_delete does exactly that.
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let stmt = file_assets::Entity::update_many()
+            .col_expr(file_assets::Column::IsDeleted, Expr::value(true))
+            .filter(file_assets::Column::Id.eq(id));
+        let sql = stmt.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""is_deleted""#), "is_deleted set: {sql}");
+        assert!(!sql.contains("deleted_at"), "no deleted_at write: {sql}");
+        assert!(!sql.contains("updated_at"), "no updated_at touch: {sql}");
     }
 }

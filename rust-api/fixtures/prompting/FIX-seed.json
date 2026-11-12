@@ -44,8 +44,8 @@
     "sql_global_select": "SELECT \"prompt_template\".\"id\", \"prompt_template\".\"workspace_id\", \"prompt_template\".\"name\", \"prompt_template\".\"body\", \"prompt_template\".\"is_active\", \"prompt_template\".\"version\", \"prompt_template\".\"updated_by_id\", \"prompt_template\".\"created_at\", \"prompt_template\".\"updated_at\" FROM \"prompt_template\" WHERE (\"prompt_template\".\"name\" = coding-task AND \"prompt_template\".\"workspace_id\" IS NULL) ORDER BY \"prompt_template\".\"updated_at\" DESC",
     "statics": {
       "default_body_equals_assemble": true,
-      "default_body_len": 54780,
-      "default_body_sha256": "eea2ba89650f68ca0e1a7e919ef803dddb373b7c9c9086a8bcb3776c1c9a9b2a",
+      "default_body_len": 55046,
+      "default_body_sha256": "064c13b177d595a08990d9ea617e8a14200e50b36fa205373b8766cd758a0c0f",
       "default_name": "coding-task",
       "migrate_receiver": "seed_default_template_on_migrate: app_config.label != 'prompting' -> return; PI_DASH_SKIP_PROMPT_SEED=1 -> return; else seed_default/review/test force=False; exceptions swallowed with print when verbosity",
       "review_body_len": 2815,

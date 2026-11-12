@@ -60,15 +60,15 @@ pub async fn update(
         return Err(Error::FieldErrors(WORKPAD_MISSING_BODY.to_owned()));
     }
     // The existence probe (`:3307-3311`): the SAME text the domain
-    // lock-read runs, on the pool — a miss 404s BEFORE validation runs,
+    // lock-read runs (one builder), on the pool — a miss 404s BEFORE validation runs,
     // as today. (`FOR UPDATE` in autocommit releases at statement end.)
-    let probe = sqlx::query(domain_issues::WORKPAD_SELECT_SQL)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(&deps.pool)
-        .await
-        .map_err(|error| db_error(error, "workpad-lock"))?;
+    let probe = sea_orm::ConnectionTrait::query_one(
+        &pidash_db::pool::sea_orm_connection(&deps.pool),
+        sea_orm::DbBackend::Postgres
+            .build(&domain_issues::workpad_select(issue_id, project_id, slug)),
+    )
+    .await
+    .map_err(|error| db_error(pidash_db::orm_tx::into_sqlx(error), "workpad-lock"))?;
     if probe.is_none() {
         return Err(Error::NotFound);
     }

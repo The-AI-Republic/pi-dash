@@ -129,7 +129,7 @@ function userPropertiesPayload(preference: string) {
   };
 }
 
-function renderLayout(detailStatus: number): void {
+function renderLayout(detailStatus: number, leaf: "issues" | "runners" = "issues"): void {
   const apiClient = createAppClient("https://api.test", async (url) => {
     let status = 404;
     let body = "{}";
@@ -186,12 +186,25 @@ function renderLayout(detailStatus: number): void {
     path: "issues",
     component: () => <p>Issues page</p>,
   });
+  // Same id as the file route (NEWPIDASH-3): `/$ws/_gated/projects/$projectId/runners`.
+  const runnersRoute = createRoute({
+    getParentRoute: () => layoutRoute,
+    path: "runners",
+    component: () => <Outlet />,
+  });
+  const runnersIndexRoute = createRoute({
+    getParentRoute: () => runnersRoute,
+    path: "/",
+    component: () => <p>AI Workers page</p>,
+  });
   const router = createRouter({
     routeTree: rootRoute.addChildren([
-      wsRoute.addChildren([gatedRoute.addChildren([layoutRoute.addChildren([leafRoute])])]),
+      wsRoute.addChildren([
+        gatedRoute.addChildren([layoutRoute.addChildren([leafRoute, runnersRoute.addChildren([runnersIndexRoute])])]),
+      ]),
     ]),
     context: { queryClient, apiClient },
-    history: createMemoryHistory({ initialEntries: [`/acme/projects/${PROJECT_ID}/issues`] }),
+    history: createMemoryHistory({ initialEntries: [`/acme/projects/${PROJECT_ID}/${leaf}`] }),
   });
   render(
     <QueryClientProvider client={queryClient}>
@@ -221,6 +234,25 @@ describe("project layout", () => {
     await screen.findByTestId("project-tab-strip");
     expect(screen.getByTestId("project-switcher-trigger")).toHaveTextContent("Web");
     expect(screen.getByRole("link", { name: "Work Items" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
+  });
+
+  // NEWPIDASH-3: the AI Workers area fills the window below the tab strip;
+  // every other tab keeps the plain stacking.
+  it("stacks the tab strip and the AI Workers area in a full-height column", async () => {
+    renderLayout(200, "runners");
+    const strip = await screen.findByTestId("project-tab-strip");
+    const column = screen.getByTestId("project-full-height-page");
+    expect(column).toHaveClass("flex", "h-full", "min-h-0", "flex-col");
+    expect(column).toContainElement(strip);
+    expect(column).toContainElement(screen.getByText("AI Workers page"));
+  });
+
+  it("adds no column around other tabs", async () => {
+    renderLayout(200);
+    const strip = await screen.findByTestId("project-tab-strip");
+    expect(screen.queryByTestId("project-full-height-page")).toBeNull();
+    expect(strip.closest("[data-testid='project-full-height-page']")).toBeNull();
     expect(screen.getByText("Issues page")).toBeInTheDocument();
   });
 

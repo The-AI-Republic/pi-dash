@@ -9,7 +9,7 @@
 
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { EMPTY_FORMATTING_STATE, type PageFormattingState } from "../../../shared/editor/index.js";
 import { PAGE_TOOLBAR_CONTROLS } from "../lib/pageToolbar.js";
@@ -115,13 +115,21 @@ describe("PageFormattingBar controls", () => {
 });
 
 describe("PageToolbarHint", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("names the action and draws each shortcut key", () => {
+    // Kbd renders modifier names as platform glyphs (pinned in @pidash/kit):
+    // the hint's "Cmd" reads as Ctrl off macOS.
+    vi.stubGlobal("navigator", { platform: "Win32" });
     for (const control of PAGE_TOOLBAR_CONTROLS) {
       const { unmount } = render(<PageToolbarHint control={control} />);
       const hint = screen.getByTestId(`page-toolbar-hint-${control.command}`);
       expect(hint).toHaveTextContent(control.label);
       const caps = Array.from(hint.querySelectorAll("kbd")).map((cap) => cap.textContent);
-      expect(caps).toEqual(control.hint === null ? [] : control.hint.split(" + "));
+      const keys = control.hint === null ? [] : control.hint.split(" + ");
+      expect(caps).toEqual(keys.map((key) => (key === "Cmd" ? "Ctrl" : key)));
       unmount();
     }
   });

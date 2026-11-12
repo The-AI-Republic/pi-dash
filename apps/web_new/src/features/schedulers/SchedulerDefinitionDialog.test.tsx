@@ -112,7 +112,7 @@ describe("SchedulerDefinitionDialog", () => {
       slug: "weekly-report",
       description: "Summary",
       prompt: "Review the week",
-      color: "#5e6ad2",
+      color: "#3b82f6",
       is_enabled: false,
     });
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
@@ -159,15 +159,31 @@ describe("SchedulerDefinitionDialog", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts an edited color in the create payload", async () => {
+  it("accepts a preset color in the create payload", async () => {
     const user = userEvent.setup();
     contracts.createScheduler.mockResolvedValue(row());
     setup();
     await user.type(screen.getByLabelText("Name"), "Weekly report");
     await user.type(screen.getByLabelText("Base prompt"), "Review the week");
-    const color = screen.getByLabelText("Color");
-    fireEvent.change(color, { target: { value: "#112233" } });
-    expect(color).toHaveValue("#112233");
+    await user.click(screen.getByRole("button", { name: "Scheduler color #ef4444" }));
+    await user.click(screen.getByRole("button", { name: "Create scheduler" }));
+    await waitFor(() => expect(contracts.createScheduler).toHaveBeenCalled());
+    expect(contracts.createScheduler).toHaveBeenCalledWith(
+      expect.anything(),
+      SLUG,
+      expect.objectContaining({ color: "#ef4444" })
+    );
+  });
+
+  it("accepts a custom color through More in the create payload", async () => {
+    const user = userEvent.setup();
+    contracts.createScheduler.mockResolvedValue(row());
+    setup();
+    await user.type(screen.getByLabelText("Name"), "Weekly report");
+    await user.type(screen.getByLabelText("Base prompt"), "Review the week");
+    const custom = screen.getByLabelText("Custom color");
+    fireEvent.change(custom, { target: { value: "#112233" } });
+    expect(custom).toHaveValue("#112233");
     await user.click(screen.getByRole("button", { name: "Create scheduler" }));
     await waitFor(() => expect(contracts.createScheduler).toHaveBeenCalled());
     expect(contracts.createScheduler).toHaveBeenCalledWith(

@@ -649,8 +649,9 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !joined.iter().any(|a| a.contains("model.token")
-                && !a.contains("PIDASH_MODEL_TOKEN_FILE")),
+            !joined
+                .iter()
+                .any(|a| a.contains("model.token") && !a.contains("PIDASH_MODEL_TOKEN_FILE")),
             "token path leaked into argv: {joined:?}"
         );
     }

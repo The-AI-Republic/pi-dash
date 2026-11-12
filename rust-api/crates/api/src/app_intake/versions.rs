@@ -13,8 +13,16 @@
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+    RelationTrait,
+};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use pidash_db::entity::{
+    issue_description_versions as version_entity, issues as issue_entity, workspaces,
+};
 
 use pidash_services::app_intake::permissions as guards;
 
@@ -44,24 +52,42 @@ struct VersionRow {
     updated_by_id: Option<Uuid>,
 }
 
-impl VersionRow {
-    fn get(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            id: row.try_get("id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            project_id: row.try_get("project_id")?,
-            issue_id: row.try_get("issue_id")?,
-            description_binary: row.try_get("description_binary")?,
-            description_html: row.try_get("description_html")?,
-            description_stripped: row.try_get("description_stripped")?,
-            description_json: row.try_get("description_json")?,
-            last_saved_at: row.try_get("last_saved_at")?,
-            owned_by_id: row.try_get("owned_by_id")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            created_by_id: row.try_get("created_by_id")?,
-            updated_by_id: row.try_get("updated_by_id")?,
-        })
+#[derive(Debug, Clone, FromQueryResult)]
+struct VersionFullRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    issue_id: Uuid,
+    description_binary: Option<Vec<u8>>,
+    description_html: Option<String>,
+    description_stripped: Option<String>,
+    description_json: serde_json::Value,
+    last_saved_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    owned_by_id: Option<Uuid>,
+    created_at: chrono::DateTime<chrono::FixedOffset>,
+    updated_at: chrono::DateTime<chrono::FixedOffset>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+}
+
+impl From<VersionFullRow> for VersionRow {
+    fn from(row: VersionFullRow) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            project_id: row.project_id,
+            issue_id: row.issue_id,
+            description_binary: row.description_binary,
+            description_html: row.description_html,
+            description_stripped: row.description_stripped,
+            description_json: row.description_json,
+            last_saved_at: row.last_saved_at.map(|dt| dt.with_timezone(&Utc)),
+            owned_by_id: row.owned_by_id,
+            created_at: row.created_at.with_timezone(&Utc),
+            updated_at: row.updated_at.with_timezone(&Utc),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+        }
     }
 }
 
@@ -174,18 +200,31 @@ async fn versions_context(
     };
     // `Issue.objects.get(workspace__slug, project_id, pk=work_item_id)`
     // — a miss is 404.
-    let issue: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT i.id, i.created_by_id FROM issues i
-           INNER JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $1 AND i.project_id = $2 AND i.id = $3 AND i.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(tenant.project_id)
-    .bind(work_item_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    let Some((issue_id, issue_creator)) = issue else {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    #[derive(Debug, FromQueryResult)]
+    struct IssueProbe {
+        id: Uuid,
+        created_by_id: Option<Uuid>,
+    }
+    let issue: Option<IssueProbe> = issue_entity::Entity::find_by_id(work_item_id)
+        .select_only()
+        .columns([issue_entity::Column::Id, issue_entity::Column::CreatedById])
+        .join(
+            JoinType::InnerJoin,
+            issue_entity::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(issue_entity::Column::ProjectId.eq(tenant.project_id))
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .into_model::<IssueProbe>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    let Some(IssueProbe {
+        id: issue_id,
+        created_by_id: issue_creator,
+    }) = issue
+    else {
         return Err(Denial::NotFound.into_response());
     };
     // Decorator (`:578`): ADMIN + MEMBER + GUEST, no creator bypass.
@@ -232,29 +271,45 @@ pub async fn detail(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let found: Option<sqlx::postgres::PgRow> = match sqlx::query(
-        r#"SELECT v.* FROM issue_description_versions v
-           INNER JOIN workspaces w ON w.id = v.workspace_id
-           WHERE w.slug = $1 AND v.project_id = $2 AND v.issue_id = $3 AND v.id = $4
-             AND v.deleted_at IS NULL"#,
-    )
-    .bind(&context.slug)
-    .bind(context.tenant_project)
-    .bind(context.issue_id)
-    .bind(pk)
-    .fetch_optional(&context.pool)
-    .await
-    {
+    let db = pidash_db::pool::sea_orm_connection(&context.pool);
+    let found_result: Result<Option<VersionFullRow>, sea_orm::DbErr> =
+        version_entity::Entity::find_by_id(pk)
+            .select_only()
+            .columns([
+                version_entity::Column::Id,
+                version_entity::Column::WorkspaceId,
+                version_entity::Column::ProjectId,
+                version_entity::Column::IssueId,
+                version_entity::Column::DescriptionBinary,
+                version_entity::Column::DescriptionHtml,
+                version_entity::Column::DescriptionStripped,
+                version_entity::Column::DescriptionJson,
+                version_entity::Column::LastSavedAt,
+                version_entity::Column::OwnedById,
+                version_entity::Column::CreatedAt,
+                version_entity::Column::UpdatedAt,
+                version_entity::Column::CreatedById,
+                version_entity::Column::UpdatedById,
+            ])
+            .join(
+                JoinType::InnerJoin,
+                version_entity::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq(context.slug.clone()))
+            .filter(version_entity::Column::ProjectId.eq(context.tenant_project))
+            .filter(version_entity::Column::IssueId.eq(context.issue_id))
+            .filter(version_entity::Column::DeletedAt.is_null())
+            .into_model::<VersionFullRow>()
+            .one(&db)
+            .await;
+    let found = match found_result {
         Ok(found) => found,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let Some(found) = found else {
         return Denial::NotFound.into_response();
     };
-    let version = match VersionRow::get(&found) {
-        Ok(version) => version,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
+    let version = VersionRow::from(found);
     match render_version_detail(&version, context.timezone) {
         Ok(body) => raw_json_response(body.to_string()),
         Err(denial) => denial.into_response(),
@@ -262,33 +317,18 @@ pub async fn detail(
 }
 
 /// One decodes list-projection row: the 10 `required_fields` columns.
-type VersionListRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    DateTime<Utc>,
-    DateTime<Utc>,
-    Option<Uuid>,
-    Option<Uuid>,
-);
-
-fn try_decode(row: &sqlx::postgres::PgRow) -> Result<VersionListRow, sqlx::Error> {
-    use sqlx::Row;
-    Ok((
-        row.try_get("id")?,
-        row.try_get("workspace_id")?,
-        row.try_get("project_id")?,
-        row.try_get("issue_id")?,
-        row.try_get("last_saved_at")?,
-        row.try_get("owned_by_id")?,
-        row.try_get("created_at")?,
-        row.try_get("updated_at")?,
-        row.try_get("created_by_id")?,
-        row.try_get("updated_by_id")?,
-    ))
+#[derive(Debug, Clone, FromQueryResult)]
+struct VersionListRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    issue_id: Uuid,
+    last_saved_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    owned_by_id: Option<Uuid>,
+    created_at: chrono::DateTime<chrono::FixedOffset>,
+    updated_at: chrono::DateTime<chrono::FixedOffset>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
 }
 
 /// Paginated list path (`:610-637`): the 10-key `required_fields`
@@ -331,49 +371,61 @@ pub async fn list(
     if page_size <= 0 || page < 0 {
         return Denial::ServerError.into_response();
     }
-    let total: i64 = match sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM issue_description_versions v
-           INNER JOIN workspaces w ON w.id = v.workspace_id
-           WHERE w.slug = $1 AND v.project_id = $2 AND v.issue_id = $3
-             AND v.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(context.tenant_project)
-    .bind(context.issue_id)
-    .fetch_one(&context.pool)
-    .await
-    {
-        Ok(total) => total,
+    let db = pidash_db::pool::sea_orm_connection(&context.pool);
+    let total_count: Result<u64, sea_orm::DbErr> = version_entity::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            version_entity::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(version_entity::Column::ProjectId.eq(context.tenant_project))
+        .filter(version_entity::Column::IssueId.eq(context.issue_id))
+        .filter(version_entity::Column::DeletedAt.is_null())
+        .count(&db)
+        .await;
+    let total_count = match total_count {
+        Ok(n) => n,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    let total: i64 = i64::try_from(total_count).unwrap_or(i64::MAX);
     let total_pages = (total + page_size - 1) / page_size;
     let start: i64 = page * page_size;
     let end: i64 = (start + page_size).min(total);
-    let rows: Vec<sqlx::postgres::PgRow> = match sqlx::query(
-        r#"SELECT v.id, v.workspace_id, v.project_id, v.issue_id, v.last_saved_at,
-                  v.owned_by_id, v.created_at, v.updated_at, v.created_by_id, v.updated_by_id
-           FROM issue_description_versions v
-           INNER JOIN workspaces w ON w.id = v.workspace_id
-           WHERE w.slug = $1 AND v.project_id = $2 AND v.issue_id = $3
-             AND v.deleted_at IS NULL
-           LIMIT $4 OFFSET $5"#,
-    )
-    .bind(&slug)
-    .bind(context.tenant_project)
-    .bind(context.issue_id)
-    .bind(page_size)
-    .bind(start)
-    .fetch_all(&context.pool)
-    .await
-    {
+    let rows_result = version_entity::Entity::find()
+        .select_only()
+        .columns([
+            version_entity::Column::Id,
+            version_entity::Column::WorkspaceId,
+            version_entity::Column::ProjectId,
+            version_entity::Column::IssueId,
+            version_entity::Column::LastSavedAt,
+            version_entity::Column::OwnedById,
+            version_entity::Column::CreatedAt,
+            version_entity::Column::UpdatedAt,
+            version_entity::Column::CreatedById,
+            version_entity::Column::UpdatedById,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            version_entity::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(version_entity::Column::ProjectId.eq(context.tenant_project))
+        .filter(version_entity::Column::IssueId.eq(context.issue_id))
+        .filter(version_entity::Column::DeletedAt.is_null())
+        .limit(page_size as u64)
+        .offset(start as u64)
+        .into_model::<VersionListRow>()
+        .all(&db)
+        .await;
+    let rows: Vec<VersionListRow> = match rows_result {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
 
     let mut results = Vec::with_capacity(rows.len());
     for row in &rows {
-        let decoded: Result<VersionListRow, sqlx::Error> = try_decode(row);
-        let (
+        let VersionListRow {
             id,
             workspace_id,
             project_id,
@@ -384,10 +436,18 @@ pub async fn list(
             updated_at,
             created_by_id,
             updated_by_id,
-        ) = match decoded {
-            Ok(decoded) => decoded,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
+        } = row;
+        let id = *id;
+        let workspace_id = *workspace_id;
+        let project_id = *project_id;
+        let issue_id = *issue_id;
+        let last_saved_at =
+            last_saved_at.map(|dt: chrono::DateTime<chrono::FixedOffset>| dt.with_timezone(&Utc));
+        let owned_by_id = *owned_by_id;
+        let created_at = created_at.with_timezone(&Utc);
+        let updated_at = updated_at.with_timezone(&Utc);
+        let created_by_id = *created_by_id;
+        let updated_by_id = *updated_by_id;
         let mut item = serde_json::Map::with_capacity(10);
         item.insert("id".to_owned(), serde_json::Value::String(id.to_string()));
         item.insert(

@@ -54,9 +54,18 @@
 //!error; [`ModelDataError::InvalidId`] carries that path.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use sea_orm::sea_query::{Alias, Expr, JoinType, Order, Query, SelectStatement};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QuerySelect};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use pidash_db::entity::{
+    cycle_issues, cycles, file_assets, intake_issues, issue_assignees, issue_comments,
+    issue_labels, issues, labels, module_issues, module_members, modules, projects, states, users,
+    workspaces,
+};
+use pidash_db::orm_tx::into_sqlx;
 
 /// Failures of `get_model_data`, mirroring the Python exception routing:
 /// [`ModelDataError::NotFound`] is the silent `ObjectDoesNotExist` path,
@@ -230,28 +239,29 @@ pub struct FileAssetRow {
 }
 
 async fn fetch_file_asset(pool: &PgPool, id: Uuid) -> Result<Option<FileAssetRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|row| FileAssetRow {
-        id: row.get("id"),
-        entity_type: row.try_get("entity_type").unwrap_or(None),
-        workspace_id: row.try_get("workspace_id").unwrap_or(None),
-        project_id: row.try_get("project_id").unwrap_or(None),
-        issue_id: row.try_get("issue_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = file_assets::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row.map(|model| FileAssetRow {
+        id: model.id,
+        entity_type: model.entity_type,
+        workspace_id: model.workspace_id,
+        project_id: model.project_id,
+        issue_id: model.issue_id,
     }))
 }
 
 async fn workspace_slug(pool: &PgPool, id: Uuid) -> Result<Option<String>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT slug FROM workspaces WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|row| row.try_get("slug").ok()))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    workspaces::Entity::find_by_id(id)
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)
 }
 
 /// Resolve `avatar_url` / `cover_image_url`: the asset FK wins when set
@@ -301,21 +311,19 @@ pub struct UserRow {
 }
 
 async fn fetch_user(pool: &PgPool, id: Uuid) -> Result<Option<UserRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, first_name, last_name, email, avatar, avatar_asset_id, display_name \
-         FROM users WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|row| UserRow {
-        id: row.get("id"),
-        first_name: row.get("first_name"),
-        last_name: row.get("last_name"),
-        email: row.try_get("email").unwrap_or(None),
-        avatar: row.get("avatar"),
-        avatar_asset_id: row.try_get("avatar_asset_id").unwrap_or(None),
-        display_name: row.get("display_name"),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row.map(|model| UserRow {
+        id: model.id,
+        first_name: model.first_name,
+        last_name: model.last_name,
+        email: model.email,
+        avatar: model.avatar,
+        avatar_asset_id: model.avatar_asset_id,
+        display_name: model.display_name,
     }))
 }
 
@@ -398,78 +406,61 @@ pub struct ProjectRow {
 }
 
 async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, cover_image_asset_id, cover_image, created_at, updated_at, deleted_at, \
-         name, description, description_text, description_html, network, identifier, emoji, \
-         icon_prop, module_view, cycle_view, issue_views_view, page_view, intake_view, \
-         is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, \
-         members_can_edit_states, archive_in, close_in, logo_props, archived_at, timezone, \
-         external_source, external_id, repo_url, base_branch, agent_default_interval_seconds, \
-         agent_default_max_ticks, agent_review_default_interval_seconds, \
-         agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, \
-         created_by_id, updated_by_id, workspace_id, default_assignee_id, project_lead_id, \
-         estimate_id, default_state_id \
-         FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    let Some(row) = row else { return Ok(None) };
-    // `description_text` / `description_html` are JSONField (jsonb): decode
-    // as JSON, surfacing errors instead of swallowing them into null.
-    let description_text: Option<Value> = row.try_get("description_text")?;
-    let description_html: Option<Value> = row.try_get("description_html")?;
-    // `network` is `PositiveSmallIntegerField` (INT2); sqlx does not widen
-    // INT2 into i32, so decode i16 and widen (same hazard the v1 handler's
-    // `row_i16_as_i32` works around).
-    let network: i16 = row.try_get("network")?;
-    Ok(Some(ProjectRow {
-        id: row.get("id"),
-        cover_image_asset_id: row.try_get("cover_image_asset_id").unwrap_or(None),
-        cover_image: row.try_get("cover_image").unwrap_or(None),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        name: row.get("name"),
-        description: row.get("description"),
-        description_text,
-        description_html,
-        network: i32::from(network),
-        identifier: row.get("identifier"),
-        emoji: row.try_get("emoji").unwrap_or(None),
-        icon_prop: row.try_get("icon_prop").unwrap_or(None),
-        module_view: row.get("module_view"),
-        cycle_view: row.get("cycle_view"),
-        issue_views_view: row.get("issue_views_view"),
-        page_view: row.get("page_view"),
-        intake_view: row.get("intake_view"),
-        is_time_tracking_enabled: row.get("is_time_tracking_enabled"),
-        is_issue_type_enabled: row.get("is_issue_type_enabled"),
-        is_default: row.get("is_default"),
-        guest_view_all_features: row.get("guest_view_all_features"),
-        members_can_edit_states: row.get("members_can_edit_states"),
-        archive_in: row.get("archive_in"),
-        close_in: row.get("close_in"),
-        logo_props: row.get("logo_props"),
-        archived_at: row.try_get("archived_at").unwrap_or(None),
-        timezone: row.get("timezone"),
-        external_source: row.try_get("external_source").unwrap_or(None),
-        external_id: row.try_get("external_id").unwrap_or(None),
-        repo_url: row.get("repo_url"),
-        base_branch: row.get("base_branch"),
-        agent_default_interval_seconds: row.get("agent_default_interval_seconds"),
-        agent_default_max_ticks: row.get("agent_default_max_ticks"),
-        agent_review_default_interval_seconds: row.get("agent_review_default_interval_seconds"),
-        agent_test_default_interval_seconds: row.get("agent_test_default_interval_seconds"),
-        agent_ticking_enabled: row.get("agent_ticking_enabled"),
-        default_agent_executor: row.get("default_agent_executor"),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        workspace_id: row.get("workspace_id"),
-        default_assignee_id: row.try_get("default_assignee_id").unwrap_or(None),
-        project_lead_id: row.try_get("project_lead_id").unwrap_or(None),
-        estimate_id: row.try_get("estimate_id").unwrap_or(None),
-        default_state_id: row.try_get("default_state_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = projects::Entity::find_by_id(id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| ProjectRow {
+        id: m.id,
+        cover_image_asset_id: m.cover_image_asset_id,
+        cover_image: m.cover_image,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        name: m.name,
+        description: m.description,
+        description_text: m.description_text,
+        description_html: m.description_html,
+        // `network` is `PositiveSmallIntegerField` (INT2); the entity types
+        // INT2 as i16, widened to i32 for the serializer.
+        network: i32::from(m.network),
+        identifier: m.identifier,
+        emoji: m.emoji,
+        icon_prop: m.icon_prop,
+        module_view: m.module_view,
+        cycle_view: m.cycle_view,
+        issue_views_view: m.issue_views_view,
+        page_view: m.page_view,
+        intake_view: m.intake_view,
+        is_time_tracking_enabled: m.is_time_tracking_enabled,
+        is_issue_type_enabled: m.is_issue_type_enabled,
+        is_default: m.is_default,
+        guest_view_all_features: m.guest_view_all_features,
+        members_can_edit_states: m.members_can_edit_states,
+        archive_in: m.archive_in,
+        close_in: m.close_in,
+        logo_props: m.logo_props,
+        archived_at: m.archived_at.map(|t| t.with_timezone(&Utc)),
+        timezone: m.timezone,
+        external_source: m.external_source,
+        external_id: m.external_id,
+        repo_url: m.repo_url,
+        base_branch: m.base_branch,
+        agent_default_interval_seconds: m.agent_default_interval_seconds,
+        agent_default_max_ticks: m.agent_default_max_ticks,
+        agent_review_default_interval_seconds: m.agent_review_default_interval_seconds,
+        agent_test_default_interval_seconds: m.agent_test_default_interval_seconds,
+        agent_ticking_enabled: m.agent_ticking_enabled,
+        default_agent_executor: m.default_agent_executor,
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        workspace_id: m.workspace_id,
+        default_assignee_id: m.default_assignee_id,
+        project_lead_id: m.project_lead_id,
+        estimate_id: m.estimate_id,
+        default_state_id: m.default_state_id,
     }))
 }
 
@@ -643,56 +634,46 @@ async fn fetch_issue(
     // `true` mirrors a `Model.objects.get(pk=)` read (the `SoftDeletionManager`
     // adds `deleted_at IS NULL`); `false` mirrors a forward-FK dereference
     // (`instance.issue`), which goes through `_base_manager` and is unscoped.
-    let guard = if soft_scope {
-        " AND deleted_at IS NULL"
-    } else {
-        ""
-    };
-    let sql = format!(
-        "SELECT id, state_id, description_json, created_at, updated_at, deleted_at, point, \
-         name, description_html, description_stripped, description_binary, priority, \
-         complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, \
-         archived_at, is_draft, external_source, external_id, git_work_branch, created_via, \
-         agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, \
-         estimate_point_id, type_id, assigned_pod_id \
-         FROM issues WHERE id = $1{guard}"
-    );
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
-    Ok(row.map(|row| IssueRow {
-        id: row.get("id"),
-        state_id: row.try_get("state_id").unwrap_or(None),
-        description_json: row.get("description_json"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        point: row.try_get("point").unwrap_or(None),
-        name: row.get("name"),
-        description_html: row.get("description_html"),
-        description_stripped: row.try_get("description_stripped").unwrap_or(None),
-        description_binary: row.try_get("description_binary").unwrap_or(None),
-        priority: row.get("priority"),
-        complexity_score: row.get("complexity_score"),
-        start_date: row.try_get("start_date").unwrap_or(None),
-        target_date: row.try_get("target_date").unwrap_or(None),
-        sequence_id: row.get("sequence_id"),
-        sort_order: row.get("sort_order"),
-        completed_at: row.try_get("completed_at").unwrap_or(None),
-        archived_at: row.try_get("archived_at").unwrap_or(None),
-        is_draft: row.get("is_draft"),
-        external_source: row.try_get("external_source").unwrap_or(None),
-        external_id: row.try_get("external_id").unwrap_or(None),
-        git_work_branch: row.get("git_work_branch"),
-        created_via: row.try_get("created_via").unwrap_or(None),
-        agent_executor: row.try_get("agent_executor").unwrap_or(None),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        project_id: row.get("project_id"),
-        workspace_id: row.get("workspace_id"),
-        parent_id: row.try_get("parent_id").unwrap_or(None),
-        estimate_point_id: row.try_get("estimate_point_id").unwrap_or(None),
-        type_id: row.try_get("type_id").unwrap_or(None),
-        assigned_pod_id: row.try_get("assigned_pod_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut query = issues::Entity::find_by_id(id);
+    if soft_scope {
+        query = query.filter(issues::Column::DeletedAt.is_null());
+    }
+    let model = query.one(&db).await.map_err(into_sqlx)?;
+    Ok(model.map(|m| IssueRow {
+        id: m.id,
+        state_id: m.state_id,
+        description_json: m.description_json,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        point: m.point,
+        name: m.name,
+        description_html: m.description_html,
+        description_stripped: m.description_stripped,
+        description_binary: m.description_binary,
+        priority: m.priority,
+        complexity_score: m.complexity_score,
+        start_date: m.start_date,
+        target_date: m.target_date,
+        sequence_id: m.sequence_id,
+        sort_order: m.sort_order,
+        completed_at: m.completed_at.map(|t| t.with_timezone(&Utc)),
+        archived_at: m.archived_at,
+        is_draft: m.is_draft,
+        external_source: m.external_source,
+        external_id: m.external_id,
+        git_work_branch: m.git_work_branch,
+        created_via: m.created_via,
+        agent_executor: m.agent_executor,
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        parent_id: m.parent_id,
+        estimate_point_id: m.estimate_point_id,
+        type_id: m.type_id,
+        assigned_pod_id: m.assigned_pod_id,
     }))
 }
 
@@ -705,16 +686,16 @@ pub struct StateLiteRow {
 }
 
 async fn fetch_state_lite(pool: &PgPool, id: Uuid) -> Result<Option<StateLiteRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT id, name, color, \"group\" FROM states WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|row| StateLiteRow {
-        id: row.get("id"),
-        name: row.get("name"),
-        color: row.get("color"),
-        group: row.get("group"),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = states::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row.map(|model| StateLiteRow {
+        id: model.id,
+        name: model.name,
+        color: model.color,
+        group: model.group,
     }))
 }
 
@@ -745,52 +726,96 @@ pub fn render_label_lite(row: &LabelLiteRow) -> Map<String, Value> {
 /// Issue labels in prefetch order: `label_issue.all()` walks the through
 /// rows in `IssueLabel.Meta.ordering` (`-created_at`) and dereferences
 /// each label — no label-side filter, no label-side ordering.
+fn issue_labels_statement(issue_id: Uuid) -> SelectStatement {
+    let l = Alias::new("l");
+    let il = Alias::new("il");
+    let mut stmt = Query::select();
+    stmt.column((l.clone(), labels::Column::Id))
+        .column((l.clone(), labels::Column::Name))
+        .column((l.clone(), labels::Column::Color))
+        .from_as(labels::Entity, l.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            issue_labels::Entity,
+            il.clone(),
+            Expr::col((il.clone(), issue_labels::Column::LabelId))
+                .equals((l.clone(), labels::Column::Id)),
+        )
+        .and_where(Expr::col((il.clone(), issue_labels::Column::IssueId)).eq(issue_id))
+        .and_where(Expr::col((il.clone(), issue_labels::Column::DeletedAt)).is_null())
+        .order_by((il.clone(), issue_labels::Column::CreatedAt), Order::Desc);
+    stmt
+}
+
 async fn fetch_issue_labels(
     pool: &PgPool,
     issue_id: Uuid,
 ) -> Result<Vec<LabelLiteRow>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT l.id, l.name, l.color FROM labels l \
-         JOIN issue_labels il ON il.label_id = l.id \
-         WHERE il.issue_id = $1 AND il.deleted_at IS NULL ORDER BY il.created_at DESC",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .map(|row| LabelLiteRow {
-            id: row.get("id"),
-            name: row.get("name"),
-            color: row.get("color"),
-        })
-        .collect())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&issue_labels_statement(issue_id)))
+        .await
+        .map_err(into_sqlx)?;
+    let mut labels = Vec::with_capacity(rows.len());
+    for row in &rows {
+        labels.push(LabelLiteRow {
+            id: row.try_get("", "id").map_err(into_sqlx)?,
+            name: row.try_get("", "name").map_err(into_sqlx)?,
+            color: row.try_get("", "color").map_err(into_sqlx)?,
+        });
+    }
+    Ok(labels)
 }
 
 /// Issue assignees in prefetch order (`IssueAssignee.Meta.ordering`,
 /// `-created_at`), with the `UserLiteSerializer` columns per row.
+fn issue_assignees_statement(issue_id: Uuid) -> SelectStatement {
+    let u = Alias::new("u");
+    let ia = Alias::new("ia");
+    let mut stmt = Query::select();
+    stmt.column((u.clone(), users::Column::Id))
+        .column((u.clone(), users::Column::FirstName))
+        .column((u.clone(), users::Column::LastName))
+        .column((u.clone(), users::Column::Email))
+        .column((u.clone(), users::Column::Avatar))
+        .column((u.clone(), users::Column::AvatarAssetId))
+        .column((u.clone(), users::Column::DisplayName))
+        .from_as(users::Entity, u.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            issue_assignees::Entity,
+            ia.clone(),
+            Expr::col((ia.clone(), issue_assignees::Column::AssigneeId))
+                .equals((u.clone(), users::Column::Id)),
+        )
+        .and_where(Expr::col((ia.clone(), issue_assignees::Column::IssueId)).eq(issue_id))
+        .and_where(Expr::col((ia.clone(), issue_assignees::Column::DeletedAt)).is_null())
+        .order_by(
+            (ia.clone(), issue_assignees::Column::CreatedAt),
+            Order::Desc,
+        );
+    stmt
+}
+
 async fn fetch_issue_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Vec<UserRow>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT u.id, u.first_name, u.last_name, u.email, u.avatar, u.avatar_asset_id, \
-         u.display_name FROM users u \
-         JOIN issue_assignees ia ON ia.assignee_id = u.id \
-         WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL ORDER BY ia.created_at DESC",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .map(|row| UserRow {
-            id: row.get("id"),
-            first_name: row.get("first_name"),
-            last_name: row.get("last_name"),
-            email: row.try_get("email").unwrap_or(None),
-            avatar: row.get("avatar"),
-            avatar_asset_id: row.try_get("avatar_asset_id").unwrap_or(None),
-            display_name: row.get("display_name"),
-        })
-        .collect())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&issue_assignees_statement(issue_id)))
+        .await
+        .map_err(into_sqlx)?;
+    let mut users = Vec::with_capacity(rows.len());
+    for row in &rows {
+        users.push(UserRow {
+            id: row.try_get("", "id").map_err(into_sqlx)?,
+            first_name: row.try_get("", "first_name").map_err(into_sqlx)?,
+            last_name: row.try_get("", "last_name").map_err(into_sqlx)?,
+            email: row.try_get("", "email").map_err(into_sqlx)?,
+            avatar: row.try_get("", "avatar").map_err(into_sqlx)?,
+            avatar_asset_id: row.try_get("", "avatar_asset_id").map_err(into_sqlx)?,
+            display_name: row.try_get("", "display_name").map_err(into_sqlx)?,
+        });
+    }
+    Ok(users)
 }
 
 /// Render `IssueExpandSerializer` in golden key order: `id`, the four
@@ -909,39 +934,35 @@ pub struct CycleRow {
 }
 
 async fn fetch_cycle(pool: &PgPool, id: Uuid) -> Result<Option<CycleRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, created_at, updated_at, deleted_at, name, description, start_date, \
-         end_date, view_props, sort_order, external_source, external_id, progress_snapshot, \
-         archived_at, logo_props, timezone, version, created_by_id, updated_by_id, \
-         project_id, workspace_id, owned_by_id \
-         FROM cycles WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|row| CycleRow {
-        id: row.get("id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        name: row.get("name"),
-        description: row.get("description"),
-        start_date: row.try_get("start_date").unwrap_or(None),
-        end_date: row.try_get("end_date").unwrap_or(None),
-        view_props: row.get("view_props"),
-        sort_order: row.get("sort_order"),
-        external_source: row.try_get("external_source").unwrap_or(None),
-        external_id: row.try_get("external_id").unwrap_or(None),
-        progress_snapshot: row.get("progress_snapshot"),
-        archived_at: row.try_get("archived_at").unwrap_or(None),
-        logo_props: row.get("logo_props"),
-        timezone: row.get("timezone"),
-        version: row.get("version"),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        project_id: row.get("project_id"),
-        workspace_id: row.get("workspace_id"),
-        owned_by_id: row.try_get("owned_by_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = cycles::Entity::find_by_id(id)
+        .filter(cycles::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| CycleRow {
+        id: m.id,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        name: m.name,
+        description: m.description,
+        start_date: m.start_date.map(|t| t.with_timezone(&Utc)),
+        end_date: m.end_date.map(|t| t.with_timezone(&Utc)),
+        view_props: m.view_props,
+        sort_order: m.sort_order,
+        external_source: m.external_source,
+        external_id: m.external_id,
+        progress_snapshot: m.progress_snapshot,
+        archived_at: m.archived_at.map(|t| t.with_timezone(&Utc)),
+        logo_props: m.logo_props,
+        timezone: m.timezone,
+        version: m.version,
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        owned_by_id: Some(m.owned_by_id),
     }))
 }
 
@@ -1017,59 +1038,69 @@ pub struct ModuleRow {
 }
 
 async fn fetch_module(pool: &PgPool, id: Uuid) -> Result<Option<ModuleRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, created_at, updated_at, deleted_at, name, description, description_text, \
-         description_html, start_date, target_date, status, view_props, sort_order, \
-         external_source, external_id, archived_at, logo_props, created_by_id, updated_by_id, \
-         project_id, workspace_id, lead_id \
-         FROM modules WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    let Some(row) = row else { return Ok(None) };
-    // `description_text` / `description_html` are JSONField (jsonb): decode
-    // as JSON, surfacing errors instead of swallowing them into null.
-    let description_text: Option<Value> = row.try_get("description_text")?;
-    let description_html: Option<Value> = row.try_get("description_html")?;
-    Ok(Some(ModuleRow {
-        id: row.get("id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        name: row.get("name"),
-        description: row.get("description"),
-        description_text,
-        description_html,
-        start_date: row.try_get("start_date").unwrap_or(None),
-        target_date: row.try_get("target_date").unwrap_or(None),
-        status: row.get("status"),
-        view_props: row.get("view_props"),
-        sort_order: row.get("sort_order"),
-        external_source: row.try_get("external_source").unwrap_or(None),
-        external_id: row.try_get("external_id").unwrap_or(None),
-        archived_at: row.try_get("archived_at").unwrap_or(None),
-        logo_props: row.get("logo_props"),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        project_id: row.get("project_id"),
-        workspace_id: row.get("workspace_id"),
-        lead_id: row.try_get("lead_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = modules::Entity::find_by_id(id)
+        .filter(modules::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| ModuleRow {
+        id: m.id,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        name: m.name,
+        description: m.description,
+        description_text: m.description_text,
+        description_html: m.description_html,
+        start_date: m.start_date,
+        target_date: m.target_date,
+        status: m.status,
+        view_props: m.view_props,
+        sort_order: m.sort_order,
+        external_source: m.external_source,
+        external_id: m.external_id,
+        archived_at: m.archived_at.map(|t| t.with_timezone(&Utc)),
+        logo_props: m.logo_props,
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        lead_id: m.lead_id,
     }))
 }
 
 /// Module member ids: `instance.members.all()` is a `User` queryset in the
 /// target model's ordering (`-created_at`), rendered as id strings.
+fn module_members_statement(module_id: Uuid) -> SelectStatement {
+    let u = Alias::new("u");
+    let mm = Alias::new("mm");
+    let mut stmt = Query::select();
+    stmt.column((u.clone(), users::Column::Id))
+        .from_as(users::Entity, u.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            module_members::Entity,
+            mm.clone(),
+            Expr::col((mm.clone(), module_members::Column::MemberId))
+                .equals((u.clone(), users::Column::Id)),
+        )
+        .and_where(Expr::col((mm.clone(), module_members::Column::ModuleId)).eq(module_id))
+        .order_by((u.clone(), users::Column::CreatedAt), Order::Desc);
+    stmt
+}
+
 async fn fetch_module_members(pool: &PgPool, module_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT u.id FROM users u \
-         JOIN module_members mm ON mm.member_id = u.id \
-         WHERE mm.module_id = $1 ORDER BY u.created_at DESC",
-    )
-    .bind(module_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.iter().map(|row| row.get("id")).collect())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&module_members_statement(module_id)))
+        .await
+        .map_err(into_sqlx)?;
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        ids.push(row.try_get("", "id").map_err(into_sqlx)?);
+    }
+    Ok(ids)
 }
 
 /// Render `ModuleSerializer`: `id`, the model fields (the write-only
@@ -1144,31 +1175,45 @@ pub struct LinkRow {
     pub second_id: Uuid,
 }
 
-async fn fetch_link(
-    pool: &PgPool,
-    table: &str,
-    first_col: &str,
-    second_col: &str,
-    id: Uuid,
-) -> Result<Option<LinkRow>, sqlx::Error> {
-    let sql = format!(
-        "SELECT id, created_at, updated_at, deleted_at, created_by_id, updated_by_id, \
-         project_id, workspace_id, {first_col}, {second_col} FROM {table} \
-         WHERE id = $1 AND deleted_at IS NULL"
-    );
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
-    Ok(row.map(|row| LinkRow {
-        id: row.get("id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        project_id: row.get("project_id"),
-        workspace_id: row.get("workspace_id"),
-        first_id: row.get(first_col),
-        second_id: row.get(second_col),
+async fn fetch_cycle_issue_link(pool: &PgPool, id: Uuid) -> Result<Option<LinkRow>, sqlx::Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = cycle_issues::Entity::find_by_id(id)
+        .filter(cycle_issues::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| LinkRow {
+        id: m.id,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        first_id: m.issue_id,
+        second_id: m.cycle_id,
+    }))
+}
+
+async fn fetch_module_issue_link(pool: &PgPool, id: Uuid) -> Result<Option<LinkRow>, sqlx::Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = module_issues::Entity::find_by_id(id)
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| LinkRow {
+        id: m.id,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        first_id: m.module_id,
+        second_id: m.issue_id,
     }))
 }
 
@@ -1231,39 +1276,35 @@ async fn fetch_issue_comment(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<IssueCommentRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, created_at, updated_at, deleted_at, comment_html, attachments, labels, \
-         access, external_source, external_id, speaker_type, speaker_label, \
-         speaker_agent_run_id, edited_at, created_by_id, updated_by_id, project_id, \
-         workspace_id, description_id, issue_id, actor_id, parent_id \
-         FROM issue_comments WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|row| IssueCommentRow {
-        id: row.get("id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        comment_html: row.get("comment_html"),
-        attachments: row.get("attachments"),
-        labels: row.get("labels"),
-        access: row.get("access"),
-        external_source: row.try_get("external_source").unwrap_or(None),
-        external_id: row.try_get("external_id").unwrap_or(None),
-        speaker_type: row.get("speaker_type"),
-        speaker_label: row.get("speaker_label"),
-        speaker_agent_run_id: row.try_get("speaker_agent_run_id").unwrap_or(None),
-        edited_at: row.try_get("edited_at").unwrap_or(None),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        project_id: row.get("project_id"),
-        workspace_id: row.get("workspace_id"),
-        description_id: row.try_get("description_id").unwrap_or(None),
-        issue_id: row.get("issue_id"),
-        actor_id: row.try_get("actor_id").unwrap_or(None),
-        parent_id: row.try_get("parent_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = issue_comments::Entity::find_by_id(id)
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| IssueCommentRow {
+        id: m.id,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        comment_html: m.comment_html,
+        attachments: m.attachments,
+        labels: m.labels,
+        access: m.access,
+        external_source: m.external_source,
+        external_id: m.external_id,
+        speaker_type: m.speaker_type,
+        speaker_label: m.speaker_label,
+        speaker_agent_run_id: m.speaker_agent_run_id,
+        edited_at: m.edited_at.map(|t| t.with_timezone(&Utc)),
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        description_id: m.description_id,
+        issue_id: m.issue_id,
+        actor_id: m.actor_id,
+        parent_id: m.parent_id,
     }))
 }
 
@@ -1335,21 +1376,25 @@ pub fn render_issue_comment(row: &IssueCommentRow, url: Option<&str>) -> Map<Str
 }
 
 async fn project_identifier(pool: &PgPool, id: Uuid) -> Result<Option<String>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT identifier FROM projects WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|row| row.try_get("identifier").ok()))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    projects::Entity::find_by_id(id)
+        .select_only()
+        .column(projects::Column::Identifier)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)
 }
 
 async fn issue_sequence(pool: &PgPool, id: Uuid) -> Result<Option<i32>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT sequence_id FROM issues WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|row| row.try_get("sequence_id").ok()))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issues::Entity::find_by_id(id)
+        .select_only()
+        .column(issues::Column::SequenceId)
+        .into_tuple::<i32>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)
 }
 
 // ---------------------------------------------------------------------------
@@ -1382,34 +1427,31 @@ async fn fetch_intake_issue(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<IntakeIssueRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, intake_id, issue_id, created_at, updated_at, deleted_at, status, \
-         snoozed_till, source, source_email, external_source, external_id, extra, \
-         created_by_id, updated_by_id, project_id, workspace_id, duplicate_to_id \
-         FROM intake_issues WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|row| IntakeIssueRow {
-        id: row.get("id"),
-        intake_id: row.get("intake_id"),
-        issue_id: row.get("issue_id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deleted_at: row.try_get("deleted_at").unwrap_or(None),
-        status: row.get("status"),
-        snoozed_till: row.try_get("snoozed_till").unwrap_or(None),
-        source: row.try_get("source").unwrap_or(None),
-        source_email: row.try_get("source_email").unwrap_or(None),
-        external_source: row.try_get("external_source").unwrap_or(None),
-        external_id: row.try_get("external_id").unwrap_or(None),
-        extra: row.get("extra"),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
-        updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
-        project_id: row.get("project_id"),
-        workspace_id: row.get("workspace_id"),
-        duplicate_to_id: row.try_get("duplicate_to_id").unwrap_or(None),
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = intake_issues::Entity::find_by_id(id)
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(model.map(|m| IntakeIssueRow {
+        id: m.id,
+        intake_id: m.intake_id,
+        issue_id: m.issue_id,
+        created_at: m.created_at.with_timezone(&Utc),
+        updated_at: m.updated_at.with_timezone(&Utc),
+        deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
+        status: m.status,
+        snoozed_till: m.snoozed_till.map(|t| t.with_timezone(&Utc)),
+        source: m.source,
+        source_email: m.source_email,
+        external_source: m.external_source,
+        external_id: m.external_id,
+        extra: m.extra,
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        project_id: m.project_id,
+        workspace_id: m.workspace_id,
+        duplicate_to_id: m.duplicate_to_id,
     }))
 }
 
@@ -1593,14 +1635,14 @@ pub async fn get_model_data(
             Ok(Value::Object(render_module(&row, &members)))
         }
         "cycle_issue" => {
-            let row = fetch_link(pool, "cycle_issues", "issue_id", "cycle_id", id)
+            let row = fetch_cycle_issue_link(pool, id)
                 .await
                 .map_err(map_store)?
                 .ok_or_else(missing)?;
             Ok(Value::Object(render_link(&row, "issue", "cycle")))
         }
         "module_issue" => {
-            let row = fetch_link(pool, "module_issues", "module_id", "issue_id", id)
+            let row = fetch_module_issue_link(pool, id)
                 .await
                 .map_err(map_store)?
                 .ok_or_else(missing)?;
@@ -1656,6 +1698,40 @@ mod tests {
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("fixture parses")
+    }
+
+    #[test]
+    fn join_statement_shapes_pin_soft_filter_and_order() {
+        let issue = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let labels_sql =
+            issue_labels_statement(issue).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(labels_sql.contains("\"labels\""), "{labels_sql}");
+        assert!(labels_sql.contains("\"issue_labels\""), "{labels_sql}");
+        assert!(
+            labels_sql.contains("\"deleted_at\" IS NULL"),
+            "{labels_sql}"
+        );
+        assert!(labels_sql.contains("ORDER BY"), "{labels_sql}");
+        let assignees_sql =
+            issue_assignees_statement(issue).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(assignees_sql.contains("\"users\""), "{assignees_sql}");
+        assert!(
+            assignees_sql.contains("\"issue_assignees\""),
+            "{assignees_sql}"
+        );
+        assert!(
+            assignees_sql.contains("\"deleted_at\" IS NULL"),
+            "{assignees_sql}"
+        );
+        assert!(assignees_sql.contains("ORDER BY"), "{assignees_sql}");
+        let members_sql =
+            module_members_statement(issue).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(members_sql.contains("\"users\""), "{members_sql}");
+        assert!(members_sql.contains("\"module_members\""), "{members_sql}");
+        assert!(
+            members_sql.contains("\"u\".\"created_at\" DESC"),
+            "{members_sql}"
+        );
     }
 
     fn golden(event: &str) -> Value {

@@ -18,6 +18,11 @@ Run form: the Celery-oracle tests need no infrastructure (Celery ships in
     export DATABASE_URL=postgresql://...  # your own scratch database
     pidash-api worker &
     pytest -p no:django tasks_cleanup/test_beat_catchup.py
+
+CI split (NEWPIDASH-30): the worker-plane oracle job runs only the
+Celery-oracle tests (it deselects the two live ones — no Rust worker
+there); the tasks-cleanup-rust job runs the two live tests against its
+``pidash-api worker``.
 """
 
 from __future__ import annotations

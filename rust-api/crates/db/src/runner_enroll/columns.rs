@@ -206,7 +206,10 @@ pub mod dev_machine {
     pub const TABLE: &str = "dev_machine";
     /// Default ordering (`Meta.ordering`, `:368`).
     pub const ORDERING: &[&str] = &["-last_seen_at", "-created_at"];
-    /// Columns in Django field-definition order (`:338-364`).
+    /// Columns in Django field-definition order (`:338-364` plus the
+    /// engine-pause trio, migration `0034_engine_dispatch_fields`, #2903,
+    /// and the #2910 machine-identity six, migration
+    /// `0036_engine_credential_machine_identity`).
     pub const COLUMNS: &[&str] = &[
         "id",
         "owner_id",
@@ -214,6 +217,15 @@ pub mod dev_machine {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -227,6 +239,15 @@ pub mod dev_machine {
         Some(""),       // label
         Some("0"),      // visibility (Visibility.PRIVATE)
         Some("manual"), // provisioning (RunnerProvisioning.MANUAL)
+        Some("false"),  // engine_paused_by_owner
+        Some(""),       // engine_auto_pause_reason (EngineAutoPauseReason.NONE)
+        Some("false"),  // engine_team_runs
+        Some("never"),  // engine_sign_in_state (EngineSignInState.NEVER)
+        None,           // engine_credential_expires_at
+        Some("{}"),     // engine_state (JSONField default=dict)
+        None,           // engine_state_reported_at
+        None,           // merged_into_id (SET_NULL)
+        Some("{}"),     // merge_result (JSONField default=dict)
         None,           // last_seen_at
         None,           // revoked_at
         None,           // created_at (auto_now_add)
@@ -288,7 +309,8 @@ pub mod runner {
     /// Default ordering (`Meta.ordering`, `:480`).
     pub const ORDERING: &[&str] = &["-last_heartbeat_at", "-created_at"];
     /// Columns in Django field-definition order (`:394-476` plus the
-    /// `09738d222` operator-pause pair, migration `0031_runner_paused`).
+    /// `09738d222` operator-pause pair, migration `0031_runner_paused`, and
+    /// `pod_dispatch`, migration `0034_engine_dispatch_fields`, #2903).
     pub const COLUMNS: &[&str] = &[
         "id",
         "owner_id",
@@ -298,6 +320,7 @@ pub mod runner {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",
@@ -324,37 +347,38 @@ pub mod runner {
     ];
     /// Django field defaults in [`COLUMNS`] order (`None` = no default).
     pub const DEFAULTS: &[Option<&str>] = &[
-        None,            // id (uuid4 pk, client-side; db_index=True is a no-op on a pk)
-        None,            // owner_id (required FK)
-        None,            // workspace_id (required FK)
-        None,            // dev_machine_id (SET_NULL)
-        None,            // pod_id (required PROTECT FK; save() may auto-resolve)
-        None,            // name (required, no default)
-        Some(""),        // host_label
-        Some("manual"),  // provisioning (RunnerProvisioning.MANUAL)
-        Some("0"),       // visibility (Visibility.PRIVATE)
-        Some(""),        // refresh_token_hash
-        Some(""),        // refresh_token_fingerprint
-        Some("0"),       // refresh_token_generation
-        Some(""),        // previous_refresh_token_hash
-        Some("1"),       // access_token_signing_key_version (reserved/unused)
-        Some(""),        // enrollment_token_hash
-        Some(""),        // enrollment_token_fingerprint
-        None,            // enrolled_at
-        Some("[]"),      // capabilities (JSONField default=list)
-        Some("offline"), // status (RunnerStatus.OFFLINE)
-        Some(""),        // os
-        Some(""),        // arch
-        Some(""),        // runner_version
-        Some("{}"),      // dev_metadata (JSONField default=dict)
-        Some("1"),       // protocol_version
-        None,            // last_heartbeat_at
-        None,            // created_at (auto_now_add)
-        None,            // updated_at (auto_now)
-        None,            // revoked_at
-        Some(""),        // revoked_reason
-        None,            // paused_at (NULL = not paused)
-        None,            // paused_by_id (SET_NULL)
+        None,               // id (uuid4 pk, client-side; db_index=True is a no-op on a pk)
+        None,               // owner_id (required FK)
+        None,               // workspace_id (required FK)
+        None,               // dev_machine_id (SET_NULL)
+        None,               // pod_id (required PROTECT FK; save() may auto-resolve)
+        None,               // name (required, no default)
+        Some(""),           // host_label
+        Some("manual"),     // provisioning (RunnerProvisioning.MANUAL)
+        Some("pod_member"), // pod_dispatch (RunnerPodDispatch.POD_MEMBER)
+        Some("0"),          // visibility (Visibility.PRIVATE)
+        Some(""),           // refresh_token_hash
+        Some(""),           // refresh_token_fingerprint
+        Some("0"),          // refresh_token_generation
+        Some(""),           // previous_refresh_token_hash
+        Some("1"),          // access_token_signing_key_version (reserved/unused)
+        Some(""),           // enrollment_token_hash
+        Some(""),           // enrollment_token_fingerprint
+        None,               // enrolled_at
+        Some("[]"),         // capabilities (JSONField default=list)
+        Some("offline"),    // status (RunnerStatus.OFFLINE)
+        Some(""),           // os
+        Some(""),           // arch
+        Some(""),           // runner_version
+        Some("{}"),         // dev_metadata (JSONField default=dict)
+        Some("1"),          // protocol_version
+        None,               // last_heartbeat_at
+        None,               // created_at (auto_now_add)
+        None,               // updated_at (auto_now)
+        None,               // revoked_at
+        Some(""),           // revoked_reason
+        None,               // paused_at (NULL = not paused)
+        None,               // paused_by_id (SET_NULL)
     ];
     /// Enrollment cap (`MAX_PER_USER`, `:392`). Enforced outside the
     /// model by `matcher.can_register_another` (`count_active < 5`;
@@ -685,14 +709,87 @@ pub mod enums {
         ("manual", "Enrolled by the user"),
         ("desktop_bundled", "Provisioned by Pi Dash Desktop"),
     ];
+    /// `RunnerPodDispatch.PINNED_ONLY` ("Pod work off", #2903).
+    pub const RUNNER_POD_DISPATCH_PINNED_ONLY: &str = "pinned_only";
+    /// `RunnerPodDispatch.POD_MEMBER` ("Pod work on", #2903).
+    pub const RUNNER_POD_DISPATCH_POD_MEMBER: &str = "pod_member";
+    /// `RunnerPodDispatch` values in declaration order.
+    pub const RUNNER_POD_DISPATCH_CHOICES: &[&str] = &["pinned_only", "pod_member"];
+    /// `RunnerPodDispatch.choices`: `(value, label)` pairs.
+    pub const RUNNER_POD_DISPATCH_LABELS: &[(&str, &str)] = &[
+        ("pinned_only", "Pod work off"),
+        ("pod_member", "Pod work on"),
+    ];
+    /// `EngineAutoPauseReason.NONE` ("Not paused", #2903).
+    pub const ENGINE_AUTO_PAUSE_REASON_NONE: &str = "";
+    /// `EngineAutoPauseReason.ENGINE_SIGN_IN_REQUIRED` (#2903).
+    pub const ENGINE_AUTO_PAUSE_REASON_SIGN_IN_REQUIRED: &str = "engine_sign_in_required";
+    /// `EngineAutoPauseReason.GATEWAY_SESSION_REVOKED` (#2903).
+    pub const ENGINE_AUTO_PAUSE_REASON_GATEWAY_SESSION_REVOKED: &str = "gateway_session_revoked";
+    /// `EngineAutoPauseReason.WALLET_EMPTY` (#2903).
+    pub const ENGINE_AUTO_PAUSE_REASON_WALLET_EMPTY: &str = "wallet_empty";
+    /// `EngineAutoPauseReason.PROFILE_UNAVAILABLE` (#2903).
+    pub const ENGINE_AUTO_PAUSE_REASON_PROFILE_UNAVAILABLE: &str = "profile_unavailable";
+    /// `EngineAutoPauseReason.ENGINE_DISABLED` (#2903).
+    pub const ENGINE_AUTO_PAUSE_REASON_ENGINE_DISABLED: &str = "engine_disabled";
+    /// `EngineAutoPauseReason` values in declaration order.
+    pub const ENGINE_AUTO_PAUSE_REASON_CHOICES: &[&str] = &[
+        "",
+        "engine_sign_in_required",
+        "gateway_session_revoked",
+        "wallet_empty",
+        "profile_unavailable",
+        "engine_disabled",
+    ];
+    /// `EngineAutoPauseReason.choices`: `(value, label)` pairs.
+    pub const ENGINE_AUTO_PAUSE_REASON_LABELS: &[(&str, &str)] = &[
+        ("", "Not paused"),
+        ("engine_sign_in_required", "Engine sign-in required"),
+        ("gateway_session_revoked", "Gateway session revoked"),
+        ("wallet_empty", "Wallet empty"),
+        ("profile_unavailable", "Model profile unavailable"),
+        ("engine_disabled", "Engine disabled on this instance"),
+    ];
+    /// `EngineSignInState.NEVER` ("Never signed in", #2910).
+    pub const ENGINE_SIGN_IN_STATE_NEVER: &str = "never";
+    /// `EngineSignInState.ACTIVE` ("Signed in", #2910).
+    pub const ENGINE_SIGN_IN_STATE_ACTIVE: &str = "active";
+    /// `EngineSignInState.EXPIRING` ("Expiring soon", #2910).
+    pub const ENGINE_SIGN_IN_STATE_EXPIRING: &str = "expiring";
+    /// `EngineSignInState.EXPIRED` ("Expired", #2910).
+    pub const ENGINE_SIGN_IN_STATE_EXPIRED: &str = "expired";
+    /// `EngineSignInState.SIGNED_OUT` ("Signed out", #2910).
+    pub const ENGINE_SIGN_IN_STATE_SIGNED_OUT: &str = "signed_out";
+    /// `EngineSignInState.REVOKED` ("Revoked", #2910).
+    pub const ENGINE_SIGN_IN_STATE_REVOKED: &str = "revoked";
+    /// `EngineSignInState` values in declaration order.
+    pub const ENGINE_SIGN_IN_STATE_CHOICES: &[&str] = &[
+        "never",
+        "active",
+        "expiring",
+        "expired",
+        "signed_out",
+        "revoked",
+    ];
+    /// `EngineSignInState.choices`: `(value, label)` pairs.
+    pub const ENGINE_SIGN_IN_STATE_LABELS: &[(&str, &str)] = &[
+        ("never", "Never signed in"),
+        ("active", "Signed in"),
+        ("expiring", "Expiring soon"),
+        ("expired", "Expired"),
+        ("signed_out", "Signed out"),
+        ("revoked", "Revoked"),
+    ];
 }
 
-/// `KNOWN_REVOKE_REASONS` (`:27-37`) + `_REVOKE_REASON_MAX_LEN` (`:39`).
+/// `KNOWN_REVOKE_REASONS` (`:27-41`) + `_REVOKE_REASON_MAX_LEN` (`:44`).
 pub mod revoke_reasons {
-    /// Canonical `Runner.revoke` reason set (`:27-37`), in source-literal
+    /// Canonical `Runner.revoke` reason set (`:27-41`), in source-literal
     /// order (Python holds a `frozenset`, so order is cosmetic here).
     /// `user_revoke` is deliberately outside the daemon synthesizer's
     /// canonical set — it is the cloud-only delete reason.
+    /// `dev_machine_merged` is also outside the local-cleanup set (the
+    /// source daemon is gone).
     pub const KNOWN_REVOKE_REASONS: &[&str] = &[
         "manual_revoke",
         "membership_revoked",
@@ -701,8 +798,9 @@ pub mod revoke_reasons {
         "dev_machine_revoked",
         "self_revoked",
         "user_revoke",
+        "dev_machine_merged",
     ];
-    /// `_REVOKE_REASON_MAX_LEN` (`:39`): matches `RunnerSession` /
+    /// `_REVOKE_REASON_MAX_LEN` (`:44`): matches `RunnerSession` /
     /// `Runner.revoked_reason` `max_length`.
     pub const REVOKE_REASON_MAX_LEN: usize = 32;
 }
@@ -1038,6 +1136,59 @@ mod tests {
                 .unwrap(),
             enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
         );
+        assert_eq!(
+            enums["RunnerPodDispatch"]["type"].as_str().unwrap(),
+            "TextChoices"
+        );
+        for (member, value) in [
+            ("PINNED_ONLY", enums::RUNNER_POD_DISPATCH_PINNED_ONLY),
+            ("POD_MEMBER", enums::RUNNER_POD_DISPATCH_POD_MEMBER),
+        ] {
+            assert_eq!(enums["RunnerPodDispatch"][member].as_str().unwrap(), value);
+        }
+        assert_eq!(
+            enums["EngineAutoPauseReason"]["type"].as_str().unwrap(),
+            "TextChoices"
+        );
+        for (member, value) in [
+            ("NONE", enums::ENGINE_AUTO_PAUSE_REASON_NONE),
+            (
+                "ENGINE_SIGN_IN_REQUIRED",
+                enums::ENGINE_AUTO_PAUSE_REASON_SIGN_IN_REQUIRED,
+            ),
+            (
+                "GATEWAY_SESSION_REVOKED",
+                enums::ENGINE_AUTO_PAUSE_REASON_GATEWAY_SESSION_REVOKED,
+            ),
+            ("WALLET_EMPTY", enums::ENGINE_AUTO_PAUSE_REASON_WALLET_EMPTY),
+            (
+                "PROFILE_UNAVAILABLE",
+                enums::ENGINE_AUTO_PAUSE_REASON_PROFILE_UNAVAILABLE,
+            ),
+            (
+                "ENGINE_DISABLED",
+                enums::ENGINE_AUTO_PAUSE_REASON_ENGINE_DISABLED,
+            ),
+        ] {
+            assert_eq!(
+                enums["EngineAutoPauseReason"][member].as_str().unwrap(),
+                value
+            );
+        }
+        assert_eq!(
+            enums["EngineSignInState"]["type"].as_str().unwrap(),
+            "TextChoices"
+        );
+        for (member, value) in [
+            ("NEVER", enums::ENGINE_SIGN_IN_STATE_NEVER),
+            ("ACTIVE", enums::ENGINE_SIGN_IN_STATE_ACTIVE),
+            ("EXPIRING", enums::ENGINE_SIGN_IN_STATE_EXPIRING),
+            ("EXPIRED", enums::ENGINE_SIGN_IN_STATE_EXPIRED),
+            ("SIGNED_OUT", enums::ENGINE_SIGN_IN_STATE_SIGNED_OUT),
+            ("REVOKED", enums::ENGINE_SIGN_IN_STATE_REVOKED),
+        ] {
+            assert_eq!(enums["EngineSignInState"][member].as_str().unwrap(), value);
+        }
         assert_eq!(enums["Visibility"]["PRIVATE"].as_i64().unwrap(), 0);
         assert_eq!(enums::VISIBILITY_PRIVATE, 0);
         let reasons = &fixture["revoke_reasons"];
@@ -1321,6 +1472,24 @@ mod tests {
             &[
                 ("manual", "Enrolled by the user"),
                 ("desktop_bundled", "Provisioned by Pi Dash Desktop"),
+            ]
+        );
+        assert_eq!(
+            enums::RUNNER_POD_DISPATCH_LABELS,
+            &[
+                ("pinned_only", "Pod work off"),
+                ("pod_member", "Pod work on")
+            ]
+        );
+        assert_eq!(
+            enums::ENGINE_AUTO_PAUSE_REASON_LABELS,
+            &[
+                ("", "Not paused"),
+                ("engine_sign_in_required", "Engine sign-in required"),
+                ("gateway_session_revoked", "Gateway session revoked"),
+                ("wallet_empty", "Wallet empty"),
+                ("profile_unavailable", "Model profile unavailable"),
+                ("engine_disabled", "Engine disabled on this instance"),
             ]
         );
     }

@@ -23,17 +23,48 @@ let machineData: DevMachine[] = machineRows;
 const projectRows: Project[] = [];
 const podRows: Pod[] = [];
 const loadErrors = { machines: false, projects: false, pods: false };
+let catalogData:
+  | {
+      agents: Record<
+        string,
+        Array<{
+          id: string;
+          agent: string;
+          model: string;
+          label: string;
+          reasoning_efforts: string[];
+          sort_order: number;
+          is_enabled: boolean;
+          is_preselected: boolean;
+          created_at: string;
+          updated_at: string;
+        }>
+      >;
+    }
+  | undefined = undefined;
 const createRunner = vi.fn<(machineId: string, input: unknown) => Promise<{ request_id: string }>>();
 const readStatus = vi.fn<(machineId: string, requestId: string, workspaceId: string) => Promise<CreateRunnerStatus>>();
 
 vi.mock("./queries.js", () => ({
-  useAddRunnerMachines: () => ({ data: loadErrors.machines ? undefined : machineData, isError: loadErrors.machines }),
-  useAddRunnerProjects: () => ({ data: loadErrors.projects ? undefined : projectRows, isError: loadErrors.projects }),
-  useAddRunnerPods: () => ({ data: loadErrors.pods ? undefined : podRows, isError: loadErrors.pods }),
+  useAddRunnerMachines: () => ({
+    data: loadErrors.machines ? undefined : machineData,
+    isError: loadErrors.machines,
+  }),
+  useAddRunnerProjects: () => ({
+    data: loadErrors.projects ? undefined : projectRows,
+    isError: loadErrors.projects,
+  }),
+  useAddRunnerPods: () => ({
+    data: loadErrors.pods ? undefined : podRows,
+    isError: loadErrors.pods,
+  }),
+  useRunnerModelCatalog: () => ({ data: catalogData, isError: false }),
   createRunnerTransport: () => ({ createRunner, readStatus }),
 }));
 
-const remoteCreate = vi.hoisted(() => ({ original: null as null | ((...args: never[]) => unknown) }));
+const remoteCreate = vi.hoisted(() => ({
+  original: null as null | ((...args: never[]) => unknown),
+}));
 const runRemoteCreateMock = vi.hoisted(() => vi.fn());
 vi.mock("./remoteCreate.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./remoteCreate.js")>();
@@ -136,6 +167,7 @@ async function submit(): Promise<void> {
 }
 
 beforeEach(() => {
+  catalogData = undefined;
   area.scope.projectId = undefined;
   machineRows.length = 0;
   machineData = machineRows;
@@ -152,7 +184,10 @@ beforeEach(() => {
   runRemoteCreateMock.mockImplementation((...args: unknown[]) =>
     (remoteCreate.original as (...inner: unknown[]) => unknown)(...args)
   );
-  readStatus.mockResolvedValue({ request_id: "44444444-4444-4444-8444-444444444444", status: "pending" });
+  readStatus.mockResolvedValue({
+    request_id: "44444444-4444-4444-8444-444444444444",
+    status: "pending",
+  });
 });
 
 describe("form entry (RUN-006)", () => {
@@ -247,6 +282,34 @@ describe("catalog (RUN-009, RUN-049)", () => {
     const command = screen.getByTestId("add-runner-command-text");
     expect(command).toHaveTextContent("--model claude-opus-5-5");
   });
+
+  it("offers a catalog-added model without a redeploy (NEWPIDASH-169)", async () => {
+    catalogData = {
+      agents: {
+        "claude-code": [
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            agent: "claude-code",
+            model: "claude-new-1",
+            label: "Claude New 1",
+            reasoning_efforts: [],
+            sort_order: 0,
+            is_enabled: true,
+            is_preselected: true,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      },
+    };
+    harness();
+    await pickPicker("Project", "Acme");
+    await pickPicker("Model (optional)", "Claude New 1");
+    await submit();
+    const command = screen.getByTestId("add-runner-command-text");
+    expect(command).toHaveTextContent("--model claude-new-1");
+    expect(command).not.toHaveTextContent("--reasoning-effort");
+  });
 });
 
 describe("machine path (RUN-007, RUN-009)", () => {
@@ -276,8 +339,16 @@ describe("machine path (RUN-007, RUN-009)", () => {
 
   it("snaps the agent when a hand-picked machine cannot run it", async () => {
     machineRows.push(
-      machine({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", label: "Alpha", supported_agents: ["claude-code"] }),
-      machine({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", label: "Beta", supported_agents: ["codex"] })
+      machine({
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        label: "Alpha",
+        supported_agents: ["claude-code"],
+      }),
+      machine({
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        label: "Beta",
+        supported_agents: ["codex"],
+      })
     );
     harness();
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Alpha"));

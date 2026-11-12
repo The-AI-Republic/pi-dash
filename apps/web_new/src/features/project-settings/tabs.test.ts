@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Settings navigation model (PSET-001/PSET-003/PSET-004, from
 // parity/specs/project-settings-shell.md). Pure: role-filtered groups,
-// suffix resolution both slash forms, the slash-sensitive active marker
+// suffix resolution both slash forms, the slash-insensitive active marker
 // and the per-page gate matrix.
 import { describe, expect, it } from "vitest";
 
@@ -166,20 +166,25 @@ describe("addresses", () => {
     expect(resolveSettingsAddress(`/${WS}/settings/projects//`, WS)).toBeUndefined();
   });
 
-  it("mark only the canonical slash form active", () => {
+  it("mark both slash forms active, including nested tabs", () => {
     const general = findTabByKey("general");
     const members = findTabByKey("members");
-    if (general === undefined || members === undefined) throw new Error("registry lost a core tab");
+    const cycles = findTabByKey("cycles");
+    if (general === undefined || members === undefined || cycles === undefined)
+      throw new Error("registry lost a core tab");
     expect(isTabActive(`/${WS}/settings/projects/${PID}/`, WS, PID, general)).toBe(true);
-    expect(isTabActive(`/${WS}/settings/projects/${PID}`, WS, PID, general)).toBe(false);
+    expect(isTabActive(`/${WS}/settings/projects/${PID}`, WS, PID, general)).toBe(true);
     expect(isTabActive(`/${WS}/settings/projects/${PID}/members/`, WS, PID, members)).toBe(true);
-    expect(isTabActive(`/${WS}/settings/projects/${PID}/members`, WS, PID, members)).toBe(false);
+    expect(isTabActive(`/${WS}/settings/projects/${PID}/members`, WS, PID, members)).toBe(true);
+    expect(isTabActive(`/${WS}/settings/projects/${PID}/features/cycles/`, WS, PID, cycles)).toBe(true);
+    expect(isTabActive(`/${WS}/settings/projects/${PID}/features/cycles`, WS, PID, cycles)).toBe(true);
   });
 
   it("does not mark a sub-address or an unknown path as its tab", () => {
     const members = findTabBySuffix("/members");
     if (members === undefined) throw new Error("registry lost the members tab");
     expect(isTabActive(`/${WS}/settings/projects/${PID}/members/details/`, WS, PID, members)).toBe(false);
+    expect(isTabActive(`/${WS}/settings/projects/${PID}/members/details`, WS, PID, members)).toBe(false);
     expect(isTabActive(`/${WS}/projects/${PID}/settings/members/`, WS, PID, members)).toBe(false);
   });
 

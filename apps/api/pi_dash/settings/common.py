@@ -112,6 +112,9 @@ REST_FRAMEWORK = {
         # Desktop agent credential. Refreshed once per token lifetime in normal
         # use, so a low ceiling still leaves generous headroom for retries.
         "assistant_agent_token": "12/minute",
+        # Built-in engine model tokens (engine credential; built_engine_as_runner
+        # §4.3). Fetched once per token lifetime and per run start.
+        "engine_model_token": "30/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
@@ -150,12 +153,33 @@ CORS_ALLOW_CREDENTIALS = True
 cors_origins_raw = get_config("CORS_ALLOWED_ORIGINS", "")
 # filter out empty strings
 cors_allowed_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+# Desktop bundle origins. The Windows webview reports http://tauri.localhost
+# as its origin (useHttpsScheme off) while macOS/Linux report tauri://localhost.
+# These are local webview asset origins, not plain-HTTP deployments, so they
+# must not downgrade SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE on an HTTPS site.
+DESKTOP_BUNDLE_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
+
+
+def compute_secure_origins(origins):
+    """True unless a non-desktop origin carries 'http:'.
+
+    ``origins`` is the parsed CORS allowlist (already stripped). Empty
+    yields False, matching the allow-all wildcard fallback below.
+    """
+    if not origins:
+        return False
+    return not any(
+        "http:" in origin and origin.rstrip("/").lower() not in DESKTOP_BUNDLE_ORIGINS
+        for origin in origins
+    )
+
+
 if cors_allowed_origins:
     CORS_ALLOWED_ORIGINS = cors_allowed_origins
-    secure_origins = False if [origin for origin in cors_allowed_origins if "http:" in origin] else True
+    secure_origins = compute_secure_origins(cors_allowed_origins)
 else:
     CORS_ALLOW_ALL_ORIGINS = True
-    secure_origins = False
+    secure_origins = compute_secure_origins(cors_allowed_origins)
 
 CORS_ALLOW_HEADERS = [*default_headers, "X-API-Key"]
 
@@ -534,10 +558,13 @@ RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(get_config("RUNNER_AGENT_OBSERVABILI
 # pinned to ``managed_runner`` simply become unavailable until it is back on.
 # See ``.ai_design/managed_runner/design.md`` §16.
 MANAGED_RUNNER_ENABLED = get_config("MANAGED_RUNNER_ENABLED", "false").lower() in ("1", "true", "yes")
-MANAGED_RUNNER_MAX_PER_USER_PROJECT = int(get_config("MANAGED_RUNNER_MAX_PER_USER_PROJECT", 1))
 # How long an automatic run may wait for a closed desktop before it is failed
 # with ``desktop_not_connected`` instead of queueing forever (§8.5).
 MANAGED_RUNNER_QUEUED_MAX_AGE_SECS = int(get_config("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS", 43200))
+# How long a dedicated runner's queued run may wait while the runner is
+# unavailable before it fails with ``dedicated_runner_unavailable`` (design
+# §11.3). Same default as the managed-runner bound.
+DEDICATED_RUN_QUEUED_MAX_AGE_SECS = int(get_config("DEDICATED_RUN_QUEUED_MAX_AGE_SECS", 43200))
 # Advisory, read by the desktop app: how long it waits for an in-flight run to
 # finish before stopping the bundled daemon (§9.5).
 MANAGED_RUNNER_GRACEFUL_STOP_SECS = int(get_config("MANAGED_RUNNER_GRACEFUL_STOP_SECS", 30))

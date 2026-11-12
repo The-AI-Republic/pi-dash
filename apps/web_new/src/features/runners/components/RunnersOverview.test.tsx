@@ -58,6 +58,7 @@ import {
   RunnersOverview,
   runnerHeartbeat,
   runnerPlatform,
+  runnerRowActions,
   runnerVersion,
 } from "./RunnersOverview.js";
 
@@ -82,7 +83,10 @@ function state(runners: Runner[]): PodFilterState {
 
 function renderTable(
   runners: Runner[],
-  handlers: { onDelete?: (id: string) => Promise<void>; onRevoke?: (id: string) => Promise<void> } = {}
+  handlers: {
+    onDelete?: (id: string, options?: { purgeLocal?: boolean }) => Promise<void>;
+    onRevoke?: (id: string) => Promise<void>;
+  } = {}
 ) {
   const onDelete = handlers.onDelete ?? vi.fn(async () => undefined);
   const onRevoke = handlers.onRevoke ?? vi.fn(async () => undefined);
@@ -261,6 +265,43 @@ describe("RunnersOverview row actions", () => {
     await waitFor(() => expect(onDelete).toHaveBeenCalledWith("r-1"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("offers a built-in engine only Remove from project, then Delete once removed (design §11)", () => {
+    const engine = { status: "online", enrolled_at: "2024-01-01T00:00:00Z", provisioning: "desktop_bundled" } as const;
+    expect(runnerRowActions({ ...engine, revoked_at: null })).toEqual({ revoke: false, remove: true, delete: false });
+    expect(runnerRowActions({ ...engine, revoked_at: "2024-02-01T00:00:00Z" })).toEqual({
+      revoke: false,
+      remove: false,
+      delete: true,
+    });
+    expect(runnerRowActions({ ...engine, provisioning: "manual", revoked_at: null })).toEqual({
+      revoke: true,
+      remove: false,
+      delete: true,
+    });
+  });
+
+  it("removes a built-in engine from the project by revoking it, never deleting its folder", async () => {
+    const { onRevoke, onDelete } = renderTable([runner({ provisioning: "desktop_bundled", revoked_at: null })]);
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Remove from project" }));
+    const dialog = screen.getByRole("dialog", { name: "Remove from project?" });
+    expect(dialog).toHaveTextContent("folder on the computer is kept");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove from project" }));
+    await waitFor(() => expect(onRevoke).toHaveBeenCalledWith("r-1"));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("deletes a removed engine's row with the local purge off", async () => {
+    const onDelete = vi.fn(async (_id: string, _options?: { purgeLocal?: boolean }) => undefined);
+    renderTable([runner({ provisioning: "desktop_bundled", revoked_at: "2024-02-01T00:00:00Z", status: "revoked" })], {
+      onDelete,
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith("r-1", { purgeLocal: false }));
   });
 
   it("revokes through the confirmation", async () => {
@@ -442,5 +483,107 @@ describe("RunnersOverview pods wiring", () => {
     );
     expect(screen.getByText("Failed to load pods")).toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+});
+
+describe("engine runners in the table", () => {
+  it("names engines by machine with a Built-in badge, and shows each own-agent runner's machine", () => {
+    const machine = { id: "m-1", label: "Work laptop", host_label: "rich-mbp" };
+    renderTable([
+      runner({ id: "r-engine", name: "builtin-x", provisioning: "desktop_bundled", dev_machine_detail: machine }),
+      runner({ id: "r-own", name: "codex-1", provisioning: "manual", dev_machine_detail: machine }),
+    ]);
+    expect(screen.getByText("Built-in engine · Work laptop")).toBeInTheDocument();
+    expect(screen.getAllByTestId("runner-built-in-badge")).toHaveLength(1);
+    expect(screen.getByText("codex-1")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-machine")).toHaveTextContent("Work laptop");
+  });
+});
+
+describe("pod members panel", () => {
+  const pod = {
+    id: "p-1",
+    name: "Alpha pod",
+    description: "",
+    is_default: true,
+    project: "prj",
+    project_identifier: "WEB",
+    runner_count: 2,
+  } as never;
+
+  it("lists the selected pod's runners with their membership and owner actions", async () => {
+    const onUpdateRunner = vi.fn(async () => undefined);
+    const podDetail = { id: "p-1", name: "Alpha pod", project: "prj" } as never;
+    const engine = runner({
+      id: "r-engine",
+      name: "builtin-x",
+      provisioning: "desktop_bundled",
+      pod_dispatch: "pinned_only",
+      owner: "me",
+      revoked_at: null,
+      pod_detail: podDetail,
+      dev_machine_detail: { id: "m-1", label: "Work laptop", host_label: "rich-mbp" },
+    });
+    const theirs = runner({
+      id: "r-theirs",
+      name: "their-runner",
+      owner: "you",
+      revoked_at: null,
+      pod_detail: podDetail,
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ ...state([engine, theirs]), selectedPodId: "p-1", selectedPod: pod }}
+          pods={[pod]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+          userId="me"
+          onUpdateRunner={onUpdateRunner}
+        />
+      </QueryClientProvider>
+    );
+    const panel = screen.getByTestId("pod-members");
+    expect(panel).toHaveTextContent("Pod work: off");
+    expect(panel).toHaveTextContent("Takes pod work");
+    // Only the viewer's own runner carries an action.
+    const addButtons = screen.getAllByRole("button", { name: "Add to pod" });
+    expect(addButtons).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Remove from pod" })).toBeNull();
+    await userEvent.click(addButtons[0]!);
+    expect(onUpdateRunner).toHaveBeenCalledWith("r-engine", { pod_dispatch: "pod_member" });
+  });
+
+  it("toasts the reason when the server refuses", async () => {
+    const onUpdateRunner = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const own = runner({ id: "r-own", owner: "me", revoked_at: null, pod_dispatch: "pod_member" });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ ...state([own]), selectedPodId: "p-1", selectedPod: pod }}
+          pods={[pod]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+          userId="me"
+          onUpdateRunner={onUpdateRunner}
+        />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Remove from pod" }));
+    expect(onUpdateRunner).toHaveBeenCalledWith("r-own", { pod_dispatch: "pinned_only" });
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't change the runner's pod",
+        "The runner is unchanged. Try again."
+      )
+    );
   });
 });

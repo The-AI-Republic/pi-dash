@@ -100,6 +100,19 @@ fn gate_for_destroy() -> &'static gates::Gate {
     .gate
 }
 
+/// The shared SeaORM connection over an sqlx pool (no I/O — it wraps the
+/// pool). Reads run on it; the insert below stays handler-side (a direct
+/// table write, not a §4 domain table).
+fn sea_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// One `MAX(sequence)` row, decoded by name.
+#[derive(Debug, Clone, Copy, sea_orm::FromQueryResult)]
+struct MaxSequenceRow {
+    largest: Option<f64>,
+}
+
 /// Coerce `request.data.get("cycle")` to the `entity_identifier` column:
 /// absent/`null` stays NULL (the field is `null=True`); everything else
 /// goes through `UUIDField.to_python` — a string parses as hex, a bool or
@@ -135,52 +148,66 @@ async fn favorite_create(
     };
     // The view passes no workspace; `WorkspaceBaseModel.save` derives it
     // from the project (`db/models/workspace.py:192-195`).
-    let workspace_id: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.workspace_id FROM projects p
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_id,) = workspace_id.ok_or(Denial::ServerError)?;
+    use pidash_db::entity::projects as proj_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let workspace_id: Option<uuid::Uuid> = proj_entity::Entity::find_by_id(project_id)
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(proj_entity::Column::WorkspaceId)
+        .into_tuple()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let workspace_id = workspace_id.ok_or(Denial::ServerError)?;
     // `UserFavorite.save`: `Max(sequence) + 10000` over the workspace's
     // live favorites, default 65535 when empty (`favorite.py:52-63`).
-    let largest: Option<(Option<f64>,)> = sqlx::query_as(
-        r#"SELECT MAX(sequence) FROM user_favorites
-           WHERE workspace_id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::user_favorites as fav_entity;
+    use sea_orm::sea_query::{Expr, Func};
+    let largest = fav_entity::Entity::find()
+        .filter(fav_entity::Column::WorkspaceId.eq(workspace_id))
+        .filter(fav_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .expr_as(
+            Func::max(Expr::col(fav_entity::Column::Sequence)),
+            "largest",
+        )
+        .into_model::<MaxSequenceRow>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let sequence = largest
-        .and_then(|(max,)| max)
+        .and_then(|row| row.largest)
         .map(|max| max + 10000.0)
         .unwrap_or(FAVORITE_SEQUENCE_DEFAULT);
     // `is_folder` is `boolean NOT NULL` with no DB default; Django supplies
     // it Python-side (`db/models/favorite.py:23`: `default=False`).
-    sqlx::query(
-        r#"INSERT INTO user_favorites
-           (id, workspace_id, project_id, user_id, entity_type, entity_identifier,
-            is_folder, sequence, created_by_id, updated_by_id, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, FALSE, $6, $7, NULL, now(), now())"#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(user_id)
-    .bind(FAVORITE_ENTITY_TYPE)
-    .bind(entity_identifier)
-    .bind(sequence)
-    .bind(user_id)
-    .execute(&pool)
+    use sea_orm::ActiveModelTrait;
+    fav_entity::ActiveModel {
+        id: sea_orm::Set(uuid::Uuid::new_v4()),
+        workspace_id: sea_orm::Set(workspace_id),
+        project_id: sea_orm::Set(Some(project_id)),
+        user_id: sea_orm::Set(user_id),
+        entity_type: sea_orm::Set(FAVORITE_ENTITY_TYPE.to_owned()),
+        entity_identifier: sea_orm::Set(entity_identifier),
+        is_folder: sea_orm::Set(false),
+        sequence: sea_orm::Set(sequence),
+        created_by_id: sea_orm::Set(Some(user_id)),
+        updated_by_id: sea_orm::Set(None),
+        created_at: sea_orm::Set(chrono::Utc::now().into()),
+        updated_at: sea_orm::Set(chrono::Utc::now().into()),
+        ..Default::default()
+    }
+    .insert(&sea_conn(&pool))
     .await
-    .map_err(|error| match error {
-        // Partial-unique violation (`favorite.py:39-44`) → IntegrityError.
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
-            Denial::BadError("The payload is not valid".to_owned())
+    .map_err(|error| {
+        let sqlx_error = pidash_db::orm_tx::into_sqlx(error);
+        match sqlx_error {
+            // Partial-unique violation (`favorite.py:39-44`) → IntegrityError.
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+                Denial::BadError("The payload is not valid".to_owned())
+            }
+            _ => Denial::ServerError,
         }
-        _ => Denial::ServerError,
     })?;
     // The view returns an empty 204 (`:579`); no activity is published.
     Ok(empty_response(StatusCode::NO_CONTENT))
@@ -207,33 +234,34 @@ async fn favorite_destroy(
     let facts = fetch_allow_facts(&pool, &slug, &project_id, &user_id).await?;
     check_gate(gate_for_destroy(), &slug, &facts)?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
-    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT uf.id FROM user_favorites uf
-           JOIN workspaces w ON w.id = uf.workspace_id
-           WHERE uf.project_id = $1 AND uf.entity_type = $2 AND uf.user_id = $3
-             AND w.slug = $4 AND uf.entity_identifier = $5
-             AND uf.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(FAVORITE_ENTITY_TYPE)
-    .bind(user_id)
-    .bind(&slug)
-    .bind(cycle_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::user_favorites as fav_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let rows: Vec<uuid::Uuid> = fav_entity::Entity::find()
+        .join(JoinType::InnerJoin, fav_entity::Relation::Workspaces.def())
+        .filter(fav_entity::Column::ProjectId.eq(project_id))
+        .filter(fav_entity::Column::EntityType.eq(FAVORITE_ENTITY_TYPE))
+        .filter(fav_entity::Column::UserId.eq(user_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(fav_entity::Column::EntityIdentifier.eq(cycle_id))
+        .filter(fav_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(fav_entity::Column::Id)
+        .into_tuple()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // `.get(...)` semantics: zero rows → `DoesNotExist` 404; several →
     // `MultipleObjectsReturned` → generic 500.
-    let [(favorite_id,)] = rows.as_slice() else {
+    let [favorite_id] = rows.as_slice() else {
         if rows.is_empty() {
             return Err(Denial::NotFound);
         }
         return Err(Denial::ServerError);
     };
     // Hard delete (`soft=False`, `:590`).
-    sqlx::query(r#"DELETE FROM user_favorites WHERE id = $1"#)
-        .bind(*favorite_id)
-        .execute(&pool)
+    fav_entity::Entity::delete_by_id(*favorite_id)
+        .exec(&sea_conn(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(empty_response(StatusCode::NO_CONTENT))

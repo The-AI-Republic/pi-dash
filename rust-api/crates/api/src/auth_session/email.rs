@@ -83,6 +83,7 @@ use crate::license::handlers_auth_forms::client_ip;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use pidash_compat::response::{redirect_found_cookies, server_error};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// `AuthenticationThrottle`: 30/minute, scope `authentication`
 /// (`authentication/rate_limit.py:17-19`).
@@ -207,9 +208,17 @@ struct Provenance {
     header_token: Option<String>,
     session_cookie: Option<String>,
     content_type: Option<String>,
+    /// `process_view`'s Origin/Referer verdict (NEWPIDASH-12), computed
+    /// off the headers before any token check.
+    csrf_origin: Result<(), String>,
 }
 
-fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -> Provenance {
+fn provenance(
+    headers: &HeaderMap,
+    peer_ip: Option<String>,
+    cookie_name: &str,
+    settings: &pidash_db::config::Settings,
+) -> Provenance {
     let cookie_header = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -231,6 +240,7 @@ fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
+        csrf_origin: super::csrf_origin_gate(settings, headers),
     }
 }
 
@@ -261,6 +271,7 @@ fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> 
 /// never renders the reason, so these are log labels only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CsrfDenial {
+    BadOrigin,
     NoCookie,
     BadToken,
 }
@@ -285,12 +296,16 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 }
 
 /// Mirror `CsrfViewMiddleware.process_view` for these endpoints: the
-/// `csrftoken` cookie must be present and the request token must
+/// Origin (or, on HTTPS, Referer) must verify first (NEWPIDASH-12), then
+/// the `csrftoken` cookie must be present and the request token must
 /// check out. A 64-char cookie unmasks first (`_get_secret`); a
 /// malformed cookie secret can never match (Django would mint a fresh
 /// secret and then fail the compare the same way); the failure page
 /// never renders the reason either way.
 fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
+    if prov.csrf_origin.is_err() {
+        return Err(CsrfDenial::BadOrigin);
+    }
     let Some(cookie) = prov.csrf_cookie.as_deref() else {
         return Err(CsrfDenial::NoCookie);
     };
@@ -348,9 +363,10 @@ fn json_400(pairs: &[(String, serde_json::Value)]) -> Response {
 }
 
 /// Live 429 body: the `auth_exception_handler` rewrite (5900 dict).
-/// `Vary: Cookie`, same as above.
-fn throttle_429() -> Response {
-    (
+/// `Vary: Cookie`, same as above, plus the ceiled `Retry-After` when the
+/// wait is known and nonzero (`guards::retry_after_secs`).
+fn throttle_429(wait: Option<f64>) -> Response {
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         [
             (header::CONTENT_TYPE, "application/json"),
@@ -358,7 +374,13 @@ fn throttle_429() -> Response {
         ],
         guards_kernel::throttle_denied_json(),
     )
-        .into_response()
+        .into_response();
+    if let Some(secs) = guards_kernel::retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 /// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
@@ -437,18 +459,26 @@ async fn config_value(
     pool: &sqlx::PgPool,
     key: &str,
     literal_default: Option<String>,
-) -> Result<Option<String>, sqlx::Error> {
-    let row: Option<(String, bool)> = sqlx::query_as(
-        r#"SELECT "value", "is_encrypted" FROM "instance_configurations"
-           WHERE "deleted_at" IS NULL AND "key" = $1
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
+) -> Result<Option<String>, sea_orm::DbErr> {
+    use pidash_db::entity::instance_configurations as cfg;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = cfg::Entity::find()
+        .filter(cfg::Column::Key.eq(key))
+        .filter(cfg::Column::DeletedAt.is_null())
+        .order_by_desc(cfg::Column::CreatedAt)
+        .select_only()
+        .columns([cfg::Column::Value, cfg::Column::IsEncrypted])
+        .into_tuple::<(Option<String>, bool)>()
+        .one(&db)
+        .await?;
     match row {
-        Some((_, true)) => Err(sqlx::Error::RowNotFound),
-        Some((value, false)) => Ok(Some(value)),
+        Some((_, true)) => Err(sea_orm::DbErr::RecordNotFound(
+            "encrypted config value cannot be read".to_owned(),
+        )),
+        Some((Some(value), false)) => Ok(Some(value)),
+        Some((None, false)) => Err(sea_orm::DbErr::RecordNotFound(
+            "config value is null".to_owned(),
+        )),
         None => Ok(std::env::var(key).ok().or(literal_default)),
     }
 }
@@ -458,12 +488,17 @@ async fn config_value(
 // ---------------------------------------------------------------------------
 
 /// `Instance.objects.first()` + the `is_setup_done` gate.
-async fn instance_is_setup(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
-    let row: Option<(bool,)> =
-        sqlx::query_as(r#"SELECT "is_setup_done" FROM "instances" ORDER BY "id" ASC LIMIT 1"#)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.is_some_and(|(done,)| done))
+async fn instance_is_setup(pool: &sqlx::PgPool) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::instances;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = instances::Entity::find()
+        .order_by_asc(instances::Column::Id)
+        .select_only()
+        .columns([instances::Column::IsSetupDone])
+        .into_tuple::<bool>()
+        .one(&db)
+        .await?;
+    Ok(row.unwrap_or(false))
 }
 
 /// The `users` columns these endpoints read.
@@ -475,14 +510,24 @@ struct UserRow {
     is_password_autoset: bool,
 }
 
-async fn user_by_email(pool: &sqlx::PgPool, email: &str) -> Result<Option<UserRow>, sqlx::Error> {
-    let row: Option<(uuid::Uuid, String, bool, bool)> = sqlx::query_as(
-        r#"SELECT "id", "password", "is_active", "is_password_autoset"
-           FROM "users" WHERE "email" = $1 LIMIT 1"#,
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
+async fn user_by_email(
+    pool: &sqlx::PgPool,
+    email: &str,
+) -> Result<Option<UserRow>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::Password,
+            users::Column::IsActive,
+            users::Column::IsPasswordAutoset,
+        ])
+        .into_tuple::<(uuid::Uuid, String, bool, bool)>()
+        .one(&db)
+        .await?;
     Ok(
         row.map(|(id, password, is_active, is_password_autoset)| UserRow {
             id,
@@ -493,14 +538,23 @@ async fn user_by_email(pool: &sqlx::PgPool, email: &str) -> Result<Option<UserRo
     )
 }
 
-async fn user_by_pk(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<Option<UserRow>, sqlx::Error> {
-    let row: Option<(uuid::Uuid, String, bool, bool)> = sqlx::query_as(
-        r#"SELECT "id", "password", "is_active", "is_password_autoset"
-           FROM "users" WHERE "id" = $1 LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+async fn user_by_pk(
+    pool: &sqlx::PgPool,
+    id: uuid::Uuid,
+) -> Result<Option<UserRow>, sea_orm::DbErr> {
+    use pidash_db::entity::users;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find_by_id(id)
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::Password,
+            users::Column::IsActive,
+            users::Column::IsPasswordAutoset,
+        ])
+        .into_tuple::<(uuid::Uuid, String, bool, bool)>()
+        .one(&db)
+        .await?;
     Ok(
         row.map(|(id, password, is_active, is_password_autoset)| UserRow {
             id,
@@ -565,7 +619,7 @@ fn display_name_for(email: &str) -> String {
 // it directly.
 
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
-/// `is_active` flip in one `UPDATE`. The activation mail is published by
+/// `is_active` flip and the `User.save()` column effects in one `UPDATE`. The activation mail is published by
 /// the caller BEFORE this write (`base.py:230` precedes `:232-233`), so a
 /// broker failure 500s with the user still inactive and the mail is
 /// re-sent on the next login (QUIRK-activation-order).
@@ -578,7 +632,7 @@ async fn save_user_data(
 ) -> Result<(), sqlx::Error> {
     let token = fresh_user_token();
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::LoginStamps {
             medium: Some("email"),
@@ -586,11 +640,13 @@ async fn save_user_data(
             login_uagent: user_agent.as_deref(),
             avatar: None,
             avatar_asset_id: None,
-            display_name: None,
-            is_staff: None,
-            // The email stamps never bump `updated_at` (preserved verbatim;
-            // see `domain::identity`).
-            touch_updated_at: false,
+            // `user.save()` (`base.py:232`) is a full save, so every
+            // `User.save()` effect applies (`user.py:169-187`): the
+            // empty-`display_name` backfill, the superuser staff sync and
+            // the `auto_now` `updated_at` bump (NEWPIDASH-17).
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
             rotated_token: &token,
             now,
         },
@@ -636,51 +692,77 @@ async fn redirection_path(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     user_email: &str,
-) -> Result<String, sqlx::Error> {
+) -> Result<String, sea_orm::DbErr> {
     let path = identity::get_or_create_profile(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         chrono::Utc::now(),
         &profile_background_color(),
     )
-    .await?;
+    .await
+    .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
     let (is_onboarded, last_workspace_id) = (path.is_onboarded, path.last_workspace_id);
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
+    use pidash_db::entity::{workspace_member_invites, workspace_members, workspaces};
+    let db = pidash_db::pool::sea_orm_connection(pool);
     if let Some(last_id) = last_workspace_id {
-        let slug: Option<(String,)> = sqlx::query_as(
-            r#"SELECT w."slug" FROM "workspaces" w
-               JOIN "workspace_members" m ON m."workspace_id" = w."id"
-               WHERE w."id" = $1 AND m."member_id" = $2 AND m."is_active" = true
-                 AND w."deleted_at" IS NULL LIMIT 1"#,
-        )
-        .bind(last_id)
-        .bind(user_id)
-        .fetch_optional(pool)
+        // `get_redirection_path`: last workspace with an active
+        // membership (inner join — two reads, same rows).
+        let member = workspace_members::Entity::find()
+            .filter(workspace_members::Column::WorkspaceId.eq(last_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .select_only()
+            .columns([workspace_members::Column::Id])
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await?;
+        if member.is_some() {
+            let ws = workspaces::Entity::find_by_id(last_id)
+                .filter(workspaces::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([workspaces::Column::Slug])
+                .into_tuple::<String>()
+                .one(&db)
+                .await?;
+            if let Some(slug) = ws {
+                return Ok(slug);
+            }
+        }
+    }
+    // Earliest active membership by workspace `created_at`.
+    let memberships = workspace_members::Entity::find()
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .select_only()
+        .columns([workspace_members::Column::WorkspaceId])
+        .into_tuple::<uuid::Uuid>()
+        .all(&db)
         .await?;
-        if let Some((slug,)) = slug {
+    if !memberships.is_empty() {
+        let fallback = workspaces::Entity::find()
+            .filter(workspaces::Column::Id.is_in(memberships))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::CreatedAt)
+            .select_only()
+            .columns([workspaces::Column::Slug])
+            .into_tuple::<String>()
+            .one(&db)
+            .await?;
+        if let Some(slug) = fallback {
             return Ok(slug);
         }
     }
-    let fallback: Option<(String,)> = sqlx::query_as(
-        r#"SELECT w."slug" FROM "workspaces" w
-           JOIN "workspace_members" m ON m."workspace_id" = w."id"
-           WHERE m."member_id" = $1 AND m."is_active" = true AND w."deleted_at" IS NULL
-           ORDER BY w."created_at" ASC LIMIT 1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some((slug,)) = fallback {
-        return Ok(slug);
-    }
-    let invites: (i64,) =
-        sqlx::query_as(r#"SELECT COUNT(*) FROM "workspace_member_invites" WHERE "email" = $1"#)
-            .bind(user_email)
-            .fetch_one(pool)
-            .await?;
-    if invites.0 > 0 {
+    // `redirection_path.py:42` reads through the soft-delete manager, so
+    // revoked invites do not count toward the invitations fallback.
+    let invites = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(user_email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .count(&db)
+        .await?;
+    if invites > 0 {
         return Ok("invitations".to_owned());
     }
     Ok("create-workspace".to_owned())
@@ -695,21 +777,42 @@ async fn redirection_path(
 async fn accepted_workspace_invites(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Vec<(uuid::Uuid, i16, String)>, sqlx::Error> {
-    // `role` is `smallint`: decoding into `i32` fails sqlx's strict
-    // type check, so the invite path 500s with zero rows (found while
-    // replaying the bulk join).
-    let rows: Vec<(uuid::Uuid, i16, String)> = sqlx::query_as(
-        r#"SELECT i."workspace_id", i."role", w."slug"
-           FROM "workspace_member_invites" i
-           JOIN "workspaces" w ON w."id" = i."workspace_id"
-           WHERE i."email" = $1 AND i."accepted" = true
-           ORDER BY i."created_at" DESC"#,
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
+) -> Result<Vec<(uuid::Uuid, i16, String)>, sea_orm::DbErr> {
+    // `role` is `smallint`. The old inner join drops invites whose
+    // workspace row is missing; the slug lookup below does the same.
+    use pidash_db::entity::{workspace_member_invites as inv, workspaces};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let invites = inv::Entity::find()
+        .filter(inv::Column::Email.eq(email))
+        .filter(inv::Column::Accepted.eq(true))
+        .filter(inv::Column::DeletedAt.is_null())
+        .order_by_desc(inv::Column::CreatedAt)
+        .select_only()
+        .columns([inv::Column::WorkspaceId, inv::Column::Role])
+        .into_tuple::<(uuid::Uuid, i16)>()
+        .all(&db)
+        .await?;
+    if invites.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<uuid::Uuid> = invites.iter().map(|(id, _)| *id).collect();
+    let slugs = workspaces::Entity::find()
+        .filter(workspaces::Column::Id.is_in(ids))
+        .select_only()
+        .columns([workspaces::Column::Id, workspaces::Column::Slug])
+        .into_tuple::<(uuid::Uuid, String)>()
+        .all(&db)
+        .await?;
+    use std::collections::HashMap;
+    let by_id: HashMap<uuid::Uuid, String> = slugs.into_iter().collect();
+    Ok(invites
+        .into_iter()
+        .filter_map(|(workspace_id, role)| {
+            by_id
+                .get(&workspace_id)
+                .map(|slug| (workspace_id, role, slug.clone()))
+        })
+        .collect())
 }
 
 /// Accepted project invites newest-first (`ProjectMemberInvite.Meta`
@@ -718,17 +821,24 @@ async fn accepted_workspace_invites(
 async fn accepted_project_invites(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)>, sqlx::Error> {
-    // `role` is `smallint` (see above): `i16`, not `i32`.
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "workspace_id", "project_id", "role", "created_by_id"
-           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true
-           ORDER BY "created_at" DESC"#,
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
+) -> Result<Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)>, sea_orm::DbErr> {
+    use pidash_db::entity::project_member_invites as inv;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    inv::Entity::find()
+        .filter(inv::Column::Email.eq(email))
+        .filter(inv::Column::Accepted.eq(true))
+        .filter(inv::Column::DeletedAt.is_null())
+        .order_by_desc(inv::Column::CreatedAt)
+        .select_only()
+        .columns([
+            inv::Column::WorkspaceId,
+            inv::Column::ProjectId,
+            inv::Column::Role,
+            inv::Column::CreatedById,
+        ])
+        .into_tuple::<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)>()
+        .all(&db)
+        .await
 }
 
 /// Map a project-invite role onto a member role (`... in [5, 15]`
@@ -832,9 +942,15 @@ async fn insert_project_arm_workspace_members(
             },
         )
         .collect();
-    members::bulk_add(pool, &bulk_rows, &default_props, &issue_props, now)
-        .await
-        .map_err(|_| server_error())?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &default_props,
+        &issue_props,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -873,7 +989,7 @@ async fn insert_project_arm_project_members(
         })
         .collect();
     pidash_services::domain::projects::members::bulk_add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &bulk,
         &default_props,
         &preferences,
@@ -890,7 +1006,7 @@ async fn insert_project_arm_project_members(
 /// rows as the bulk) and publishes one `track_event.delay` per invite;
 /// the project arm replays Django's two bulk statements (all
 /// `workspace_members` rows first, then the `project_members` bulk with
-/// each invite's `project_id`); then the invite deletes. Cache
+/// each invite's `project_id`); then the invite soft-deletes. Cache
 /// invalidation is a documented no-op (see the module docs). Each
 /// statement is its own autocommit write — no `transaction.atomic`
 /// anywhere — so a later failure keeps the earlier rows, exactly like
@@ -911,7 +1027,7 @@ async fn post_user_auth_workflow(
         .map_err(|_| server_error())?;
     for (workspace_id, role, _slug) in &workspace_invites {
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
@@ -950,18 +1066,33 @@ async fn post_user_auth_workflow(
     // `workspace_members` row before the `project_members` bulk below.
     insert_project_arm_workspace_members(pool, &project_invites, user_id, now).await?;
     insert_project_arm_project_members(pool, &project_invites, user_id, now).await?;
-    sqlx::query(
-        r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1 AND "accepted" = true"#,
-    )
-    .bind(user_email)
-    .execute(pool)
-    .await
-    .map_err(|_| server_error())?;
-    sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true"#)
-        .bind(user_email)
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
+    // Soft-delete (`SoftDeletionQuerySet.delete()`, `db/mixins.py:48-53`):
+    // stamp `deleted_at` instead of removing rows (magic.rs twin).
+    {
+        use pidash_db::entity::workspace_member_invites as inv;
+        use sea_orm::EntityTrait as _;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        inv::Entity::update_many()
+            .col_expr(inv::Column::DeletedAt, sea_orm::sea_query::Expr::value(now))
+            .filter(inv::Column::Email.eq(user_email))
+            .filter(inv::Column::Accepted.eq(true))
+            .filter(inv::Column::DeletedAt.is_null())
+            .exec(&db)
+            .await
+            .map_err(|_| server_error())?;
+    }
+    {
+        use pidash_db::entity::project_member_invites as inv;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        inv::Entity::update_many()
+            .col_expr(inv::Column::DeletedAt, sea_orm::sea_query::Expr::value(now))
+            .filter(inv::Column::Email.eq(user_email))
+            .filter(inv::Column::Accepted.eq(true))
+            .filter(inv::Column::DeletedAt.is_null())
+            .exec(&db)
+            .await
+            .map_err(|_| server_error())?;
+    }
     Ok(())
 }
 
@@ -1066,6 +1197,33 @@ fn auth_payload_entries(
 /// `expire_date = now + SESSION_COOKIE_AGE` on both arms. Returns
 /// the two `Set-Cookie` values (session + rotated CSRF secret, which
 /// `login()` rotates on every login via `rotate_token`).
+/// Load one session row as `(session_data, expire_unix)` (`EXTRACT(EPOCH
+/// FROM "expire_date")::BIGINT` in the old SQL — whole seconds, so the
+/// `FixedOffset` instant's `timestamp()` is the same value).
+async fn load_session(
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<Option<(String, i64)>, sea_orm::DbErr> {
+    use pidash_db::entity::sessions;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = sessions::Entity::find_by_id(key)
+        .select_only()
+        .columns([sessions::Column::SessionData, sessions::Column::ExpireDate])
+        .into_tuple::<(String, chrono::DateTime<chrono::FixedOffset>)>()
+        .one(&db)
+        .await?;
+    Ok(row.map(|(data, expire)| (data, expire.timestamp())))
+}
+
+/// `to_timestamp($3::DOUBLE PRECISION)` as a tz-aware instant at whole
+/// seconds (the old bind cast `expire_unix` to double — identical at
+/// whole-second precision, as in `middleware::session::expire_date_of`).
+fn session_expire_of(expire_unix: i64) -> chrono::DateTime<chrono::FixedOffset> {
+    chrono::DateTime::from_timestamp(expire_unix, 0)
+        .map(|utc| utc.fixed_offset())
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn issue_session(
     pool: &sqlx::PgPool,
@@ -1078,18 +1236,13 @@ async fn issue_session(
     ctx: &CookieCtx,
     age_secs: i64,
     now_unix: i64,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<String>, sea_orm::DbErr> {
     let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
     let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key);
     let user_id_str = user_id.to_string();
     let expire_unix = now_unix + age_secs;
     if let Some(old) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key)) {
-        let row: Option<(String, i64)> = sqlx::query_as(
-            r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
-        )
-        .bind(old)
-        .fetch_optional(pool)
-        .await?;
+        let row = load_session(pool, old).await?;
         if let Some((session_data, expire_date_unix)) = row {
             if !session_kernel::is_expired(expire_date_unix, now_unix) {
                 let unwrapped: Option<serde_json::Map<String, serde_json::Value>> =
@@ -1107,20 +1260,34 @@ async fn issue_session(
                         }
                         let session_data = signer
                             .sign_object(&payload, now_unix as u64)
-                            .map_err(|_| sqlx::Error::RowNotFound)?;
-                        sqlx::query(
-                            r#"UPDATE "sessions" SET "session_data" = $2,
-                               "expire_date" = to_timestamp($3::DOUBLE PRECISION),
-                               "user_id" = $4, "device_info" = $5
-                               WHERE "session_key" = $1"#,
-                        )
-                        .bind(old)
-                        .bind(&session_data)
-                        .bind(expire_unix as f64)
-                        .bind(user_id.to_string())
-                        .bind(sqlx::types::Json(device_info.clone()))
-                        .execute(pool)
-                        .await?;
+                            .map_err(|_| sea_orm::DbErr::Custom("sign session".to_owned()))?;
+                        use pidash_db::entity::sessions;
+                        let db = pidash_db::pool::sea_orm_connection(pool);
+                        // `update_many` keeps the raw `UPDATE … WHERE
+                        // session_key` silent success when the row
+                        // vanished between the read above and here;
+                        // `ActiveModel::update` would `RecordNotUpdated`
+                        // (500) instead of the old always-Ok cookies.
+                        sessions::Entity::update_many()
+                            .col_expr(
+                                sessions::Column::SessionData,
+                                sea_orm::sea_query::Expr::value(session_data),
+                            )
+                            .col_expr(
+                                sessions::Column::ExpireDate,
+                                sea_orm::sea_query::Expr::value(session_expire_of(expire_unix)),
+                            )
+                            .col_expr(
+                                sessions::Column::UserId,
+                                sea_orm::sea_query::Expr::value(Some(user_id.to_string())),
+                            )
+                            .col_expr(
+                                sessions::Column::DeviceInfo,
+                                sea_orm::sea_query::Expr::value(Some(device_info.clone())),
+                            )
+                            .filter(sessions::Column::SessionKey.eq(old.to_owned()))
+                            .exec(&db)
+                            .await?;
                         return Ok(vec![
                             session_set_cookie(old, ctx, cookie_name, age_secs, now_unix),
                             csrf_rotate_cookie(&csrf_kernel::new_secret(), ctx),
@@ -1128,10 +1295,11 @@ async fn issue_session(
                     }
                 }
             }
-            sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
-                .bind(old)
-                .execute(pool)
-                .await?;
+            {
+                use pidash_db::entity::sessions;
+                let db = pidash_db::pool::sea_orm_connection(pool);
+                sessions::Entity::delete_by_id(old).exec(&db).await?;
+            }
         }
     }
     let mut payload = serde_json::Map::new();
@@ -1140,23 +1308,31 @@ async fn issue_session(
     }
     let session_data = signer
         .sign_object(&payload, now_unix as u64)
-        .map_err(|_| sqlx::Error::RowNotFound)?;
+        .map_err(|_| sea_orm::DbErr::Custom("sign session".to_owned()))?;
     let key = loop {
         let key = session_kernel::generate_session_key();
-        let inserted = sqlx::query(
-            r#"INSERT INTO "sessions" ("session_key", "session_data", "expire_date", "user_id", "device_info")
-               VALUES ($1, $2, to_timestamp($3::DOUBLE PRECISION), $4, $5)
-               ON CONFLICT ("session_key") DO NOTHING"#,
-        )
-        .bind(&key)
-        .bind(&session_data)
-        .bind(expire_unix as f64)
-        .bind(user_id.to_string())
-        .bind(sqlx::types::Json(device_info.clone()))
-        .execute(pool)
-        .await?;
-        if inserted.rows_affected() > 0 {
-            break key;
+        use pidash_db::entity::sessions;
+        use sea_orm::TryInsertResult;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let model = sessions::ActiveModel {
+            session_key: sea_orm::Set(key.clone()),
+            session_data: sea_orm::Set(session_data.clone()),
+            expire_date: sea_orm::Set(session_expire_of(expire_unix)),
+            user_id: sea_orm::Set(Some(user_id.to_string())),
+            device_info: sea_orm::Set(Some(device_info.clone())),
+        };
+        match sessions::Entity::insert(model)
+            .on_conflict_do_nothing()
+            .exec(&db)
+            .await?
+        {
+            TryInsertResult::Inserted(_) => break key,
+            TryInsertResult::Conflicted => {}
+            TryInsertResult::Empty => {
+                return Err(sea_orm::DbErr::Custom(
+                    "session insert had no columns".to_owned(),
+                ))
+            }
         }
     };
     Ok(vec![
@@ -1213,7 +1389,7 @@ fn email_request(
 ) -> EmailRequest {
     let hosts = host_ctx(state);
     let cookie_name = state.settings().session.cookie_name.clone();
-    let prov = provenance(headers, peer_ip, &cookie_name);
+    let prov = provenance(headers, peer_ip, &cookie_name, state.settings());
     let pairs = form_pairs(prov.content_type.as_deref(), body);
     let next_path = pairs
         .iter()
@@ -1274,9 +1450,13 @@ async fn provider_outcome(
             if let Some(new_hash) =
                 pidash_auth::password::rehash_if_outdated(raw_password, &user.password)
             {
-                identity::rehash_password(pool, user.id, &new_hash)
-                    .await
-                    .map_err(|_| server_error())?;
+                identity::rehash_password(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    user.id,
+                    &new_hash,
+                )
+                .await
+                .map_err(|_| server_error())?;
                 user.password = new_hash;
             }
             Ok(kernel::ProviderOutcome::Ok)
@@ -1286,13 +1466,19 @@ async fn provider_outcome(
                 .await
                 .map_err(|_| server_error())?;
             if enable_signup.as_deref() == Some("0") {
-                let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
-                    r#"SELECT "id" FROM "workspace_member_invites" WHERE "email" = $1 LIMIT 1"#,
-                )
-                .bind(normalized)
-                .fetch_optional(pool)
-                .await
-                .map_err(|_| server_error())?;
+                // `adapter/base.py:111` reads through the soft-delete
+                // manager: a revoked invite does not satisfy the gate.
+                use pidash_db::entity::workspace_member_invites as inv;
+                let db = pidash_db::pool::sea_orm_connection(pool);
+                let invited = inv::Entity::find()
+                    .filter(inv::Column::Email.eq(normalized))
+                    .filter(inv::Column::DeletedAt.is_null())
+                    .select_only()
+                    .columns([inv::Column::Id])
+                    .into_tuple::<uuid::Uuid>()
+                    .one(&db)
+                    .await
+                    .map_err(|_| server_error())?;
                 if invited.is_none() {
                     return Ok(kernel::ProviderOutcome::SignupDisabled {
                         email: normalized.to_owned(),
@@ -1435,7 +1621,7 @@ async fn run_authenticated(
     // `user_login` AFTER `provider.authenticate()` returns
     // (`app/email.py:109-111`) — so the stamp lands after the invitation
     // workflow, never on its 500 path.
-    identity::stamp_last_login(pool, user_id, now)
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user_id, now)
         .await
         .map_err(|_| server_error())?;
     let device_info = serde_json::json!({
@@ -1786,14 +1972,7 @@ async fn resolve_session_user(
     if !session_kernel::is_plausible_session_key(key) {
         return None;
     }
-    let row: Option<(String, i64)> = sqlx::query_as(
-        r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let row = load_session(pool, key).await.ok().flatten();
     let (session_data, expire_unix) = row?;
     if session_kernel::is_expired(expire_unix, now_unix) {
         return None;
@@ -1826,9 +2005,11 @@ async fn resolve_session_user(
 /// (`rate_limit.py:17-19` + `throttling.py:109-132` via the guards
 /// kernel): trim entries older than the window, allow iff fewer than
 /// 30 remain, recording `now` on allow with a 60s TTL (DRF caches
-/// with `timeout=duration`). Redis errors fall back to the
-/// process-local governor.
-async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
+/// with `timeout=duration`). Denial carries the DRF wait for the
+/// `Retry-After` header (NEWPIDASH-16). Redis errors fall back to the
+/// process-local governor, whose denial carries no wait (unknown waits
+/// omit the header, like DRF).
+async fn check_email_throttle(state: &AppState, ident: &str) -> Result<(), Option<f64>> {
     let key = guards_kernel::throttle_cache_key(AUTHENTICATION_THROTTLE.scope, ident);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1855,13 +2036,22 @@ async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
                 .await
                 .is_ok()
             {
-                return true;
+                return Ok(());
             }
         } else {
-            return false;
+            return Err(guards_kernel::throttle_wait(
+                &decision.history,
+                AUTHENTICATION_THROTTLE.requests,
+                AUTHENTICATION_THROTTLE.window_secs,
+                now,
+            ));
         }
     }
-    throttle_check(AUTHENTICATION_THROTTLE, ident)
+    if throttle_check(AUTHENTICATION_THROTTLE, ident) {
+        Ok(())
+    } else {
+        Err(None)
+    }
 }
 
 async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Response {
@@ -1907,6 +2097,11 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
     // `None` before the CSRF check; authenticated callers without a
     // valid token get the 403 (`authentication.py:124-148`).
     if authenticated {
+        // `process_view` verifies Origin/Referer before the cookie
+        // (NEWPIDASH-12).
+        if let Err(reason) = super::csrf_origin_gate(state.settings(), &parts.headers) {
+            return csrf_failure_json(&reason);
+        }
         let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
         let header_token = parts
             .headers
@@ -1931,8 +2126,8 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         // DRF `get_ident`, not the first-entry `client_ip` stamp:
         // the whole X-Forwarded-For chain is the bucket.
         let ident = throttle_ident(&parts.headers, peer);
-        if !check_email_throttle(state, &ident).await {
-            return throttle_429();
+        if let Err(wait) = check_email_throttle(state, &ident).await {
+            return throttle_429(wait);
         }
     }
     if !instance_is_setup(pool).await.unwrap_or(false) {
@@ -2001,14 +2196,7 @@ async fn presented_session_is_empty(
     else {
         return true;
     };
-    let row: Option<(String, i64)> = sqlx::query_as(
-        r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let row = load_session(pool, key).await.ok().flatten();
     let Some((session_data, expire_unix)) = row else {
         return true;
     };
@@ -2047,7 +2235,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string());
-    let prov = provenance(&parts.headers, peer, &cookie_name);
+    let prov = provenance(&parts.headers, peer, &cookie_name, state.settings());
     if csrf_gate(&prov, &form_pairs(prov.content_type.as_deref(), &body)).is_err() {
         return csrf_failure_response(render_csrf_failure(&hosts.root_base));
     }
@@ -2091,17 +2279,22 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         return bare();
     };
     let now = chrono::Utc::now();
-    let stamped = identity::stamp_logout(pool, user_id, prov.ip.as_deref(), now).await;
+    let stamped = identity::stamp_logout(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user_id,
+        prov.ip.as_deref(),
+        now,
+    )
+    .await;
     if stamped.is_err() {
         return bare();
     }
     // `Session.flush()`: drop the old row; the middleware then
     // answers the deletion because the post-view session reads empty.
     if let Some(key) = prov.session_cookie.as_deref() {
-        let _ = sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
-            .bind(key)
-            .execute(pool)
-            .await;
+        use pidash_db::entity::sessions;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let _ = sessions::Entity::delete_by_id(key).exec(&db).await;
     }
     with_delete()
 }
@@ -2117,6 +2310,118 @@ async fn signout_space(State(state): State<AppState>, req: axum::extract::Reques
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrated_read_shapes() {
+        // Pin the SeaORM statement shapes for the migrated reads (no DB):
+        // columns, filters and ordering must stay byte-identical to the
+        // Django lookups they replaced.
+        use pidash_db::entity::{instance_configurations as cfg, instances, users};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let id = uuid::Uuid::nil();
+        let setup = instances::Entity::find()
+            .order_by_asc(instances::Column::Id)
+            .select_only()
+            .columns([instances::Column::IsSetupDone])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            setup.contains("\"instances\".\"is_setup_done\"")
+                && setup.contains("ORDER BY \"instances\".\"id\" ASC"),
+            "setup shape: {setup}"
+        );
+        let by_id = users::Entity::find_by_id(id)
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::Password,
+                users::Column::IsActive,
+                users::Column::IsPasswordAutoset,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            by_id.contains("\"users\".\"password\"")
+                && by_id.contains("\"users\".\"is_active\"")
+                && by_id.contains("\"users\".\"is_password_autoset\""),
+            "user_by_pk shape: {by_id}"
+        );
+        let config = cfg::Entity::find()
+            .filter(cfg::Column::Key.eq("ENABLE_SIGNUP"))
+            .filter(cfg::Column::DeletedAt.is_null())
+            .order_by_desc(cfg::Column::CreatedAt)
+            .select_only()
+            .columns([cfg::Column::Value, cfg::Column::IsEncrypted])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            config.contains("\"instance_configurations\".\"value\"")
+                && config.contains("\"instance_configurations\".\"is_encrypted\"")
+                && config.contains("ORDER BY \"instance_configurations\".\"created_at\" DESC"),
+            "config shape: {config}"
+        );
+    }
+
+    #[test]
+    fn migrated_invite_shapes() {
+        use pidash_db::entity::{project_member_invites as pinv, workspace_member_invites as winv};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let winv_q = winv::Entity::find()
+            .filter(winv::Column::Email.eq("a@b.c"))
+            .filter(winv::Column::Accepted.eq(true))
+            .filter(winv::Column::DeletedAt.is_null())
+            .order_by_desc(winv::Column::CreatedAt)
+            .select_only()
+            .columns([winv::Column::WorkspaceId, winv::Column::Role])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            winv_q.contains("\"workspace_member_invites\".\"workspace_id\"")
+                && winv_q.contains("\"workspace_member_invites\".\"role\"")
+                && winv_q.contains("ORDER BY \"workspace_member_invites\".\"created_at\" DESC"),
+            "workspace invites shape: {winv_q}"
+        );
+        let pinv_q = pinv::Entity::find()
+            .filter(pinv::Column::Email.eq("a@b.c"))
+            .filter(pinv::Column::Accepted.eq(true))
+            .filter(pinv::Column::DeletedAt.is_null())
+            .order_by_desc(pinv::Column::CreatedAt)
+            .select_only()
+            .columns([
+                pinv::Column::WorkspaceId,
+                pinv::Column::ProjectId,
+                pinv::Column::Role,
+                pinv::Column::CreatedById,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            pinv_q.contains("\"project_member_invites\".\"project_id\"")
+                && pinv_q.contains("ORDER BY \"project_member_invites\".\"created_at\" DESC"),
+            "project invites shape: {pinv_q}"
+        );
+    }
+
+    #[test]
+    fn migrated_session_shapes() {
+        use pidash_db::entity::sessions;
+        use sea_orm::{DbBackend, EntityTrait as _, QuerySelect as _, QueryTrait as _};
+        let load = sessions::Entity::find_by_id("k")
+            .select_only()
+            .columns([sessions::Column::SessionData, sessions::Column::ExpireDate])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            load.contains("\"sessions\".\"session_data\"")
+                && load.contains("\"sessions\".\"expire_date\"")
+                && load.contains("\"sessions\".\"session_key\" = 'k'"),
+            "session load shape: {load}"
+        );
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {
@@ -2137,7 +2442,52 @@ mod tests {
             header_token: token.map(str::to_owned),
             session_cookie: None,
             content_type: Some("application/x-www-form-urlencoded".to_owned()),
+            csrf_origin: Ok(()),
         }
+    }
+
+    #[test]
+    fn csrf_gate_rejects_a_failed_origin_before_the_token() {
+        // NEWPIDASH-12: a matching cookie/token pair does not rescue a
+        // foreign Origin, and the Origin verdict wins over a missing cookie.
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let pairs: Vec<(String, String)> = vec![];
+        let denied = Err(
+            "Origin checking failed - https://evil.example does not match any trusted origins."
+                .to_owned(),
+        );
+        let mut prov = prov_with(Some(secret), Some(secret));
+        assert_eq!(csrf_gate(&prov, &pairs), Ok(()));
+        prov.csrf_origin = denied.clone();
+        assert_eq!(csrf_gate(&prov, &pairs), Err(CsrfDenial::BadOrigin));
+        let mut prov = prov_with(None, None);
+        prov.csrf_origin = denied;
+        assert_eq!(csrf_gate(&prov, &pairs), Err(CsrfDenial::BadOrigin));
+    }
+
+    #[test]
+    fn provenance_runs_the_origin_gate() {
+        let settings = pidash_db::config::Settings::test_defaults();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "app.test".parse().unwrap());
+        headers.insert("origin", "http://app.test".parse().unwrap());
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Ok(())
+        );
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Err(
+                "Origin checking failed - https://evil.example does not match any trusted origins."
+                    .to_owned()
+            )
+        );
+        headers.remove("origin");
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Ok(())
+        );
     }
 
     #[test]

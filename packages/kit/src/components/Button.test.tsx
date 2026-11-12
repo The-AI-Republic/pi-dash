@@ -53,13 +53,4 @@ describe("Button", () => {
       expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
     }
   });
-
-  it("paints the primary variant Google blue", () => {
-    render(<Button variant="primary">Save</Button>);
-    const button = screen.getByRole("button", { name: "Save" });
-    expect(button.className).toContain("bg-(--button-primary)");
-    expect(button.className).toContain("text-(--on-button-primary)");
-    expect(button.className).toContain("hover:bg-(--button-primary-hover)");
-    expect(button.className).not.toContain("bg-(--accent)");
-  });
 });

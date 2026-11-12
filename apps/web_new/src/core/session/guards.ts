@@ -7,9 +7,10 @@
 // and tests share them; route beforeLoad blocks only adapt decisions to
 // redirects.
 
-import type { QueryClient } from "@tanstack/react-query";
+import type { FetchQueryOptions, QueryClient, QueryKey } from "@tanstack/react-query";
 import { isApiError, type ApiClient, type Me, type Profile, type WorkspaceList } from "@pidash/api-client";
 
+import { isRestoredPreview } from "../query/persistence.js";
 import {
   meQueryOptions,
   profileQueryOptions,
@@ -17,6 +18,7 @@ import {
   settingsQueryOptions,
   workspacesQueryOptions,
 } from "./queries.js";
+import { endExpiredSession, useSessionStore } from "./store.js";
 
 /** Non-empty strings only; everything else is an absent param. */
 export function asString(value: unknown): string | undefined {
@@ -173,18 +175,49 @@ function nullOnRejection<T>(promise: Promise<T>): Promise<T | null> {
 }
 
 /**
+ * One gate read. Cached data answers it only while it can be trusted: an
+ * entry restored from disk (desktop) was written by a session that may
+ * have ended since, and once any 401 has expired the session, a remembered
+ * user is exactly what is in doubt. Either way the gate asks the server
+ * (PIDESKAPP-194). A transient failure of that read keeps the cached data,
+ * so an offline warm launch still opens on it; a rejection propagates.
+ */
+async function readGateQuery<TData, TKey extends QueryKey>(
+  queryClient: QueryClient,
+  options: FetchQueryOptions<TData, Error, TData, TKey>
+): Promise<TData> {
+  const state = queryClient.getQueryState<TData>(options.queryKey);
+  const cached = state?.data;
+  const doubtful = isRestoredPreview(state) || useSessionStore.getState().status === "expired";
+  if (cached === undefined || !doubtful) return queryClient.ensureQueryData(options);
+  try {
+    return await queryClient.fetchQuery({ ...options, staleTime: 0 });
+  } catch (error) {
+    if (isSessionRejection(error)) throw error;
+    return cached;
+  }
+}
+
+/**
  * Gate inputs for a route beforeLoad: the signed-in user and their
  * profile, each null when the read is rejected. Without a session there
  * is no profile to read. Callers treat a null profile as unfinished (fail
- * closed toward onboarding, never into the app).
+ * closed toward onboarding, never into the app). A rejection of a user
+ * the cache remembered ends that session locally too, so its rows neither
+ * paint for the next account nor restore on the next launch.
  */
 export async function loadGateInputs(
   queryClient: QueryClient,
   apiClient: ApiClient
 ): Promise<{ me: Me | null; profile: Profile | null }> {
-  const me = await nullOnRejection(queryClient.ensureQueryData(meQueryOptions(apiClient)));
-  if (me === null) return { me, profile: null };
-  const profile = await nullOnRejection(queryClient.ensureQueryData(profileQueryOptions(apiClient)));
+  const options = meQueryOptions(apiClient);
+  const remembered = queryClient.getQueryState(options.queryKey)?.data !== undefined;
+  const me = await nullOnRejection(readGateQuery(queryClient, options));
+  if (me === null) {
+    if (remembered) endExpiredSession(queryClient);
+    return { me, profile: null };
+  }
+  const profile = await nullOnRejection(readGateQuery(queryClient, profileQueryOptions(apiClient)));
   return { me, profile };
 }
 

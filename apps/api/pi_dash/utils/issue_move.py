@@ -234,6 +234,15 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
             ]
         )
 
+        # A project move clears the dedicated assignment (§13): the old
+        # pod's runner can never serve the new project.
+        if issue.assigned_runner_id is not None:
+            from pi_dash.runner.services.issue_assignment import (
+                clear_dedicated_runner,
+            )
+
+            clear_dedicated_runner(issue, reason="project_move", actor=actor, decided_by=None)
+
         # A project move is a run handoff, not an in-place pod mutation:
         #
         # - QUEUED / PAUSED work has no executing agent, so close the source
