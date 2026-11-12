@@ -1328,14 +1328,14 @@ async fn op_create_project_issue(
     };
     // The tool's `seq` probe executes; `save` then discards its value
     // for the effective sequence.
-    let _max_seq: Option<i64> = issue_entity::Entity::find()
+    let _max_seq: Option<i32> = issue_entity::Entity::find()
         .filter(issue_entity::Column::ProjectId.eq(project_id))
         .filter(issue_entity::Column::DeletedAt.is_null())
         .select_only()
         .column(issue_entity::Column::SequenceId)
         .order_by_desc(issue_entity::Column::SequenceId)
         .limit(1)
-        .into_tuple::<i64>()
+        .into_tuple::<i32>()
         .one(&txn.connection())
         .await
         .map_err(orm_error)?;
@@ -5031,13 +5031,11 @@ mod live_tests {
         cleanup_phase0(&pool, &seed, &[]).await;
     }
 
-    /// Phase 0: the create write today fails on a Django-migrated
-    /// schema — the discarded sequence probe decodes INT4 as i64
-    /// (`tools_exec.rs` `_max_seq`, `into_tuple::<i64>()` over
-    /// `issues.sequence_id`, Django `IntegerField`) — leaving no
-    /// issue, no ledger row and no jobs. Pinned as-is: the refactor
-    /// must preserve this until the probe defect is fixed under its
-    /// own issue (found: NEWPIDASH-1).
+    /// Phase 0: the create write persists the issue + sequence row,
+    /// marks the ledger succeeded, and returns the brief. Fixed by
+    /// NEWPIDASH-191: the discarded sequence probe now decodes INT4
+    /// as i32 (`tools_exec.rs` `_max_seq`, `into_tuple::<i32>()`
+    /// over `issues.sequence_id`, Django `IntegerField`).
     #[tokio::test]
     async fn phase0_create_write_pins_current_failure_and_atomicity() {
         let Some(pool) = live_pool().await else {
@@ -5047,27 +5045,35 @@ mod live_tests {
         let seed = seed_phase0(&pool).await;
         let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
         let ctx = phase0_ctx(&pool);
-        let outcome = dispatch_tool(
+        let result = dispatch_tool(
             &ctx,
             run_id,
             TOOL_CREATE_PROJECT_ISSUE,
             serde_json::json!({"title": "Phase0 new issue", "description": "body text"}),
         )
-        .await;
-        match outcome {
-            Err(ToolExecError::Db(error)) => {
-                let message = error.to_string();
-                assert!(
-                    message.contains("mismatched types") && message.contains("INT4"),
-                    "sequence probe decode failure: {message}"
-                );
-            }
-            other => panic!("expected Db decode failure, got {other:?}"),
-        }
+        .await
+        .expect("create issue");
+        assert_eq!(result["created"], serde_json::json!(true));
+        assert_eq!(result["name"], serde_json::json!("Phase0 new issue"));
+        assert_eq!(result["state"], serde_json::json!("Backlog"));
+        assert_eq!(result["state_group"], serde_json::json!("backlog"));
+        assert_eq!(result["priority"], serde_json::json!("none"));
+        let new_id: Uuid = result["id"]
+            .as_str()
+            .expect("id renders")
+            .parse()
+            .expect("id parses");
+        assert_eq!(
+            result["identifier"],
+            serde_json::json!(format!("{}-3", seed.project_identifier))
+        );
         assert_eq!(
             ledger_for_run(&pool, run_id).await,
-            Vec::<(String, String, String)>::new(),
-            "failed create leaves no ledger row"
+            vec![(
+                TOOL_CREATE_PROJECT_ISSUE.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
         );
         let issue_count =
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM issues WHERE project_id = $1")
@@ -5075,12 +5081,33 @@ mod live_tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count issues");
-        assert_eq!(issue_count, 2, "only the two seeded issues stand");
-        assert!(
-            jobs_for_needle(&pool, seed.issue_id).await.is_empty(),
-            "failed create enqueues no jobs"
+        assert_eq!(issue_count, 3, "the created issue stands");
+        let row = sqlx::query("SELECT name, sequence_id, state_id FROM issues WHERE id = $1")
+            .bind(new_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read created issue");
+        assert_eq!(
+            row.try_get::<String, _>("name").expect("name"),
+            "Phase0 new issue"
         );
-        cleanup_phase0(&pool, &seed, &[]).await;
+        assert_eq!(row.try_get::<i32, _>("sequence_id").expect("seq"), 3);
+        assert_eq!(
+            row.try_get::<Option<Uuid>, _>("state_id").expect("state"),
+            Some(seed.state_backlog)
+        );
+        let seq: i64 =
+            sqlx::query_scalar("SELECT sequence FROM issue_sequences WHERE issue_id = $1")
+                .bind(new_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read sequence row");
+        assert_eq!(seq, 3, "issue_sequences row matches");
+        assert!(
+            jobs_for_needle(&pool, new_id).await.is_empty(),
+            "create enqueues no jobs for the new issue without LLM config"
+        );
+        cleanup_phase0(&pool, &seed, &[new_id]).await;
     }
 
     /// Phase 0: the relate write pins the relation row, verdict
