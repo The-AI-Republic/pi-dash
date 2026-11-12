@@ -10,11 +10,12 @@
 // and the chosen row.
 
 import type { IssueSearchHit } from "@pidash/api-client";
-import { Button, IconButton, Popover, cn } from "@pidash/kit";
+import { IconButton, Popover, cn } from "@pidash/kit";
 import { ExternalLink, Loader2, Search, X } from "lucide-react";
 import * as React from "react";
 
 import { useDebouncedValue } from "../../../shared/commands/index.js";
+import { PropertyChip } from "../../../shared/pickers/PropertyChip.js";
 import { PARENT_SEARCH_DEBOUNCE_MS, hitIdentifier, selectParentCandidates, useParentSearch } from "./createApi.js";
 
 export interface ParentPickerProps {
@@ -109,7 +110,8 @@ export function ParentPicker({
     return (
       <span
         data-testid="parent-tag"
-        className="inline-flex max-w-full items-center gap-(--space-2) rounded-(--radius-full) border border-(--border) bg-(--bg) py-(--space-1) pr-(--space-1) pl-(--space-3)"
+        title={`${hitIdentifier(value)} ${value.name}`}
+        className="inline-flex h-6 max-w-full items-center gap-(--space-2) rounded-(--radius-full) border border-(--border) bg-(--bg) pr-(--space-1) pl-(--space-3)"
       >
         <StateDot hit={value} />
         <span className="text-meta shrink-0 text-(--text-muted)">{hitIdentifier(value)}</span>
@@ -135,11 +137,7 @@ export function ParentPicker({
 
   return (
     <Popover
-      trigger={
-        <Button variant="secondary" disabled={disabled}>
-          Add parent
-        </Button>
-      }
+      trigger={<PropertyChip label="Add parent" text="Add parent" disabled={disabled} />}
       title="Set a parent"
       description="Pick the work item this one breaks down from."
       open={open}

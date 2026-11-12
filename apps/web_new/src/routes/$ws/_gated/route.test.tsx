@@ -347,6 +347,7 @@ describe("gated layout guard", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             const value = values[options.queryKey[1] as string];
             if (value instanceof Error) throw value;
@@ -416,6 +417,7 @@ describe("gated layout loader", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             seen.push(options.queryKey);
             return [];
@@ -441,6 +443,7 @@ describe("gated layout loader", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: (options: { queryKey: readonly unknown[] }) =>
             options.queryKey[2] === "favorites" ? new Promise(() => undefined) : Promise.resolve([]),
         },
@@ -457,6 +460,7 @@ describe("gated layout loader", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             if (options.queryKey[2] === "favorites") throw new Error("favorites down");
             return [];
@@ -475,6 +479,7 @@ describe("gated layout loader", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             if (options.queryKey[2] === "notifications") throw new Error("unread down");
             return [];
@@ -493,6 +498,7 @@ describe("gated layout loader", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             if (options.queryKey[2] === "projects") throw new Error("projects down");
             return [];
@@ -511,6 +517,7 @@ describe("gated layout loader", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             if (options.queryKey[2] === "sidebar-preferences") throw new Error("prefs down");
             return [];

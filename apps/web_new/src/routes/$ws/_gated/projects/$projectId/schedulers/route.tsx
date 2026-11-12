@@ -5,10 +5,14 @@
 // List and Calendar tabs above the tab body. The section renders inside
 // the project layout's access gate, so every allowed project viewer reads
 // it; the list tab is mounted here and the calendar tab by NEWFRONT-593.
+// The tab row also carries the admin-only creation control, so it reaches
+// every tab and the install detail pages (AGT-010).
 
 import { createFileRoute, Link, Outlet, useLocation } from "@tanstack/react-router";
 import { CalendarClock, List } from "lucide-react";
 import * as React from "react";
+
+import { SectionCreateControl } from "../../../../../../features/schedulers/SectionCreateControl.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/schedulers")({
   component: ProjectSchedulersSectionComponent,
@@ -51,30 +55,32 @@ function ProjectSchedulersSectionComponent(): React.ReactElement {
   const tabs = schedulerSectionTabs(pathname, `/${ws}/projects/${projectId}/schedulers`);
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <nav
-        aria-label="Scheduler views"
-        className="flex items-center gap-(--space-1) border-b border-(--border) px-(--space-4)"
-      >
-        {tabs.map((tab) => (
-          <Link
-            key={tab.key}
-            to={tab.href}
-            aria-current={tab.active ? "page" : undefined}
-            className={
-              tab.active
-                ? "text-body flex items-center gap-(--space-2) border-b-2 border-accent-strong px-(--space-3) py-(--space-2) font-medium text-(--text)"
-                : "text-body flex items-center gap-(--space-2) border-b-2 border-transparent px-(--space-3) py-(--space-2) text-(--text-muted) hover:text-(--text)"
-            }
-          >
-            {tab.key === "list" ? (
-              <List size={16} strokeWidth={1.5} aria-hidden="true" />
-            ) : (
-              <CalendarClock size={16} strokeWidth={1.5} aria-hidden="true" />
-            )}
-            {tab.label}
-          </Link>
-        ))}
-      </nav>
+      <div className="flex items-center gap-(--space-4) border-b border-(--border) px-(--space-4)">
+        <nav aria-label="Scheduler views" className="flex items-center gap-(--space-1)">
+          {tabs.map((tab) => (
+            <Link
+              key={tab.key}
+              to={tab.href}
+              aria-current={tab.active ? "page" : undefined}
+              className={
+                tab.active
+                  ? "text-body flex items-center gap-(--space-2) border-b-2 border-accent-strong px-(--space-3) py-(--space-2) font-medium text-(--text)"
+                  : "text-body flex items-center gap-(--space-2) border-b-2 border-transparent px-(--space-3) py-(--space-2) text-(--text-muted) hover:text-(--text)"
+              }
+            >
+              {tab.key === "list" ? (
+                <List size={16} strokeWidth={1.5} aria-hidden="true" />
+              ) : (
+                <CalendarClock size={16} strokeWidth={1.5} aria-hidden="true" />
+              )}
+              {tab.label}
+            </Link>
+          ))}
+        </nav>
+        <div className="ml-auto py-(--space-2)">
+          <SectionCreateControl workspaceSlug={ws} projectId={projectId} />
+        </div>
+      </div>
       <div className="min-h-0 flex-1 overflow-auto">
         <Outlet />
       </div>

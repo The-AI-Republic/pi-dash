@@ -82,6 +82,123 @@ pub struct ReloadOutcome {
     pub warnings: Option<String>,
 }
 
+/// Budget for one in-process runner change over IPC. Generous: stopping a
+/// runner waits up to 5 s for its HTTP loops to exit.
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What asking the running daemon to bring a runner up in-process did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivateOutcome {
+    /// The daemon activated the runner; nothing else was restarted.
+    Activated,
+    /// No daemon answers on this host's socket.
+    DaemonNotRunning,
+    /// The daemon answered but refused or failed; the message says why.
+    Failed(String),
+}
+
+/// Ask the running daemon to bring the runner `name` up from its block on
+/// disk (`RunnerActivateLocal`), without restarting it or any other
+/// runner (design §5, "No restart to add or remove a runner").
+pub async fn activate_runner_in_daemon(paths: &Paths, name: &str) -> ActivateOutcome {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let Ok(mut client) = Client::connect(paths.ipc_socket_path()).await else {
+        return ActivateOutcome::DaemonNotRunning;
+    };
+    let call = client.call(Request::RunnerActivateLocal {
+        runner: name.to_string(),
+    });
+    match tokio::time::timeout(ACTIVATE_TIMEOUT, call).await {
+        Ok(Ok(Response::Ack)) => ActivateOutcome::Activated,
+        Ok(Ok(Response::Error(e))) => ActivateOutcome::Failed(e.message),
+        Ok(Ok(other)) => ActivateOutcome::Failed(format!("unexpected IPC response: {other:?}")),
+        Ok(Err(e)) => ActivateOutcome::Failed(format!("{e:#}")),
+        Err(_) => ActivateOutcome::Failed("timed out waiting for the daemon".into()),
+    }
+}
+
+/// Bring a freshly written runner block live: in the running daemon when
+/// there is one (no restart, other runners keep running), else by starting
+/// the service, which loads every block. Used by `pidash runner add` and
+/// the TUI's add-runner modal.
+pub async fn activate_or_restart(paths: &Paths, name: &str) -> ReloadOutcome {
+    match activate_runner_in_daemon(paths, name).await {
+        ActivateOutcome::Activated => ReloadOutcome {
+            ok: true,
+            summary: format!("runner {name} activated in the running daemon (no restart)"),
+            detail: None,
+            service_state: "active".into(),
+            warnings: None,
+        },
+        ActivateOutcome::DaemonNotRunning => restart_and_verify(paths).await,
+        ActivateOutcome::Failed(why) => ReloadOutcome {
+            ok: false,
+            summary: format!("the running daemon did not activate runner {name}"),
+            detail: Some(match outdated_daemon_warning(paths).await {
+                Some(warning) => format!(
+                    "{why}\n{warning}\nThe runner block was written; `pidash restart` loads it."
+                ),
+                None => format!("{why}\nThe runner block was written; `pidash restart` loads it."),
+            }),
+            service_state: "active".into(),
+            warnings: None,
+        },
+    }
+}
+
+/// Tell a running daemon that the workspace tokens in `config.toml`
+/// changed (`pidash auth login` / `logout`), so it uses them without a
+/// restart. Best-effort: with no daemon, or an older one that does not
+/// know `CredentialsReload`, the tokens are used from its next start.
+pub async fn notify_credentials_changed(paths: &Paths) {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let Ok(mut client) = Client::connect(paths.ipc_socket_path()).await else {
+        return;
+    };
+    match tokio::time::timeout(ACTIVATE_TIMEOUT, client.call(Request::CredentialsReload)).await {
+        Ok(Ok(Response::Ack)) => {
+            tracing::debug!("daemon reloaded workspace credentials");
+            return;
+        }
+        Ok(Ok(other)) => tracing::debug!("daemon did not reload credentials: {other:?}"),
+        Ok(Err(e)) => tracing::debug!("credentials reload over IPC failed: {e:#}"),
+        Err(_) => tracing::debug!("credentials reload over IPC timed out"),
+    }
+    // An older daemon still running after `pidash update` (no `--restart`)
+    // neither picks up the new tokens nor keeps `[[cli.workspaces]]` when
+    // it rewrites `config.toml`, so say so.
+    if let Some(warning) = outdated_daemon_warning(paths).await {
+        eprintln!("warning: {warning}");
+    }
+}
+
+/// `Some(message)` when the daemon answering on this host's socket is not
+/// the same version as this `pidash` (typically: the binary was updated
+/// but the service not restarted). `None` when it matches or no daemon
+/// answers.
+pub async fn outdated_daemon_warning(paths: &Paths) -> Option<String> {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let mut client = Client::connect(paths.ipc_socket_path()).await.ok()?;
+    let running = match tokio::time::timeout(ACTIVATE_TIMEOUT, client.call(Request::Hello)).await {
+        Ok(Ok(Response::Hello(hello))) if hello.daemon_version == crate::RUNNER_VERSION => {
+            return None;
+        }
+        Ok(Ok(Response::Hello(hello))) => format!("version {}", hello.daemon_version),
+        // A daemon from before `Hello` answers with an error frame.
+        Ok(Ok(Response::Error(_))) => "an older version".to_string(),
+        _ => return None,
+    };
+    Some(format!(
+        "the running Pi Dash daemon is {running}, but this pidash is {}. \
+         Restart it with `pidash restart` so it uses this version; until then it may \
+         ignore this change or overwrite other workspaces' sign-ins in config.toml.",
+        crate::RUNNER_VERSION
+    ))
+}
+
 /// Write-then-restart flow. Starts the service if inactive, restarts if
 /// active, then polls IPC and the cloud-connected flag. Always returns
 /// something you can render — failures carry a `detail` string, successes
@@ -515,7 +632,12 @@ mod tests {
     use crate::ipc::protocol::{DaemonInfo, RunnerStatusSnapshot, StatusSnapshot};
     use pidash_ipc::RunnerStatus;
 
-    fn runner(name: &str, project: Option<&str>, connected: bool, fails: u32) -> RunnerStatusSnapshot {
+    fn runner(
+        name: &str,
+        project: Option<&str>,
+        connected: bool,
+        fails: u32,
+    ) -> RunnerStatusSnapshot {
         RunnerStatusSnapshot {
             runner_id: uuid::Uuid::new_v4(),
             name: name.to_string(),
@@ -531,6 +653,7 @@ mod tests {
             disconnect_reason: None,
             next_retry_at: None,
             cloud_deleted_confirmations: 0,
+            workspace_signed_out: false,
             observability: None,
         }
     }
@@ -550,7 +673,10 @@ mod tests {
     #[test]
     fn all_runners_connected_is_a_clean_success() {
         let snap = snapshot(true, vec![runner("a", Some("P1"), true, 0)]);
-        assert_eq!(classify_cloud_readiness(&snap), CloudReadiness::AllConnected);
+        assert_eq!(
+            classify_cloud_readiness(&snap),
+            CloudReadiness::AllConnected
+        );
     }
 
     #[test]
@@ -587,9 +713,15 @@ mod tests {
     fn nothing_connected_is_a_hard_failure() {
         let snap = snapshot(
             false,
-            vec![runner("a", Some("P1"), false, 2), runner("b", None, false, 0)],
+            vec![
+                runner("a", Some("P1"), false, 2),
+                runner("b", None, false, 0),
+            ],
         );
-        assert_eq!(classify_cloud_readiness(&snap), CloudReadiness::NotConnected);
+        assert_eq!(
+            classify_cloud_readiness(&snap),
+            CloudReadiness::NotConnected
+        );
     }
 
     #[test]
@@ -618,8 +750,12 @@ mod tests {
         );
         let w = render_degraded_warnings(&snap);
         // Named by runner name + project so the message is actionable.
-        assert!(w.contains("claude_macmini01 (PDASHOSS01) — session-open failing (5 consecutive failures)"));
-        assert!(w.contains("private_pidash_codex001 (PRIVATEPI1) — session-open failing (1 consecutive failure)"));
+        assert!(w.contains(
+            "claude_macmini01 (PDASHOSS01) — session-open failing (5 consecutive failures)"
+        ));
+        assert!(w.contains(
+            "private_pidash_codex001 (PRIVATEPI1) — session-open failing (1 consecutive failure)"
+        ));
         assert!(w.contains("no_project_runner (no project) — never connected since daemon start"));
         // Healthy runners are not in the warning list.
         assert!(!w.contains("healthy_a ("));

@@ -28,6 +28,22 @@ const STRIP_EXCLUDED_KINDS = new Set([
   "chat_timing",
 ]);
 
+/** Activity-strip wording for a turn the runner refused because a run holds its folder. */
+export const RUNNER_BUSY_LABEL = "Runner busy with an issue run";
+
+/**
+ * Banner shown when a live chat turn is refused the same way: the run
+ * sharing the working folder must finish before chatting resumes.
+ */
+export const RUNNER_CHAT_BUSY_MESSAGE =
+  "This runner is busy with an issue run in the same working folder. Wait for the run to finish, then send your message again.";
+
+/** The busy message when `event` is a runner refusing chat during a run, else `null`. */
+export function runnerBusyMessage(event: Pick<ChatEvent, "kind" | "payload">): string | null {
+  if (event.kind !== "chat_failed") return null;
+  return event.payload.code === "runner_busy" ? RUNNER_CHAT_BUSY_MESSAGE : null;
+}
+
 /** Named frames with a fixed meaning; `null` suppresses lifecycle narration. */
 const NAMED_LABELS: Record<string, string | null> = {
   chat_approval_request: "Waiting for your approval",
@@ -160,6 +176,7 @@ interface FrameActivity {
  * method is read rather than the kind.
  */
 function frameActivity(event: Pick<ChatEvent, "kind" | "payload">): FrameActivity | null {
+  if (runnerBusyMessage(event) !== null) return { label: RUNNER_BUSY_LABEL, key: RUNNER_BUSY_LABEL };
   if (event.kind !== "raw") {
     const named = NAMED_LABELS[event.kind];
     const label = named !== undefined ? named : STRIP_EXCLUDED_KINDS.has(event.kind) ? null : event.kind;

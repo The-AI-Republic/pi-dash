@@ -185,6 +185,35 @@ pub fn py_float_str(value: f64) -> String {
     }
 }
 
+/// Unquote `sort_order` in serialized grouped rows: Django renders the
+/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
+/// a string for the grouping kernels (which never do math on it). The
+/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
+/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
+/// splicing the quotes is exact.
+pub fn unquote_sort_order(results_json: &str) -> String {
+    let mut out = String::with_capacity(results_json.len());
+    let mut rest = results_json;
+    let marker = "\"sort_order\":\"";
+    while let Some(start) = rest.find(marker) {
+        let (head, tail) = rest.split_at(start + marker.len());
+        out.push_str(&head[..head.len() - 1]);
+        match tail.find('"') {
+            Some(end) => {
+                out.push_str(&tail[..end]);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push_str(tail);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 impl std::fmt::Display for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.value {
@@ -551,11 +580,19 @@ pub fn offset_window(
     if offset < 0 {
         return Err(PageError::NegativeOffset);
     }
+    if limit < 0 {
+        // `results[:limit]` with a negative limit raises Django's
+        // `ValueError` for *every* `limit < 0` (`utils/paginator.py:169`),
+        // even when `stop >= offset` (the crafted `per_page=-3`,
+        // `cursor=-3:-2:0` case: offset 6, stop 4). Error here, before
+        // any handler casts `stop - offset` or slices `rows[start..stop]`.
+        return Err(PageError::NegativeSlice);
+    }
     let stop = saturate_offset(offset as i128 + limit as i128 + 1);
     if stop < 0 {
         // `queryset[offset:stop]` with a negative `stop`: Django raises
-        // `ValueError` on the lazy queryset (only reachable with `limit < 0`,
-        // since `offset >= 0` here).
+        // `ValueError` on the lazy queryset. Unreachable since the guard
+        // above holds `limit >= 0` and `offset >= 0`; kept as defense.
         return Err(PageError::NegativeSlice);
     }
     if !cursor_value.equals_limit(limit) && is_prev {
@@ -1218,6 +1255,19 @@ mod tests {
     }
 
     #[test]
+    fn sort_order_unquotes_exactly() {
+        assert_eq!(
+            unquote_sort_order(r#"{"a":1,"sort_order":"65535.0","b":[]}"#),
+            r#"{"a":1,"sort_order":65535.0,"b":[]}"#
+        );
+        assert_eq!(
+            unquote_sort_order(r#"[{"sort_order":"1e+20"}]"#),
+            r#"[{"sort_order":1e+20}]"#
+        );
+        assert_eq!(unquote_sort_order(r#"{"x":"y"}"#), r#"{"x":"y"}"#);
+    }
+
+    #[test]
     fn negative_limit_is_a_server_error_like_python() {
         // Oracle: `results[:limit]` with a negative limit runs on the lazy
         // queryset, so Django raises `ValueError` — no slice-trim happens.
@@ -1527,6 +1577,20 @@ mod tests {
         // with a negative bound: Django `ValueError`, not rows.
         assert_eq!(
             offset_window(-5, 0, CursorValue::Int(-5), false, None),
+            Err(PageError::NegativeSlice)
+        );
+        // PIDASHCONV-1718: crafted negative per_page + negative cursor page
+        // (`per_page=-3`, `cursor=-3:-2:0` => limit -3, page -2, offset 6,
+        // stop 4). `queryset[6:4]` is an empty slice in Django but
+        // `results[:limit]` with a negative limit always raises
+        // `ValueError`, so every `limit < 0` is a 500. The window must error
+        // before handlers cast `stop - offset` or slice `rows[start..stop]`.
+        assert_eq!(
+            offset_window(-3, -2, CursorValue::Int(-3), false, None),
+            Err(PageError::NegativeSlice)
+        );
+        assert_eq!(
+            offset_window(-1, 0, CursorValue::Int(-1), false, None),
             Err(PageError::NegativeSlice)
         );
         assert_eq!(max_hits(95, 50), Ok(2));

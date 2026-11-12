@@ -269,3 +269,24 @@ def test_generic_upload_container_external_source(org, external_source, spelling
     repeat_body = repeat.json()
     assert repeat_body["message"] == "Asset with same external id and source already exists"
     assert repeat_body["asset_id"] == body["asset_id"]
+
+
+def test_generic_upload_stores_empty_storage_metadata(org):
+    """``POST`` stores ``storage_metadata={}``, not NULL (PIDASHCONV-1719).
+
+    Django ``FileAsset.objects.create`` at ``asset.py:553-563`` omits
+    ``storage_metadata`` so the model default ``JSONField(default=dict,
+    null=True)`` at ``db/models/asset.py:62`` stores ``{}``. The SeaORM
+    rewrite (#2975, ``ffe434e20``) stored ``Set(None)`` (SQL NULL) on Rust
+    while the sibling user-asset POST correctly stores
+    ``Some(json!({}))`` (``asset_user.rs:1147``). Serializers with
+    ``fields="__all__"`` then render ``null`` instead of ``{}`` until
+    the metadata job backfills.
+    """
+    body = _upload(org)
+    (storage_metadata,) = org.conn.execute(
+        "SELECT storage_metadata FROM file_assets WHERE id = %s",
+        (body["asset_id"],),
+    ).fetchone()
+    assert storage_metadata is not None, f"storage_metadata is NULL for {body['asset_id']}"
+    assert storage_metadata == {}

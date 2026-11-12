@@ -53,6 +53,7 @@ pub const COLUMNS: &[&str] = &[
     "pod_id",
     "runner_id",
     "pinned_runner_id",
+    "pin_kind",
     "work_item_id",
     "scheduler_binding_id",
     "parent_run_id",
@@ -437,6 +438,9 @@ pub struct AgentRun {
     pub pod_id: uuid::Uuid,
     pub runner_id: Option<uuid::Uuid>,
     pub pinned_runner_id: Option<uuid::Uuid>,
+    /// Why the run is pinned (`PinKind`, design §6.4): `locality` or
+    /// `dedicated`. Django-owned column (runner 0039).
+    pub pin_kind: String,
     pub work_item_id: Option<uuid::Uuid>,
     pub scheduler_binding_id: Option<uuid::Uuid>,
     pub parent_run_id: Option<uuid::Uuid>,
@@ -496,7 +500,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 39);
+        assert_eq!(COLUMNS.len(), 40);
     }
 
     #[test]

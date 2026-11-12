@@ -90,6 +90,16 @@
 //! Ported bugs: none found in this unit on read-through.
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity::{
+    agent_chat_approval, agent_chat_event, agent_chat_message, agent_chat_session, agent_run,
+    chat_message_dedupe, dev_machine, engine_credential, machine_session, runner,
+    runner_force_refresh, runner_live_state,
+};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
 use uuid::Uuid;
 
 use super::revoke::{revoke_runner, RevokeError, RevokeOutcome, RevokeStore};
@@ -130,162 +140,292 @@ pub fn delete_revoke_reason(purge_local: bool) -> &'static str {
 // moved to `crate::domain::tokens::revoke_tokens_for_dev_machine`
 // (PIDASHCONV-1520), whose test carries the pin.
 
-/// D2 — locked full rows for the machine (`:128`).
-///
-/// `$1` = machine. Django materializes full instances; the driver reads
-/// only id + `revoked_at` ([`LockedRunner`]).
-pub const LOCK_MACHINE_RUNNERS_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = $1 ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC FOR UPDATE";
-
-/// Runner-collector root fetch, single-id form (`:94`; no `ORDER BY`).
-///
-/// `$1` = runner.
-pub const COLLECT_RUNNER_BY_ID_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"id\" = $1";
-
-/// Runner-collector root fetch, by-machine form (`:142`; no `ORDER BY`).
-///
-/// `$1` = machine.
-pub const COLLECT_RUNNERS_BY_MACHINE_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = $1";
-
-/// Machine-collector root fetch (`:143`; no `ORDER BY`).
-///
-/// `$1` = machine.
-pub const COLLECT_MACHINE_BY_ID_SQL: &str = "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"visibility\", \"dev_machine\".\"provisioning\", \"dev_machine\".\"last_seen_at\", \"dev_machine\".\"revoked_at\", \"dev_machine\".\"created_at\", \"dev_machine\".\"updated_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1";
-
-/// `$1, $2, ...` bind list for an `IN (...)` of `count` ids, in order.
-fn in_placeholders(count: usize) -> String {
-    (1..=count)
-        .map(|index| format!("${index}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Chat-id collection (`agent_chat_session.runner CASCADE`, non-fast:
-/// messages hang off it). `$1..$N` = runner ids in fetch order.
-pub fn collect_chat_ids_sql(runner_count: usize) -> String {
-    format!(
-        "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" WHERE \"agent_chat_session\".\"runner_id\" IN ({}) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC",
-        in_placeholders(runner_count),
-    )
-}
-
-/// Message-id collection. `$1..$N` = chat ids. The parent ordering
-/// prefixes the child's (`seq ASC`), hence the join.
-pub fn collect_message_ids_sql(chat_count: usize) -> String {
-    format!(
-        "SELECT \"agent_chat_message\".\"id\" FROM \"agent_chat_message\" INNER JOIN \"agent_chat_session\" ON (\"agent_chat_message\".\"session_id\" = \"agent_chat_session\".\"id\") WHERE \"agent_chat_message\".\"session_id\" IN ({}) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC, \"agent_chat_message\".\"seq\" ASC",
-        in_placeholders(chat_count),
-    )
-}
-
-/// Chat-subtree fast deletes (chat ids). Each takes `$1..$N` = chat ids.
-pub fn delete_chat_events_sql(chat_count: usize) -> String {
-    format!(
-        "DELETE FROM \"agent_chat_event\" WHERE \"agent_chat_event\".\"session_id\" IN ({})",
-        in_placeholders(chat_count),
-    )
-}
-
-/// See [`delete_chat_events_sql`].
-pub fn delete_chat_approvals_sql(chat_count: usize) -> String {
-    format!(
-        "DELETE FROM \"agent_chat_approval\" WHERE \"agent_chat_approval\".\"session_id\" IN ({})",
-        in_placeholders(chat_count),
-    )
-}
-
-/// See [`delete_chat_events_sql`].
-pub fn delete_chat_dedupes_sql(chat_count: usize) -> String {
-    format!(
-        "DELETE FROM \"chat_message_dedupe\" WHERE \"chat_message_dedupe\".\"session_id\" IN ({})",
-        in_placeholders(chat_count),
-    )
-}
-
 // NOTE: the session fast-delete builder lived here; the statement moved
 // to `crate::domain::tokens::delete_runner_sessions_for_runners`
 // (PIDASHCONV-1520), whose tests carry the pins.
-
-/// Runner-level fast deletes (runner ids). Each takes `$1..$N` = runner
-/// ids in fetch order.
-pub fn delete_force_refresh_sql(runner_count: usize) -> String {
-    format!(
-        "DELETE FROM \"runner_force_refresh\" WHERE \"runner_force_refresh\".\"runner_id\" IN ({})",
-        in_placeholders(runner_count),
-    )
-}
-
-/// Runner-level fast deletes (runner ids). Each takes `$1..$N` = runner
-/// ids in fetch order.
-pub fn delete_live_state_sql(runner_count: usize) -> String {
-    format!(
-        "DELETE FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" IN ({})",
-        in_placeholders(runner_count),
-    )
-}
-
-/// `SET_NULL` updates (runner ids). Each takes `$1..$N` = runner ids.
-pub fn null_run_runners_sql(runner_count: usize) -> String {
-    format!(
-        "UPDATE \"agent_run\" SET \"runner_id\" = NULL WHERE \"agent_run\".\"runner_id\" IN ({})",
-        in_placeholders(runner_count),
-    )
-}
-
-/// See [`null_run_runners_sql`].
-pub fn null_run_pins_sql(runner_count: usize) -> String {
-    format!(
-        "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"agent_run\".\"pinned_runner_id\" IN ({})",
-        in_placeholders(runner_count),
-    )
-}
-
-/// `agent_chat_event.message_id` nulling. `$1..$N` = message ids.
-pub fn null_event_messages_sql(message_count: usize) -> String {
-    format!(
-        "UPDATE \"agent_chat_event\" SET \"message_id\" = NULL WHERE \"agent_chat_event\".\"message_id\" IN ({})",
-        in_placeholders(message_count),
-    )
-}
-
-/// Instance deletes, deepest first. `$1..$N` = row ids in fetch order.
-pub fn delete_chat_messages_sql(message_count: usize) -> String {
-    format!(
-        "DELETE FROM \"agent_chat_message\" WHERE \"agent_chat_message\".\"id\" IN ({})",
-        in_placeholders(message_count),
-    )
-}
-
-/// See [`delete_chat_messages_sql`] (`$1..$N` = chat ids).
-pub fn delete_chat_sessions_sql(chat_count: usize) -> String {
-    format!(
-        "DELETE FROM \"agent_chat_session\" WHERE \"agent_chat_session\".\"id\" IN ({})",
-        in_placeholders(chat_count),
-    )
-}
-
-/// See [`delete_chat_messages_sql`] (`$1..$N` = runner ids).
-pub fn delete_runner_rows_sql(runner_count: usize) -> String {
-    format!(
-        "DELETE FROM \"runner\" WHERE \"runner\".\"id\" IN ({})",
-        in_placeholders(runner_count),
-    )
-}
-
-/// Machine fast delete: `$1` = machine.
-pub const DELETE_MACHINE_SESSIONS_SQL: &str =
-    "DELETE FROM \"machine_session\" WHERE \"machine_session\".\"dev_machine_id\" IN ($1)";
-
-/// Machine `SET_NULL` updates: `$1` = machine.
-pub const NULL_RUNNER_MACHINES_SQL: &str =
-    "UPDATE \"runner\" SET \"dev_machine_id\" = NULL WHERE \"runner\".\"dev_machine_id\" IN ($1)";
 
 // NOTE: the machine-token `SET_NULL` const lived here; the statement
 // moved to `crate::domain::tokens::clear_token_dev_machines`
 // (PIDASHCONV-1520), whose test carries the pin (token rows survive).
 
-/// Machine-row delete: `$1` = machine.
-pub const DELETE_MACHINE_ROW_SQL: &str =
-    "DELETE FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" IN ($1)";
+// ---------------------------------------------------------------------------
+// SeaORM cascade statements (`runner_delete.py:94-143`)
+// ---------------------------------------------------------------------------
+
+/// D2 (`:128`): the machine's runners, `Meta.ordering`, `FOR UPDATE`; the
+/// driver reads id + `revoked_at` ([`LockedRunner`]).
+pub async fn lock_machine_runners(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Vec<LockedRunner>, DbErr> {
+    let rows: Vec<(Uuid, Option<DateTime<Utc>>)> = runner::Entity::find()
+        .select_only()
+        .columns([runner::Column::Id, runner::Column::RevokedAt])
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, revoked_at)| LockedRunner { id, revoked_at })
+        .collect())
+}
+
+/// Runner-collector root (`:94`): the runner row exists.
+pub async fn runner_exists(db: &impl ConnectionTrait, runner_id: Uuid) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .filter(runner::Column::Id.eq(runner_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// Runner-collector root, by machine (`:142`; no ordering).
+pub async fn machine_runner_ids(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// Machine-collector root (`:143`): the machine row exists.
+pub async fn machine_exists(db: &impl ConnectionTrait, machine_id: Uuid) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = dev_machine::Entity::find()
+        .select_only()
+        .column(dev_machine::Column::Id)
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// Chat ids under the runners (`agent_chat_session.runner CASCADE`), in
+/// the session `Meta.ordering`.
+pub async fn chat_ids_for_runners(
+    db: &impl ConnectionTrait,
+    runner_ids: &[Uuid],
+) -> Result<Vec<Uuid>, DbErr> {
+    agent_chat_session::Entity::find()
+        .select_only()
+        .column(agent_chat_session::Column::Id)
+        .filter(agent_chat_session::Column::RunnerId.is_in(runner_ids.iter().copied()))
+        .order_by_desc(agent_chat_session::Column::LastMessageAt)
+        .order_by_desc(agent_chat_session::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// Message ids under the chats; the parent ordering prefixes the child's
+/// (`seq ASC`), hence the join.
+pub async fn message_ids_for_chats(
+    db: &impl ConnectionTrait,
+    chat_ids: &[Uuid],
+) -> Result<Vec<Uuid>, DbErr> {
+    agent_chat_message::Entity::find()
+        .select_only()
+        .column(agent_chat_message::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            agent_chat_message::Relation::AgentChatSession.def(),
+        )
+        .filter(agent_chat_message::Column::SessionId.is_in(chat_ids.iter().copied()))
+        .order_by_desc(agent_chat_session::Column::LastMessageAt)
+        .order_by_desc(agent_chat_session::Column::CreatedAt)
+        .order_by_asc(agent_chat_message::Column::Seq)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// Chat-subtree fast delete: events (then approvals, then dedupes).
+pub async fn delete_chat_events(db: &impl ConnectionTrait, chat_ids: &[Uuid]) -> Result<(), DbErr> {
+    agent_chat_event::Entity::delete_many()
+        .filter(agent_chat_event::Column::SessionId.is_in(chat_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// See [`delete_chat_events`].
+pub async fn delete_chat_approvals(
+    db: &impl ConnectionTrait,
+    chat_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    agent_chat_approval::Entity::delete_many()
+        .filter(agent_chat_approval::Column::SessionId.is_in(chat_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// See [`delete_chat_events`].
+pub async fn delete_chat_dedupes(
+    db: &impl ConnectionTrait,
+    chat_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    chat_message_dedupe::Entity::delete_many()
+        .filter(chat_message_dedupe::Column::SessionId.is_in(chat_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Runner-level fast delete: force-refresh rows.
+pub async fn delete_force_refresh(
+    db: &impl ConnectionTrait,
+    runner_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    runner_force_refresh::Entity::delete_many()
+        .filter(runner_force_refresh::Column::RunnerId.is_in(runner_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Runner-level fast delete: live-state rows.
+pub async fn delete_live_state(
+    db: &impl ConnectionTrait,
+    runner_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    runner_live_state::Entity::delete_many()
+        .filter(runner_live_state::Column::RunnerId.is_in(runner_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `SET_NULL`: `agent_run.runner`.
+pub async fn null_run_runners(db: &impl ConnectionTrait, runner_ids: &[Uuid]) -> Result<(), DbErr> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::RunnerId, Expr::value(None::<Uuid>))
+        .filter(agent_run::Column::RunnerId.is_in(runner_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `SET_NULL`: `agent_run.pinned_runner`.
+pub async fn null_run_pins(db: &impl ConnectionTrait, runner_ids: &[Uuid]) -> Result<(), DbErr> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(None::<Uuid>))
+        .filter(agent_run::Column::PinnedRunnerId.is_in(runner_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `SET_NULL`: `agent_chat_event.message`.
+pub async fn null_event_messages(
+    db: &impl ConnectionTrait,
+    message_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    agent_chat_event::Entity::update_many()
+        .col_expr(
+            agent_chat_event::Column::MessageId,
+            Expr::value(None::<Uuid>),
+        )
+        .filter(agent_chat_event::Column::MessageId.is_in(message_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Instance delete: chat messages.
+pub async fn delete_chat_messages(
+    db: &impl ConnectionTrait,
+    message_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    agent_chat_message::Entity::delete_many()
+        .filter(agent_chat_message::Column::Id.is_in(message_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Instance delete: chat sessions.
+pub async fn delete_chat_sessions(
+    db: &impl ConnectionTrait,
+    chat_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    agent_chat_session::Entity::delete_many()
+        .filter(agent_chat_session::Column::Id.is_in(chat_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Instance delete: runners.
+pub async fn delete_runner_rows(
+    db: &impl ConnectionTrait,
+    runner_ids: &[Uuid],
+) -> Result<(), DbErr> {
+    runner::Entity::delete_many()
+        .filter(runner::Column::Id.is_in(runner_ids.iter().copied()))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Machine fast delete: its sessions.
+pub async fn delete_machine_sessions(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<(), DbErr> {
+    machine_session::Entity::delete_many()
+        .filter(machine_session::Column::DevMachineId.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Machine `SET_NULL`: `runner.dev_machine` (the rows survive).
+pub async fn null_runner_machines(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<(), DbErr> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::DevMachineId, Expr::value(None::<Uuid>))
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// Machine-row delete.
+pub async fn delete_machine_row(db: &impl ConnectionTrait, machine_id: Uuid) -> Result<(), DbErr> {
+    dev_machine::Entity::delete_many()
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// CASCADE from the machine row: the credential rows die with the
+/// machine (Django's collector; the DB FK carries no cascade).
+pub async fn delete_machine_engine_credentials(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<(), DbErr> {
+    engine_credential::Entity::delete_many()
+        .filter(engine_credential::Column::DevMachineId.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
 
 // ---------------------------------------------------------------------------
 // Seam + drivers
@@ -343,7 +483,17 @@ pub trait RunnerDeleteStore: RevokeStore {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError>;
 
-    /// D2: locked machine runners ([`LOCK_MACHINE_RUNNERS_SQL`]), in
+    /// D2a: revoke the machine's engine credential
+    /// (`crate::domain::engine_credential::revoke_engine_credential`,
+    /// `machine_removed`): the cascade step Django runs between the
+    /// token revoke and the runner frames (`runner_delete.py:138`).
+    async fn revoke_machine_engine_credential(
+        &mut self,
+        machine_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), RevokeError>;
+
+    /// D2: locked machine runners, in
     /// listed order.
     async fn lock_machine_runners(
         &mut self,
@@ -351,76 +501,84 @@ pub trait RunnerDeleteStore: RevokeStore {
     ) -> Result<Vec<LockedRunner>, RevokeError>;
 
     /// Runner-collector root fetch, single id
-    /// ([`COLLECT_RUNNER_BY_ID_SQL`]): whether the row exists.
+    ///: whether the row exists.
     async fn fetch_runner_for_delete(&mut self, runner_id: Uuid) -> Result<bool, RevokeError>;
 
     /// Runner-collector root fetch, by machine
-    /// ([`COLLECT_RUNNERS_BY_MACHINE_SQL`]): ids in fetch order
+    ///: ids in fetch order
     /// (no `ORDER BY` — the driver keeps the returned order).
     async fn fetch_machine_runner_ids_for_delete(
         &mut self,
         machine_id: Uuid,
     ) -> Result<Vec<Uuid>, RevokeError>;
 
-    /// Chat-id collection ([`collect_chat_ids_sql`]), in listed order.
+    /// Chat-id collection, in listed order.
     async fn fetch_chat_ids(&mut self, runner_ids: &[Uuid]) -> Result<Vec<Uuid>, RevokeError>;
 
-    /// Message-id collection ([`collect_message_ids_sql`]), in listed
+    /// Message-id collection, in listed
     /// order.
     async fn fetch_message_ids(&mut self, chat_ids: &[Uuid]) -> Result<Vec<Uuid>, RevokeError>;
 
-    /// Chat-subtree fast deletes ([`delete_chat_events_sql`]).
+    /// Chat-subtree fast deletes.
     async fn delete_chat_events(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Chat-subtree fast deletes ([`delete_chat_approvals_sql`]).
+    /// Chat-subtree fast deletes.
     async fn delete_chat_approvals(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Chat-subtree fast deletes ([`delete_chat_dedupes_sql`]).
+    /// Chat-subtree fast deletes.
     async fn delete_chat_dedupes(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError>;
 
     /// Runner fast deletes
     /// (`crate::domain::tokens::delete_runner_sessions_for_runners`).
     async fn delete_runner_sessions(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Runner fast deletes ([`delete_force_refresh_sql`]).
+    /// Runner fast deletes.
     async fn delete_force_refresh(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Runner fast deletes ([`delete_live_state_sql`]).
+    /// Runner fast deletes.
     async fn delete_live_state(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// `SET_NULL` ([`null_run_runners_sql`]).
+    /// `SET_NULL`.
     async fn null_run_runners(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// `SET_NULL` ([`null_run_pins_sql`]).
+    /// `SET_NULL`.
     async fn null_run_pins(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// `SET_NULL` ([`null_event_messages_sql`]).
+    /// `SET_NULL`.
     async fn null_event_messages(&mut self, message_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Instance deletes ([`delete_chat_messages_sql`]).
+    /// Instance deletes.
     async fn delete_chat_messages(&mut self, message_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Instance deletes ([`delete_chat_sessions_sql`]).
+    /// Instance deletes.
     async fn delete_chat_sessions(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Instance deletes ([`delete_runner_rows_sql`]).
+    /// Instance deletes.
     async fn delete_runner_rows(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Machine-collector root fetch ([`COLLECT_MACHINE_BY_ID_SQL`]):
+    /// Machine-collector root fetch:
     /// whether the row exists.
     async fn fetch_machine_for_delete(&mut self, machine_id: Uuid) -> Result<bool, RevokeError>;
 
-    /// Machine fast delete ([`DELETE_MACHINE_SESSIONS_SQL`]).
+    /// Machine fast delete.
     async fn delete_machine_sessions(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
 
-    /// Machine `SET_NULL` ([`NULL_RUNNER_MACHINES_SQL`]).
+    /// Machine `SET_NULL`.
     async fn null_runner_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
 
     /// Machine `SET_NULL` on token rows
     /// (`crate::domain::tokens::clear_token_dev_machines`).
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
 
-    /// Machine-row delete ([`DELETE_MACHINE_ROW_SQL`]).
+    /// CASCADE from the machine row (`on_delete=CASCADE`, emulated by
+    /// Django's collector — the DB FK carries no cascade of its own):
+    /// the credential rows die with the machine.
+    async fn delete_machine_engine_credentials(
+        &mut self,
+        machine_id: Uuid,
+    ) -> Result<(), RevokeError>;
+
+    /// Machine-row delete.
     async fn delete_machine_row(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
 }
 
@@ -551,6 +709,9 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
     revoke_clock: &mut impl FnMut() -> DateTime<Utc>,
 ) -> Result<DeleteMachineOutcome, RevokeError> {
     store.revoke_machine_tokens(machine_id, now).await?;
+    store
+        .revoke_machine_engine_credential(machine_id, now)
+        .await?;
     let runners = store.lock_machine_runners(machine_id).await?;
     let active: Vec<LockedRunner> = runners
         .iter()
@@ -594,6 +755,7 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
         store.delete_machine_sessions(machine_id).await?;
         store.null_runner_machines(machine_id).await?;
         store.null_token_machines(machine_id).await?;
+        store.delete_machine_engine_credentials(machine_id).await?;
         store.delete_machine_row(machine_id).await?;
     }
     Ok(DeleteMachineOutcome {
@@ -610,7 +772,6 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use pidash_db::runner_enroll::columns::{dev_machine as dm_cols, runner as r_cols};
 
     fn flows_fixture() -> serde_json::Value {
         let text = include_str!("../../../../fixtures/runner_enroll/services/flows.golden.json");
@@ -660,148 +821,8 @@ mod tests {
 
     // -- SQL text -----------------------------------------------------------
 
-    fn select_prefix(table: &str, columns: &[&str]) -> String {
-        let list = columns
-            .iter()
-            .map(|column| format!("\"{table}\".\"{column}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("SELECT {list} FROM \"{table}\"")
-    }
-
     // (The D1 SQL pin moved with the statement to
     // `crate::domain::tokens`.)
-
-    #[test]
-    fn d2_locks_full_rows_in_model_order() {
-        let expected = format!(
-            "{} WHERE \"runner\".\"dev_machine_id\" = $1 ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC FOR UPDATE",
-            select_prefix(r_cols::TABLE, r_cols::COLUMNS),
-        );
-        assert_eq!(LOCK_MACHINE_RUNNERS_SQL, expected);
-        assert_eq!(r_cols::COLUMNS.len(), 31);
-    }
-
-    #[test]
-    fn collector_roots_have_no_ordering() {
-        for sql in [COLLECT_RUNNER_BY_ID_SQL, COLLECT_RUNNERS_BY_MACHINE_SQL] {
-            assert!(
-                sql.starts_with(&select_prefix(r_cols::TABLE, r_cols::COLUMNS)),
-                "{sql}"
-            );
-            assert!(!sql.contains("ORDER BY"), "{sql}");
-        }
-        assert_eq!(
-            COLLECT_RUNNER_BY_ID_SQL,
-            format!(
-                "{} WHERE \"runner\".\"id\" = $1",
-                select_prefix(r_cols::TABLE, r_cols::COLUMNS),
-            )
-        );
-        assert_eq!(
-            COLLECT_RUNNERS_BY_MACHINE_SQL,
-            format!(
-                "{} WHERE \"runner\".\"dev_machine_id\" = $1",
-                select_prefix(r_cols::TABLE, r_cols::COLUMNS),
-            )
-        );
-        assert_eq!(
-            COLLECT_MACHINE_BY_ID_SQL,
-            format!(
-                "{} WHERE \"dev_machine\".\"id\" = $1",
-                select_prefix(dm_cols::TABLE, dm_cols::COLUMNS),
-            )
-        );
-        assert_eq!(dm_cols::COLUMNS.len(), 10);
-    }
-
-    #[test]
-    fn collector_collection_selects() {
-        assert_eq!(
-            collect_chat_ids_sql(1),
-            "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" WHERE \"agent_chat_session\".\"runner_id\" IN ($1) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC"
-        );
-        assert_eq!(
-            collect_chat_ids_sql(2),
-            "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" WHERE \"agent_chat_session\".\"runner_id\" IN ($1, $2) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC"
-        );
-        assert_eq!(
-            collect_message_ids_sql(1),
-            "SELECT \"agent_chat_message\".\"id\" FROM \"agent_chat_message\" INNER JOIN \"agent_chat_session\" ON (\"agent_chat_message\".\"session_id\" = \"agent_chat_session\".\"id\") WHERE \"agent_chat_message\".\"session_id\" IN ($1) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC, \"agent_chat_message\".\"seq\" ASC"
-        );
-    }
-
-    #[test]
-    fn collector_fast_deletes_set_nulls_and_instance_deletes() {
-        assert_eq!(
-            delete_chat_events_sql(1),
-            "DELETE FROM \"agent_chat_event\" WHERE \"agent_chat_event\".\"session_id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_chat_approvals_sql(2),
-            "DELETE FROM \"agent_chat_approval\" WHERE \"agent_chat_approval\".\"session_id\" IN ($1, $2)"
-        );
-        assert_eq!(
-            delete_chat_dedupes_sql(1),
-            "DELETE FROM \"chat_message_dedupe\" WHERE \"chat_message_dedupe\".\"session_id\" IN ($1)"
-        );
-        // (The session fast-delete pin moved with the statement to
-        // `crate::domain::tokens`.)
-        assert_eq!(
-            delete_force_refresh_sql(1),
-            "DELETE FROM \"runner_force_refresh\" WHERE \"runner_force_refresh\".\"runner_id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_live_state_sql(1),
-            "DELETE FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" IN ($1)"
-        );
-        assert_eq!(
-            null_run_runners_sql(1),
-            "UPDATE \"agent_run\" SET \"runner_id\" = NULL WHERE \"agent_run\".\"runner_id\" IN ($1)"
-        );
-        assert_eq!(
-            null_run_pins_sql(1),
-            "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"agent_run\".\"pinned_runner_id\" IN ($1)"
-        );
-        assert_eq!(
-            null_event_messages_sql(1),
-            "UPDATE \"agent_chat_event\" SET \"message_id\" = NULL WHERE \"agent_chat_event\".\"message_id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_chat_messages_sql(1),
-            "DELETE FROM \"agent_chat_message\" WHERE \"agent_chat_message\".\"id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_chat_sessions_sql(1),
-            "DELETE FROM \"agent_chat_session\" WHERE \"agent_chat_session\".\"id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_runner_rows_sql(1),
-            "DELETE FROM \"runner\" WHERE \"runner\".\"id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_runner_rows_sql(3),
-            "DELETE FROM \"runner\" WHERE \"runner\".\"id\" IN ($1, $2, $3)"
-        );
-    }
-
-    #[test]
-    fn machine_collector_tail() {
-        assert_eq!(
-            DELETE_MACHINE_SESSIONS_SQL,
-            "DELETE FROM \"machine_session\" WHERE \"machine_session\".\"dev_machine_id\" IN ($1)"
-        );
-        assert_eq!(
-            NULL_RUNNER_MACHINES_SQL,
-            "UPDATE \"runner\" SET \"dev_machine_id\" = NULL WHERE \"runner\".\"dev_machine_id\" IN ($1)"
-        );
-        // (The token `SET_NULL` pin moved with the statement to
-        // `crate::domain::tokens`.)
-        assert_eq!(
-            DELETE_MACHINE_ROW_SQL,
-            "DELETE FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" IN ($1)"
-        );
-    }
 
     // -- driver order (fake store) ------------------------------------------
 
@@ -823,6 +844,7 @@ mod tests {
         Cleanup(Uuid),
         // machine reads
         RevokeTokens(Uuid),
+        RevokeEngineCredential(Uuid),
         LockRunners(Uuid),
         // collector
         FetchRunner(Uuid),
@@ -846,6 +868,7 @@ mod tests {
         NullRunnerMachines(Uuid),
         NullTokenMachines(Uuid),
         DelMachineRow(Uuid),
+        DelEngineCredentials(Uuid),
     }
 
     struct Fake {
@@ -941,6 +964,39 @@ mod tests {
         fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
             self.calls.push(Call::Cleanup(runner_id));
         }
+
+        async fn dedicated_issue_ids(
+            &mut self,
+            _runner_id: Uuid,
+        ) -> Result<Vec<Uuid>, RevokeError> {
+            Ok(Vec::new())
+        }
+
+        async fn apply_lost_runner(
+            &mut self,
+            _issue_id: Uuid,
+            _reason: &str,
+        ) -> Result<crate::domain::issue_assignment::LostRunnerOutcome, RevokeError> {
+            Ok(crate::domain::issue_assignment::LostRunnerOutcome::default())
+        }
+
+        fn bounce_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _runner_name: Option<&str>,
+            _reason: &str,
+            _triggered_by: &str,
+        ) {
+        }
+
+        fn recreate_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _pod_id: Uuid,
+            _trigger: &str,
+            _creator: Option<Uuid>,
+        ) {
+        }
     }
 
     impl RunnerDeleteStore for Fake {
@@ -975,6 +1031,15 @@ mod tests {
             _now: DateTime<Utc>,
         ) -> Result<(), RevokeError> {
             self.calls.push(Call::RevokeTokens(machine_id));
+            Ok(())
+        }
+
+        async fn revoke_machine_engine_credential(
+            &mut self,
+            machine_id: Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), RevokeError> {
+            self.calls.push(Call::RevokeEngineCredential(machine_id));
             Ok(())
         }
 
@@ -1094,6 +1159,14 @@ mod tests {
 
         async fn delete_machine_row(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
             self.calls.push(Call::DelMachineRow(machine_id));
+            Ok(())
+        }
+
+        async fn delete_machine_engine_credentials(
+            &mut self,
+            machine_id: Uuid,
+        ) -> Result<(), RevokeError> {
+            self.calls.push(Call::DelEngineCredentials(machine_id));
             Ok(())
         }
     }
@@ -1266,6 +1339,7 @@ mod tests {
             store.calls,
             vec![
                 Call::RevokeTokens(uuid(5)),
+                Call::RevokeEngineCredential(uuid(5)),
                 Call::LockRunners(uuid(5)),
                 Call::RevokeFrame(live, "dev machine deleted".to_string()),
                 Call::Mark(live),
@@ -1286,6 +1360,7 @@ mod tests {
                 Call::DelMachineSessions(uuid(5)),
                 Call::NullRunnerMachines(uuid(5)),
                 Call::NullTokenMachines(uuid(5)),
+                Call::DelEngineCredentials(uuid(5)),
                 Call::DelMachineRow(uuid(5)),
             ]
         );
@@ -1322,8 +1397,179 @@ mod tests {
         assert_eq!(outcome.revoke_reason, "runner_removed");
         assert_eq!(outcome.revokes[0].1.stored_reason, "runner_removed");
         assert!(matches!(
-            store.calls[2],
+            store.calls[3],
             Call::RemoveFrame(_, ref reason) if reason == "dev machine deleted"
         ));
+    }
+
+    /// The runner / machine delete cascade and the revoke S1/S3/S4
+    /// statements against constraint-free temp tables on one transaction.
+    #[tokio::test]
+    async fn live_cascade_statements() {
+        use crate::runner_enroll::revoke;
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "runner",
+            "agent_run",
+            "agent_chat_session",
+            "agent_chat_message",
+            "agent_chat_event",
+            "agent_chat_approval",
+            "chat_message_dedupe",
+            "runner_force_refresh",
+            "runner_live_state",
+            "machine_session",
+            "dev_machine",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (machine, r1, r2, chat, msg, run, queued, pod) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let active = crate::runner_sessions::guards::NON_TERMINAL_STATUSES[0].value();
+        for sql in [
+            format!("INSERT INTO dev_machine (id) VALUES ('{machine}')"),
+            format!(
+                "INSERT INTO runner (id, dev_machine_id, created_at, revoked_at) VALUES \
+                 ('{r1}', '{machine}', now(), NULL), ('{r2}', '{machine}', now() - interval '1 hour', now())"
+            ),
+            format!("INSERT INTO agent_chat_session (id, runner_id, created_at) VALUES ('{chat}', '{r1}', now())"),
+            format!("INSERT INTO agent_chat_message (id, session_id, seq) VALUES ('{msg}', '{chat}', 1)"),
+            format!("INSERT INTO agent_chat_event (id, session_id, message_id) VALUES (1, '{chat}', '{msg}')"),
+            format!("INSERT INTO agent_chat_approval (id, session_id) VALUES (gen_random_uuid(), '{chat}')"),
+            format!("INSERT INTO chat_message_dedupe (id, session_id) VALUES (1, '{chat}')"),
+            format!("INSERT INTO runner_force_refresh (runner_id, min_rtg) VALUES ('{r1}', 1)"),
+            format!("INSERT INTO runner_live_state (runner_id, usage, updated_at) VALUES ('{r1}', '{{}}', now())"),
+            format!(
+                "INSERT INTO agent_run (id, runner_id, pinned_runner_id, pod_id, status, created_at) VALUES \
+                 ('{run}', '{r1}', NULL, '{pod}', '{active}', now()), \
+                 ('{queued}', NULL, '{r1}', '{pod}', 'queued', now())"
+            ),
+            format!("INSERT INTO machine_session (id, dev_machine_id) VALUES (gen_random_uuid(), '{machine}')"),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let count = |table: &'static str| {
+            let conn = &conn;
+            async move {
+                let row = conn
+                    .query_one(sea_orm::Statement::from_string(
+                        sea_orm::DbBackend::Postgres,
+                        format!("SELECT COUNT(*) AS n FROM {table}"),
+                    ))
+                    .await
+                    .expect("count")
+                    .expect("row");
+                row.try_get::<i64>("", "n").expect("n")
+            }
+        };
+
+        // Revoke S1/S3/S4.
+        revoke::stamp_runner_revoked(&conn, r1, chrono::Utc::now(), "manual")
+            .await
+            .expect("S1");
+        assert_eq!(
+            revoke::lock_active_runs(&conn, r1).await.expect("S3"),
+            vec![(run, Some(pod))]
+        );
+        assert_eq!(
+            revoke::pinned_queued_pod_ids(&conn, r1).await.expect("S4a"),
+            vec![Some(pod)]
+        );
+        revoke::unpin_queued_runs_for_runner(&conn, r1)
+            .await
+            .expect("S4b");
+        assert!(revoke::pinned_queued_pod_ids(&conn, r1)
+            .await
+            .expect("S4a")
+            .is_empty());
+
+        // D2 lock: both runners, newest heartbeat/creation first.
+        let locked: Vec<Uuid> = lock_machine_runners(&conn, machine)
+            .await
+            .expect("D2")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(locked, vec![r1, r2]);
+        assert!(runner_exists(&conn, r1).await.expect("root"));
+        assert!(machine_exists(&conn, machine).await.expect("root"));
+        assert_eq!(
+            machine_runner_ids(&conn, machine).await.expect("ids").len(),
+            2
+        );
+
+        // Runner cascade, in the driver's order.
+        let chats = chat_ids_for_runners(&conn, &[r1]).await.expect("chats");
+        assert_eq!(chats, vec![chat]);
+        let messages = message_ids_for_chats(&conn, &chats)
+            .await
+            .expect("messages");
+        assert_eq!(messages, vec![msg]);
+        delete_chat_events(&conn, &chats).await.expect("events");
+        delete_chat_approvals(&conn, &chats)
+            .await
+            .expect("approvals");
+        delete_chat_dedupes(&conn, &chats).await.expect("dedupes");
+        delete_force_refresh(&conn, &[r1]).await.expect("ffr");
+        delete_live_state(&conn, &[r1]).await.expect("live");
+        null_run_runners(&conn, &[r1]).await.expect("null runner");
+        null_run_pins(&conn, &[r1]).await.expect("null pin");
+        null_event_messages(&conn, &messages)
+            .await
+            .expect("null msg");
+        delete_chat_messages(&conn, &messages)
+            .await
+            .expect("messages");
+        delete_chat_sessions(&conn, &chats).await.expect("sessions");
+        delete_runner_rows(&conn, &[r1]).await.expect("runner");
+        for table in [
+            "agent_chat_event",
+            "agent_chat_approval",
+            "chat_message_dedupe",
+            "runner_force_refresh",
+            "runner_live_state",
+            "agent_chat_message",
+            "agent_chat_session",
+        ] {
+            assert_eq!(count(table).await, 0, "{table}");
+        }
+        assert_eq!(count("runner").await, 1);
+        // The runs survive with their runner link nulled.
+        assert!(revoke::lock_active_runs(&conn, r1)
+            .await
+            .expect("S3")
+            .is_empty());
+        assert_eq!(count("agent_run").await, 2);
+
+        // Machine delete: sessions gone, surviving runners detached, row gone.
+        delete_machine_sessions(&conn, machine)
+            .await
+            .expect("sessions");
+        null_runner_machines(&conn, machine).await.expect("detach");
+        delete_machine_row(&conn, machine).await.expect("row");
+        assert_eq!(count("machine_session").await, 0);
+        assert!(machine_runner_ids(&conn, machine)
+            .await
+            .expect("ids")
+            .is_empty());
+        assert!(!machine_exists(&conn, machine).await.expect("root"));
+        assert!(runner_exists(&conn, r2).await.expect("root"));
     }
 }

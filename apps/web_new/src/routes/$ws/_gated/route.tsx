@@ -135,6 +135,12 @@ const LazyRuntimeSupervisor = React.lazy(() =>
 const LazyUpdateControl = React.lazy(() =>
   import("../../../features/updater/index.js").then((module) => ({ default: module.DesktopUpdateControl }))
 );
+// The desktop About control rides its own lazy chunk too (DESK-028): the
+// web platform has no About capability, so the web initial chain never
+// carries the dialog or its licence rendering.
+const LazyAboutControl = React.lazy(() =>
+  import("../../../features/about/index.js").then((module) => ({ default: module.DesktopAboutControl }))
+);
 // The help menu opens on click only, so it rides its own chunk like the
 // update control; the shell warms that chunk once it is interactive, so
 // the button is ready by the time anyone opens it (SHELL-060, size gate).
@@ -234,7 +240,7 @@ export const Route = createFileRoute("/$ws/_gated")({
             // someone picks a server hit, and the route module is eager
             // (NEWFRONT-871, size gate).
             void import("./searchTarget.js").then((module) => {
-              void navigate(module.resolveSearchTarget(hit, params.ws));
+              void navigate(module.resolveSearchTarget(hit, params.ws, lastParam(matches, "projectId")));
             });
           }}
           onNavigateHref={(href: string) => navigate({ href })}
@@ -528,6 +534,13 @@ function WorkspaceShell({
             updateControl={
               <React.Suspense fallback={null}>
                 <LazyUpdateControl />
+              </React.Suspense>
+            }
+            // The desktop About dialog fills its own sidebar slot beside the
+            // update control; it renders nothing on web (DESK-028).
+            aboutControl={
+              <React.Suspense fallback={null}>
+                <LazyAboutControl />
               </React.Suspense>
             }
             onNavigateHref={handleNavigateHref}

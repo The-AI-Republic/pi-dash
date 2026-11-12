@@ -321,14 +321,14 @@ describe("NotificationDetailHost", () => {
     expect(screen.getByTestId("issue-re-tick")).toBeDisabled();
   });
 
-  it("keeps the peek agent actions inert on a synced work item", async () => {
+  it("enables the agent actions on a synced work item", async () => {
     createAppClient("https://api.test", (async (url: string) =>
       isAccess(url)
         ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
         : response(url, issue({ is_synced: true, agent_ticker: ticker(true) }))) as never);
     renderHost(selection(), vi.fn(), [workspaceRow()]);
-    expect(await screen.findByTestId("issue-run-ai")).toBeDisabled();
-    expect(screen.getByTestId("issue-re-tick")).toBeDisabled();
+    expect(await screen.findByTestId("issue-run-ai")).toBeEnabled();
+    expect(screen.getByTestId("issue-re-tick")).toBeEnabled();
   });
 
   it("renders the actor avatar when the notification carries one", async () => {

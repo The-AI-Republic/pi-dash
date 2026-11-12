@@ -536,9 +536,40 @@ impl Drop for TransportGuard {
     }
 }
 
-/// Map a sqlx failure into the `pr_links` store error.
-fn pr_store_error(context: &str, error: sqlx::Error) -> StoreError {
+/// Unwrap the driver error a SeaORM failure carries, so store-error bytes
+/// stay what sqlx rendered (`{context}: {driver}`), not SeaORM's
+/// `Execution Error: …` wrapper. Non-driver failures stay a protocol
+/// error text (the `read::DbError::from_orm` precedent).
+fn sqlx_err(error: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::{DbErr, RuntimeErr};
+    match error {
+        DbErr::Exec(RuntimeErr::SqlxError(inner))
+        | DbErr::Query(RuntimeErr::SqlxError(inner))
+        | DbErr::Conn(RuntimeErr::SqlxError(inner)) => inner,
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Borrow the driver error, if any (classification guards).
+fn as_sqlx(error: &sea_orm::DbErr) -> Option<&sqlx::Error> {
+    use sea_orm::{DbErr, RuntimeErr};
+    match error {
+        DbErr::Exec(RuntimeErr::SqlxError(inner))
+        | DbErr::Query(RuntimeErr::SqlxError(inner))
+        | DbErr::Conn(RuntimeErr::SqlxError(inner)) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Map a database failure into the `pr_links` store error.
+fn pr_store_error(context: &str, error: sea_orm::DbErr) -> StoreError {
     let _ = context;
+    StoreError(format!("{context}: {}", sqlx_err(error)))
+}
+
+/// Map a row-decode failure into the `pr_links` store error (same bytes
+/// as the query path: `{context}: {driver}`).
+fn pr_map_error(context: &str, error: sqlx::Error) -> StoreError {
     StoreError(format!("{context}: {error}"))
 }
 
@@ -599,12 +630,13 @@ impl PrLinksSurface {
 /// violations carry the payload marker (Python's `IntegrityError` 400);
 /// on MCP every failure keeps the generic store error (surfaced as
 /// `TOOL_ERROR` text).
-fn pr_write_error(surface: PrLinksSurface, context: &str, error: sqlx::Error) -> StoreError {
+fn pr_write_error(surface: PrLinksSurface, context: &str, error: sea_orm::DbErr) -> StoreError {
+    let error = sqlx_err(error);
     match surface.payload_invalid() {
         Some(marker) if is_integrity_error(&error) => {
             StoreError(format!("{marker}: {context}: {error}"))
         }
-        _ => pr_store_error(context, error),
+        _ => StoreError(format!("{context}: {error}")),
     }
 }
 
@@ -635,13 +667,34 @@ impl PoolPrStore {
             .map_err(|error| match error {
                 crate::read::Error::NotFound => StoreError(self.surface.workspace_miss()),
                 crate::read::Error::Db(err) => {
-                    pr_store_error("project workspace", err.into_source())
+                    let source = err.into_source();
+                    StoreError(format!("project workspace: {source}"))
                 }
                 // Unreachable: the lookup never fails mid-row.
                 crate::read::Error::Failed(site) => {
                     StoreError(format!("project workspace: {site}"))
                 }
             })
+    }
+}
+
+/// Map an entity row: the store's shape after the SeaORM conversion.
+fn pr_link_model_row(model: pidash_db::entity::github_pull_request_links::Model) -> PrLinkRow {
+    PrLinkRow {
+        id: model.id,
+        project_id: model.project_id,
+        issue_id: model.issue_id,
+        repo_owner: model.repo_owner,
+        repo_name: model.repo_name,
+        pr_number: i64::from(model.pr_number),
+        url: model.url,
+        title: model.title,
+        state: model.state,
+        merged: model.merged,
+        draft: model.draft,
+        pr_updated_at: model
+            .pr_updated_at
+            .map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
     }
 }
 
@@ -652,59 +705,44 @@ pub fn pr_link_row_from(row: &sqlx::postgres::PgRow) -> Result<PrLinkRow, StoreE
     Ok(PrLinkRow {
         id: row
             .try_get("id")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         project_id: row
             .try_get("project_id")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         issue_id: row
             .try_get("issue_id")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         repo_owner: row
             .try_get("repo_owner")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         repo_name: row
             .try_get("repo_name")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         pr_number: row
             .try_get::<i32, _>("pr_number")
             .map(i64::from)
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         url: row
             .try_get("url")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         title: row
             .try_get("title")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         state: row
             .try_get("state")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         merged: row
             .try_get("merged")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         draft: row
             .try_get("draft")
-            .map_err(|error| pr_store_error("pr link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
         pr_updated_at: row
             .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("pr_updated_at")
             .map(|stamp| {
                 stamp.map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
             })
-            .map_err(|error| pr_store_error("pr link map", error))?,
-    })
-}
-
-fn review_link_row_from(row: &sqlx::postgres::PgRow) -> Result<ReviewLinkRow, StoreError> {
-    use sqlx::Row as _;
-    Ok(ReviewLinkRow {
-        id: row
-            .try_get("id")
-            .map_err(|error| pr_store_error("review link map", error))?,
-        issue_id: row
-            .try_get("issue_id")
-            .map_err(|error| pr_store_error("review link map", error))?,
-        metadata: row
-            .try_get("metadata")
-            .map_err(|error| pr_store_error("review link map", error))?,
+            .map_err(|error| pr_map_error("pr link map", error))?,
     })
 }
 
@@ -714,21 +752,43 @@ impl PrLinksStore for PoolPrStore {
         workspace_slug: &str,
         owner: &str,
     ) -> Result<Option<InstallationRow>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(crate::app_issues::pr_links::INSTALLATION_LOOKUP_SQL)
-                .bind(workspace_slug)
-                .bind(owner)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("installation lookup", error))?;
-        row.map(|row| {
-            use sqlx::Row as _;
-            let id: Uuid = row
-                .try_get("id")
-                .map_err(|error| pr_store_error("installation map", error))?;
-            let installation_id: i64 = row
-                .try_get("installation_id")
-                .map_err(|error| pr_store_error("installation map", error))?;
+        // `INSTALLATION_LOOKUP_SQL`: live installation joined through the
+        // integration to the workspace, case-folded login, newest first.
+        use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+        use sea_orm::sea_query::{Expr, Func};
+        use sea_orm::{
+            ColumnTrait as _, EntityTrait as _, JoinType, QueryFilter as _, QueryOrder as _,
+            QuerySelect as _, RelationTrait as _,
+        };
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<(Uuid, i64)> = github_app_installations::Entity::find()
+            .select_only()
+            .column(github_app_installations::Column::Id)
+            .column(github_app_installations::Column::InstallationId)
+            .join(
+                JoinType::InnerJoin,
+                github_app_installations::Relation::WorkspaceIntegrations.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                workspace_integrations::Relation::Workspaces.def(),
+            )
+            .filter(github_app_installations::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Slug.eq(workspace_slug))
+            .filter(
+                Expr::expr(Func::lower(Expr::col((
+                    github_app_installations::Entity,
+                    github_app_installations::Column::AccountLogin,
+                ))))
+                .eq(Func::lower(Expr::value(owner))),
+            )
+            .order_by_desc(github_app_installations::Column::CreatedAt)
+            .limit(1)
+            .into_tuple::<(Uuid, i64)>()
+            .one(&db)
+            .await
+            .map_err(|error| pr_store_error("installation lookup", error))?;
+        row.map(|(id, installation_id)| {
             Ok(InstallationRow {
                 id,
                 installation_id,
@@ -743,11 +803,24 @@ impl PrLinksStore for PoolPrStore {
         project_id: Uuid,
         workspace_slug: &str,
     ) -> Result<bool, StoreError> {
-        let row: Option<(i32,)> = sqlx::query_as(crate::app_issues::pr_links::ISSUE_EXISTS_SQL)
-            .bind(issue_id)
-            .bind(project_id)
-            .bind(workspace_slug)
-            .fetch_optional(&self.pool)
+        // `ISSUE_EXISTS_SQL`: live issue in the workspace.
+        use pidash_db::entity::{issues, workspaces};
+        use sea_orm::{
+            ColumnTrait as _, EntityTrait as _, JoinType, QueryFilter as _, QuerySelect as _,
+            RelationTrait as _,
+        };
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<Uuid> = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+            .filter(issues::Column::DeletedAt.is_null())
+            .filter(issues::Column::Id.eq(issue_id))
+            .filter(issues::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq(workspace_slug))
+            .limit(1)
+            .into_tuple::<Uuid>()
+            .one(&db)
             .await
             .map_err(|error| pr_store_error("issue exists", error))?;
         Ok(row.is_some())
@@ -764,15 +837,22 @@ impl PrLinksStore for PoolPrStore {
                 "pr_number {number} out of range for integer column"
             ))
         })?;
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(crate::app_issues::pr_links::PR_LINK_LOOKUP_SQL)
-                .bind(owner)
-                .bind(name)
-                .bind(number_i32)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("pr link lookup", error))?;
-        row.map(|row| pr_link_row_from(&row)).transpose()
+        use pidash_db::entity::github_pull_request_links;
+        use sea_orm::{
+            ColumnTrait as _, EntityTrait as _, QueryFilter as _, QueryOrder as _, QuerySelect as _,
+        };
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let model = github_pull_request_links::Entity::find()
+            .filter(github_pull_request_links::Column::DeletedAt.is_null())
+            .filter(github_pull_request_links::Column::RepoOwner.eq(owner))
+            .filter(github_pull_request_links::Column::RepoName.eq(name))
+            .filter(github_pull_request_links::Column::PrNumber.eq(number_i32))
+            .order_by_desc(github_pull_request_links::Column::CreatedAt)
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(|error| pr_store_error("pr link lookup", error))?;
+        Ok(model.map(pr_link_model_row))
     }
 
     async fn review_link_by_pr(
@@ -781,15 +861,28 @@ impl PrLinksStore for PoolPrStore {
         name: &str,
         number: &str,
     ) -> Result<Option<ReviewLinkRow>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(crate::app_issues::pr_links::REVIEW_LINK_LOOKUP_SQL)
-                .bind(owner)
-                .bind(name)
-                .bind(number)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("review link lookup", error))?;
-        row.map(|row| review_link_row_from(&row)).transpose()
+        use pidash_db::entity::git_code_review_links;
+        use sea_orm::{
+            ColumnTrait as _, EntityTrait as _, QueryFilter as _, QueryOrder as _, QuerySelect as _,
+        };
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let model = git_code_review_links::Entity::find()
+            .filter(git_code_review_links::Column::DeletedAt.is_null())
+            .filter(git_code_review_links::Column::Provider.eq("github"))
+            .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+            .filter(git_code_review_links::Column::Namespace.eq(owner))
+            .filter(git_code_review_links::Column::RepoName.eq(name))
+            .filter(git_code_review_links::Column::ExternalIid.eq(number))
+            .order_by_desc(git_code_review_links::Column::CreatedAt)
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(|error| pr_store_error("review link lookup", error))?;
+        Ok(model.map(|model| ReviewLinkRow {
+            id: model.id,
+            issue_id: model.issue_id,
+            metadata: model.metadata,
+        }))
     }
 
     async fn create_pr_link(
@@ -805,26 +898,36 @@ impl PrLinksStore for PoolPrStore {
                 new.pr_number
             ))
         })?;
-        let outcome = sqlx::query(crate::app_issues::pr_links::PR_LINK_INSERT_SQL)
-            .bind(new.id)
-            .bind(now)
-            .bind(now)
-            .bind(actor_id)
-            .bind(new.project_id)
-            .bind(workspace_id)
-            .bind(new.issue_id)
-            .bind(&new.repo_owner)
-            .bind(&new.repo_name)
-            .bind(pr_number)
-            .bind(&new.url)
-            .bind(&new.title)
-            .bind(&new.state)
-            .bind(new.merged)
-            .bind(new.draft)
-            .bind(new.pr_updated_at.as_deref().and_then(parse_snapshot_dt))
-            .execute(&self.pool)
-            .await;
-        match outcome {
+        use pidash_db::entity::github_pull_request_links;
+        use sea_orm::ActiveModelTrait as _;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // `PR_LINK_INSERT_SQL`.
+        let model = github_pull_request_links::ActiveModel {
+            id: sea_orm::Set(new.id),
+            created_at: sea_orm::Set((*now).fixed_offset()),
+            updated_at: sea_orm::Set((*now).fixed_offset()),
+            created_by_id: sea_orm::Set(actor_id),
+            updated_by_id: sea_orm::Set(None),
+            deleted_at: sea_orm::Set(None),
+            project_id: sea_orm::Set(new.project_id),
+            workspace_id: sea_orm::Set(workspace_id),
+            issue_id: sea_orm::Set(new.issue_id),
+            repo_owner: sea_orm::Set(new.repo_owner.clone()),
+            repo_name: sea_orm::Set(new.repo_name.clone()),
+            pr_number: sea_orm::Set(pr_number),
+            url: sea_orm::Set(new.url.clone()),
+            title: sea_orm::Set(new.title.clone()),
+            state: sea_orm::Set(new.state.clone()),
+            merged: sea_orm::Set(new.merged),
+            draft: sea_orm::Set(new.draft),
+            pr_updated_at: sea_orm::Set(
+                new.pr_updated_at
+                    .as_deref()
+                    .and_then(parse_snapshot_dt)
+                    .map(|stamp| stamp.fixed_offset()),
+            ),
+        };
+        match model.insert(&db).await {
             Ok(_) => Ok(CreatePrLinkOutcome::Created(Box::new(PrLinkRow {
                 id: new.id,
                 project_id: new.project_id,
@@ -839,15 +942,12 @@ impl PrLinksStore for PoolPrStore {
                 draft: new.draft,
                 pr_updated_at: new.pr_updated_at.clone(),
             }))),
-            Err(error) if is_unique_violation(&error) => Ok(CreatePrLinkOutcome::Conflict),
+            Err(error) if as_sqlx(&error).is_some_and(is_unique_violation) => {
+                Ok(CreatePrLinkOutcome::Conflict)
+            }
             // MCP has no payload marker: every non-race failure keeps
             // the generic shape (surfaced as `TOOL_ERROR` text).
-            Err(error) => Err(match self.surface.payload_invalid() {
-                Some(marker) if is_integrity_error(&error) => {
-                    StoreError(format!("{marker}: pr link insert: {error}"))
-                }
-                _ => pr_store_error("pr link insert", error),
-            }),
+            Err(error) => Err(pr_write_error(self.surface, "pr link insert", error)),
         }
     }
 
@@ -858,25 +958,42 @@ impl PrLinksStore for PoolPrStore {
         actor_id: Option<Uuid>,
     ) -> Result<ReviewLinkRow, StoreError> {
         let workspace_id = self.workspace_of(&new.project_id).await?;
-        sqlx::query(crate::app_issues::pr_links::REVIEW_LINK_INSERT_SQL)
-            .bind(new.id)
-            .bind(now)
-            .bind(now)
-            .bind(actor_id)
-            .bind(new.project_id)
-            .bind(workspace_id)
-            .bind(new.issue_id)
-            .bind(&new.url)
-            .bind(&new.title)
-            .bind(&new.state)
-            .bind(new.merged)
-            .bind(new.draft)
-            .bind(new.remote_updated_at.as_deref().and_then(parse_snapshot_dt))
-            .bind(&new.metadata)
-            .bind(&new.namespace)
-            .bind(&new.repo_name)
-            .bind(&new.external_iid)
-            .execute(&self.pool)
+        use pidash_db::entity::git_code_review_links;
+        use sea_orm::ActiveModelTrait as _;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // `REVIEW_LINK_INSERT_SQL`.
+        let model = git_code_review_links::ActiveModel {
+            id: sea_orm::Set(new.id),
+            created_at: sea_orm::Set((*now).fixed_offset()),
+            updated_at: sea_orm::Set((*now).fixed_offset()),
+            created_by_id: sea_orm::Set(actor_id),
+            updated_by_id: sea_orm::Set(None),
+            deleted_at: sea_orm::Set(None),
+            project_id: sea_orm::Set(new.project_id),
+            workspace_id: sea_orm::Set(workspace_id),
+            issue_id: sea_orm::Set(new.issue_id),
+            provider: sea_orm::Set("github".to_owned()),
+            host_url: sea_orm::Set("https://github.com".to_owned()),
+            namespace: sea_orm::Set(new.namespace.clone()),
+            repo_name: sea_orm::Set(new.repo_name.clone()),
+            repo_external_id: sea_orm::Set(String::new()),
+            external_id: sea_orm::Set(String::new()),
+            external_iid: sea_orm::Set(new.external_iid.clone()),
+            url: sea_orm::Set(new.url.clone()),
+            title: sea_orm::Set(new.title.clone()),
+            state: sea_orm::Set(new.state.clone()),
+            merged: sea_orm::Set(new.merged),
+            draft: sea_orm::Set(new.draft),
+            remote_updated_at: sea_orm::Set(
+                new.remote_updated_at
+                    .as_deref()
+                    .and_then(parse_snapshot_dt)
+                    .map(|stamp| stamp.fixed_offset()),
+            ),
+            metadata: sea_orm::Set(new.metadata.clone()),
+        };
+        model
+            .insert(&db)
             .await
             .map_err(|error| pr_write_error(self.surface, "review link insert", error))?;
         Ok(ReviewLinkRow {
@@ -894,26 +1011,68 @@ impl PrLinksStore for PoolPrStore {
         actor_id: Option<Uuid>,
     ) -> Result<(), StoreError> {
         let workspace_id = self.workspace_of(&fields.project_id).await?;
-        sqlx::query(crate::app_issues::pr_links::REVIEW_LINK_UPDATE_SQL)
-            .bind(now)
-            .bind(actor_id)
-            .bind(fields.project_id)
-            .bind(workspace_id)
-            .bind(fields.issue_id)
-            .bind(&fields.url)
-            .bind(&fields.title)
-            .bind(&fields.state)
-            .bind(fields.merged)
-            .bind(fields.draft)
-            .bind(
-                fields
-                    .remote_updated_at
-                    .as_deref()
-                    .and_then(parse_snapshot_dt),
+        use pidash_db::entity::git_code_review_links;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // `REVIEW_LINK_UPDATE_SQL`.
+        git_code_review_links::Entity::update_many()
+            .col_expr(
+                git_code_review_links::Column::UpdatedAt,
+                Expr::value((*now).fixed_offset()),
             )
-            .bind(&fields.metadata)
-            .bind(id)
-            .execute(&self.pool)
+            .col_expr(
+                git_code_review_links::Column::UpdatedById,
+                Expr::value(actor_id),
+            )
+            .col_expr(
+                git_code_review_links::Column::ProjectId,
+                Expr::value(fields.project_id),
+            )
+            .col_expr(
+                git_code_review_links::Column::WorkspaceId,
+                Expr::value(workspace_id),
+            )
+            .col_expr(
+                git_code_review_links::Column::IssueId,
+                Expr::value(fields.issue_id),
+            )
+            .col_expr(
+                git_code_review_links::Column::Url,
+                Expr::value(fields.url.clone()),
+            )
+            .col_expr(
+                git_code_review_links::Column::Title,
+                Expr::value(fields.title.clone()),
+            )
+            .col_expr(
+                git_code_review_links::Column::State,
+                Expr::value(fields.state.clone()),
+            )
+            .col_expr(
+                git_code_review_links::Column::Merged,
+                Expr::value(fields.merged),
+            )
+            .col_expr(
+                git_code_review_links::Column::Draft,
+                Expr::value(fields.draft),
+            )
+            .col_expr(
+                git_code_review_links::Column::RemoteUpdatedAt,
+                Expr::value(
+                    fields
+                        .remote_updated_at
+                        .as_deref()
+                        .and_then(parse_snapshot_dt)
+                        .map(|stamp| stamp.fixed_offset()),
+                ),
+            )
+            .col_expr(
+                git_code_review_links::Column::Metadata,
+                Expr::value(fields.metadata.clone()),
+            )
+            .filter(git_code_review_links::Column::Id.eq(id))
+            .exec(&db)
             .await
             .map_err(|error| pr_write_error(self.surface, "review link update", error))?;
         Ok(())
@@ -925,11 +1084,26 @@ impl PrLinksStore for PoolPrStore {
         now: &chrono::DateTime<chrono::Utc>,
         actor_id: Option<Uuid>,
     ) -> Result<(), StoreError> {
-        sqlx::query(crate::app_issues::pr_links::PR_LINK_SOFT_DELETE_SQL)
-            .bind(now)
-            .bind(actor_id)
-            .bind(id)
-            .execute(&self.pool)
+        use pidash_db::entity::github_pull_request_links;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // `PR_LINK_SOFT_DELETE_SQL`.
+        github_pull_request_links::Entity::update_many()
+            .col_expr(
+                github_pull_request_links::Column::DeletedAt,
+                Expr::value((*now).fixed_offset()),
+            )
+            .col_expr(
+                github_pull_request_links::Column::UpdatedAt,
+                Expr::value((*now).fixed_offset()),
+            )
+            .col_expr(
+                github_pull_request_links::Column::UpdatedById,
+                Expr::value(actor_id),
+            )
+            .filter(github_pull_request_links::Column::Id.eq(id))
+            .exec(&db)
             .await
             .map_err(|error| pr_store_error("pr link delete", error))?;
         Ok(())
@@ -941,11 +1115,26 @@ impl PrLinksStore for PoolPrStore {
         now: &chrono::DateTime<chrono::Utc>,
         actor_id: Option<Uuid>,
     ) -> Result<(), StoreError> {
-        sqlx::query(crate::app_issues::pr_links::REVIEW_LINK_SOFT_DELETE_SQL)
-            .bind(now)
-            .bind(actor_id)
-            .bind(id)
-            .execute(&self.pool)
+        use pidash_db::entity::git_code_review_links;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // `REVIEW_LINK_SOFT_DELETE_SQL`.
+        git_code_review_links::Entity::update_many()
+            .col_expr(
+                git_code_review_links::Column::DeletedAt,
+                Expr::value((*now).fixed_offset()),
+            )
+            .col_expr(
+                git_code_review_links::Column::UpdatedAt,
+                Expr::value((*now).fixed_offset()),
+            )
+            .col_expr(
+                git_code_review_links::Column::UpdatedById,
+                Expr::value(actor_id),
+            )
+            .filter(git_code_review_links::Column::Id.eq(id))
+            .exec(&db)
             .await
             .map_err(|error| pr_store_error("review link delete", error))?;
         Ok(())
@@ -963,6 +1152,320 @@ fn parse_snapshot_dt(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- statement shapes (TAIL-1 conversion) ---------------------------------
+
+    #[test]
+    fn installation_lookup_join_shape() {
+        // `INSTALLATION_LOOKUP_SQL`: live installation joined through the
+        // integration to the workspace, case-folded login, newest first.
+        use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+        use sea_orm::sea_query::{Expr, Func};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+            QueryTrait, RelationTrait,
+        };
+        let sql = github_app_installations::Entity::find()
+            .select_only()
+            .column(github_app_installations::Column::Id)
+            .column(github_app_installations::Column::InstallationId)
+            .join(
+                JoinType::InnerJoin,
+                github_app_installations::Relation::WorkspaceIntegrations.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                workspace_integrations::Relation::Workspaces.def(),
+            )
+            .filter(github_app_installations::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Slug.eq("ws"))
+            .filter(
+                Expr::expr(Func::lower(Expr::col((
+                    github_app_installations::Entity,
+                    github_app_installations::Column::AccountLogin,
+                ))))
+                .eq(Func::lower(Expr::val("owner"))),
+            )
+            .order_by_desc(github_app_installations::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(
+                "INNER JOIN \"workspace_integrations\" ON \"github_app_installations\".\"workspace_integration_id\" = \"workspace_integrations\".\"id\""
+            ) && sql.contains(
+                "INNER JOIN \"workspaces\" ON \"workspace_integrations\".\"workspace_id\" = \"workspaces\".\"id\""
+            ) && sql.contains(
+                "LOWER(\"github_app_installations\".\"account_login\") = LOWER('owner')"
+            ) && sql.contains("ORDER BY \"github_app_installations\".\"created_at\" DESC")
+                && sql.contains("LIMIT 1"),
+            "installation lookup shape: {sql}"
+        );
+    }
+
+    #[test]
+    fn issue_exists_join_shape() {
+        // `ISSUE_EXISTS_SQL`: live issue in the workspace.
+        use pidash_db::entity::{issues, workspaces};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QuerySelect, QueryTrait,
+            RelationTrait,
+        };
+        let sql = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+            .filter(issues::Column::DeletedAt.is_null())
+            .filter(issues::Column::Id.eq(Uuid::nil()))
+            .filter(issues::Column::ProjectId.eq(Uuid::nil()))
+            .filter(workspaces::Column::Slug.eq("ws"))
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(
+                "INNER JOIN \"workspaces\" ON \"issues\".\"workspace_id\" = \"workspaces\".\"id\""
+            ) && sql.contains("\"slug\" = 'ws'")
+                && sql.contains("\"deleted_at\" IS NULL")
+                && sql.ends_with("LIMIT 1"),
+            "issue exists shape: {sql}"
+        );
+    }
+
+    #[test]
+    fn review_link_lookup_shape() {
+        // `REVIEW_LINK_LOOKUP_SQL`: github mirror, newest first.
+        use pidash_db::entity::git_code_review_links;
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let sql = git_code_review_links::Entity::find()
+            .filter(git_code_review_links::Column::DeletedAt.is_null())
+            .filter(git_code_review_links::Column::Provider.eq("github"))
+            .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+            .filter(git_code_review_links::Column::Namespace.eq("owner"))
+            .filter(git_code_review_links::Column::RepoName.eq("repo"))
+            .filter(git_code_review_links::Column::ExternalIid.eq("7"))
+            .order_by_desc(git_code_review_links::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"provider\" = 'github'")
+                && sql.contains("\"host_url\" = 'https://github.com'")
+                && sql.contains("ORDER BY \"git_code_review_links\".\"created_at\" DESC"),
+            "review link lookup shape: {sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_links_store_round_trip_live_db() {
+        // Gated like the other live tests: needs a Django-migrated
+        // scratch database (DATABASE_URL).
+        use crate::read::test_support::{pool, seed_world};
+        let Some(pool) = pool().await else { return };
+        let world = seed_world(&pool).await;
+        let store = PoolPrStore::new(pool.clone(), PrLinksSurface::Relations);
+
+        // Chain for `installation_for_account`: integration + api token
+        // + workspace integration + installation (mixed-case login).
+        let integration_id = Uuid::new_v4();
+        let token_id = Uuid::new_v4();
+        let workspace_integration_id = Uuid::new_v4();
+        let installation_id = Uuid::new_v4();
+        // The Django migrate seeds a `github` integration (unique on
+        // provider); reuse it when present, seed otherwise.
+        let existing: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM integrations WHERE provider = 'github'")
+                .fetch_optional(&pool)
+                .await
+                .expect("existing integration");
+        let integration_id = match existing {
+            Some(id) => id,
+            None => {
+                sqlx::query(
+                    "INSERT INTO integrations (id, created_at, updated_at, title, provider, \
+                     network, description, author, webhook_url, webhook_secret, redirect_url, \
+                     metadata, verified) VALUES ($1, now(), now(), 'gh', 'github', 0, '{}', '', \
+                     '', '', '', '{}', false)",
+                )
+                .bind(integration_id)
+                .execute(&pool)
+                .await
+                .expect("seed integration");
+                integration_id
+            }
+        };
+        sqlx::query(
+            "INSERT INTO api_tokens (id, created_at, updated_at, token, label, user_type, \
+             user_id, description, is_active, is_service, allowed_rate_limit) \
+             VALUES ($1, now(), now(), $3, 'l', 1, $2, '', true, false, '1000/day')",
+        )
+        .bind(token_id)
+        .bind(world.user_id)
+        .bind(format!("tok-{}", token_id.simple()))
+        .execute(&pool)
+        .await
+        .expect("seed api token");
+        sqlx::query(
+            "INSERT INTO workspace_integrations (id, created_at, updated_at, metadata, config, \
+             actor_id, api_token_id, integration_id, workspace_id) \
+             VALUES ($1, now(), now(), '{}', '{}', $2, $3, $4, $5)",
+        )
+        .bind(workspace_integration_id)
+        .bind(world.user_id)
+        .bind(token_id)
+        .bind(integration_id)
+        .bind(world.workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed workspace integration");
+        // `installation_id` carries a global unique key; mint fresh.
+        let installation_number: i64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            installation_id.as_bytes().hash(&mut hasher);
+            (hasher.finish() % 1_000_000 + 1).try_into().unwrap()
+        };
+        sqlx::query(
+            "INSERT INTO github_app_installations (id, created_at, updated_at, \
+             installation_id, account_login, account_type, repository_selection, \
+             repository_count, permissions, events, last_check_error, \
+             workspace_integration_id) VALUES ($1, now(), now(), $3, 'AcMe', 'User', 'all', \
+             1, '{}', '{}', '', $2)",
+        )
+        .bind(installation_id)
+        .bind(workspace_integration_id)
+        .bind(installation_number)
+        .execute(&pool)
+        .await
+        .expect("seed installation");
+
+        let hit = store
+            .installation_for_account(&world.workspace_slug, "acme")
+            .await
+            .expect("lookup");
+        assert_eq!(
+            hit.map(|row| (row.id, row.installation_id)),
+            Some((installation_id, installation_number)),
+            "case-folded login matches"
+        );
+        assert!(store
+            .installation_for_account(&world.workspace_slug, "other")
+            .await
+            .expect("miss lookup")
+            .is_none());
+        assert!(store
+            .installation_for_account("no-such-slug", "acme")
+            .await
+            .expect("miss lookup")
+            .is_none());
+
+        assert!(store
+            .issue_exists(world.issue_id, world.project_id, &world.workspace_slug)
+            .await
+            .expect("exists"));
+        assert!(!store
+            .issue_exists(Uuid::new_v4(), world.project_id, &world.workspace_slug)
+            .await
+            .expect("not exists"));
+
+        let now = chrono::Utc::now();
+        let new = NewPrLink {
+            id: Uuid::new_v4(),
+            project_id: world.project_id,
+            issue_id: world.issue_id,
+            repo_owner: "acme".to_owned(),
+            repo_name: "repo".to_owned(),
+            pr_number: 7,
+            url: "https://github.com/acme/repo/pull/7".to_owned(),
+            title: "Add the thing".to_owned(),
+            state: "open".to_owned(),
+            merged: false,
+            draft: true,
+            pr_updated_at: Some("2026-01-02T03:04:05+00:00".to_owned()),
+        };
+        match store.create_pr_link(&new, &now, Some(world.user_id)).await {
+            Ok(CreatePrLinkOutcome::Created(row)) => assert_eq!(row.id, new.id),
+            other => panic!("expected Created, got {other:?}"),
+        }
+        let row = store
+            .pr_link_by_pr("acme", "repo", 7)
+            .await
+            .expect("pr lookup")
+            .expect("pr row");
+        assert_eq!(row.pr_number, 7);
+        assert_eq!(row.title, "Add the thing");
+        assert!(row.draft);
+        assert_eq!(
+            row.pr_updated_at.as_deref(),
+            Some("2026-01-02T03:04:05.000000Z")
+        );
+        match store.create_pr_link(&new, &now, Some(world.user_id)).await {
+            Ok(CreatePrLinkOutcome::Conflict) => {}
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+
+        let mirror = NewReviewLink {
+            id: Uuid::new_v4(),
+            project_id: world.project_id,
+            issue_id: world.issue_id,
+            namespace: "acme".to_owned(),
+            repo_name: "repo".to_owned(),
+            external_iid: "7".to_owned(),
+            url: "https://github.com/acme/repo/pull/7".to_owned(),
+            title: "Add the thing".to_owned(),
+            state: "open".to_owned(),
+            merged: false,
+            draft: true,
+            remote_updated_at: None,
+            metadata: serde_json::json!({"iid": "7"}),
+        };
+        store
+            .create_review_link(&mirror, &now, Some(world.user_id))
+            .await
+            .expect("review insert");
+        let row = store
+            .review_link_by_pr("acme", "repo", "7")
+            .await
+            .expect("review lookup")
+            .expect("review row");
+        assert_eq!(row.metadata, serde_json::json!({"iid": "7"}));
+        let update = ReviewMirrorFields {
+            project_id: world.project_id,
+            issue_id: world.issue_id,
+            url: "https://github.com/acme/repo/pull/7".to_owned(),
+            title: "Add the thing (2)".to_owned(),
+            state: "closed".to_owned(),
+            merged: true,
+            draft: false,
+            remote_updated_at: None,
+            metadata: serde_json::json!({"iid": "7", "done": true}),
+        };
+        store
+            .update_review_link(mirror.id, &update, &now, Some(world.user_id))
+            .await
+            .expect("review update");
+        store
+            .delete_review_link(mirror.id, &now, Some(world.user_id))
+            .await
+            .expect("review delete");
+        assert!(store
+            .review_link_by_pr("acme", "repo", "7")
+            .await
+            .expect("review lookup")
+            .is_none());
+        store
+            .delete_pr_link(new.id, &now, Some(world.user_id))
+            .await
+            .expect("pr delete");
+        assert!(store
+            .pr_link_by_pr("acme", "repo", 7)
+            .await
+            .expect("pr lookup")
+            .is_none());
+    }
 
     // -- github pagination ----------------------------------------------------
 
@@ -1097,8 +1600,10 @@ mod tests {
         }
     }
 
-    fn db_error(code: &'static str) -> sqlx::Error {
-        sqlx::Error::Database(Box::new(FakeDbError { code }))
+    fn db_error(code: &'static str) -> sea_orm::DbErr {
+        sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(
+            Box::new(FakeDbError { code }),
+        )))
     }
 
     #[test]

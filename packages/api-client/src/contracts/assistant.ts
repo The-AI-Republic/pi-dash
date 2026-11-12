@@ -137,12 +137,14 @@ export type AssistantConnectionListItem = z.infer<typeof AssistantConnectionList
  * The connections list: rows plus the managed-model options, the
  * provider sign-in availability, and the hosted-lane availability flag.
  * Older backends predate the lane flag; resolveOpenhubAvailable reads
- * a missing flag as available so they never banner every row.
+ * a missing flag as available so they never banner every row. The
+ * model-labels map is likewise optional: the cloud backend omits it
+ * entirely, and connectionModelFlags defaults a missing map to {}.
  */
 export const AssistantConnectionList = z.object({
   connections: z.array(AssistantConnectionListItem),
   codex_model_options: z.array(z.string()),
-  codex_model_labels: z.record(z.string(), z.string()),
+  codex_model_labels: z.optional(z.record(z.string(), z.string())),
   has_codex_credential: z.boolean(),
   openai_login_available: z.boolean(),
   openhub_model_options: z.array(z.string()),

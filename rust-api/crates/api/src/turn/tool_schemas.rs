@@ -30,7 +30,7 @@ pub struct ToolSchema {
     pub parameters: Value,
 }
 
-/// All 17 local tools in registration order.
+/// All 18 local tools in registration order.
 pub fn all_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
@@ -193,7 +193,10 @@ priority (urgent, high, medium, low, none)."#,
         ToolSchema {
             name: "create_issue",
             description: r#"Create an issue. Requires Member or Admin role. Pass parent_issue_id to
-link it as a sub-issue of another issue in the same project. (Assignees/labels:
+link it as a sub-issue of another issue in the same project. Pass
+assigned_runner (UUID or name) to dedicate the issue to one runner and
+assigned_pod (UUID or name) to set its pod; eligibility follows the
+shared E-code rules and any E-code is returned to the model. (Assignees/labels:
 set them afterwards in the UI — not yet supported by this tool.)"#,
             parameters: json!({
                 "additionalProperties": false,
@@ -227,6 +230,20 @@ set them afterwards in the UI — not yet supported by this tool.)"#,
                             { "type": "null" }
                         ],
                         "default": Value::Null
+                    },
+                    "assigned_runner": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ],
+                        "default": Value::Null
+                    },
+                    "assigned_pod": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ],
+                        "default": Value::Null
                     }
                 },
                 "required": ["project_id", "name"],
@@ -235,11 +252,17 @@ set them afterwards in the UI — not yet supported by this tool.)"#,
         },
         ToolSchema {
             name: "update_issue",
-            description: r#"Update an issue's name, description, state, or priority. Requires write access.
-Changing the state may dispatch a coding run if it moves the issue into a
-delegated/ticking state (same as moving it in the UI). Pass parent_issue_id to
-re-parent the issue (must be another issue in the same project); pass null to
-unlink it from its current parent; omit it to leave the parent unchanged."#,
+            description: r#"Update an issue's name, description, state, priority, parent, pod or
+dedicated runner. Requires write access. Changing the state may dispatch
+a coding run if it moves the issue into a delegated/ticking state (same
+as moving it in the UI). Pass parent_issue_id to re-parent the issue
+(must be another issue in the same project); pass null to unlink it
+from its current parent; omit it to leave the parent unchanged.
+assigned_runner (UUID or name) dedicates the issue to one runner; null
+clears it back to "any runner in the pod". assigned_pod (UUID or name)
+sets the pod; null clears it; a pod change with no runner in the same
+update also clears the dedicated runner (§13.1). Eligibility follows
+the shared E-code rules and any E-code is returned to the model."#,
             parameters: json!({
                 "additionalProperties": false,
                 "properties": {
@@ -273,6 +296,20 @@ unlink it from its current parent; omit it to leave the parent unchanged."#,
                         "default": Value::Null
                     },
                     "parent_issue_id": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ],
+                        "default": "__unset__"
+                    },
+                    "assigned_runner": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ],
+                        "default": "__unset__"
+                    },
+                    "assigned_pod": {
                         "anyOf": [
                             { "type": "string" },
                             { "type": "null" }
@@ -364,6 +401,29 @@ and state. Check ``blocked_by`` states before starting dependent work."#,
             }),
         },
         ToolSchema {
+            name: "list_project_runners",
+            description: r#"List a project's runners the caller can see. With assignable_for (an
+issue id or "new"), each row also carries the eligibility read —
+assignable, not_assignable_code, is_busy, queue_depth (design §7.4).
+Check it before dedicating an issue; do not choose a runner that is
+not assignable."#,
+            parameters: json!({
+                "additionalProperties": false,
+                "properties": {
+                    "project_id": { "type": "string" },
+                    "assignable_for": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ],
+                        "default": Value::Null
+                    }
+                },
+                "required": ["project_id"],
+                "type": "object"
+            }),
+        },
+        ToolSchema {
             name: "list_labels",
             description: "List the labels available in a project.",
             parameters: json!({
@@ -389,7 +449,8 @@ and state. Check ``blocked_by`` states before starting dependent work."#,
         },
         ToolSchema {
             name: "get_run_status",
-            description: "Get the status of coding agent runs for an issue.",
+            description: r#"Get the status of coding agent runs for an issue, including the
+dedicated-runner pin and waiting state of each run."#,
             parameters: json!({
                 "additionalProperties": false,
                 "properties": {
@@ -402,12 +463,25 @@ and state. Check ``blocked_by`` states before starting dependent work."#,
         ToolSchema {
             name: "dispatch_coding_run",
             description: r#"Start a coding agent run on an issue by moving it into a delegated state.
-Requires write access. Identical to dragging the issue into that state in the UI."#,
+Requires write access. Identical to dragging the issue into that state in the UI.
+Pin "pod_once" runs on any runner in the issue's pod for this run only
+instead of the issue's dedicated runner (design §23.3; the issue stays
+dedicated). Dedicated-runner refusal reasons (assigned_runner_offline,
+assigned_runner_paused, assigned_runner_not_owner) and pod_once
+refusals (pod_once_not_allowed, pod_once_not_applicable,
+no_eligible_runner_in_pod) are returned in "reason" unchanged."#,
             parameters: json!({
                 "additionalProperties": false,
                 "properties": {
                     "issue_id": { "type": "string" },
                     "target_state_id": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ],
+                        "default": Value::Null
+                    },
+                    "pin": {
                         "anyOf": [
                             { "type": "string" },
                             { "type": "null" }
@@ -462,8 +536,8 @@ mod tests {
     fn schemas_match_captured_pydantic_ai_output() {
         let captured: Vec<Value> = fixture().as_array().expect("array").clone();
         let ported = all_tool_schemas();
-        assert_eq!(ported.len(), 17, "all 17 local tools");
-        assert_eq!(captured.len(), 17, "fixture holds all 17 tools");
+        assert_eq!(ported.len(), 18, "all 18 local tools");
+        assert_eq!(captured.len(), 18, "fixture holds all 18 tools");
         for schema in &ported {
             let expected = captured
                 .iter()
@@ -508,6 +582,7 @@ mod tests {
                 "list_issue_relations",
                 "list_projects",
                 "list_states",
+                "list_project_runners",
                 "list_labels",
                 "list_project_members",
                 "get_run_status",

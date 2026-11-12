@@ -50,7 +50,10 @@ def _drain_broker():
         return []
     from _harness import broker_probe
 
-    return broker_probe.drain_queue()
+    # Drain to empty: the matrix runs workerless, so every earlier test's
+    # .delay() piles up on the broker and the default 100-message cap
+    # would stop short of this test's job (oldest first).
+    return broker_probe.drain_queue(limit=10000)
 
 
 def _rust_rows(db_conn, task, after_id):
@@ -818,7 +821,7 @@ def test_deleted_project_is_404(clients, seed, db_conn):
     with db_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO projects (%s) VALUES (%s)" % (
-                PROJECT_COLUMNS, ",".join(["%s"] * 30)),
+                PROJECT_COLUMNS, ",".join(["%s"] * 31)),
             _project_row(tpid, _unique("Bulk gone"),
                          f"BG{uuid.uuid4().hex[:6]}", seed["ws"], True),
         )

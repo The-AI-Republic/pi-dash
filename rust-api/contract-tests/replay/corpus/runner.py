@@ -50,6 +50,10 @@ ENROLL2 = "apd_en_rp823daemon2000000000000002"
 AID1 = "11111111-2222-3333-4444-555555555555"
 R2_TICKET = "rp823r2tick00000000000000000000001"
 
+# Built-in engine credential flow (runner_engine_credentials session).
+EC_RAW = "ec_rp823engine0000000000000000000001"
+MT_ENGINE = "mt_rp823engine000000000000000000001"
+
 # Distinct static idempotency keys (same bytes both sides, so the
 # dedupe rows match; K_DUP is sent twice to prove the duplicate leg).
 def _keys():
@@ -212,6 +216,61 @@ def _chat(sid: str, leaf: str) -> str:
     return f"{DAEMON}/chat/sessions/{sid}/{leaf}/"
 
 
+def _seed_engine(conn) -> None:
+    import uuid
+
+    from _harness.seed import Seeder, SeedTracker
+    from _harness.tokens import fingerprint as _fp
+    from _harness.tokens import hash_token as _hash
+
+    from .space import _ConnDb
+
+    adapter = _ConnDb(conn)
+    secret = os.environ["SECRET_KEY"]
+    seeder = Seeder(adapter, SeedTracker(adapter), tag="RP823", secret_key=secret)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM workspaces WHERE slug = 'replay-ws'")
+        ws_id = str(cur.fetchone()[0])
+        cur.execute("SELECT id FROM users WHERE email = 'replay-admin@example.com'")
+        admin_id = str(cur.fetchone()[0])
+    machine = seeder.create_dev_machine(admin_id, host_label="rp-meng")
+    seeder.create_machine_token(
+        admin_id, ws_id, MT_ENGINE, host_label="rp-meng",
+        dev_machine_id=machine["id"],
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO engine_credential
+               (id, user_id, dev_machine_id, token_hash, fingerprint,
+                created_at, expires_at, revoked_reason)
+               VALUES (%s,%s,%s,%s,%s, now(), now() + interval '14 days', '')""",
+            (
+                str(uuid.uuid4()),
+                admin_id,
+                machine["id"],
+                _hash(EC_RAW, secret),
+                _fp(EC_RAW),
+            ),
+        )
+        cur.execute(
+            "UPDATE dev_machine SET engine_sign_in_state = 'active',"
+            " engine_credential_expires_at = now() + interval '14 days'"
+            " WHERE id = %s",
+            (machine["id"],),
+        )
+
+
+def _setup_engine(world, config) -> dict:
+    import psycopg
+
+    out = {}
+    with psycopg.connect(config.django_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM dev_machine WHERE host_label = 'rp-meng'")
+        out["meng"] = str(cur.fetchone()[0])
+    return out
+
+
+
 SESSIONS = (
     Session(
         name="runner_daemon_lifecycle",
@@ -252,7 +311,10 @@ SESSIONS = (
             "machine_session": ["last_seen_at", "revoked_at"],
             # Evidence: mt_ auth stamps last_used_at on every
             # authenticated request (request 16).
-            "machine_token": ["last_used_at"],
+            # expires_at is minted as now+60d on both backends
+            # (runner/models.py save + Rust tokens mint, PIDESKAPP-122);
+            # the replay sees two instants ms apart (NEWPIDASH-58).
+            "machine_token": ["last_used_at", "expires_at"],
             # Evidence: the complete transition stamps ended_at +
             # terminal_*_at with now() per backend (request 19).
             "agent_run": [
@@ -795,4 +857,73 @@ SESSIONS = (
             ),
         ),
     ),
+    Session(
+        name="runner_engine_credentials",
+        domain="runner",
+        source=(
+            "runner/test_engine_credential.py (model-token, revoke) + "
+            "Django's test_engine_identity.py (model-token, revoke cases)"
+        ),
+        auth_users=("admin",),
+        static_context={"mt": MT_ENGINE, "ec": EC_RAW},
+        seed=_seed_engine,
+        setup=_setup_engine,
+        setup_keys=("meng",),
+        timestamp_columns={
+            # Evidence: the model-token stamps the credential's
+            # last_used_at per backend; the revoke stamps revoked_at
+            # the same way. The seed's expires_at (+14d, static) and
+            # token_hash/fingerprint (deterministic) compare as-is.
+            "engine_credential": ["last_used_at", "revoked_at"],
+            # Evidence: mt_ auth stamps last_used_at AND renews the
+            # 60-day idle expiry (expires_at = now + 60d) on every
+            # authenticated use, per backend (runner/authentication.py
+            # touch_machine_token; Rust domain/tokens.rs mirrors it).
+            # The revoke call's mt_ auth sees the two instants ms apart
+            # (NEWPIDASH-168), same evidence as runner_daemon_lifecycle.
+            "machine_token": ["last_used_at", "expires_at"],
+        },
+        db_cell_refs=[
+            ("engine_credential", "dev_machine_id", "dev_machine", ""),
+        ],
+        requests=(
+            # The instance kill switch is off in the replay env, so a
+            # live engine credential reaches the engine-disabled 409
+            # (with pause side-effect) instead of a gateway mint.
+            Request(
+                "POST", f"{DAEMON}/engine/model-token/",
+                route=f"{DAEMON}/engine/model-token/",
+                json={},
+                headers={"Authorization": "Bearer {ec}"},
+                auth="anonymous", expect_status=409,
+            ),
+            # The daemon revoke signs the machine's engine out
+            # (idempotent, 200 with the payload).
+            Request(
+                "POST", f"{DAEMON}/engine/credential/revoke/",
+                route=f"{DAEMON}/engine/credential/revoke/",
+                json={},
+                headers={"Authorization": "Bearer {mt}"},
+                auth="anonymous", expect_status=200,
+            ),
+            Request(
+                "POST", f"{DAEMON}/engine/credential/revoke/",
+                route=f"{DAEMON}/engine/credential/revoke/",
+                json={},
+                headers={"Authorization": "Bearer {mt}"},
+                auth="anonymous", expect_status=200,
+            ),
+            # The revoked credential is dead now (401, sign-in
+            # required); no live credential remains, so the dead-key
+            # pause applies (already stamped by the revoke).
+            Request(
+                "POST", f"{DAEMON}/engine/model-token/",
+                route=f"{DAEMON}/engine/model-token/",
+                json={},
+                headers={"Authorization": "Bearer {ec}"},
+                auth="anonymous", expect_status=401,
+            ),
+        ),
+    ),
 )
+
