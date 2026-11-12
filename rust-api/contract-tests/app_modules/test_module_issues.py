@@ -12,7 +12,10 @@ URL names the kwargs module_id/issue_id but DRF's default
 retrieve/update look for `pk`. DELETE is a custom action and works.
 """
 
+import datetime
 import json
+
+import pytest
 
 from .conftest import module_url, modules_url
 
@@ -173,3 +176,457 @@ def test_module_issues_state_id_in_filter(
     )
     assert r.status_code == 200, r.text
     assert {row["id"] for row in r.json()["results"]} == {issue_a, issue_b}
+
+
+# --- Spreadsheet sort keys (PIDASHCONV-1421) -------------------------------
+#
+# The web app sorts the module spreadsheet by these `order_by` values; the
+# Rust port 500d on all five while Django 200-sorts them. The world below
+# pins every behavior the fix relies on: `0`-form counts with a
+# `-created_at` tiebreak, estimate keys with `NULLS LAST`, and the
+# cycle-name traversal as Django's plain join — no `deleted_at` guard on
+# the bridge or the cycle (the deleted Zulu bridge and the deleted AAA
+# cycle both sort), fanning multi-linked issues out into identical rows.
+
+def _sweep_sort_world(seed, workspace_id):
+    """Delete sort-world side rows `Seed.cleanup` does not sweep."""
+    with seed.conn.cursor() as cur:
+        for table in ("issue_links", "file_assets", "cycle_issues"):
+            cur.execute(
+                f"DELETE FROM {table} WHERE workspace_id = %s", (workspace_id,)
+            )
+        cur.execute(
+            "UPDATE issues SET estimate_point_id = NULL, parent_id = NULL"
+            " WHERE workspace_id = %s",
+            (workspace_id,),
+        )
+        for table in ("cycles", "estimate_points", "estimates"):
+            cur.execute(
+                f"DELETE FROM {table} WHERE workspace_id = %s", (workspace_id,)
+            )
+
+
+@pytest.fixture()
+def sort_world(seed, tenant_a, project_a, module_a):
+    """Five module issues with staggered `created_at` (A oldest, E newest):
+
+    - A: 2 links, 1 attachment, 2 kids; estimate 5; live Beta link.
+    - B: 0 links, 3 attachments, 0 kids; estimate 1; live Alpha link plus
+      a *deleted* Zulu bridge (which still sorts).
+    - C: 1 link, 0 attachments, 1 kid; no estimate; no cycle.
+    - D: 0/0/0; no estimate; two live links (Alpha, Gamma).
+    - E: 0/0/0; estimate 9; live Beta link plus a live bridge to the
+      *deleted* AAA cycle (which still sorts).
+    """
+    ws_id = tenant_a["workspace"]["id"]
+    user_id = tenant_a["user"]["id"]
+    state_a = seed.state(project_a, ws_id, name="Todo", group="unstarted")
+    state_b = seed.state(project_a, ws_id, name="Doing", group="started")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    estimate = seed._insert(
+        "estimates", name="CT1421 scale", description="", type="categories",
+        last_used=False, workspace_id=ws_id, project_id=project_a,
+        created_at=now, updated_at=now,
+    )
+    points = {}
+    for key in (1, 5, 9):
+        points[key] = seed._insert(
+            "estimate_points", estimate_id=estimate, key=key, description="",
+            value=str(key), workspace_id=ws_id, project_id=project_a,
+            created_at=now, updated_at=now,
+        )
+    cycles = {}
+    for name in ("Alpha", "Beta", "Gamma", "Zulu"):
+        cycles[name] = seed._insert(
+            "cycles", workspace_id=ws_id, project_id=project_a, name=name,
+            description="", owned_by_id=user_id, view_props="{}",
+            sort_order=65535, progress_snapshot="{}", logo_props="{}",
+            timezone="UTC", version=1, created_at=now, updated_at=now,
+        )
+    cycles["AAA"] = seed._insert(
+        "cycles", workspace_id=ws_id, project_id=project_a, name="AAA-gone",
+        description="", owned_by_id=user_id, view_props="{}",
+        sort_order=65535, progress_snapshot="{}", logo_props="{}",
+        timezone="UTC", version=1, created_at=now, updated_at=now,
+        deleted_at=now,
+    )
+
+    def _add(name, state, links, attachments, kids, estimate_key, bridges, idx):
+        issue_id = seed.issue(ws_id, project_a, name=name, state_id=state)
+        seed.module_issue(ws_id, project_a, module_a, issue_id)
+        for num in range(links):
+            seed._insert(
+                "issue_links", title=f"l{num}",
+                url=f"https://example.com/{name}/{num}",
+                issue_id=issue_id, project_id=project_a, workspace_id=ws_id,
+                metadata="{}", created_at=now, updated_at=now,
+            )
+        for num in range(attachments):
+            seed._insert(
+                "file_assets", attributes="{}", asset=f"{name}-att{num}",
+                entity_type="ISSUE_ATTACHMENT", is_deleted=False,
+                is_archived=False, is_uploaded=True, issue_id=issue_id,
+                project_id=project_a, workspace_id=ws_id, size=10,
+                created_at=now, updated_at=now,
+            )
+        for num in range(kids):
+            kid = seed.issue(ws_id, project_a, name=f"{name}-kid{num}")
+            with seed.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE issues SET parent_id = %s WHERE id = %s",
+                    (issue_id, kid),
+                )
+        if estimate_key is not None:
+            with seed.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE issues SET estimate_point_id = %s WHERE id = %s",
+                    (points[estimate_key], issue_id),
+                )
+        for cycle_name, deleted in bridges:
+            seed._insert(
+                "cycle_issues", workspace_id=ws_id, project_id=project_a,
+                cycle_id=cycles[cycle_name], issue_id=issue_id,
+                created_at=now, updated_at=now,
+                deleted_at=now if deleted else None,
+            )
+        stamp = now + datetime.timedelta(seconds=idx * 30)
+        with seed.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_at = %s, updated_at = %s WHERE id = %s",
+                (stamp, stamp, issue_id),
+            )
+        return issue_id
+
+    ids = {
+        "sort-A": _add("sort-A", state_a, 2, 1, 2, 5, [("Beta", False)], 0),
+        "sort-B": _add("sort-B", state_a, 0, 3, 0, 1,
+                       [("Alpha", False), ("Zulu", True)], 1),
+        "sort-C": _add("sort-C", state_b, 1, 0, 1, None, [], 2),
+        "sort-D": _add("sort-D", state_b, 0, 0, 0, None,
+                       [("Alpha", False), ("Gamma", False)], 3),
+        "sort-E": _add("sort-E", state_a, 0, 0, 0, 9,
+                       [("Beta", False), ("AAA", False)], 4),
+    }
+    try:
+        yield {
+            "ids": ids,
+            "state_a": state_a,
+            "state_b": state_b,
+            "cycles": cycles,
+        }
+    finally:
+        _sweep_sort_world(seed, ws_id)
+
+
+# Django's flat id order per key (names stand in for ids): counts render
+# `0` and break ties by `-created_at`; estimates and cycle names sort
+# `NULLS LAST`; the cycle traversal fans out (8 rows for 5 issues).
+FLAT_SORT_ORDERS = {
+    "link_count": ["sort-E", "sort-D", "sort-B", "sort-C", "sort-A"],
+    "-link_count": ["sort-A", "sort-C", "sort-E", "sort-D", "sort-B"],
+    "attachment_count": ["sort-E", "sort-D", "sort-C", "sort-A", "sort-B"],
+    "-attachment_count": ["sort-B", "sort-A", "sort-E", "sort-D", "sort-C"],
+    "sub_issues_count": ["sort-E", "sort-D", "sort-B", "sort-C", "sort-A"],
+    "-sub_issues_count": ["sort-A", "sort-C", "sort-E", "sort-D", "sort-B"],
+    "estimate_point__key": ["sort-B", "sort-A", "sort-E", "sort-D", "sort-C"],
+    "-estimate_point__key": ["sort-E", "sort-A", "sort-B", "sort-D", "sort-C"],
+    "issue_cycle__cycle__name": [
+        "sort-E", "sort-D", "sort-B", "sort-E",
+        "sort-A", "sort-D", "sort-B", "sort-C",
+    ],
+    "-issue_cycle__cycle__name": [
+        "sort-B", "sort-D", "sort-E", "sort-A",
+        "sort-D", "sort-B", "sort-E", "sort-C",
+    ],
+}
+
+
+def test_sort_keys_flat(api, tenant_a, project_a, auth_a, module_a, sort_world):
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    for order_by, expected in FLAT_SORT_ORDERS.items():
+        r = api.get(url, headers=auth_a, params={"order_by": order_by})
+        assert r.status_code == 200, (order_by, r.text)
+        body = r.json()
+        assert [row["name"] for row in body["results"]] == expected, order_by
+        assert body["count"] == len(expected), order_by
+        # Flat totals stay distinct-issue counts even when rows fan out.
+        assert body["total_count"] == 5, order_by
+        assert body["total_results"] == 5, order_by
+    # The count annotations render `0`, never `NULL`, on this list.
+    r = api.get(url, headers=auth_a, params={"order_by": "link_count"})
+    got = {row["name"]: row["link_count"] for row in r.json()["results"]}
+    assert got == {
+        "sort-A": 2, "sort-B": 0, "sort-C": 1, "sort-D": 0, "sort-E": 0,
+    }
+
+
+def _group_names(results, member):
+    """Name order of the group bucket holding `member`."""
+    for bucket in results.values():
+        names = [row["name"] for row in bucket["results"]]
+        if member in names:
+            return names
+    raise AssertionError(f"{member} not grouped")
+
+
+def test_sort_keys_grouped(api, tenant_a, project_a, auth_a, module_a, sort_world):
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    for order_by, expected in FLAT_SORT_ORDERS.items():
+        r = api.get(
+            url, headers=auth_a,
+            params={"order_by": order_by, "group_by": "state_id"},
+        )
+        assert r.status_code == 200, (order_by, r.text)
+        body = r.json()
+        buckets = body["results"]
+        assert len(buckets) == 2, (order_by, sorted(buckets))
+        # Buckets keep the global order; per-group totals stay distinct.
+        state_a_names = _group_names(buckets, "sort-A")
+        state_b_names = _group_names(buckets, "sort-C")
+        assert sorted(state_a_names) == sorted(
+            n for n in expected if n in ("sort-A", "sort-B", "sort-E")
+        ), order_by
+        assert sorted(state_b_names) == sorted(
+            n for n in expected if n in ("sort-C", "sort-D")
+        ), order_by
+        assert [n for n in expected if n in state_a_names] == state_a_names, order_by
+        assert [n for n in expected if n in state_b_names] == state_b_names, order_by
+        totals = sorted(b["total_results"] for b in buckets.values())
+        assert totals == [2, 3], (order_by, totals)
+        # Grouped totals count the joined rows, fan-out included.
+        assert body["count"] == len(expected), order_by
+        assert body["total_count"] == len(expected), order_by
+        assert body["total_results"] == len(expected), order_by
+
+
+def test_sort_keys_sub_grouped(api, tenant_a, project_a, auth_a, module_a, sort_world):
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    for order_by, expected in FLAT_SORT_ORDERS.items():
+        r = api.get(
+            url, headers=auth_a,
+            params={
+                "order_by": order_by,
+                "group_by": "state_id",
+                "sub_group_by": "priority",
+            },
+        )
+        assert r.status_code == 200, (order_by, r.text)
+        body = r.json()
+        buckets = body["results"]
+        assert len(buckets) == 2, (order_by, sorted(buckets))
+        # Every issue has priority `none`: one cell per group, same rows.
+        for bucket in buckets.values():
+            cells = bucket["results"]
+            assert sorted(cells) == ["none"], (order_by, sorted(cells))
+        flat: list[str] = []
+        for bucket in buckets.values():
+            for cell in bucket["results"].values():
+                flat.extend(row["name"] for row in cell["results"])
+        assert sorted(flat) == sorted(expected), order_by
+        assert body["count"] == len(expected), order_by
+        assert body["total_count"] == len(expected), order_by
+
+
+def test_sort_keys_filtered_cycle_sort(
+    api, tenant_a, project_a, auth_a, module_a, sort_world
+):
+    # A cycle filter lends its bridge join to the traversal (Django reuses
+    # it, scope included): B's deleted Zulu bridge and D's Gamma bridge do
+    # not fan out here.
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    filters = json.dumps(
+        {"and": [{"cycle_id__in": sort_world["cycles"]["Alpha"]}]}
+    )
+    for order_by in ("issue_cycle__cycle__name", "-issue_cycle__cycle__name"):
+        r = api.get(
+            url, headers=auth_a,
+            params={"order_by": order_by, "filters": filters},
+        )
+        assert r.status_code == 200, (order_by, r.text)
+        body = r.json()
+        assert [row["name"] for row in body["results"]] == [
+            "sort-D", "sort-B",
+        ], order_by
+        assert body["count"] == 2, order_by
+        assert body["total_count"] == 2, order_by
+
+
+def test_sort_keys_unknown_stays_server_error(
+    api, tenant_a, project_a, auth_a, module_a, sort_world
+):
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    r = api.get(url, headers=auth_a, params={"order_by": "no_such_key"})
+    assert r.status_code == 500, r.text
+    assert r.json() == SERVER_ERROR
+
+
+def test_default_order_is_created_at_ascending(
+    api, seed, tenant_a, project_a, auth_a, module_a
+):
+    # PIDASHCONV-1422: with no order_by the module list defaults to
+    # `created_at` ascending (module/issue.py:112), unlike the cycle and
+    # project lists which default to `-created_at`. The Rust port used the
+    # shared `-created_at` default and returned newest-first.
+    ws_id = tenant_a["workspace"]["id"]
+    old_id = seed.issue(ws_id, project_a, name="Mod order OLD")
+    new_id = seed.issue(ws_id, project_a, name="Mod order NEW")
+    seed.module_issue(ws_id, project_a, module_a, old_id)
+    seed.module_issue(ws_id, project_a, module_a, new_id)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_at = %s, updated_at = %s WHERE id = %s",
+            (
+                datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+                old_id,
+            ),
+        )
+        cur.execute(
+            "UPDATE issues SET created_at = %s, updated_at = %s WHERE id = %s",
+            (
+                datetime.datetime(2025, 6, 1, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2025, 6, 1, tzinfo=datetime.timezone.utc),
+                new_id,
+            ),
+        )
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    r = api.get(url, headers=auth_a)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_count"] == 2, body
+    assert [row["id"] for row in body["results"]] == [old_id, new_id], body
+    r = api.get(url, headers=auth_a, params={"group_by": "priority"})
+    assert r.status_code == 200, r.text
+    buckets = r.json()["results"]
+    assert [row["id"] for row in buckets["none"]["results"]] == [
+        old_id, new_id,
+    ], sorted(buckets)
+
+
+def test_grouped_m2m_none_bucket_keeps_relation_less_issues(
+    api, seed, tenant_a, project_a, auth_a, module_a
+):
+    """NEWPIDASH-151: grouping the module list by an m2m key keeps
+    issues with no relation row under the "None" bucket.
+
+    Django does LEFT OUTER JOIN + alias.deleted_at IS NULL (GROUP_FILTER_MAPPER
+    in utils/grouper.py:41-49), so linkless issues survive with the NULL group
+    key. The Rust module handler forced INNER JOIN, dropping every unlabeled /
+    unassigned issue from buckets, total_count and total_results. Fixed to
+    LEFT JOIN + quoted guard, matching list_engine (NEWPIDASH-131) and the
+    cycle handler.
+
+    Fails on Rust before the fix (labels__id total_count 3 with no None bucket,
+    assignees__id 2, sub-grouped 3); passes after. Distinct-count totals follow
+    the NEWPIDASH-132 precedent — Django's assignees__id total_count counts
+    fanned rows (5 for 4 issues when A has 2 assignees), while the new system
+    counts distinct issues (4). This test uses one label/assignee per issue so
+    both backends agree at 4, pinning the bucket contents; the count precedent
+    is documented here rather than forced into a cross-backend equality.
+    """
+    ws_id = tenant_a["workspace"]["id"]
+    user_a = tenant_a["user"]["id"]
+    # Second user as assignee U2 (tenant_b would be cross-workspace)
+    user_b_id = seed.user()["id"]
+    # Make user_b a member of the workspace+project so the group list includes it
+    seed.project_member(project_a, ws_id, user_b_id, role=20)
+
+    state_backlog = seed.state(project_a, ws_id, name="NEWPIDASH-151 Todo", group="unstarted")
+
+    label_alpha = seed.label(ws_id, project_a, name="NEWPIDASH-151 alpha")
+    label_beta = seed.label(ws_id, project_a, name="NEWPIDASH-151 beta")
+
+    # A: alpha+beta labels, U1+U2 assignees would fan out; use singletons to keep
+    # total_count parity in this pinning test (see docstring).
+    issue_A = seed.issue(ws_id, project_a, name="NEWPIDASH-151 A", state_id=state_backlog)
+    issue_B = seed.issue(ws_id, project_a, name="NEWPIDASH-151 B", state_id=state_backlog)
+    issue_C = seed.issue(ws_id, project_a, name="NEWPIDASH-151 C", state_id=state_backlog)
+    issue_D = seed.issue(ws_id, project_a, name="NEWPIDASH-151 D", state_id=state_backlog)
+
+    for iid in (issue_A, issue_B, issue_C, issue_D):
+        seed.module_issue(ws_id, project_a, module_a, iid)
+
+    # A: alpha, U1
+    seed.issue_label(ws_id, project_a, issue_A, label_alpha)
+    seed.issue_assignee(ws_id, project_a, issue_A, user_a)
+    # B: alpha, U1 (second occupant for alpha/U1)
+    seed.issue_label(ws_id, project_a, issue_B, label_alpha)
+    seed.issue_assignee(ws_id, project_a, issue_B, user_a)
+    # C: no label, no assignee — the None case for both
+    # D: beta, U2
+    seed.issue_label(ws_id, project_a, issue_D, label_beta)
+    seed.issue_assignee(ws_id, project_a, issue_D, user_b_id)
+
+    url = _module_issues_url(tenant_a, project_a, module_a)
+
+    # --- labels__id ---
+    r = api.get(url, headers=auth_a, params={"group_by": "labels__id", "order_by": "-created_at"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grouped_by"] == "labels__id"
+    # Distinct count (4 issues) — Django and new system agree here (no fan-out)
+    assert body["total_count"] == 4, body
+    assert body["total_results"] == 4, body
+    groups = body["results"]
+    # Keys are stringified UUIDs and "None"
+    assert label_alpha in groups, f"alpha missing: {sorted(groups)}"
+    assert label_beta in groups, f"beta missing: {sorted(groups)}"
+    assert "None" in groups, f"None bucket missing: {sorted(groups)}"
+    none_ids = {row["id"] for row in groups["None"]["results"]}
+    assert none_ids == {issue_C}, f"None labels {none_ids}"
+    assert groups["None"]["total_results"] == 1
+    # alpha holds A,B
+    alpha_ids = {row["id"] for row in groups[label_alpha]["results"]}
+    assert alpha_ids == {issue_A, issue_B}
+    assert groups[label_alpha]["total_results"] == 2
+    beta_ids = {row["id"] for row in groups[label_beta]["results"]}
+    assert beta_ids == {issue_D}
+    assert groups[label_beta]["total_results"] == 1
+    for row in groups["None"]["results"]:
+        assert row["label_ids"] == []
+        assert row["labels__id"] is None
+
+    # --- assignees__id ---
+    r = api.get(url, headers=auth_a, params={"group_by": "assignees__id", "order_by": "-created_at"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grouped_by"] == "assignees__id"
+    assert body["total_count"] == 4, body
+    assert body["total_results"] == 4, body
+    groups = body["results"]
+    assert user_a in groups, f"U1 missing: {sorted(groups)}"
+    assert user_b_id in groups, f"U2 missing: {sorted(groups)}"
+    assert "None" in groups, f"None bucket missing assignees: {sorted(groups)}"
+    none_ids = {row["id"] for row in groups["None"]["results"]}
+    assert none_ids == {issue_C}
+    assert groups["None"]["total_results"] == 1
+    u1_ids = {row["id"] for row in groups[user_a]["results"]}
+    assert u1_ids == {issue_A, issue_B}
+    u2_ids = {row["id"] for row in groups[user_b_id]["results"]}
+    assert u2_ids == {issue_D}
+    for row in groups["None"]["results"]:
+        assert row["assignee_ids"] == []
+        assert row["assignees__id"] is None
+
+    # --- state_id + labels__id sub-group ---
+    r = api.get(
+        url,
+        headers=auth_a,
+        params={"group_by": "state_id", "sub_group_by": "labels__id", "order_by": "-created_at"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grouped_by"] == "state_id"
+    assert body["sub_grouped_by"] == "labels__id"
+    assert body["total_count"] == 4, body
+    # results structure: {state_id: {"results": {label_id_or_None: {"results": [...], "total_results": n}}, "total_results": n}}
+    state_bucket = body["results"][state_backlog]
+    sub = state_bucket["results"]
+    assert "None" in sub, f"None sub-bucket missing: {sorted(sub)}"
+    none_ids = {row["id"] for row in sub["None"]["results"]}
+    assert none_ids == {issue_C}
+    assert sub["None"]["total_results"] == 1
+    assert label_alpha in sub
+    assert {row["id"] for row in sub[label_alpha]["results"]} == {issue_A, issue_B}
+    assert label_beta in sub
+    assert {row["id"] for row in sub[label_beta]["results"]} == {issue_D}

@@ -71,9 +71,11 @@
 //! endpoint reads `get_or_create(user=request.user, ...)`
 //! (`base.py:846-855`). Guests pass the gate on these routes but still
 //! see only their own rows; the handler port preserves those filters.
-//! No `created_by` filter exists anywhere in the module views —
-//! `created_by=` appears only as a write attribute on
-//! `ModuleIssue` creation (`issue.py:223,263`).
+//! Since NEWFRONT-334 the module-issue list also scopes guests without
+//! `guest_view_all_features` to `created_by=request.user` (`issue.py:127-141`,
+//! same issue-list rule as the cycle-issue list); `created_by=` elsewhere
+//! appears only as a write attribute on `ModuleIssue` creation
+//! (`issue.py:239,279`).
 //!
 //! Throttles (verified, not ported): no D-28 view declares
 //! `throttle_classes`, `throttle_scope`, or any `throttle` reference —
@@ -204,9 +206,9 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
-        source: "base.py:395 (ModuleViewSet.retrieve)",
+        source: "base.py:395 (ModuleViewSet.retrieve; NEWFRONT-334 adds GUEST)",
     },
     // PUT quirk: no custom update, IsAuthenticated only.
     RouteGate {
@@ -235,15 +237,15 @@ pub static GATES: &[RouteGate] = &[
         gate: Gate::Project {
             roles: ADMIN_MEMBER,
         },
-        source: "issue.py:248 (ModuleIssueViewSet.create_issue_modules)",
+        source: "issue.py:264 (ModuleIssueViewSet.create_issue_modules)",
     },
     RouteGate {
         method: "GET",
         path: "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
-        source: "issue.py:95 (ModuleIssueViewSet.list)",
+        source: "issue.py:96 (ModuleIssueViewSet.list; NEWFRONT-334 adds GUEST)",
     },
     RouteGate {
         method: "POST",
@@ -251,7 +253,7 @@ pub static GATES: &[RouteGate] = &[
         gate: Gate::Project {
             roles: ADMIN_MEMBER,
         },
-        source: "issue.py:209 (ModuleIssueViewSet.create_module_issues)",
+        source: "issue.py:225 (ModuleIssueViewSet.create_module_issues)",
     },
     // Undecorated ModelViewSet defaults on the module-issue detail route.
     RouteGate {
@@ -278,7 +280,7 @@ pub static GATES: &[RouteGate] = &[
         gate: Gate::Project {
             roles: ADMIN_MEMBER,
         },
-        source: "issue.py:317 (ModuleIssueViewSet.destroy)",
+        source: "issue.py:333 (ModuleIssueViewSet.destroy)",
     },
     RouteGate {
         method: "GET",
@@ -652,7 +654,7 @@ mod tests {
             "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
             true,
             true,
-            false,
+            true,
         ),
         (
             "PATCH",
@@ -666,7 +668,7 @@ mod tests {
             "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/",
             true,
             true,
-            false,
+            true,
         ),
         (
             "POST",

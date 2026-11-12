@@ -75,71 +75,121 @@
 //!   `handle_exception` branch).
 //! * `expand=<unmapped field>` overwrites that field with `null`
 //!   (`getattr(instance, f"{expand}_id", None)`, `serializers/base.py`).
-//! * Non-ASCII names slugify differently: Django `slugify` folds NFKD → ASCII
-//!   (`db/models/state.py`, via `State.save`), while
-//!   [`state_model::slugify_name`] keeps non-ASCII alphanumerics
-//!   (`char::is_alphanumeric`). ASCII names are byte-exact; non-ASCII names
-//!   diverge. The slug helper lives in the models layer (PIDASHCONV-352,
-//!   read-only for port agents), so this stays a documented divergence.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
-
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State as AxumState};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono_tz::Tz;
 use serde_json::Value;
 use uuid::Uuid;
 
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect};
+
 use pidash_auth::permissions::is_safe_method;
 use pidash_auth::permissions::project as perm_project;
 use pidash_auth::permissions::workspace as perm_workspace;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
+use pidash_db::entity::{
+    api_tokens, dev_machine, file_assets, issues, machine_token, project_members, projects, states,
+    users, workspace_members, workspaces,
+};
 use pidash_db::v1_projects::models::state as state_model;
 use pidash_db::v1_projects::queries_stateest as state_q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_services::v1_projects::ser_workflow as ser;
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::perms::{decide, gate_for, V1ProjectsGate, V1Route, CLASS_DENIAL_BODY};
+use crate::license::AssetUrl;
 use crate::paginator::{self, Cursor, PageResponse};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::json_ok;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    is_active: bool,
+    expired_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: Uuid,
+}
 
 /// One `machine_token` auth lookup row: user, workspace, dev-machine, revocation.
-type MachineTokenLookup = Option<(
-    Uuid,
-    Uuid,
-    Option<Uuid>,
-    Option<chrono::DateTime<chrono::Utc>>,
-)>;
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookup {
+    user_id: Uuid,
+    workspace_id: Uuid,
+    dev_machine_id: Option<Uuid>,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// One project lite row for `expand=project` (direct columns + cover asset FK).
-type ProjectLiteLookup = Option<(
-    Uuid,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<serde_json::Value>,
-    Option<String>,
-    Option<String>,
-    bool,
-    Option<Uuid>,
-)>;
+#[derive(Debug, FromQueryResult)]
+struct ProjectLiteLookup {
+    id: Uuid,
+    identifier: Option<String>,
+    name: Option<String>,
+    cover_image: Option<String>,
+    icon_prop: Option<serde_json::Value>,
+    emoji: Option<String>,
+    description: Option<String>,
+    is_default: bool,
+    cover_image_asset_id: Option<Uuid>,
+}
+
 /// One user lite row for `expand=created_by/updated_by` (+ avatar asset FK).
-type UserLiteLookup = Option<(
-    Uuid,
-    String,
-    String,
-    Option<String>,
-    String,
-    String,
-    Option<Uuid>,
-)>;
-/// One `file_assets` row for `asset_url` rendering.
-type AssetLookup = Option<(String, Option<Uuid>, Option<Uuid>, Option<Uuid>)>;
+#[derive(Debug, FromQueryResult)]
+struct UserLiteLookup {
+    id: Uuid,
+    first_name: String,
+    last_name: String,
+    email: Option<String>,
+    avatar: String,
+    display_name: String,
+    avatar_asset_id: Option<Uuid>,
+}
+
+/// One `file_assets` row for [`file_asset_url`]: `entity_type` is nullable
+/// (`db/models/asset.py:54`), so a NULL row must decode — never 500.
+#[derive(Debug, FromQueryResult)]
+struct AssetLookup {
+    entity_type: Option<String>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    issue_id: Option<Uuid>,
+}
+
+/// One `workspaces` row for `expand=workspace` and the `file_asset_url`
+/// workspace-slug lookup (direct columns only).
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceLiteLookup {
+    id: Uuid,
+    name: String,
+    slug: String,
+}
+
+/// One project-membership row joined to its project: the membership role
+/// plus the project's `members_can_edit_states` flag (`can_mutate_states`).
+#[derive(Debug, FromQueryResult)]
+struct StateMutationLookup {
+    role: i16,
+    members_can_edit_states: bool,
+}
+
+/// SeaORM over the request pool (a wrapper, no I/O).
+fn orm(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -281,8 +331,6 @@ pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`views/base.py:134-137`).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic branch (`views/base.py:156-160`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler failure with its exact status + body, mirroring the `handle_exception`
 /// matrix plus the DRF denials these views inherit.
@@ -301,6 +349,9 @@ enum HandlerError {
     ProjectNotFound,
     /// 400, `{"detail": ...}` (`ParseError`: bad per_page/cursor/JSON).
     BadDetail(String),
+    /// 415, DRF `select_parser` (`{"detail": ...}`): the state writes read
+    /// `request.data` (PIDASHCONV-1391).
+    UnsupportedMediaType(String),
     /// 400, serializer `errors` dict (already rendered).
     FieldErrors(String),
     /// 400, view-inline `{"error": ...}` bodies.
@@ -328,6 +379,10 @@ impl HandlerError {
             ),
             HandlerError::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            HandlerError::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             HandlerError::FieldErrors(body) | HandlerError::Conflict(body) => {
@@ -368,15 +423,6 @@ impl IntoResponse for HandlerError {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes (DRF `JSONRenderer`, compact).
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 // ---------------------------------------------------------------------------
@@ -440,13 +486,25 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identi
     // `deleted_at IS NULL` is the `SoftDeletionManager` scope
     // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
     // rows, so a soft-deleted token 403s instead of authenticating.
-    let row: Option<(Uuid, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(r#"SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#)
-            .bind(raw)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-    let Some((user_id, is_active, expired_at)) = row else {
+    let row = api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::UserId,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+        ])
+        .filter(api_tokens::Column::Token.eq(raw))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let Some(ApiTokenLookup {
+        user_id,
+        is_active,
+        expired_at,
+    }) = row
+    else {
         return Err(HandlerError::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -460,11 +518,12 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identi
         .map_err(|_| HandlerError::InvalidToken)?;
     // `api_token.save(update_fields=["last_used"])`: operational failures 500
     // through the generic branch, like Python.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = now() WHERE token = $1"#)
-        .bind(raw)
-        .execute(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+        &pidash_db::pool::sea_orm_connection(pool),
+        raw,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
 }
 
@@ -477,61 +536,81 @@ async fn authenticate_machine_token(
 ) -> Result<Identity, HandlerError> {
     let secret = state.settings().secret_key.clone();
     let presented_hash = token_kernel::hash_token(raw, secret.as_bytes());
-    let row: MachineTokenLookup = sqlx::query_as(
-        r#"SELECT mt.user_id, mt.workspace_id, mt.dev_machine_id, mt.revoked_at
-           FROM machine_token mt WHERE mt.token_hash = $1"#,
-    )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let Some((user_id, workspace_id, dev_machine_id, revoked_at)) = row else {
+    let row = machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::DevMachineId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
+        ])
+        .filter(machine_token::Column::TokenHash.eq(presented_hash.clone()))
+        .into_model::<MachineTokenLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let Some(MachineTokenLookup {
+        user_id,
+        workspace_id,
+        dev_machine_id,
+        revoked_at,
+        expires_at,
+    }) = row
+    else {
         return Err(HandlerError::InvalidToken);
     };
     let dev_revoked = match dev_machine_id {
         None => false,
         Some(dm) => {
-            let rev: Option<chrono::DateTime<chrono::Utc>> =
-                sqlx::query_scalar(r#"SELECT revoked_at FROM dev_machine WHERE id = $1"#)
-                    .bind(dm)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| HandlerError::ServerError)?
-                    .flatten();
-            rev.is_some()
+            let machine = dev_machine::Entity::find_by_id(dm)
+                .one(&orm(pool))
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+            machine.and_then(|m| m.revoked_at).is_some()
         }
     };
     let kernel_row = token_kernel::MachineTokenRow {
         token_hash: presented_hash.clone(),
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked,
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
-    token_kernel::validate_machine_token_static(Some(&kernel_row), &presented_hash)
-        .map_err(|_| HandlerError::InvalidToken)?;
+    token_kernel::validate_machine_token_static(
+        Some(&kernel_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| HandlerError::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: any active membership row.
     // A non-member is revoked first, then denied (`core/permissions.py:28-36`).
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    if member.is_none() {
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = now() WHERE token_hash = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-        return Err(HandlerError::InvalidToken);
-    }
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = now() WHERE token_hash = $1"#)
-        .bind(&presented_hash)
-        .execute(pool)
+    let member: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| HandlerError::ServerError)?;
+    if member.is_none() {
+        pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+        return Err(HandlerError::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
 }
 
@@ -540,14 +619,16 @@ async fn authenticate_machine_token(
 /// normally (see `authenticate_api_token`). The timezone string is returned
 /// raw; parsing happens after the gate in [`authorize`].
 async fn load_identity(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Identity, HandlerError> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT user_timezone FROM users WHERE id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let row: Option<Option<String>> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(user_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     match row {
-        Some((timezone,)) => {
+        Some(timezone) => {
             // The token loggers stamp this id on the `process_logs`
             // payload (Django reads `request.user` post-view;
             // PIDASHCONV-937).
@@ -618,16 +699,25 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| row.0).ok_or(HandlerError::ProjectNotFound)
+    let row: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            projects::Entity::belongs_to(workspaces::Entity)
+                .from(projects::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    row.ok_or(HandlerError::ProjectNotFound)
 }
 
 /// Fetch the `ProjectStateEntityPermission` facts and decide
@@ -647,18 +737,26 @@ async fn resolve_state_gate(
     let scope = TenantScope::new(WorkspaceId::from(slug));
     // Active project membership on this project (soft-deleted rows excluded,
     // like every other `ProjectMember.objects` read). `role` is `smallint`.
-    let membership: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(actor_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    let membership: Option<i16> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Entity::belongs_to(workspaces::Entity)
+                .from(project_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::MemberId.eq(actor_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     let project_facts = perm_project::ProjectFacts {
         workspace: WorkspaceId::from(slug),
         project_id: ProjectId::from(project_id.to_string()),
@@ -682,35 +780,64 @@ async fn resolve_state_gate(
             is_workspace_admin: false,
         }
     } else {
-        let row: Option<(i16, bool)> = sqlx::query_as(
-            r#"SELECT pm.role, p.members_can_edit_states
-               FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id
-               JOIN projects p ON p.id = pm.project_id
-               WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-               AND pm.is_active AND pm.deleted_at IS NULL"#,
-        )
-        .bind(slug)
-        .bind(project_id)
-        .bind(actor_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+        let row = project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Role)
+            .column_as(
+                projects::Column::MembersCanEditStates,
+                "members_can_edit_states",
+            )
+            .join(
+                JoinType::InnerJoin,
+                project_members::Entity::belongs_to(workspaces::Entity)
+                    .from(project_members::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                project_members::Entity::belongs_to(projects::Entity)
+                    .from(project_members::Column::ProjectId)
+                    .to(projects::Column::Id)
+                    .into(),
+            )
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(project_members::Column::ProjectId.eq(project_id))
+            .filter(project_members::Column::MemberId.eq(actor_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_model::<StateMutationLookup>()
+            .one(&orm(pool))
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
         let (role, flag) = match row {
-            Some((role, flag)) => (Some(i32::from(role)), flag),
+            Some(StateMutationLookup {
+                role,
+                members_can_edit_states: flag,
+            }) => (Some(i32::from(role)), flag),
             None => (None, false),
         };
-        let ws_admin: Option<(i32,)> = sqlx::query_as(
-            r#"SELECT 1 FROM workspace_members wm
-               JOIN workspaces w ON w.id = wm.workspace_id
-               WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-               AND wm.is_active AND wm.deleted_at IS NULL"#,
-        )
-        .bind(slug)
-        .bind(actor_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+        let ws_admin: Option<Uuid> = workspace_members::Entity::find()
+            .select_only()
+            .column(workspace_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                workspace_members::Entity::belongs_to(workspaces::Entity)
+                    .from(workspace_members::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+            )
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(workspace_members::Column::MemberId.eq(actor_id))
+            .filter(workspace_members::Column::Role.eq(20_i16))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&orm(pool))
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
         perm_project::StateMutationFacts {
             authenticated: true,
             project_role: role,
@@ -749,24 +876,7 @@ async fn resolve_state_gate(
 // Query params, `fields` / `expand`, rendering
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (mirrors `app_issues::OneOrMany`: axum's
-/// `Query` backend does not coerce repeats, so callers read last-wins like
-/// Django's `QueryDict.get`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = HashMap<String, OneOrMany>;
-
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 /// `BaseAPIView.fields` / `.expand` (`views/base.py:203-211`): comma-split,
 /// empties dropped, `None` when empty.
@@ -784,37 +894,6 @@ fn csv_param(raw: Option<String>) -> Option<Vec<String>> {
     }
 }
 
-/// All `StateSerializer` wire fields, in live-DRF order (probed 2026-09-30 against
-/// Django 4.2.30: declared `id`, the time/soft-delete columns, the plain model
-/// fields in definition order, then the four FKs — `created_by`, `updated_by`,
-/// `project`, `workspace` — last).
-///
-/// NOTE: this differs from
-/// [`pidash_services::v1_projects::ser_workflow::StateView`], which documents
-/// "declared `id`, then model definition order" (foundation, PIDASHCONV-351,
-/// read-only here). The order below is what Django actually emits; rendering
-/// lives in this module, so the port follows the wire, not the doc.
-const STATE_FIELDS: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "deleted_at",
-    "name",
-    "description",
-    "color",
-    "slug",
-    "sequence",
-    "group",
-    "is_triage",
-    "default",
-    "external_source",
-    "external_id",
-    "created_by",
-    "updated_by",
-    "project",
-    "workspace",
-];
-
 /// Expansion map applicable to states (`serializers/base.py:53-94`):
 /// `project` → `ProjectLiteSerializer`, `workspace` → `WorkspaceLiteSerializer`,
 /// `created_by` / `updated_by` → `UserLiteSerializer`.
@@ -825,75 +904,6 @@ fn expand_lite_kind(name: &str) -> Option<&'static str> {
         "created_by" | "updated_by" => Some("user"),
         _ => None,
     }
-}
-
-/// One rendered state object as an ordered map, before `fields`/`expand`.
-#[allow(clippy::too_many_arguments)]
-fn state_base_map(
-    id: &str,
-    created_at: &str,
-    updated_at: &str,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    deleted_at: Option<String>,
-    project: &str,
-    workspace: &str,
-    name: &str,
-    description: &str,
-    color: &str,
-    slug: &str,
-    sequence: f64,
-    group: &str,
-    is_triage: bool,
-    default: bool,
-    external_source: Option<&str>,
-    external_id: Option<&str>,
-) -> serde_json::Map<String, Value> {
-    let mut map = serde_json::Map::with_capacity(STATE_FIELDS.len());
-    let opt = |v: Option<String>| v.map(Value::String).unwrap_or(Value::Null);
-    map.insert("id".to_owned(), Value::String(id.to_owned()));
-    map.insert(
-        "created_at".to_owned(),
-        Value::String(created_at.to_owned()),
-    );
-    map.insert(
-        "updated_at".to_owned(),
-        Value::String(updated_at.to_owned()),
-    );
-    map.insert("deleted_at".to_owned(), opt(deleted_at));
-    map.insert("name".to_owned(), Value::String(name.to_owned()));
-    map.insert(
-        "description".to_owned(),
-        Value::String(description.to_owned()),
-    );
-    map.insert("color".to_owned(), Value::String(color.to_owned()));
-    map.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    map.insert(
-        "sequence".to_owned(),
-        serde_json::Number::from_f64(sequence)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-    );
-    map.insert("group".to_owned(), Value::String(group.to_owned()));
-    map.insert("is_triage".to_owned(), Value::Bool(is_triage));
-    map.insert("default".to_owned(), Value::Bool(default));
-    map.insert(
-        "external_source".to_owned(),
-        external_source
-            .map(|v| Value::String(v.to_owned()))
-            .unwrap_or(Value::Null),
-    );
-    map.insert(
-        "external_id".to_owned(),
-        external_id
-            .map(|v| Value::String(v.to_owned()))
-            .unwrap_or(Value::Null),
-    );
-    map.insert("created_by".to_owned(), opt(created_by));
-    map.insert("updated_by".to_owned(), opt(updated_by));
-    map.insert("project".to_owned(), Value::String(project.to_owned()));
-    map.insert("workspace".to_owned(), Value::String(workspace.to_owned()));
-    map
 }
 
 /// Render one state row (`StateSerializer.to_representation`, `state.py:11-41`):
@@ -915,7 +925,7 @@ async fn render_state(
         .deleted_at
         .as_ref()
         .map(|dt| crate::serializer::render_datetime_in(dt, tz));
-    let mut map = state_base_map(
+    let mut map = ser::state_base_map(
         &row.id.to_string(),
         &created_at,
         &updated_at,
@@ -984,16 +994,25 @@ async fn render_state(
 /// `Meta.fields` list order (probed: `id, identifier, name, cover_image, icon_prop,
 /// emoji, description, is_default, cover_image_url`).
 async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value, HandlerError> {
-    let row: ProjectLiteLookup = sqlx::query_as(
-        r#"SELECT id, identifier, name, cover_image, icon_prop, emoji, description,
-                  is_default, cover_image_asset_id
-           FROM projects WHERE id = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let Some((
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::IconProp,
+            projects::Column::Emoji,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+            projects::Column::CoverImageAssetId,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_model::<ProjectLiteLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let Some(ProjectLiteLookup {
         id,
         identifier,
         name,
@@ -1002,17 +1021,18 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
         emoji,
         description,
         is_default,
-        cover_asset,
-    )) = row
+        cover_image_asset_id: cover_asset,
+    }) = row
     else {
         return Ok(Value::Null);
     };
-    // `cover_image_url` (`db/models/project.py:176-184`): the asset URL when a
-    // cover asset exists (even when that URL is null); else the raw value when
-    // truthy; else null. A dangling asset FK raises (`DoesNotExist` → 404).
+    // `cover_image_url` (`db/models/project.py:176-185`): the asset URL when a
+    // cover asset exists — used verbatim, so an unmapped entity type renders
+    // null and a NULL-workspace attachment/description omits the key — else
+    // the raw value when truthy; else null.
     let cover_url = match cover_asset {
-        Some(aid) => asset_url_for(pool, aid).await?,
-        None => cover_image.clone().filter(|raw| !raw.is_empty()),
+        Some(aid) => file_asset_url(pool, &aid).await?,
+        None => AssetUrl::Present(cover_image.clone().filter(|raw| !raw.is_empty())),
     };
     let mut map = serde_json::Map::with_capacity(9);
     map.insert("id".to_owned(), Value::String(id.to_string()));
@@ -1038,24 +1058,34 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
         description.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("is_default".to_owned(), Value::Bool(is_default));
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
-    );
+    // DRF `SkipField`: a read-only field whose source raises a plain
+    // `AttributeError` leaves its key out of the response entirely.
+    if let AssetUrl::Present(url) = cover_url {
+        map.insert(
+            "cover_image_url".to_owned(),
+            url.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
     Ok(Value::Object(map))
 }
 
 /// `WorkspaceLiteSerializer` (`serializers/workspace.py:10-21`): wire order is the
 /// `Meta.fields` list order (probed: `name, slug, id`).
 async fn expand_workspace(pool: &sqlx::PgPool, workspace_id: &Uuid) -> Result<Value, HandlerError> {
-    let row: Option<(Uuid, String, String)> =
-        sqlx::query_as(r#"SELECT id, name, slug FROM workspaces WHERE id = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let row = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+        ])
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .into_model::<WorkspaceLiteLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     match row {
-        Some((id, name, slug)) => {
+        Some(WorkspaceLiteLookup { id, name, slug }) => {
             let mut map = serde_json::Map::with_capacity(3);
             map.insert("name".to_owned(), Value::String(name));
             map.insert("slug".to_owned(), Value::String(slug));
@@ -1070,23 +1100,42 @@ async fn expand_workspace(pool: &sqlx::PgPool, workspace_id: &Uuid) -> Result<Va
 /// the model fields in `Meta.fields` order (`first_name`, `last_name`, `email`,
 /// `avatar`, `avatar_url`, `display_name` — the duplicated `email` collapses).
 async fn expand_user(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Value, HandlerError> {
-    let row: UserLiteLookup = sqlx::query_as(
-        r#"SELECT id, first_name, last_name, email, avatar, display_name, avatar_asset_id
-           FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let Some((id, first, last, email, avatar, display, avatar_asset)) = row else {
+    let row = users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Email,
+            users::Column::Avatar,
+            users::Column::DisplayName,
+            users::Column::AvatarAssetId,
+        ])
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model::<UserLiteLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let Some(UserLiteLookup {
+        id,
+        first_name: first,
+        last_name: last,
+        email,
+        avatar,
+        display_name: display,
+        avatar_asset_id: avatar_asset,
+    }) = row
+    else {
         return Ok(Value::Null);
     };
     // `avatar_url` (`db/models/user.py:142-151`): the asset URL when an avatar
-    // asset exists (even when null); else the raw value when truthy; else null.
+    // asset exists — used verbatim, so an unmapped entity type renders null
+    // and a NULL-workspace attachment/description omits the key — else the
+    // raw value when truthy; else null.
     let avatar_url = match avatar_asset {
-        Some(aid) => asset_url_for(pool, aid).await?,
-        None if !avatar.is_empty() => Some(avatar.clone()),
-        None => None,
+        Some(aid) => file_asset_url(pool, &aid).await?,
+        None if !avatar.is_empty() => AssetUrl::Present(Some(avatar.clone())),
+        None => AssetUrl::Present(None),
     };
     let mut map = serde_json::Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(id.to_string()));
@@ -1097,73 +1146,70 @@ async fn expand_user(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Value, Handl
         email.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("avatar".to_owned(), Value::String(avatar));
-    map.insert(
-        "avatar_url".to_owned(),
-        avatar_url.map(Value::String).unwrap_or(Value::Null),
-    );
+    // DRF `SkipField`: a read-only field whose source raises a plain
+    // `AttributeError` leaves its key out of the response entirely.
+    if let AssetUrl::Present(url) = avatar_url {
+        map.insert(
+            "avatar_url".to_owned(),
+            url.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
     map.insert("display_name".to_owned(), Value::String(display));
     Ok(Value::Object(map))
 }
 
-/// Shared `avatar_url` / `cover_image_url` rendering (`db/models/user.py:142-151`,
-/// `db/models/project.py:176-184` via `Asset.asset_url`, `db/models/asset.py:80-99`).
-/// A dangling asset FK raises `DoesNotExist`, which `handle_exception` maps to
-/// the 404 branch — hence [`HandlerError::NotFound`] here.
-async fn asset_url_for(
-    pool: &sqlx::PgPool,
-    asset_id: Uuid,
-) -> Result<Option<String>, HandlerError> {
-    let row: AssetLookup = sqlx::query_as(
-        r#"SELECT entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
-        return Err(HandlerError::NotFound);
+/// `FileAsset.asset_url` for one asset row, resolved unscoped (the forward-FK
+/// descriptor reads through `_base_manager`). The entity-type map lives once,
+/// in [`crate::license::file_asset_url`]: `Present(Some(url))` renders the
+/// URL, `Present(None)` renders JSON null (a NULL/unmapped `entity_type`, or
+/// a dangling asset FK — the descriptor's `RelatedObjectDoesNotExist` is
+/// caught as `ObjectDoesNotExist` by DRF's module-level `get_attribute` and
+/// reads as null), and `Skip` drops the key — the plain `AttributeError`
+/// from `None.slug` on an attachment/description asset with a NULL
+/// workspace, which DRF's `Field.get_attribute` (`fields.py:445-451`) turns
+/// into `SkipField` for a read-only field.
+async fn file_asset_url(pool: &sqlx::PgPool, asset_id: &Uuid) -> Result<AssetUrl, HandlerError> {
+    let row = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .into_model::<AssetLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let Some(AssetLookup {
+        entity_type,
+        workspace_id,
+        project_id,
+        issue_id,
+    }) = row
+    else {
+        return Ok(AssetUrl::Present(None));
     };
-    match entity_type.as_str() {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
-        }
-        "ISSUE_ATTACHMENT" => {
-            let slug: Option<(String,)> = match workspace_id {
-                Some(ws) => sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-                    .bind(ws)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| HandlerError::ServerError)?,
-                None => None,
-            };
-            match (slug, project_id, issue_id) {
-                (Some((slug,)), Some(pid), Some(iid)) => Ok(Some(format!(
-                    "/api/assets/v2/workspaces/{slug}/projects/{pid}/issues/{iid}/attachments/{asset_id}/"
-                ))),
-                _ => Ok(None),
-            }
-        }
-        "ISSUE_DESCRIPTION"
-        | "COMMENT_DESCRIPTION"
-        | "PAGE_DESCRIPTION"
-        | "DRAFT_ISSUE_DESCRIPTION" => {
-            let slug: Option<(String,)> = match workspace_id {
-                Some(ws) => sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-                    .bind(ws)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| HandlerError::ServerError)?,
-                None => None,
-            };
-            match (slug, project_id) {
-                (Some((slug,)), Some(pid)) => Ok(Some(format!(
-                    "/api/assets/v2/workspaces/{slug}/projects/{pid}/{asset_id}/"
-                ))),
-                _ => Ok(None),
-            }
-        }
-        _ => Ok(None),
-    }
+    let workspace_slug: Option<String> = match workspace_id {
+        Some(ws) => workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(ws))
+            .into_tuple()
+            .one(&orm(pool))
+            .await
+            .map_err(|_| HandlerError::ServerError)?,
+        None => None,
+    };
+    Ok(crate::license::file_asset_url(
+        asset_id,
+        entity_type.as_deref(),
+        workspace_id.as_ref(),
+        project_id.as_ref(),
+        issue_id.as_ref(),
+        workspace_slug.as_deref(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,14 +1235,46 @@ fn drf_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Parse the request body the way DRF's parsers do for these views: an empty
-/// body is empty data; otherwise JSON (malformed → 400 `{"detail": ...}`);
-/// a non-object JSON value answers 400 `non_field_errors`.
-fn read_object_body(body: Bytes) -> Result<serde_json::Map<String, Value>, HandlerError> {
-    if body.is_empty() {
-        return Ok(serde_json::Map::new());
+/// State write-path body spec: no list fields; blank `sequence`/`group`/
+/// `is_triage`/`default` form values behave as absent (all verified live).
+/// `description`/`external_*` keep `''` (`allow_blank`, stored verbatim).
+const STATE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["sequence", "group", "is_triage", "default"],
+    };
+
+/// Content-negotiated state write body (PIDASHCONV-1391): empty bodies are
+/// `{}`, form/multipart arrives as the HTML-input map (last value wins,
+/// blank optionals skipped per [`STATE_BODY_SPEC`]), JSON keeps the existing
+/// serde + `JSON parse error` mapping over the decoded text, and a media type
+/// no DRF parser accepts (or a missing `Content-Type` with a body) is the 415.
+///
+/// Multipart *file* parts are dropped: no state field is a file field, so a
+/// text-only multipart request is the whole named surface (same convention as
+/// PIDASHCONV-1149).
+fn parse_write_body(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<serde_json::Map<String, Value>, HandlerError> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, &STATE_BODY_SPEC) {
+        Err(BodyError::UnsupportedMediaType(detail)) => {
+            Err(HandlerError::UnsupportedMediaType(detail))
+        }
+        Err(BodyError::ParseDetail(detail)) => Err(HandlerError::BadDetail(detail)),
+        Err(BodyError::ServerError) => Err(HandlerError::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok(serde_json::Map::new()),
+        Ok(NegotiatedBody::JsonText { text, .. }) => read_json_object(text.as_bytes()),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(map),
     }
-    let value: Value = serde_json::from_slice(&body)
+}
+
+/// Parse decoded JSON source text the way DRF's parsers do for these views:
+/// malformed → 400 `{"detail": ...}`; a non-object JSON value answers 400
+/// `non_field_errors`.
+fn read_json_object(body: &[u8]) -> Result<serde_json::Map<String, Value>, HandlerError> {
+    let value: Value = serde_json::from_slice(body)
         .map_err(|e| HandlerError::BadDetail(format!("JSON parse error - {e}")))?;
     match value {
         Value::Object(map) => Ok(map),
@@ -1663,7 +1741,12 @@ fn validate_state_input(
         })
     } else {
         // Error order is serializer field order (DRF `errors` dict).
-        let order = |name: &str| STATE_FIELDS.iter().position(|f| *f == name).unwrap_or(99);
+        let order = |name: &str| {
+            ser::STATE_FIELDS
+                .iter()
+                .position(|f| *f == name)
+                .unwrap_or(99)
+        };
         errors.sort_by_key(|(name, _)| order(name));
         Err(errors)
     }
@@ -1779,7 +1862,7 @@ async fn list_states_inner(
     let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
     let cursor = Cursor::from_string(&cursor_raw).map_err(page_denial)?;
 
-    let mut rows = state_q::fetch_state_list(&pool, slug, gate.project_id, gate.actor.id)
+    let mut rows = state_q::fetch_state_list(&orm(&pool), slug, gate.project_id, gate.actor.id)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // `Meta.ordering = ("sequence",)`: ascending, nulls last (never null here).
@@ -1868,7 +1951,7 @@ async fn create_state_inner(
         "POST",
     )
     .await?;
-    let raw = read_object_body(body)?;
+    let raw = parse_write_body(headers, &body)?;
     // Field validation first: DRF never calls `validate()` after field errors,
     // so the default-flip stays dormant on this path.
     let input = validate_state_input(&raw, false)
@@ -1925,7 +2008,6 @@ async fn create_state_inner(
             None => state_model::DEFAULT_SEQUENCE,
         },
     };
-    let id = Uuid::new_v4();
     let slug_value = state_model::slugify_name(&name);
     let description = input.description.clone().unwrap_or_default();
     let is_triage = input.is_triage.unwrap_or(state_model::DEFAULT_IS_TRIAGE);
@@ -1933,32 +2015,29 @@ async fn create_state_inner(
     // Each external field saves independently (missing or explicit null → null).
     let external_source = input.external_source.clone().flatten();
     let external_id = input.external_id.clone().flatten();
-    let insert = sqlx::query(
-        r#"INSERT INTO states
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, name, description, color, slug, sequence,
-            "group", is_triage, "default", external_source, external_id)
-           VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
+    let insert = pidash_services::domain::projects::states::create(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        &pidash_services::domain::projects::states::NewState {
+            project_id: gate.project_id,
+            workspace_id,
+            name: &name,
+            description: &description,
+            color: &color,
+            slug: &slug_value,
+            sequence,
+            group: &group,
+            is_triage,
+            default,
+            external_source: external_source.as_deref(),
+            external_id: external_id.as_deref(),
+            created_by: gate.actor.id,
+            updated_by: None,
+            now,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.actor.id)
-    .bind(Option::<Uuid>::None)
-    .bind(gate.project_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(&description)
-    .bind(&color)
-    .bind(&slug_value)
-    .bind(sequence)
-    .bind(&group)
-    .bind(is_triage)
-    .bind(default)
-    .bind(&external_source)
-    .bind(&external_id);
-    match insert.execute(&pool).await {
-        Ok(_) => {}
+    .await;
+    let id = match insert {
+        Ok(id) => id,
         Err(e) if is_unique_violation(&e) => {
             // Name clash: echo the surviving row's id; a lookup miss 500s
             // (Python `AttributeError` on `None.id` → generic branch). The lookup
@@ -1977,7 +2056,7 @@ async fn create_state_inner(
             )));
         }
         Err(_) => return Err(HandlerError::ServerError),
-    }
+    };
     let created = state_model::State {
         id,
         created_at: now,
@@ -2014,13 +2093,14 @@ fn micros_now() -> chrono::DateTime<chrono::Utc> {
 
 /// The default-flip side effect (`serializers/state.py:21-22`): clear `default`
 /// on every sibling in the project (soft-deleted and triage rows keep theirs,
-/// via the default-manager scope in [`ser::STATE_DEFAULT_FLIP_SQL`]).
+/// via the default-manager scope in the domain twin).
 async fn run_default_flip(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), HandlerError> {
-    sqlx::query(ser::STATE_DEFAULT_FLIP_SQL)
-        .bind(project_id)
-        .execute(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    domain_projects::states::clear_project_defaults(
+        &pidash_db::pool::sea_orm_connection(pool),
+        project_id,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     Ok(())
 }
 
@@ -2031,15 +2111,18 @@ async fn fetch_project_workspace(
     pool: &sqlx::PgPool,
     project_id: Uuid,
 ) -> Result<Uuid, HandlerError> {
-    let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT workspace_id FROM projects WHERE id = $1"#)
-        .bind(project_id)
-        .fetch_optional(pool)
+    let row: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(project_id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // `None` is preserved as a NULL workspace bind would violate NOT NULL; the
     // INSERT below fails the FK/requirement instead — but a UUID is required, so
     // carry a sentinel that fails the same way. In practice the FK fails first.
-    row.map(|row| row.0).ok_or(HandlerError::ServerError)
+    row.ok_or(HandlerError::ServerError)
 }
 
 /// Max sibling sequence over the default-manager scope (soft-deleted and triage
@@ -2049,15 +2132,41 @@ async fn max_sibling_sequence(
     pool: &sqlx::PgPool,
     project_id: Uuid,
 ) -> Result<Option<f64>, HandlerError> {
-    let row: Option<(Option<f64>,)> = sqlx::query_as(
-        r#"SELECT MAX(sequence) FROM states
-           WHERE project_id = $1 AND deleted_at IS NULL AND NOT ("group" = 'triage')"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    Ok(row.and_then(|row| row.0))
+    let row: Option<Option<f64>> = states::Entity::find()
+        .select_only()
+        .column_as(states::Column::Sequence.max(), "max_sequence")
+        .filter(states::Column::ProjectId.eq(project_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    Ok(row.flatten())
+}
+
+/// Map one `states` entity row onto the D-19 model (name-based, UTC datetimes).
+fn state_from_entity(row: states::Model) -> state_model::State {
+    state_model::State {
+        id: row.id,
+        created_at: row.created_at.with_timezone(&chrono::Utc),
+        updated_at: row.updated_at.with_timezone(&chrono::Utc),
+        created_by_id: row.created_by_id,
+        updated_by_id: row.updated_by_id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        name: row.name,
+        description: row.description,
+        color: row.color,
+        slug: row.slug,
+        sequence: row.sequence,
+        group: row.group,
+        is_triage: row.is_triage,
+        default: row.default,
+        external_source: row.external_source,
+        external_id: row.external_id,
+        deleted_at: row.deleted_at.map(|d| d.with_timezone(&chrono::Utc)),
+    }
 }
 
 /// The create-time external-id lookup (`views/state.py:92-104`): `State.objects`
@@ -2070,23 +2179,25 @@ async fn fetch_state_by_external(
     external_source: &str,
     external_id: &str,
 ) -> Result<Option<state_model::State>, HandlerError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT states.* FROM states
-           JOIN workspaces ON workspaces.id = states.workspace_id
-           WHERE states.project_id = $1 AND workspaces.slug = $2
-           AND states.external_source = $3 AND states.external_id = $4
-           AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
-           LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(external_source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| state_q::map_state_row(&row).map_err(|_| HandlerError::ServerError))
-        .transpose()
+    let row = states::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            states::Entity::belongs_to(workspaces::Entity)
+                .from(states::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(states::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(states::Column::ExternalSource.eq(external_source))
+        .filter(states::Column::ExternalId.eq(external_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .limit(1)
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    Ok(row.map(state_from_entity))
 }
 
 /// The 409 name-holder lookup (`views/state.py:117-121`): same `State.objects`
@@ -2097,21 +2208,24 @@ async fn fetch_state_by_name(
     project_id: Uuid,
     name: &str,
 ) -> Result<Option<state_model::State>, HandlerError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT states.* FROM states
-           JOIN workspaces ON workspaces.id = states.workspace_id
-           WHERE workspaces.slug = $1 AND states.project_id = $2 AND states.name = $3
-           AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(name)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| state_q::map_state_row(&row).map_err(|_| HandlerError::ServerError))
-        .transpose()
+    let row = states::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            states::Entity::belongs_to(workspaces::Entity)
+                .from(states::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(states::Column::ProjectId.eq(project_id))
+        .filter(states::Column::Name.eq(name))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .limit(1)
+        .one(&orm(pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    Ok(row.map(state_from_entity))
 }
 
 fn state_conflict_body(error: &str, id: &str) -> String {
@@ -2119,12 +2233,23 @@ fn state_conflict_body(error: &str, id: &str) -> String {
         .expect("conflict body serializes")
 }
 
-/// True for unique/partial-unique violations (SQLSTATE 23505): the only
-/// `IntegrityError` the name-constraint INSERT can raise deterministically.
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    e.as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code == "23505")
+/// Rebuild a request from its parts and proxy it to Django (the resolver
+/// 404 for a `state_id` spelling Django itself would never route to the
+/// view).
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(AxumState(state), req).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2138,7 +2263,22 @@ async fn retrieve_state(
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
+    method: Method,
+    uri: Uri,
+    body: Bytes,
 ) -> Response {
+    // Django routes this segment through the `<uuid:state_id>` converter
+    // (`api/urls/state.py:19`), whose regex is lowercase-hyphenated
+    // canonical form only, matched case-sensitively — every other spelling
+    // resolver-404s before auth. `Uuid::parse_str` also accepts uppercase,
+    // simple, braced and `urn:uuid:` spellings, so proxy the
+    // parseable-but-non-canonical ones for Django's own resolver 404
+    // before auth runs (PIDASHCONV-1095 / -1132 / -1162 / -1193 / -1205
+    // precedent, PIDASHCONV-1393). Garbage keeps the existing auth-first
+    // path (`parse_state_id`).
+    if matches!(classify_uuid_segment(&state_id), UuidSegment::NonCanonical) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match retrieve_state_inner(&state, &headers, &slug, &project_raw, &state_id, &query).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -2165,10 +2305,11 @@ async fn retrieve_state_inner(
     let state_id = parse_state_id(state_id_raw)?;
     let fields = csv_param(query_last(query, "fields"));
     let expand = csv_param(query_last(query, "expand"));
-    let row = state_q::fetch_state_detail(&pool, slug, gate.project_id, gate.actor.id, state_id)
-        .await
-        .map_err(|_| HandlerError::ServerError)?
-        .ok_or(HandlerError::NotFound)?;
+    let row =
+        state_q::fetch_state_detail(&orm(&pool), slug, gate.project_id, gate.actor.id, state_id)
+            .await
+            .map_err(|_| HandlerError::ServerError)?
+            .ok_or(HandlerError::NotFound)?;
     let rendered = render_state(
         &pool,
         &row,
@@ -2202,9 +2343,17 @@ fn parse_state_id(raw: &str) -> Result<Uuid, HandlerError> {
 async fn patch_state(
     AxumState(state): AxumState<AppState>,
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // Same canonical-spelling gate as the GET handler: a
+    // parseable-but-non-canonical segment proxies for Django's resolver
+    // 404 before auth; garbage keeps the auth-first path (PIDASHCONV-1393).
+    if matches!(classify_uuid_segment(&state_id), UuidSegment::NonCanonical) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match patch_state_inner(&state, &headers, &slug, &project_raw, &state_id, body).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -2232,11 +2381,12 @@ async fn patch_state_inner(
     // Direct get (`views/state.py:278`): default-manager scope but NO
     // archived-project guard and NO `is_triage` filter (only DELETE has one) —
     // the PATCH-specific scope, not the shared direct scope.
-    let mut row = state_q::fetch_state_direct_for_patch(&pool, slug, gate.project_id, state_id)
-        .await
-        .map_err(|_| HandlerError::ServerError)?
-        .ok_or(HandlerError::NotFound)?;
-    let raw = read_object_body(body)?;
+    let mut row =
+        state_q::fetch_state_direct_for_patch(&orm(&pool), slug, gate.project_id, state_id)
+            .await
+            .map_err(|_| HandlerError::ServerError)?
+            .ok_or(HandlerError::NotFound)?;
+    let raw = parse_write_body(headers, &body)?;
     let input = validate_state_input(&raw, true)
         .map_err(|errors| HandlerError::FieldErrors(field_errors_body(&errors)))?;
     // Partial `validate()`: the triage check sees the supplied group (or
@@ -2275,11 +2425,11 @@ async fn patch_state_inner(
             }
         }
     }
-    // Apply the patch: supplied fields only; `save()` recomputes the slug and
-    // stamps `updated_by` (crum) + `updated_at` (auto_now).
+    // Apply the patch: supplied fields only; `save()` recomputes the slug
+    // unconditionally (`db/models/state.py:132`) and stamps `updated_by`
+    // (crum) + `updated_at` (auto_now).
     if let Some(name) = input.name {
-        row.name = name.clone();
-        row.slug = state_model::slugify_name(&name);
+        row.name = name;
     }
     if let Some(description) = input.description {
         row.description = description;
@@ -2305,29 +2455,29 @@ async fn patch_state_inner(
     if let Some(external_id) = input.external_id {
         row.external_id = external_id;
     }
+    row.slug = state_model::slugify_name(&row.name);
     row.updated_at = micros_now();
     row.updated_by_id = Some(gate.actor.id);
-    let update = sqlx::query(
-        r#"UPDATE states SET updated_at = $1, updated_by_id = $2, name = $3,
-                  description = $4, color = $5, slug = $6, sequence = $7,
-                  "group" = $8, is_triage = $9, "default" = $10,
-                  external_source = $11, external_id = $12
-           WHERE id = $13"#,
+    match pidash_services::domain::projects::states::save(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        &pidash_services::domain::projects::states::SaveState {
+            id: row.id,
+            updated_at: row.updated_at,
+            updated_by: row.updated_by_id,
+            name: &row.name,
+            description: &row.description,
+            color: &row.color,
+            slug: &row.slug,
+            sequence: row.sequence,
+            group: &row.group,
+            is_triage: row.is_triage,
+            default: row.default,
+            external_source: row.external_source.as_deref(),
+            external_id: row.external_id.as_deref(),
+        },
     )
-    .bind(row.updated_at)
-    .bind(row.updated_by_id)
-    .bind(&row.name)
-    .bind(&row.description)
-    .bind(&row.color)
-    .bind(&row.slug)
-    .bind(row.sequence)
-    .bind(&row.group)
-    .bind(row.is_triage)
-    .bind(row.default)
-    .bind(&row.external_source)
-    .bind(&row.external_id)
-    .bind(row.id);
-    match update.execute(&pool).await {
+    .await
+    {
         Ok(_) => {}
         // Uncaught `IntegrityError` → `handle_exception` 400 branch.
         Err(e) if is_unique_violation(&e) => return Err(HandlerError::InvalidPayload),
@@ -2351,35 +2501,29 @@ async fn state_external_exists(
     external_source: Option<&str>,
     external_id: &str,
 ) -> Result<bool, HandlerError> {
-    // The source predicate shape is fixed per call (`IS NULL` vs `=`), so
-    // the statement is built once per shape — no parameter juggling.
-    let sql = match external_source {
-        None => {
-            r#"SELECT states.id FROM states
-               JOIN workspaces ON workspaces.id = states.workspace_id
-               WHERE states.project_id = $1 AND workspaces.slug = $2
-               AND states.external_source IS NULL AND states.external_id = $3
-               AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
-               LIMIT 1"#
-        }
-        Some(_) => {
-            r#"SELECT states.id FROM states
-               JOIN workspaces ON workspaces.id = states.workspace_id
-               WHERE states.project_id = $1 AND workspaces.slug = $2
-               AND states.external_source = $3 AND states.external_id = $4
-               AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
-               LIMIT 1"#
-        }
-    };
-    let mut query = sqlx::query_as::<_, (Uuid,)>(sql)
-        .bind(project_id)
-        .bind(slug);
+    let mut query = states::Entity::find()
+        .select_only()
+        .column(states::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            states::Entity::belongs_to(workspaces::Entity)
+                .from(states::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(states::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(states::Column::ExternalId.eq(external_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .limit(1);
     query = match external_source {
-        None => query.bind(external_id),
-        Some(source) => query.bind(source).bind(external_id),
+        None => query.filter(states::Column::ExternalSource.is_null()),
+        Some(source) => query.filter(states::Column::ExternalSource.eq(source)),
     };
-    let hit: Option<(Uuid,)> = query
-        .fetch_optional(pool)
+    let hit: Option<Uuid> = query
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| HandlerError::ServerError)?;
     Ok(hit.is_some())
@@ -2401,8 +2545,17 @@ async fn state_external_exists(
 async fn delete_state(
     AxumState(state): AxumState<AppState>,
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
+    // Same canonical-spelling gate as the GET handler: a
+    // parseable-but-non-canonical segment proxies for Django's resolver
+    // 404 before auth; garbage keeps the auth-first path (PIDASHCONV-1393).
+    if matches!(classify_uuid_segment(&state_id), UuidSegment::NonCanonical) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match delete_state_inner(&state, &headers, &slug, &project_raw, &state_id).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -2426,7 +2579,7 @@ async fn delete_state_inner(
     )
     .await?;
     let state_id = parse_state_id(state_id_raw)?;
-    let row = state_q::fetch_state_direct(&pool, slug, gate.project_id, state_id)
+    let row = state_q::fetch_state_direct(&orm(&pool), slug, gate.project_id, state_id)
         .await
         .map_err(|_| HandlerError::ServerError)?
         .ok_or(HandlerError::NotFound)?;
@@ -2435,26 +2588,30 @@ async fn delete_state_inner(
             "Default state cannot be deleted".to_owned(),
         ));
     }
-    let used: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM issues WHERE state_id = $1 AND deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(state_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    let used: Option<Uuid> = issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::StateId.eq(state_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     if used.is_some() {
         return Err(HandlerError::BadError(
             "The state is not empty, only empty states can be deleted".to_owned(),
         ));
     }
     let now = micros_now();
-    sqlx::query(r#"UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3"#)
-        .bind(now)
-        .bind(gate.actor.id)
-        .bind(state_id)
-        .execute(&pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    pidash_services::domain::projects::states::soft_delete(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        state_id,
+        gate.actor.id,
+        now,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
     // then enqueue — same order as the mixin, shared helper.
     super::handlers_project::enqueue_soft_delete(&pool, "state", &state_id).await;
@@ -2623,7 +2780,7 @@ mod tests {
         // Probed live order: id, created_at, updated_at, deleted_at, then the
         // plain model fields, then the four FKs last.
         assert_eq!(
-            STATE_FIELDS,
+            ser::STATE_FIELDS,
             &[
                 "id",
                 "created_at",
@@ -2789,6 +2946,38 @@ mod tests {
             if message == "The required key does not exist."
         ));
     }
+
+    #[test]
+    fn write_body_negotiates() {
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Form input: text values arrive as scalars, blank optionals behave
+        // as absent, blank text stays in the map.
+        let body = b"name=S1&color=%23fff&sequence=&description=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let map = parse_write_body(&headers, body).expect("form");
+        assert_eq!(map.get("name"), Some(&Value::String("S1".to_owned())));
+        assert!(!map.contains_key("sequence"));
+        assert_eq!(map.get("description"), Some(&Value::String(String::new())));
+        // Unknown media types 415 with the DRF detail.
+        let text_body = b"{\"description\": \"x\"}";
+        let headers = headers_for("text/plain", text_body.len());
+        let err = parse_write_body(&headers, text_body).expect_err("415");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body,
+            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
+        );
+        assert!(matches!(err, HandlerError::UnsupportedMediaType(_)));
+        // Empty bodies are `{}`.
+        let map = parse_write_body(&HeaderMap::new(), b"").expect("empty");
+        assert!(map.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -2812,5 +3001,369 @@ mod pidashconv_736_tests {
         // TAB and U+0085 padding already matched Django; pin the behavior.
         assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
         assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}
+
+/// Live scratch-DB probes for the SeaORM-converted helpers (env-gated):
+/// without `DATABASE_URL` these skip. Seeds use fresh ids/slugs, so
+/// parallel tests never share rows.
+#[cfg(test)]
+mod state_estimate_live {
+    use super::*;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    struct SeedWorld {
+        user_id: Uuid,
+        workspace_id: Uuid,
+        slug: String,
+        project_id: Uuid,
+        token: String,
+    }
+
+    async fn seed_user(pool: &sqlx::PgPool, id: Uuid) {
+        let username = format!("se-{id}");
+        let email = format!("{username}@example.com");
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name, avatar,\
+             date_joined, created_at, updated_at, last_location, created_location,\
+             is_superuser, is_managed, is_password_expired, is_active, is_staff,\
+             is_email_verified, is_password_autoset, token, user_timezone,\
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,\
+             is_bot, display_name, is_email_valid, is_password_reset_required)\
+             VALUES ($1,'pbkdf2_sha256$600000$x$y',$2,$3,'Seed','User','',\
+             now(), now(), now(), '','', false,false,false,true,false,false,false,'','UTC',\
+             '','','email','',false,'Seed User',false,false)",
+        )
+        .bind(id)
+        .bind(&username)
+        .bind(&email)
+        .execute(pool)
+        .await
+        .expect("seed user");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_state_row(
+        pool: &sqlx::PgPool,
+        id: Uuid,
+        project_id: Uuid,
+        workspace_id: Uuid,
+        name: &str,
+        group: &str,
+        sequence: f64,
+        external_source: Option<&str>,
+        external_id: Option<&str>,
+        deleted: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, slug,\
+             project_id, workspace_id, sequence, \"group\", \"default\", is_triage,\
+             external_source, external_id, deleted_at)\
+             VALUES ($1, now(), now(), $2, '', '#ff0000', $2, $3, $4, $5, $6, false, false,\
+             $7, $8, $9)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(sequence)
+        .bind(group)
+        .bind(external_source)
+        .bind(external_id)
+        .bind(if deleted {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        })
+        .execute(pool)
+        .await
+        .expect("seed state");
+    }
+
+    async fn seed_world(pool: &sqlx::PgPool) -> SeedWorld {
+        let user_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let slug = format!("se-{}", workspace_id.simple().to_string().get(..8).unwrap());
+        let project_id = Uuid::new_v4();
+        let token = format!("se-token-{user_id}");
+        seed_user(pool, user_id).await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, slug, owner_id, timezone, background_color,\
+             created_at, updated_at) VALUES ($1,'Seed WS',$2,$3,'UTC','#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(&slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, created_at, updated_at, name, description, network,\
+             identifier, workspace_id, cycle_view, module_view, issue_views_view, page_view,\
+             intake_view, archive_in, close_in, logo_props, is_time_tracking_enabled,\
+             is_issue_type_enabled, guest_view_all_features, timezone, members_can_edit_states,\
+             repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,\
+             agent_ticking_enabled, is_default, agent_review_default_interval_seconds,\
+             default_agent_executor, agent_test_default_interval_seconds)\
+             VALUES ($1, now(), now(), 'Seed Project', '', 0, 'SEED', $2, true, true, true, true,\
+             true, 0, 0, '{}', false, false, false, 'UTC', true, '', '', 0, 0, false, false,\
+             0, '', 0)",
+        )
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO project_members (id, role, project_id, workspace_id, member_id,\
+             view_props, default_props, sort_order, preferences, is_active, created_at, updated_at)\
+             VALUES ($1, 20, $2, $3, $4, '{}', '{}', 65535, '{}', true, now(), now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed project member");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role,\
+             is_active, view_props, default_props, issue_props,\
+             explored_features, getting_started_checklist, tips,\
+             created_at, updated_at)\
+             VALUES ($1, $2, $3, 20, true, '{}', '{}', '{}', '{}', '{}', '{}', now(), now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace member");
+        sqlx::query(
+            "INSERT INTO api_tokens (id, token, label, user_type, user_id,\
+             description, is_active, is_service, allowed_rate_limit, created_at, updated_at)\
+             VALUES ($1, $2, 'se', 0, $3, '', true, false, '', now(), now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&token)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed token");
+        SeedWorld {
+            user_id,
+            workspace_id,
+            slug,
+            project_id,
+            token,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_api_token_auth_and_resolve() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let w = seed_world(&pool).await;
+        let ident = authenticate_api_token(&pool, &w.token)
+            .await
+            .expect("api token authenticates");
+        assert_eq!(ident.id, w.user_id);
+        assert!(matches!(
+            authenticate_api_token(&pool, "se-no-such-token").await,
+            Err(HandlerError::InvalidToken)
+        ));
+        // Identifier resolves through the workspace; uuids pass through.
+        assert_eq!(
+            resolve_project_id(&pool, &w.slug, " seed ")
+                .await
+                .expect("resolve seed"),
+            w.project_id
+        );
+        assert_eq!(
+            resolve_project_id(&pool, &w.slug, &w.project_id.to_string())
+                .await
+                .expect("uuid passthrough"),
+            w.project_id
+        );
+        assert!(matches!(
+            resolve_project_id(&pool, &w.slug, "NOPE").await,
+            Err(HandlerError::ProjectNotFound)
+        ));
+        assert_eq!(
+            fetch_project_workspace(&pool, w.project_id)
+                .await
+                .expect("workspace"),
+            w.workspace_id
+        );
+    }
+
+    #[tokio::test]
+    async fn live_expands_max_external_and_gate() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let w = seed_world(&pool).await;
+        // Seeded states: one backlog with external ids, one triage, one deleted.
+        seed_state_row(
+            &pool,
+            Uuid::new_v4(),
+            w.project_id,
+            w.workspace_id,
+            "Backlog",
+            "backlog",
+            10000.0,
+            Some("GH"),
+            Some("E1"),
+            false,
+        )
+        .await;
+        seed_state_row(
+            &pool,
+            Uuid::new_v4(),
+            w.project_id,
+            w.workspace_id,
+            "Review",
+            "review",
+            20000.0,
+            None,
+            Some("E2"),
+            false,
+        )
+        .await;
+        seed_state_row(
+            &pool,
+            Uuid::new_v4(),
+            w.project_id,
+            w.workspace_id,
+            "Triage",
+            "triage",
+            90000.0,
+            None,
+            None,
+            false,
+        )
+        .await;
+        seed_state_row(
+            &pool,
+            Uuid::new_v4(),
+            w.project_id,
+            w.workspace_id,
+            "Gone",
+            "backlog",
+            95000.0,
+            None,
+            None,
+            true,
+        )
+        .await;
+        // Max over the default-manager scope ignores triage + soft-deleted.
+        assert_eq!(
+            max_sibling_sequence(&pool, w.project_id)
+                .await
+                .expect("max"),
+            Some(20000.0)
+        );
+        let by_name = fetch_state_by_name(&pool, &w.slug, w.project_id, "Backlog")
+            .await
+            .expect("by name")
+            .expect("found");
+        assert_eq!(by_name.name, "Backlog");
+        assert!(fetch_state_by_name(&pool, &w.slug, w.project_id, "Triage")
+            .await
+            .expect("triage")
+            .is_none());
+        let by_external = fetch_state_by_external(&pool, &w.slug, w.project_id, "GH", "E1")
+            .await
+            .expect("by external")
+            .expect("found");
+        assert_eq!(by_external.name, "Backlog");
+        assert!(
+            state_external_exists(&pool, &w.slug, w.project_id, Some("GH"), "E1")
+                .await
+                .expect("exists")
+        );
+        assert!(
+            !state_external_exists(&pool, &w.slug, w.project_id, None, "E1")
+                .await
+                .expect("null source misses")
+        );
+        assert!(
+            state_external_exists(&pool, &w.slug, w.project_id, None, "E2")
+                .await
+                .expect("null source hits")
+        );
+        // Expands decode against the live tables.
+        let proj = expand_project(&pool, &w.project_id).await.expect("project");
+        assert_eq!(proj["identifier"], serde_json::json!("SEED"));
+        let ws = expand_workspace(&pool, &w.workspace_id)
+            .await
+            .expect("workspace");
+        assert_eq!(ws["slug"], serde_json::json!(w.slug));
+        let user = expand_user(&pool, &w.user_id).await.expect("user");
+        assert_eq!(user["id"], serde_json::json!(w.user_id.to_string()));
+        assert!(matches!(
+            file_asset_url(&pool, &Uuid::new_v4())
+                .await
+                .expect("missing asset"),
+            crate::license::AssetUrl::Present(None)
+        ));
+        // Gate: seeded admin member passes safe GET and write POST.
+        assert_eq!(
+            resolve_state_gate(
+                &pool,
+                &w.slug,
+                w.project_id,
+                Some(w.user_id),
+                V1Route::StateList,
+                "GET"
+            )
+            .await
+            .expect("safe gate"),
+            w.user_id
+        );
+        assert_eq!(
+            resolve_state_gate(
+                &pool,
+                &w.slug,
+                w.project_id,
+                Some(w.user_id),
+                V1Route::StateList,
+                "POST"
+            )
+            .await
+            .expect("write gate"),
+            w.user_id
+        );
+        // A stranger with no membership row is denied on both.
+        let stranger = Uuid::new_v4();
+        seed_user(&pool, stranger).await;
+        assert!(matches!(
+            resolve_state_gate(
+                &pool,
+                &w.slug,
+                w.project_id,
+                Some(stranger),
+                V1Route::StateList,
+                "GET"
+            )
+            .await,
+            Err(HandlerError::Forbidden)
+        ));
     }
 }

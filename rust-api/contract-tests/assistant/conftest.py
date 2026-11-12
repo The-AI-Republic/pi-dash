@@ -37,7 +37,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _harness.client import anonymous_client, login_client  # noqa: E402
+from _harness.client import anonymous_client, login_client, login_desktop_client  # noqa: E402
 from _harness.worlds import World, build_world  # noqa: E402
 
 PUBLIC_BASE = "https://8.8.8.8/v1"
@@ -51,6 +51,11 @@ def world() -> World:
 @pytest.fixture
 def member(world):
     return login_client(world.member)
+
+
+@pytest.fixture
+def desktop_member(world):
+    return login_desktop_client(world.member)
 
 
 @pytest.fixture

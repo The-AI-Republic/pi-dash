@@ -13,19 +13,21 @@
 //! * `POST auth/revoke/` — invalidate the caller's CLI token, idempotent
 //!   (`device.py:485-511`).
 //!
-//! Only these three path+method pairs are registered, so the edge serves
-//! exactly this family from Rust while every sibling path keeps proxying
-//! to Django — route registration is the cutover granularity, no flag
-//! needed. Every other method on the owned paths proxies too, so Django
-//! answers its own 405-after-auth and metadata OPTIONS byte for byte
-//! (the loop-handlers precedent).
+//! Only these three path+method pairs are served from Rust while every
+//! sibling path keeps proxying to Django — route registration is the
+//! cutover granularity, no flag needed. Every other method on the owned
+//! paths answers locally in DRF order (auth first, then the 405), because
+//! the token lives in Rust's database and a proxied verdict would fail
+//! Django's copy of the gate before its own method check (PIDASHCONV-1478);
+//! only OPTIONS still proxies so DRF's metadata response is preserved byte
+//! for byte (the `v1_openapi::owned` precedent).
 //!
 //! Layering: the device-machine / rotate SQL text and pure helpers
 //! (`normalize_host_label`, `machine_token_label`, touch-field selection,
 //! lock/create/touch statements, ownership errors) live in the Done layer
 //! [`pidash_db::auth_oauth::queries::dev_machine`] (PIDASHCONV-327,
 //! AUTHOAUTH-F8); `deactivate_api_token` in
-//! [`pidash_db::auth_oauth::queries::cli_token`] (AUTHOAUTH-F7); the
+//! [`pidash_services::domain::tokens::cli_token`] (AUTHOAUTH-F7); the
 //! token classify/hash/fingerprint kernels in [`pidash_auth::token`]
 //! (foundation). This module owns the HTTP shell (routes, API-key auth,
 //! body validation), the membership/workspace/APIToken/MachineToken SQL,
@@ -55,7 +57,7 @@
 //!   Python (500); the auth shell answers 500 the same way.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use base64::Engine as _;
@@ -63,13 +65,44 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use pidash_auth::token as token_kernel;
-use pidash_db::auth_oauth::queries::{cli_token, dev_machine};
+use pidash_db::auth_oauth::queries::dev_machine;
+use pidash_services::domain::tokens::cli_token;
 
 use crate::assistant::common::{
     body_get, json_response, parse_body, pool_of, request_content_type, BodyField, BodyMap,
     Failure, ParsedBody,
 };
 use crate::state::AppState;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+use pidash_db::redis::client_from_settings;
+use pidash_services::runner_enroll::dispatch_rules::PauseEffects;
+
+/// Drain post-commit pause effects after a device-session transaction commits.
+async fn drain_pause_effects(pool: &sqlx::PgPool, state: &AppState, effects: &PauseEffects) {
+    if effects.drain_pod_ids.is_empty() && effects.drain_runner_ids.is_empty() {
+        return;
+    }
+    let redis = client_from_settings(state.settings());
+    for pod_id in &effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner_id,
+        )
+        .await;
+    }
+}
 
 /// `api/urls/auth.py:43-46`, under the `api/v1/` include.
 pub const WORKSPACES_PATH: &str = "/api/v1/auth/workspaces/";
@@ -86,8 +119,14 @@ const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
 /// 200 `{"ok": true}` (`device.py:500,507,510-511`).
 const OK_TRUE_BODY: &str = r#"{"ok":true}"#;
 
-/// Register the three device-session routes. Nothing else: sibling paths
-/// stay unmatched and proxy to Django.
+/// Register the device-session routes. Nothing else: sibling paths stay
+/// unmatched and proxy to Django.
+///
+/// `machine-token/` and `revoke/` are Rust-owned (NEWPIDASH-51): the
+/// exchange opportunistically issues the engine credential per
+/// `_maybe_issue_engine_credential` and the revoke locks the machine and,
+/// when it revokes the last live `mt_`, signs the engine out via
+/// `revoke_engine_credential`.
 pub fn routes() -> Router<AppState> {
     use axum::routing::{get, post};
     Router::new()
@@ -96,31 +135,44 @@ pub fn routes() -> Router<AppState> {
         .route(REVOKE_PATH, owned_post(post(post_revoke)))
 }
 
-/// A GET-owned path: the GET handler serves from Rust, everything else
-/// falls through to Django.
+/// A GET-owned path: the GET handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit: the view defines no
+/// `head`, so DRF 405s it — axum's automatic GET-backed HEAD would
+/// wrongly answer 200.
 fn owned_get(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     get_handler
-        .post(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
-        .head(crate::edge::proxy)
+        .post(workspaces_method_not_allowed)
+        .put(workspaces_method_not_allowed)
+        .patch(workspaces_method_not_allowed)
+        .delete(workspaces_method_not_allowed)
+        .head(workspaces_method_not_allowed)
+        .trace(workspaces_method_not_allowed)
+        .connect(workspaces_method_not_allowed)
         .options(crate::edge::proxy)
+        .fallback(workspaces_method_not_allowed)
 }
 
-/// A POST-owned path: the POST handler serves from Rust, everything
-/// else falls through to Django.
+/// A POST-owned path: the POST handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit (DRF 405s it) so the
+/// denial keeps its body, which runserver sends on the wire — axum's
+/// automatic GET-backed HEAD would strip it.
 fn owned_post(
     post_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     post_handler
-        .get(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
+        .get(post_only_method_not_allowed)
+        .put(post_only_method_not_allowed)
+        .patch(post_only_method_not_allowed)
+        .delete(post_only_method_not_allowed)
+        .head(post_only_method_not_allowed)
+        .trace(post_only_method_not_allowed)
+        .connect(post_only_method_not_allowed)
         .options(crate::edge::proxy)
+        .fallback(post_only_method_not_allowed)
 }
 
 fn invalid_token() -> Response {
@@ -154,7 +206,7 @@ async fn authenticate(
     headers: &HeaderMap,
 ) -> Result<Caller, Response> {
     let Some(raw) = headers.get(token_kernel::API_KEY_HEADER) else {
-        // `if not token: return None` (`api_authentication.py:70-72`) —
+        // `if not token: return None` (`api_authentication.py:68-69`) —
         // the `IsAuthenticated` gate then answers 401.
         return Err(Failure::unauthorized().into_response());
     };
@@ -172,9 +224,16 @@ async fn authenticate(
     }
 }
 
-/// One `api_tokens` row for the lookup: `(id, user_id, is_active,
-/// expired_at)`.
-type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
+/// Whether the request presents a credential for the auth gate: the
+/// `X-Api-Key` header is set to a non-empty value. Mirrors the no-DB
+/// 401 branches of [`authenticate`] exactly (a missing or empty header
+/// never reaches the pool); undecodable bytes still need the lookup (a
+/// miss is 403, never 401).
+fn has_presented_credential(headers: &HeaderMap) -> bool {
+    headers
+        .get(token_kernel::API_KEY_HEADER)
+        .is_some_and(|raw| !matches!(raw.to_str(), Ok(value) if value.is_empty()))
+}
 
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token
 /// match, `is_active`, unexpired (`expired_at__gt=now` or null) — then
@@ -184,13 +243,25 @@ type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
 #[allow(clippy::result_large_err)]
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller, Response> {
     let now = Utc::now();
-    let row: Option<ApiTokenLookupRow> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error().into_response())?;
+    let row = {
+        use pidash_db::entity::api_tokens;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let found = api_tokens::Entity::find()
+            .filter(api_tokens::Column::Token.eq(presented))
+            .filter(api_tokens::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Failure::server_error().into_response())?;
+        found.map(|m| {
+            (
+                m.id,
+                m.user_id,
+                m.is_active,
+                m.expired_at
+                    .map(|dt: sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&Utc)),
+            )
+        })
+    };
     let Some((id, user_id, is_active, expired_at)) = row else {
         return Err(invalid_token());
     };
@@ -203,12 +274,13 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -218,23 +290,10 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
     })
 }
 
-/// One `machine_token` row for the lookup, with the linked dev-machine
-/// revocation flag: `(id, user_id, workspace_id, revoked_at,
-/// dev_machine_id, dev_machine_revoked, dev_machine_found)`.
-type MachineTokenLookupRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-);
-
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
-/// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `token_hash`, unrevoked, not past its 60-day idle expiry, dev-machine
+/// unrevoked, workspace member (a non-member's token is revoked, then
+/// rejected) — then stamp `last_used_at`.
 #[allow(clippy::result_large_err)]
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
@@ -243,53 +302,74 @@ async fn authenticate_machine(
 ) -> Result<Caller, Response> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookupRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at, dm.id
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error().into_response())?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
-    else {
-        return Err(invalid_token());
-    };
-    if revoked_at.is_some() {
-        return Err(invalid_token());
-    }
-    // `machine_token.dev_machine_id is not None and
-    // machine_token.dev_machine.revoked_at is not None`. A set id with no
-    // row is the `select_related` 500 (unreachable without FK surgery).
-    if let Some(machine_id) = dev_machine_id {
-        if dm_found != Some(machine_id) {
-            return Err(Failure::server_error().into_response());
-        }
-        if dm_revoked.is_some() {
+    let (id, user_id, workspace_id, dev_machine_id) = {
+        use pidash_db::entity::machine_token;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let found = machine_token::Entity::find()
+            .filter(machine_token::Column::TokenHash.eq(&token_hash))
+            .one(&db)
+            .await
+            .map_err(|_| Failure::server_error().into_response())?;
+        let Some(m) = found else {
             return Err(invalid_token());
+        };
+        (m.id, m.user_id, m.workspace_id, m.dev_machine_id)
+    };
+    // revoked check via fresh fetch (avoids join raw SQL; same semantics)
+    {
+        use pidash_db::entity::machine_token;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let row = machine_token::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap_or(None);
+        match row {
+            Some(m) if m.revoked_at.is_some() => return Err(invalid_token()),
+            // `MachineToken.is_expired()`: at-or-past expiry refuses (the same
+            // opaque denial as every other `mt_` arm here); Django order is
+            // revoked, then expired, then machine-revoked (#2910).
+            Some(m) if m.expires_at.is_some_and(|expires| expires <= now) => {
+                return Err(invalid_token())
+            }
+            Some(_) => {}
+            None => return Err(invalid_token()),
+        }
+        if let Some(mid) = dev_machine_id {
+            use pidash_db::entity::dev_machine;
+            let machine = dev_machine::Entity::find_by_id(mid)
+                .one(&db)
+                .await
+                .unwrap_or(None);
+            match machine {
+                Some(dm) => {
+                    if dm.revoked_at.is_some() {
+                        return Err(invalid_token());
+                    }
+                }
+                None => return Err(Failure::server_error().into_response()),
+            }
         }
     }
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|_| Failure::server_error().into_response())?;
+        pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            id,
+            now,
+        )
+        .await
+        .map_err(|_| Failure::server_error().into_response())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -308,20 +388,97 @@ async fn is_member(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<bool, Response> {
-    let exists: Option<bool> = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error().into_response())?;
-    Ok(exists.unwrap_or(false))
+    use pidash_db::entity::workspace_members;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count = workspace_members::Entity::find()
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Failure::server_error().into_response())?;
+    Ok(count > 0)
 }
 
 fn not_found(error: &str) -> Failure {
     Failure::bare_error(StatusCode::NOT_FOUND, error)
+}
+
+// ---------------------------------------------------------------------------
+// wrong-method denial (PIDASHCONV-1478)
+// ---------------------------------------------------------------------------
+
+/// DRF `default_response_headers` `Allow` for the GET-owned view:
+/// `WorkspaceListEndpoint` defines only `get` (`device.py:395`), but
+/// Django's `View.setup` binds `head = get` at request time, so the
+/// live `Allow` is `GET, HEAD, OPTIONS` (probed on the real view class,
+/// NEWPIDASH-31 — PIDASHCONV-1478 read `_allowed_methods` pre-setup and
+/// missed the binding).
+const ALLOW_WORKSPACES: &str = "GET, HEAD, OPTIONS";
+/// DRF `default_response_headers` `Allow` for the POST-owned views,
+/// which define only `post` (`device.py:417,496`).
+const ALLOW_POST_ONLY: &str = "POST, OPTIONS";
+
+/// DRF `MethodNotAllowed` body for these views (compact JSON, probed
+/// live): `{"detail":"Method \"<M>\" not allowed."}`. `method` is an
+/// `http::Method`, whose token charset needs no JSON escaping.
+fn not_allowed_body(method: &str) -> String {
+    format!(r#"{{"detail":"Method \"{method}\" not allowed."}}"#)
+}
+
+/// Wrong method on `GET auth/workspaces/`: DRF order — the auth gate
+/// first (its 401/403 stand), then the 405.
+async fn workspaces_method_not_allowed(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    deny_method(&state, &method, &headers, ALLOW_WORKSPACES).await
+}
+
+/// Wrong method on the POST-owned paths: the same DRF order with the
+/// POST-only `Allow`.
+async fn post_only_method_not_allowed(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    deny_method(&state, &method, &headers, ALLOW_POST_ONLY).await
+}
+
+/// Authenticate, then answer DRF's 405. A proxied verdict cannot work
+/// here: the token lives in Rust's database, so Django's copy of the
+/// gate 403s before its own method check.
+async fn deny_method(
+    state: &AppState,
+    method: &Method,
+    headers: &HeaderMap,
+    allow: &'static str,
+) -> Response {
+    // The gate before the pool: Django's `authenticate` returns None
+    // without a query when no credential is presented
+    // (`api_authentication.py:68-69`), and `IsAuthenticated` answers
+    // 401 — so a credential-less request 401s here without demanding
+    // a pool (PIDASHCONV-1536). Only a presented credential needs the
+    // lookup below.
+    if !has_presented_credential(headers) {
+        return Failure::unauthorized().into_response();
+    }
+    let pool = match pool_of(state) {
+        Ok(pool) => pool,
+        Err(failure) => return failure.into_response(),
+    };
+    if let Err(denial) = authenticate(&pool, state.settings().secret_key.as_bytes(), headers).await
+    {
+        return denial;
+    }
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ALLOW, allow)
+        .body(axum::body::Body::from(not_allowed_body(method.as_str())))
+        .expect("static denial response")
 }
 
 /// One `{"slug", "name"}` entry in Python dict order
@@ -360,18 +517,33 @@ async fn get_workspaces(State(state): State<AppState>, headers: HeaderMap) -> Re
     };
     // `WorkspaceMember.objects.filter(member=user,
     // is_active=True).select_related("workspace").order_by("created_at")`.
-    let rows: Vec<(Option<String>, Option<String>)> = match sqlx::query_as(
-        r#"SELECT w.slug, w.name FROM workspace_members m
-           LEFT JOIN workspaces w ON w.id = m.workspace_id
-           WHERE m.member_id = $1 AND m.is_active AND m.deleted_at IS NULL
-           ORDER BY m.created_at"#,
-    )
-    .bind(user_id)
-    .fetch_all(&pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return Failure::server_error().into_response(),
+    let rows = {
+        use pidash_db::entity::{workspace_members, workspaces};
+        use sea_orm::{EntityTrait as _, QueryOrder as _};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let members = match workspace_members::Entity::find()
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_asc(workspace_members::Column::CreatedAt)
+            .all(&db)
+            .await
+        {
+            Ok(m) => m,
+            Err(_) => return Failure::server_error().into_response(),
+        };
+        let mut out = Vec::new();
+        for m in members {
+            let ws = workspaces::Entity::find_by_id(m.workspace_id)
+                .one(&db)
+                .await
+                .unwrap_or(None);
+            match ws {
+                Some(w) => out.push((Some(w.slug), Some(w.name))),
+                None => out.push((None, None)),
+            }
+        }
+        out
     };
     let mut list = Vec::new();
     for (slug, name) in rows {
@@ -510,20 +682,25 @@ async fn post_machine_token(
         Err(failure) => return failure.into_response(),
     };
     // `Workspace.objects.filter(slug=...).first()` + membership, else
-    // 404 (`device.py:446-451`).
-    let workspace: Option<(Uuid, String)> = match sqlx::query_as(
-        r#"SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(&params.workspace_slug)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(_) => return Failure::server_error().into_response(),
+    // 404 (`device.py:446-451`) — via SeaORM.
+    let workspace = {
+        use pidash_db::entity::workspaces;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let row = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq(&params.workspace_slug))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .one(&db)
+            .await;
+        let Ok(Some(row)) = row else {
+            return match row {
+                Err(_) => Failure::server_error().into_response(),
+                Ok(None) => not_found("workspace_not_found").into_response(),
+                _ => unreachable!(),
+            };
+        };
+        (row.id, row.slug)
     };
-    let Some((workspace_id, workspace_slug)) = workspace else {
-        return not_found("workspace_not_found").into_response();
-    };
+    let (workspace_id, workspace_slug) = workspace;
     let user_id = match &caller {
         Caller::Api { user_id, .. } | Caller::Machine { user_id, .. } => *user_id,
     };
@@ -543,6 +720,7 @@ async fn post_machine_token(
     let outcome = exchange_in_transaction(
         &mut tx,
         state.settings().secret_key.as_bytes(),
+        state.settings(),
         &caller,
         user_id,
         workspace_id,
@@ -551,28 +729,47 @@ async fn post_machine_token(
     )
     .await;
     match outcome {
-        Ok((dev_machine_id, host_label, raw)) => {
+        Ok((
+            dev_machine_id,
+            host_label,
+            raw,
+            engine_sign_in_state,
+            engine_credential,
+            pause_effects,
+        )) => {
             if tx.commit().await.is_err() {
                 return Failure::server_error().into_response();
             }
+            drain_pause_effects(&pool, &state, &pause_effects).await;
+            let cred_opt: Option<(String, String)> = engine_credential.clone();
             json_response(
                 StatusCode::CREATED,
-                machine_token_response_body(&raw, &workspace_slug, &dev_machine_id, &host_label),
+                machine_token_response_body(
+                    &raw,
+                    &workspace_slug,
+                    &dev_machine_id,
+                    &host_label,
+                    &engine_sign_in_state,
+                    cred_opt.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+                ),
             )
         }
         Err(denial) => denial,
     }
 }
 
-/// The 201 body in Python dict order (`device.py:474-481`):
-/// `machine_token`, `workspace_slug`, `dev_machine_id`, `host_label`.
+/// The 201 body in Python dict order (`device.py:474-481` + engine):
+/// `machine_token`, `workspace_slug`, `dev_machine_id`, `host_label`,
+/// `engine_sign_in_state`, plus `engine_credential` when issued.
 fn machine_token_response_body(
     raw: &str,
     workspace_slug: &str,
     dev_machine_id: &Uuid,
     host_label: &str,
+    engine_sign_in_state: &str,
+    engine_credential: Option<(&str, &str)>,
 ) -> String {
-    let mut entry = serde_json::Map::with_capacity(4);
+    let mut entry = serde_json::Map::with_capacity(6);
     entry.insert(
         "machine_token".to_owned(),
         serde_json::Value::String(raw.to_owned()),
@@ -589,27 +786,63 @@ fn machine_token_response_body(
         "host_label".to_owned(),
         serde_json::Value::String(host_label.to_owned()),
     );
+    entry.insert(
+        "engine_sign_in_state".to_owned(),
+        serde_json::Value::String(engine_sign_in_state.to_owned()),
+    );
+    if let Some((token, expires_at)) = engine_credential {
+        let mut cred = serde_json::Map::with_capacity(2);
+        cred.insert(
+            "token".to_owned(),
+            serde_json::Value::String(token.to_owned()),
+        );
+        cred.insert(
+            "expires_at".to_owned(),
+            serde_json::Value::String(expires_at.to_owned()),
+        );
+        entry.insert(
+            "engine_credential".to_owned(),
+            serde_json::Value::Object(cred),
+        );
+    }
     serde_json::to_string(&serde_json::Value::Object(entry)).expect("machine-token body serializes")
 }
 
+#[allow(clippy::too_many_arguments)]
 /// The transactional core of the exchange: get-or-create the dev machine
 /// (ownership conflicts are 404), revoke-then-mint the machine token,
-/// and deactivate the `APIToken` bridge for API-key callers.
+/// opportunistically issue an engine credential via
+/// `_maybe_issue_engine_credential`, and deactivate the `APIToken` bridge
+/// for API-key callers.
 #[allow(clippy::result_large_err)]
 async fn exchange_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     secret_key: &[u8],
+    settings: &pidash_db::config::Settings,
     caller: &Caller,
     user_id: Uuid,
     workspace_id: Uuid,
     params: &MachineTokenParams,
     now: DateTime<Utc>,
-) -> Result<(Uuid, String, String), Response> {
+) -> Result<
+    (
+        Uuid,
+        String,
+        String,
+        String,
+        Option<(String, String)>,
+        PauseEffects,
+    ),
+    Response,
+> {
     // `_get_or_create_dev_machine` (`device.py:88-109`): lock, then
     // create-or-retry through the Done-layer kernels.
-    let locked = dev_machine::fetch_locked_machine(&mut **tx, params.dev_machine_id)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    let locked = {
+        let db = pidash_db::orm_tx::TxConn::new(tx);
+        dev_machine::fetch_locked_machine(&db, params.dev_machine_id)
+            .await
+            .map_err(|_| Failure::server_error().into_response())?
+    };
     match locked {
         Some(machine) => {
             // Owner mismatch raises (`device.py:92-94`); the dropped
@@ -618,76 +851,104 @@ async fn exchange_in_transaction(
             if dev_machine::check_owner(machine.owner_id, user_id).is_err() {
                 return Err(not_found("dev_machine_not_found").into_response());
             }
-            dev_machine::touch_dev_machine(
-                &mut **tx,
-                machine.id,
-                &machine.host_label,
-                &machine.label,
-                Some(&params.host_label),
-                now,
-            )
-            .await
-            .map_err(|_| Failure::server_error().into_response())?;
+            {
+                let db = pidash_db::orm_tx::TxConn::new(tx);
+                dev_machine::touch_dev_machine(
+                    &db,
+                    machine.id,
+                    &machine.host_label,
+                    &machine.label,
+                    Some(&params.host_label),
+                    now,
+                )
+                .await
+                .map_err(|_| Failure::server_error().into_response())?;
+            }
         }
         None => {
             // Racing insert under a savepoint (the inner
             // `transaction.atomic()` savepoint of `device.py:96-101`):
-            // a unique violation rolls back to the savepoint and
-            // re-locks; anything else aborts the exchange.
-            sqlx::query("SAVEPOINT dev_machine_create")
-                .execute(&mut **tx)
+            // a sqlx nested transaction stands in for the savepoint; a
+            // unique violation rolls it back and re-locks; anything else
+            // aborts the exchange.
+            use sqlx::Connection as _;
+            let mut savepoint = (**tx)
+                .begin()
                 .await
                 .map_err(|_| Failure::server_error().into_response())?;
-            let created = sqlx::query(dev_machine::CREATE_SQL)
-                .bind(params.dev_machine_id)
-                .bind(user_id)
-                .bind(&params.host_label)
-                .bind(dev_machine::label_from_host_label(&params.host_label))
-                .bind(dev_machine::VISIBILITY_PRIVATE)
-                .bind(dev_machine::PROVISIONING_MANUAL)
-                .bind(serde_json::json!([]))
-                .bind(now)
-                .bind(None::<DateTime<Utc>>)
-                .bind(now)
-                .bind(now)
-                .execute(&mut **tx)
-                .await;
+            let created = {
+                let db = pidash_db::orm_tx::TxConn::new(&mut savepoint);
+                dev_machine::insert_dev_machine(
+                    &db,
+                    &dev_machine::NewDevMachine {
+                        id: params.dev_machine_id,
+                        owner_id: user_id,
+                        host_label: &params.host_label,
+                        now,
+                    },
+                    &params.host_label,
+                    now,
+                )
+                .await
+            };
             match created {
-                Ok(_) => {
-                    sqlx::query("RELEASE SAVEPOINT dev_machine_create")
-                        .execute(&mut **tx)
+                Ok(()) => {
+                    savepoint
+                        .commit()
                         .await
                         .map_err(|_| Failure::server_error().into_response())?;
                 }
-                Err(err) if dev_machine::is_unique_violation(&err) => {
-                    sqlx::query("ROLLBACK TO SAVEPOINT dev_machine_create")
-                        .execute(&mut **tx)
+                Err(err)
+                    if {
+                        use sea_orm::{DbErr, RuntimeErr};
+                        match &err {
+                            DbErr::Exec(RuntimeErr::SqlxError(inner)) => {
+                                dev_machine::is_unique_violation(inner)
+                            }
+                            DbErr::Query(RuntimeErr::SqlxError(inner)) => {
+                                dev_machine::is_unique_violation(inner)
+                            }
+                            DbErr::Conn(RuntimeErr::SqlxError(inner)) => {
+                                dev_machine::is_unique_violation(inner)
+                            }
+                            _ => false,
+                        }
+                    } =>
+                {
+                    savepoint
+                        .rollback()
                         .await
                         .map_err(|_| Failure::server_error().into_response())?;
                     // `locked is None or owner mismatch -> raise`
                     // (`device.py:105-108`).
-                    let relocked =
-                        dev_machine::fetch_locked_machine(&mut **tx, params.dev_machine_id)
+                    let relocked = {
+                        let db = pidash_db::orm_tx::TxConn::new(tx);
+                        dev_machine::fetch_locked_machine(&db, params.dev_machine_id)
                             .await
-                            .map_err(|_| Failure::server_error().into_response())?;
+                            .map_err(|_| Failure::server_error().into_response())?
+                    };
                     let same_owner = relocked.filter(|machine| {
                         dev_machine::check_owner(machine.owner_id, user_id).is_ok()
                     });
                     let Some(machine) = same_owner else {
                         return Err(not_found("dev_machine_not_found").into_response());
                     };
-                    dev_machine::touch_dev_machine(
-                        &mut **tx,
-                        machine.id,
-                        &machine.host_label,
-                        &machine.label,
-                        Some(&params.host_label),
-                        now,
-                    )
-                    .await
-                    .map_err(|_| Failure::server_error().into_response())?;
+                    {
+                        let db = pidash_db::orm_tx::TxConn::new(tx);
+                        dev_machine::touch_dev_machine(
+                            &db,
+                            machine.id,
+                            &machine.host_label,
+                            &machine.label,
+                            Some(&params.host_label),
+                            now,
+                        )
+                        .await
+                        .map_err(|_| Failure::server_error().into_response())?;
+                    }
                 }
                 Err(_) => {
+                    let _ = savepoint.rollback().await;
                     return Err(Failure::server_error().into_response());
                 }
             }
@@ -695,47 +956,196 @@ async fn exchange_in_transaction(
     }
     // `_rotate_machine_token` (`device.py:112-129`): revoke every live
     // token for the pair, then mint.
-    sqlx::query(dev_machine::ROTATE_REVOKE_SQL)
-        .bind(now)
-        .bind(workspace_id)
-        .bind(params.dev_machine_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::revoke_tokens_for_device_pair(
+        &pidash_db::orm_tx::TxConn::new(tx),
+        workspace_id,
+        params.dev_machine_id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     let raw = format!(
         "{}{}",
         token_kernel::MACHINE_TOKEN_PREFIX,
         token_urlsafe_32()
     );
     let token_id = Uuid::new_v4();
-    sqlx::query(dev_machine::ROTATE_CREATE_SQL)
-        .bind(token_id)
-        .bind(user_id)
-        .bind(params.dev_machine_id)
-        .bind(workspace_id)
-        .bind(dev_machine::rotate_host_label(&params.host_label))
-        .bind(token_kernel::hash_token(&raw, secret_key))
-        .bind(token_kernel::fingerprint(&raw))
-        .bind(dev_machine::machine_token_label(&params.host_label))
-        .bind(true)
-        .bind(now)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::insert_machine_token(
+        &pidash_db::orm_tx::TxConn::new(tx),
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: token_id,
+            user_id,
+            dev_machine_id: Some(params.dev_machine_id),
+            workspace_id,
+            host_label: dev_machine::rotate_host_label(&params.host_label),
+            token_hash: token_kernel::hash_token(&raw, secret_key),
+            token_fingerprint: token_kernel::fingerprint(&raw),
+            label: dev_machine::machine_token_label(&params.host_label),
+            is_service: true,
+            created_at: now,
+        },
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
+    // `_maybe_issue_engine_credential` (`device.py:570-595`): when the
+    // caller is not already a machine token (device-flow API token),
+    // find the newest cli grant with api_token.token = request.auth and
+    // try to issue. Nothing when no grant, machine revoked, silent and
+    // !allowed, or instance_can_serve false. Swallow silent refusal.
+    let mut engine_cred: Option<(String, String)> = None;
+    let mut pause_effects = PauseEffects::default();
+    let mut engine_state = {
+        use sea_orm::EntityTrait;
+        let m = pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
+            .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+            .await
+            .unwrap_or(None);
+        m.map(|m| {
+            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &m.engine_sign_in_state,
+                m.engine_credential_expires_at.as_ref().map(
+                    |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
+                ),
+                now,
+            )
+        })
+        .unwrap_or_else(|| "never".to_owned())
+    };
+    if matches!(caller, Caller::Api { .. }) {
+        // Find the grant via api_token.token = bridge raw (SeaORM fetch).
+        let bridge_raw = match caller {
+            Caller::Api { raw, .. } => raw.clone(),
+            Caller::Machine { .. } => unreachable!(),
+        };
+        let grant = {
+            use pidash_db::entity::{api_tokens, cli_device_codes};
+            use sea_orm::{EntityTrait as _, QueryOrder as _};
+            let tx_conn = pidash_db::orm_tx::TxConn::new(tx);
+            let api_tok = api_tokens::Entity::find()
+                .filter(api_tokens::Column::Token.eq(&bridge_raw))
+                .filter(api_tokens::Column::DeletedAt.is_null())
+                .one(&tx_conn as &_)
+                .await
+                .unwrap_or(None);
+            match api_tok {
+                Some(tok) => cli_device_codes::Entity::find()
+                    .filter(cli_device_codes::Column::ApiTokenId.eq(tok.id))
+                    .filter(cli_device_codes::Column::DeletedAt.is_null())
+                    .order_by_desc(cli_device_codes::Column::CreatedAt)
+                    .one(&tx_conn as &_)
+                    .await
+                    .unwrap_or(None)
+                    .map(|c| (c.interactive_approval, c.dev_machine_id)),
+                None => None,
+            }
+        };
+        // grant is (interactive_approval, dev_machine_id)
+        if let Some((interactive_approval, _grant_machine_id)) = grant {
+            // Check machine revoked.
+            let machine_revoked = {
+                use sea_orm::EntityTrait;
+                let m = pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
+                    .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+                    .await
+                    .unwrap_or(None);
+                m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
+            };
+            if !machine_revoked
+                && pidash_services::domain::engine_credential::engine_profile_for_user_available(
+                    settings,
+                )
+                .0
+            {
+                let silent = !interactive_approval;
+                // Check silent allowed via machine's current state.
+                let machine_for_silent = {
+                    use sea_orm::EntityTrait;
+                    pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
+                        .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+                        .await
+                        .unwrap_or(None)
+                };
+                let should_issue = if silent {
+                    if let Some(m) = machine_for_silent {
+                        pidash_services::domain::engine_credential::silent_issue_allowed(
+                            &pidash_db::orm_tx::TxConn::new(tx) as &_,
+                            m.id,
+                            now,
+                        )
+                        .await
+                        .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
+                if should_issue {
+                    let dbc = pidash_db::orm_tx::TxConn::new(tx);
+                    let issued =
+                        pidash_services::domain::engine_credential::issue_engine_credential(
+                            &dbc,
+                            secret_key,
+                            user_id,
+                            params.dev_machine_id,
+                            silent,
+                            now,
+                        )
+                        .await;
+                    if let Ok(ic) = issued {
+                        engine_cred = Some((
+                            ic.raw.clone(),
+                            ic.expires_at
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        ));
+                        engine_state = {
+                            use sea_orm::EntityTrait;
+                            let m = pidash_db::entity::dev_machine::Entity::find_by_id(
+                                params.dev_machine_id,
+                            )
+                            .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+                            .await
+                            .unwrap_or(None);
+                            m.map(|m| {
+                                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                                    &m.engine_sign_in_state,
+                                    m.engine_credential_expires_at.as_ref().map(|dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc)),
+                                    now,
+                                )
+                            })
+                            .unwrap_or_else(|| engine_state.clone())
+                        };
+                        pause_effects = ic.pause_effects;
+                    }
+                    // Silent refusal is swallowed.
+                }
+            }
+        }
+    }
     // The bridge is an in-memory credential: deactivate it for API-key
     // callers, keep machine-token callers on their rotation
     // (`device.py:466-467`).
     if let Caller::Api { raw: bridge, .. } = caller {
-        if cli_token::deactivate_api_token(&mut **tx, Some(bridge), true, now)
-            .await
-            .is_err()
+        if cli_token::deactivate_api_token(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            Some(bridge),
+            true,
+            now,
+        )
+        .await
+        .is_err()
         {
             return Err(Failure::server_error().into_response());
         }
     }
-    Ok((params.dev_machine_id, params.host_label.clone(), raw))
+    Ok((
+        params.dev_machine_id,
+        params.host_label.clone(),
+        raw,
+        engine_state,
+        engine_cred,
+        pause_effects,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -744,7 +1154,9 @@ async fn exchange_in_transaction(
 
 /// `POST /api/v1/auth/revoke/`: invalidate the caller's CLI token.
 /// Idempotent — a missing or already-inactive `APIToken` still answers
-/// ok (`device.py:503-507`).
+/// ok (`device.py:503-507`). For a machine-token caller, in one
+/// transaction, lock the token's machine, revoke the token, and when the
+/// machine then has no live token, `revoke_engine_credential`.
 async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -756,19 +1168,92 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
     };
     match caller {
         Caller::Machine { token_id, .. } => {
-            // `machine_token.revoke()`: no-op when already revoked, else
-            // stamp `revoked_at` (`runner/models.py:865-869`).
-            if sqlx::query(
-                r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL"#,
+            // `machine_token.revoke()` + engine sign-out on last token,
+            // in one transaction with the machine row locked so the
+            // "last live token" check is exact (device.py:485-511,
+            // "Serializes concurrent revocations ...").
+            let now = Utc::now();
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(_) => return Failure::server_error().into_response(),
+            };
+            let machine_id_opt: Option<Uuid> = {
+                use sea_orm::EntityTrait;
+                let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                let tok = pidash_db::entity::machine_token::Entity::find_by_id(token_id)
+                    .one(&tx_conn as &_)
+                    .await
+                    .unwrap_or(None);
+                tok.and_then(|t| t.dev_machine_id)
+            };
+            if let Some(mid) = machine_id_opt {
+                // `SELECT id ... FOR UPDATE` via SeaORM: the lock raises no
+                // error on miss, so a concurrently deleted row is non-fatal —
+                // the revoke below still lands, as Django's `.first()` did.
+                let lock: Option<Uuid> = {
+                    use sea_orm::{EntityTrait as _, QuerySelect as _};
+                    let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                    pidash_db::entity::dev_machine::Entity::find_by_id(mid)
+                        .select_only()
+                        .column(pidash_db::entity::dev_machine::Column::Id)
+                        .lock_exclusive()
+                        .into_tuple::<Uuid>()
+                        .one(&tx_conn as &_)
+                        .await
+                        .unwrap_or(None)
+                };
+                let _ = lock;
+            }
+            if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
+                token_id,
+                now,
             )
-            .bind(Utc::now())
-            .bind(token_id)
-            .execute(&pool)
             .await
             .is_err()
             {
                 return Failure::server_error().into_response();
             }
+            let mut revoke_effects = PauseEffects::default();
+            if let Some(mid) = machine_id_opt {
+                // _machine_has_live_token: revoked_at IS NULL AND (expires_at IS NULL OR > now)
+                let has_live = {
+                    use sea_orm::ColumnTrait;
+                    use sea_orm::EntityTrait;
+                    let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                    let count = pidash_db::entity::machine_token::Entity::find()
+                        .filter(pidash_db::entity::machine_token::Column::DevMachineId.eq(mid))
+                        .filter(pidash_db::entity::machine_token::Column::RevokedAt.is_null())
+                        .filter(
+                            sea_orm::Condition::any()
+                                .add(pidash_db::entity::machine_token::Column::ExpiresAt.is_null())
+                                .add(
+                                    pidash_db::entity::machine_token::Column::ExpiresAt
+                                        .gt(now.fixed_offset()),
+                                ),
+                        )
+                        .count(&tx_conn as &_)
+                        .await
+                        .unwrap_or(1);
+                    count > 0
+                };
+                if !has_live {
+                    let (_revoked, effects) =
+                        pidash_services::domain::engine_credential::revoke_engine_credential(
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
+                            mid,
+                            "signed_out",
+                            now,
+                        )
+                        .await
+                        .unwrap_or((false, PauseEffects::default()));
+                    revoke_effects = effects;
+                }
+            }
+            if tx.commit().await.is_err() {
+                return Failure::server_error().into_response();
+            }
+            drain_pause_effects(&pool, &state, &revoke_effects).await;
         }
         Caller::Api { raw, .. } => {
             // `request.auth` is the raw token string
@@ -778,23 +1263,26 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
             // scope (`db/mixins.py:56-66`): Python re-reads via
             // `APIToken.objects.get`, which never sees soft-deleted rows
             // (`device.py:504`).
-            let row: Option<(Uuid, bool)> = match sqlx::query_as(
-                r#"SELECT id, is_active FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-            )
-            .bind(&raw)
-            .fetch_optional(&pool)
-            .await
-            {
-                Ok(row) => row,
-                Err(_) => return Failure::server_error().into_response(),
+            let row = {
+                use pidash_db::entity::api_tokens;
+                let db = pidash_db::pool::sea_orm_connection(&pool);
+                let found = api_tokens::Entity::find()
+                    .filter(api_tokens::Column::Token.eq(&raw))
+                    .filter(api_tokens::Column::DeletedAt.is_null())
+                    .one(&db)
+                    .await;
+                match found {
+                    Ok(Some(m)) => Some((m.id, m.is_active)),
+                    Ok(None) => None,
+                    Err(_) => return Failure::server_error().into_response(),
+                }
             };
             if let Some((id, true)) = row {
-                if sqlx::query(
-                    r#"UPDATE api_tokens SET is_active = false, updated_at = $1 WHERE id = $2"#,
+                if pidash_services::domain::tokens::deactivate_api_token_by_id(
+                    &pidash_db::pool::sea_orm_connection(&pool),
+                    id,
+                    Utc::now(),
                 )
-                .bind(Utc::now())
-                .bind(id)
-                .execute(&pool)
                 .await
                 .is_err()
                 {
@@ -853,6 +1341,51 @@ mod tests {
     }
 
     #[test]
+    fn method_not_allowed_body_and_allow_match_live_django() {
+        // DRF `exception_handler` (`{'Detail': ...}`) + compact
+        // `JSONRenderer`, and each view's `_allowed_methods`
+        // (PIDASHCONV-1478).
+        assert_eq!(
+            not_allowed_body("GET"),
+            r#"{"detail":"Method \"GET\" not allowed."}"#
+        );
+        assert_eq!(
+            not_allowed_body("POST"),
+            r#"{"detail":"Method \"POST\" not allowed."}"#
+        );
+        assert_eq!(
+            not_allowed_body("DELETE"),
+            r#"{"detail":"Method \"DELETE\" not allowed."}"#
+        );
+        assert_eq!(ALLOW_WORKSPACES, "GET, HEAD, OPTIONS");
+        assert_eq!(ALLOW_POST_ONLY, "POST, OPTIONS");
+    }
+
+    #[test]
+    fn presented_credential_mirrors_authenticate_no_db_branches() {
+        // Missing or empty is the 401 without a query
+        // (`api_authentication.py:68-69`); anything else — including
+        // undecodable bytes, a lookup miss — needs the pool
+        // (PIDASHCONV-1536).
+        use axum::http::{HeaderName, HeaderValue};
+        let name: HeaderName = token_kernel::API_KEY_HEADER
+            .parse()
+            .expect("api key header name");
+        let empty = HeaderMap::new();
+        assert!(!has_presented_credential(&empty));
+        let mut headers = HeaderMap::new();
+        headers.insert(name.clone(), HeaderValue::from_static(""));
+        assert!(!has_presented_credential(&headers));
+        headers.insert(name.clone(), HeaderValue::from_static("x"));
+        assert!(has_presented_credential(&headers));
+        headers.insert(
+            name,
+            HeaderValue::from_bytes(&[0xff]).expect("opaque bytes"),
+        );
+        assert!(has_presented_credential(&headers));
+    }
+
+    #[test]
     fn workspaces_entry_key_order_matches_python() {
         // `{"slug": ..., "name": ...}` (`device.py:401`); the string
         // comparison is order-sensitive.
@@ -905,8 +1438,8 @@ mod tests {
         // the string comparison is order-sensitive.
         let dm = Uuid::parse_str("10ecd282-5e9e-4616-8139-015323a3d96c").expect("fixture uuid");
         assert_eq!(
-            machine_token_response_body("mt_RAW", "ws", &dm, "myhost"),
-            r#"{"machine_token":"mt_RAW","workspace_slug":"ws","dev_machine_id":"10ecd282-5e9e-4616-8139-015323a3d96c","host_label":"myhost"}"#
+            machine_token_response_body("mt_RAW", "ws", &dm, "myhost", "never", None),
+            r#"{"machine_token":"mt_RAW","workspace_slug":"ws","dev_machine_id":"10ecd282-5e9e-4616-8139-015323a3d96c","host_label":"myhost","engine_sign_in_state":"never"}"#
         );
     }
 
@@ -1032,5 +1565,56 @@ mod tests {
             );
         }
         assert_eq!(token_kernel::MACHINE_TOKEN_PREFIX, "mt_");
+    }
+
+    #[test]
+    fn auth_oauth1_dev_machine_statement_shapes() {
+        // AUTH-OAUTH-1: `SELECT id ... FOR UPDATE` for the concurrent-revoke
+        // serialization (`post_revoke`) renders `FOR UPDATE` on the narrow id.
+        use sea_orm::{DbBackend, EntityTrait, QuerySelect, QueryTrait};
+        let machine_id = Uuid::new_v4();
+        let lock = pidash_db::entity::dev_machine::Entity::find_by_id(machine_id)
+            .select_only()
+            .column(pidash_db::entity::dev_machine::Column::Id)
+            .lock_exclusive()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(lock.contains("FOR UPDATE"), "revoke lock: {lock}");
+        assert!(
+            lock.contains("\"dev_machine\""),
+            "revoke lock table: {lock}"
+        );
+        // The locked-read builder behind the exchange (`_get_or_create`)
+        // filters by pk and locks; the insert builder carries Django
+        // defaults for the `device.py:94-101` create.
+        let fetch = dev_machine::lock_machine_query(machine_id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(fetch.contains("FOR UPDATE"), "locked fetch: {fetch}");
+        assert!(
+            fetch.contains("\"owner_id\""),
+            "locked fetch columns: {fetch}"
+        );
+        let model = dev_machine::new_machine_model(
+            &dev_machine::NewDevMachine {
+                id: machine_id,
+                owner_id: Uuid::new_v4(),
+                host_label: "myhost",
+                now: Utc::now(),
+            },
+            "myhost",
+            Utc::now(),
+        );
+        let create = pidash_db::entity::dev_machine::Entity::insert(model)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            create.contains("INSERT INTO \"dev_machine\""),
+            "create insert: {create}"
+        );
+        assert!(
+            create.contains("\"visibility\"") && create.contains("\"provisioning\""),
+            "create defaults: {create}"
+        );
     }
 }

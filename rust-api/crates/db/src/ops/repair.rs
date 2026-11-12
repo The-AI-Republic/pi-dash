@@ -10,8 +10,11 @@
 //! version-sync payload shape. Decision logic (which branch, which
 //! message) lives in `pidash_services::ops::repair`; prompts, printing,
 //! exit codes and the Celery publish live in the binary's `ops::repair`.
-//! Execution uses runtime `sqlx::query` (no `query!` macros): there is no
-//! build-time database, per the merged precedent.
+//! Every executor is SeaORM over `sea_orm_connection(pool)` (or `TxConn`
+//! inside the renumber transaction) with `sqlx::Error` signatures kept
+//! through `orm_tx::into_sqlx` (`orm-migration.md`); the one remaining
+//! raw executor is the `pg_advisory_xact_lock` transaction lock
+//! (`orm-migration.md` §6).
 //!
 //! Fixtures: `rust-api/fixtures/ops/commands/repair_sql.sql`,
 //! `repair.rows.json` (F37-05), `version_sync.golden.json` (F37-06).
@@ -64,9 +67,18 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, Select,
+};
+use sea_query::{Expr, Func};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::entity::{issue_comments, issue_sequences, issues, projects, workspaces};
+use crate::orm_tx::{into_sqlx, TxConn};
+use crate::pool::sea_orm_connection;
 
 /// Batch size of the copy loop
 /// (`copy_issue_comment_to_description.py:18`).
@@ -325,30 +337,74 @@ pub struct WorkspaceRow {
 /// `filter(description_id__isnull=True).order_by("created_at")[:500]`
 /// (`copy_issue_comment_to_description.py:21-23`) over the default
 /// manager (`deleted_at IS NULL`).
-pub const COMMENT_BATCH_SQL: &str = "SELECT id, comment_json, comment_html, \
-    comment_stripped, project_id, created_by_id, updated_by_id, workspace_id \
-    FROM issue_comments WHERE deleted_at IS NULL AND description_id IS NULL \
-    ORDER BY created_at ASC LIMIT $1";
+#[derive(Debug, Clone, FromQueryResult)]
+struct CommentBatchRow {
+    id: Uuid,
+    comment_json: serde_json::Value,
+    comment_html: String,
+    comment_stripped: Option<String>,
+    project_id: Uuid,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    workspace_id: Uuid,
+}
 
-/// `bulk_update(..., ["description_id"])`
-/// (`copy_issue_comment_to_description.py:51`): one column, no
-/// `updated_at` bump (verified against live Django).
-pub const LINK_COMMENT_SQL: &str = "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
+fn comment_batch_query(limit: i64) -> Select<issue_comments::Entity> {
+    issue_comments::Entity::find()
+        .select_only()
+        .columns([
+            issue_comments::Column::Id,
+            issue_comments::Column::CommentJson,
+            issue_comments::Column::CommentHtml,
+            issue_comments::Column::CommentStripped,
+            issue_comments::Column::ProjectId,
+            issue_comments::Column::CreatedById,
+            issue_comments::Column::UpdatedById,
+            issue_comments::Column::WorkspaceId,
+        ])
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .filter(issue_comments::Column::DescriptionId.is_null())
+        .order_by_asc(issue_comments::Column::CreatedAt)
+        .limit(limit as u64)
+}
 
 /// `Project.objects.get(identifier__iexact=..., workspace__slug=...)`
 /// (`fix_duplicate_sequences.py:50`): no `LIMIT` — `get()` needs the full
 /// count for the 0/1/N decision, and no `deleted_at` filter on the joined
 /// `workspaces` (Django never applies the related default manager).
-pub const FIND_PROJECT_SQL: &str = "SELECT p.id FROM projects p \
-    INNER JOIN workspaces w ON w.id = p.workspace_id \
-    WHERE p.deleted_at IS NULL AND UPPER(p.identifier) = UPPER($1) \
-    AND w.slug = $2";
+fn find_project_query(identifier: &str, workspace_slug: &str) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(
+            Expr::expr(Func::upper(Expr::col((
+                projects::Entity,
+                projects::Column::Identifier,
+            ))))
+            .eq(Func::upper(Expr::val(identifier))),
+        )
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+}
 
 /// `Issue.objects.filter(project=..., sequence_id=...)`
 /// (`fix_duplicate_sequences.py:53`) in `Meta.ordering -created_at`.
-pub const DUPLICATE_ISSUES_SQL: &str = "SELECT id, sequence_id FROM issues \
-    WHERE deleted_at IS NULL AND project_id = $1 AND sequence_id = $2 \
-    ORDER BY created_at DESC";
+#[derive(Debug, Clone, FromQueryResult)]
+struct DuplicateIssueRow {
+    id: Uuid,
+    sequence_id: i32,
+}
+
+fn duplicate_issues_query(project_id: &Uuid, sequence_id: i64) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([issues::Column::Id, issues::Column::SequenceId])
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::SequenceId.eq(sequence_id))
+        .order_by_desc(issues::Column::CreatedAt)
+}
 
 /// `SELECT pg_advisory_xact_lock(%s)`
 /// (`fix_duplicate_sequences.py:66`).
@@ -356,84 +412,69 @@ pub const ADVISORY_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock($1)";
 
 /// `Max("sequence")` over the default manager
 /// (`fix_duplicate_sequences.py:68-71`).
-pub const MAX_SEQUENCE_SQL: &str = "SELECT MAX(sequence) FROM issue_sequences \
-    WHERE deleted_at IS NULL AND project_id = $1";
+#[derive(Debug, Clone, FromQueryResult)]
+struct MaxSequenceRow {
+    max_sequence: Option<i64>,
+}
+
+fn max_sequence_query(project_id: &Uuid) -> Select<issue_sequences::Entity> {
+    issue_sequences::Entity::find()
+        .filter(issue_sequences::Column::DeletedAt.is_null())
+        .filter(issue_sequences::Column::ProjectId.eq(*project_id))
+        .select_only()
+        .column_as(issue_sequences::Column::Sequence.max(), "max_sequence")
+}
 
 /// The id-map queryset (`fix_duplicate_sequences.py:76`) in `Meta.ordering
 /// -created_at` (order feeds the last-wins rule).
-pub const PROJECT_SEQUENCES_SQL: &str = "SELECT id, issue_id, sequence \
-    FROM issue_sequences WHERE deleted_at IS NULL AND project_id = $1 \
-    ORDER BY created_at DESC";
+#[derive(Debug, Clone, FromQueryResult)]
+struct SequenceBatchRow {
+    id: Uuid,
+    issue_id: Option<Uuid>,
+    sequence: i64,
+}
 
-/// `bulk_update(bulk_issues, ["sequence_id"])`
-/// (`fix_duplicate_sequences.py:90`): one column, no `updated_at` bump
-/// (verified against live Django).
-pub const UPDATE_ISSUE_SEQUENCE_ID_SQL: &str = "UPDATE issues SET sequence_id = $1 WHERE id = $2";
+fn project_sequences_query(project_id: &Uuid) -> Select<issue_sequences::Entity> {
+    issue_sequences::Entity::find()
+        .select_only()
+        .columns([
+            issue_sequences::Column::Id,
+            issue_sequences::Column::IssueId,
+            issue_sequences::Column::Sequence,
+        ])
+        .filter(issue_sequences::Column::DeletedAt.is_null())
+        .filter(issue_sequences::Column::ProjectId.eq(*project_id))
+        .order_by_desc(issue_sequences::Column::CreatedAt)
+}
 
-/// `bulk_update(bulk_issue_sequences, ["sequence"])`
-/// (`fix_duplicate_sequences.py:91`): one column, no `updated_at` bump
-/// (verified against live Django).
-pub const UPDATE_SEQUENCE_SQL: &str = "UPDATE issue_sequences SET sequence = $1 WHERE id = $2";
+// NOTE: the repair writes moved to `pidash_services::domain`
+// (PIDASHCONV-1630) — covered tables write only from domain/ per
+// design D7. `LINK_COMMENT_SQL`, `descriptions_insert_sql` and
+// `apply_copy_batch` live in `domain::comments`;
+// the two renumber writes and the `FixTx::commit_plan` body (as
+// `domain::issues::apply_fix_plan`, on SeaORM) in `domain::issues`. This module keeps reads, plans and pure helpers.
 
 /// `Workspace.all_objects.get(slug=...)`
 /// (`update_deleted_workspace_slug.py:31`): the unfiltered manager, so no
 /// `deleted_at` predicate. `slug` is unique, hence `LIMIT 1`.
-pub const FIND_WORKSPACE_SQL: &str =
-    "SELECT id, name, slug, deleted_at FROM workspaces WHERE slug = $1 LIMIT 1";
-
-/// `save(update_fields=["slug"])`
-/// (`update_deleted_workspace_slug.py:63-64`): the `slug` column only
-/// (verified — `updated_at` untouched).
-pub const UPDATE_WORKSPACE_SLUG_SQL: &str = "UPDATE workspaces SET slug = $1 WHERE id = $2";
-
-/// Columns of the copy `INSERT`, in bind order.
-const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
-    description_json, description_html, description_stripped, project_id, \
-    created_by_id, updated_by_id, workspace_id)";
-
-/// Multi-row `INSERT INTO descriptions ... RETURNING id` for `bulk_create`
-/// (`copy_issue_comment_to_description.py:44`): one statement per batch,
-/// Postgres `$N` placeholders, zip-aligned `RETURNING id` like Django's.
-pub fn descriptions_insert_sql(row_count: usize) -> String {
-    let mut sql = format!("INSERT INTO descriptions {DESCRIPTION_INSERT_COLUMNS} VALUES ");
-    for row in 0..row_count {
-        if row > 0 {
-            sql.push_str(", ");
-        }
-        let base = row * 10;
-        sql.push('(');
-        for col in 0..10 {
-            if col > 0 {
-                sql.push_str(", ");
-            }
-            sql.push_str(&format!("${}", base + col + 1));
-        }
-        sql.push(')');
-    }
-    sql.push_str(" RETURNING id");
-    sql
+#[derive(Debug, Clone, FromQueryResult)]
+struct WorkspaceLookupRow {
+    id: Uuid,
+    name: String,
+    slug: String,
+    deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
 }
 
-fn map_comment_row(row: &sqlx::postgres::PgRow) -> Result<CommentRow, sqlx::Error> {
-    let comment_json: sqlx::types::Json<serde_json::Value> = row.try_get("comment_json")?;
-    Ok(CommentRow {
-        id: row.try_get("id")?,
-        comment_json: comment_json.0,
-        comment_html: row.try_get("comment_html")?,
-        comment_stripped: row.try_get("comment_stripped")?,
-        project_id: row.try_get("project_id")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        workspace_id: row.try_get("workspace_id")?,
-    })
-}
-
-fn map_sequence_row(row: &sqlx::postgres::PgRow) -> Result<SequenceRow, sqlx::Error> {
-    Ok(SequenceRow {
-        id: row.try_get("id")?,
-        issue_id: row.try_get("issue_id")?,
-        sequence: row.try_get("sequence")?,
-    })
+fn find_workspace_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::DeletedAt,
+        ])
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
 }
 
 /// One copy batch (`copy_issue_comment_to_description.py:20-26`).
@@ -441,57 +482,25 @@ pub async fn fetch_comment_batch(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<CommentRow>, RepairError> {
-    let rows = sqlx::query(COMMENT_BATCH_SQL)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
-    rows.iter()
-        .map(map_comment_row)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(RepairError::Db)
-}
-
-/// One copy batch write (`copy_issue_comment_to_description.py:28-51`):
-/// `bulk_create` then the `description_id` backfill in a single
-/// transaction. Returns the inserted ids, zip-aligned with `descriptions`.
-pub async fn apply_copy_batch(
-    pool: &PgPool,
-    descriptions: &[NewDescription],
-    links: &[(Uuid, Uuid)],
-) -> Result<Vec<Uuid>, RepairError> {
-    if descriptions.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut tx = pool.begin().await?;
-    let insert_sql = descriptions_insert_sql(descriptions.len());
-    let mut query = sqlx::query(&insert_sql);
-    for desc in descriptions {
-        query = query
-            .bind(desc.id)
-            .bind(desc.created_at)
-            .bind(desc.updated_at)
-            .bind(sqlx::types::Json(&desc.description_json))
-            .bind(&desc.description_html)
-            .bind(&desc.description_stripped)
-            .bind(desc.project_id)
-            .bind(desc.created_by_id)
-            .bind(desc.updated_by_id)
-            .bind(desc.workspace_id);
-    }
-    let inserted = query.fetch_all(&mut *tx).await?;
-    let mut ids = Vec::with_capacity(inserted.len());
-    for row in &inserted {
-        ids.push(row.try_get::<Uuid, _>("id")?);
-    }
-    for (comment_id, description_id) in links {
-        sqlx::query(LINK_COMMENT_SQL)
-            .bind(description_id)
-            .bind(comment_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
-    Ok(ids)
+    let db = sea_orm_connection(pool);
+    let rows = comment_batch_query(limit)
+        .into_model::<CommentBatchRow>()
+        .all(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| CommentRow {
+            id: row.id,
+            comment_json: row.comment_json,
+            comment_html: row.comment_html,
+            comment_stripped: row.comment_stripped,
+            project_id: row.project_id,
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            workspace_id: row.workspace_id,
+        })
+        .collect())
 }
 
 /// Project candidates for `get()` (`fix_duplicate_sequences.py:50`).
@@ -501,19 +510,13 @@ pub async fn find_project_rows(
     identifier: &str,
     workspace_slug: &str,
 ) -> Result<Vec<ProjectRow>, RepairError> {
-    let rows = sqlx::query(FIND_PROJECT_SQL)
-        .bind(identifier)
-        .bind(workspace_slug)
-        .fetch_all(pool)
-        .await?;
-    rows.iter()
-        .map(|row| {
-            Ok(ProjectRow {
-                id: row.try_get("id")?,
-            })
-        })
-        .collect::<Result<Vec<_>, sqlx::Error>>()
-        .map_err(RepairError::Db)
+    let db = sea_orm_connection(pool);
+    let rows = find_project_query(identifier, workspace_slug)
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(rows.into_iter().map(|id| ProjectRow { id }).collect())
 }
 
 /// Duplicate issues in `-created_at` order
@@ -523,20 +526,19 @@ pub async fn fetch_duplicate_issues(
     project_id: &Uuid,
     sequence_id: i64,
 ) -> Result<Vec<IssueRow>, RepairError> {
-    let rows = sqlx::query(DUPLICATE_ISSUES_SQL)
-        .bind(project_id)
-        .bind(sequence_id)
-        .fetch_all(pool)
-        .await?;
-    rows.iter()
-        .map(|row| {
-            Ok(IssueRow {
-                id: row.try_get("id")?,
-                sequence_id: row.try_get("sequence_id")?,
-            })
+    let db = sea_orm_connection(pool);
+    let rows = duplicate_issues_query(project_id, sequence_id)
+        .into_model::<DuplicateIssueRow>()
+        .all(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| IssueRow {
+            id: row.id,
+            sequence_id: row.sequence_id,
         })
-        .collect::<Result<Vec<_>, sqlx::Error>>()
-        .map_err(RepairError::Db)
+        .collect())
 }
 
 /// The renumber transaction (`fix_duplicate_sequences.py:59-91`):
@@ -559,27 +561,17 @@ impl FixTx<'_> {
         &self.sequences
     }
 
-    /// The two `bulk_update`s (`:90-91`) plus commit. Each pair is
-    /// `(row_id, new_value)`.
-    pub async fn commit_plan(
-        mut self,
-        issue_updates: &[(Uuid, i64)],
-        sequence_updates: &[(Uuid, i64)],
-    ) -> Result<(), RepairError> {
-        for (issue_id, new_sequence) in issue_updates {
-            sqlx::query(UPDATE_ISSUE_SEQUENCE_ID_SQL)
-                .bind(new_sequence)
-                .bind(issue_id)
-                .execute(&mut *self.tx)
-                .await?;
-        }
-        for (row_id, new_sequence) in sequence_updates {
-            sqlx::query(UPDATE_SEQUENCE_SQL)
-                .bind(new_sequence)
-                .bind(row_id)
-                .execute(&mut *self.tx)
-                .await?;
-        }
+    /// The transaction's connection for the domain-owned write
+    /// (`pidash_services::domain::issues::apply_fix_plan`, the two
+    /// `bulk_update`s `:90-91`); the driver commits afterwards. Split
+    /// from `commit_plan` (PIDASHCONV-1630): covered-table SQL lives in
+    /// domain/, and this crate cannot depend on it.
+    pub fn executor(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.tx
+    }
+
+    /// Commit after [`FixTx::executor`] writes.
+    pub async fn commit(self) -> Result<(), RepairError> {
         self.tx.commit().await?;
         Ok(())
     }
@@ -593,23 +585,38 @@ pub async fn begin_fix_tx<'a>(
 ) -> Result<FixTx<'a>, RepairError> {
     let mut tx = pool.begin().await?;
     let lock_key = convert_uuid_to_integer(project_id);
+    // `pg_advisory_xact_lock` takes the transaction lock (`orm-migration.md`
+    // §6 lists advisory locks as an allowed exception) before the SeaORM reads.
+    // raw-sql: advisory lock needs the sqlx transaction; the builder cannot express it
     sqlx::query(ADVISORY_LOCK_SQL)
         .bind(lock_key)
         .execute(&mut *tx)
         .await?;
-    let max_row = sqlx::query(MAX_SEQUENCE_SQL)
-        .bind(project_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    let max_sequence: Option<i64> = max_row.try_get("max")?;
-    let seq_rows = sqlx::query(PROJECT_SEQUENCES_SQL)
-        .bind(project_id)
-        .fetch_all(&mut *tx)
-        .await?;
+    let max_sequence = {
+        let conn = TxConn::new(&mut tx);
+        max_sequence_query(project_id)
+            .into_model::<MaxSequenceRow>()
+            .one(&conn)
+            .await
+            .map_err(into_sqlx)?
+            .and_then(|row| row.max_sequence)
+    };
+    let seq_rows = {
+        let conn = TxConn::new(&mut tx);
+        project_sequences_query(project_id)
+            .into_model::<SequenceBatchRow>()
+            .all(&conn)
+            .await
+            .map_err(into_sqlx)?
+    };
     let sequences = seq_rows
-        .iter()
-        .map(map_sequence_row)
-        .collect::<Result<Vec<_>, _>>()?;
+        .into_iter()
+        .map(|row| SequenceRow {
+            id: row.id,
+            issue_id: row.issue_id,
+            sequence: row.sequence,
+        })
+        .collect();
     Ok(FixTx {
         tx,
         max_sequence,
@@ -623,37 +630,18 @@ pub async fn find_workspace(
     pool: &PgPool,
     slug: &str,
 ) -> Result<Option<WorkspaceRow>, RepairError> {
-    let row = sqlx::query(FIND_WORKSPACE_SQL)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await?;
-    row.map(|row| {
-        Ok(WorkspaceRow {
-            id: row.try_get("id")?,
-            name: row.try_get("name")?,
-            slug: row.try_get("slug")?,
-            deleted_at: row.try_get("deleted_at")?,
-        })
-    })
-    .transpose()
-    .map_err(RepairError::Db)
-}
-
-/// The slug write (`update_deleted_workspace_slug.py:62-64`) in a
-/// transaction: `slug` column only.
-pub async fn apply_slug_update(
-    pool: &PgPool,
-    workspace_id: &Uuid,
-    new_slug: &str,
-) -> Result<(), RepairError> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(UPDATE_WORKSPACE_SLUG_SQL)
-        .bind(new_slug)
-        .bind(workspace_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
+    let db = sea_orm_connection(pool);
+    let row = find_workspace_query(slug)
+        .into_model::<WorkspaceLookupRow>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row.map(|row| WorkspaceRow {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        deleted_at: row.deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
+    }))
 }
 
 #[cfg(test)]
@@ -821,34 +809,69 @@ mod tests {
     }
 
     #[test]
-    fn insert_builder_numbers_placeholders() {
-        let one = descriptions_insert_sql(1);
-        assert!(one.starts_with("INSERT INTO descriptions ("), "{one}");
-        assert!(
-            one.contains("$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"),
-            "{one}"
-        );
-        assert!(one.ends_with(" RETURNING id"), "{one}");
-        let two = descriptions_insert_sql(2);
-        assert!(two.contains("($11, $12, $13"), "{two}");
-        assert!(two.contains("$20) RETURNING id"), "{two}");
+    fn seaorm_comment_batch_orders_oldest_unlinked_first() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = comment_batch_query(500)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""description_id" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""created_at" ASC"#), "{sql}");
+        assert!(sql.contains("LIMIT 500"), "{sql}");
     }
 
     #[test]
-    fn static_sql_pins_clauses() {
-        assert!(COMMENT_BATCH_SQL.contains("description_id IS NULL"));
-        assert!(COMMENT_BATCH_SQL.contains("ORDER BY created_at ASC"));
-        assert!(LINK_COMMENT_SQL.contains("SET description_id = $1"));
-        assert!(!LINK_COMMENT_SQL.contains("updated_at"));
-        assert!(FIND_PROJECT_SQL.contains("UPPER(p.identifier) = UPPER($1)"));
-        assert!(FIND_PROJECT_SQL.contains("INNER JOIN workspaces"));
-        assert!(DUPLICATE_ISSUES_SQL.contains("ORDER BY created_at DESC"));
-        assert!(MAX_SEQUENCE_SQL.contains("MAX(sequence)"));
-        assert!(PROJECT_SEQUENCES_SQL.contains("ORDER BY created_at DESC"));
-        assert!(!UPDATE_ISSUE_SEQUENCE_ID_SQL.contains("updated_at"));
-        assert!(!UPDATE_SEQUENCE_SQL.contains("updated_at"));
-        assert!(FIND_WORKSPACE_SQL.contains("SELECT id, name, slug, deleted_at"));
-        assert!(!FIND_WORKSPACE_SQL.contains("deleted_at IS NULL"));
-        assert!(!UPDATE_WORKSPACE_SLUG_SQL.contains("updated_at"));
+    fn seaorm_find_project_uses_iexact_without_workspace_liveness() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = find_project_query("PRB", "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
+        assert!(sql.contains("UPPER("), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            !sql.contains(r#""workspaces"."deleted_at""#),
+            "Django never applies the related manager: {sql}"
+        );
+    }
+
+    #[test]
+    fn seaorm_duplicate_issues_orders_newest_first() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = duplicate_issues_query(&project, 5)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""created_at" DESC"#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+    }
+
+    #[test]
+    fn seaorm_sequences_read_newest_first_under_the_lock() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = project_sequences_query(&project)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""created_at" DESC"#), "{sql}");
+        let max_sql = max_sequence_query(&project)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            max_sql.contains(r#"MAX("issue_sequences"."sequence")"#),
+            "{max_sql}"
+        );
+        assert!(max_sql.contains(r#""deleted_at" IS NULL"#), "{max_sql}");
+    }
+
+    #[test]
+    fn seaorm_workspace_lookup_has_no_liveness_predicate() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = find_workspace_query("acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""slug" = 'acme'"#), "{sql}");
+        assert!(!sql.contains("deleted_at\" IS NULL"), "{sql}");
     }
 }

@@ -90,8 +90,25 @@ app.conf.beat_schedule = {
         "task": "runner.release_pins_on_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Built-in engine: pause engines whose engine credential expired, so
+    # pods route elsewhere (built_engine_as_runner §4.3).
+    "runner-pause-engines-with-expired-credentials": {
+        "task": "runner.pause_engines_with_expired_credentials",
+        "schedule": crontab(minute="*/5"),
+    },
     "runner-fail-runs-on-offline-runners": {
         "task": "runner.fail_runs_on_offline_runners",
+        "schedule": crontab(minute="*/1"),
+    },
+    # Dedicated-runner bounds (§11.3, §12.1): fail dedicated runs whose
+    # runner is still unavailable after 12h, and sweep stranded dedicated
+    # pins untouched by the released sweeps.
+    "runner-fail-dedicated-runs": {
+        "task": "runner.fail_dedicated_runs",
+        "schedule": crontab(minute="*/1"),
+    },
+    "runner-sweep-stranded-dedicated-runs": {
+        "task": "runner.sweep_stranded_dedicated_runs",
         "schedule": crontab(minute="*/1"),
     },
     # Per-active-run agent stall watchdog. Backstop for the runner's own

@@ -7,11 +7,10 @@
 //! [`StoreDeps`]: settings, an admission cache, the `H`/`E`/`P`
 //! closures, and `now`. This module builds those inputs live:
 //!
-//! * [`CallCache`]: the per-call admission cache. Mirrors the api
-//!   crate's `RequestCache` exactly (a `Mutex<HashMap>`; the sync
-//!   [`AdmissionCache`] trait cannot reach the async Redis client, and
-//!   the drivers consult it only when building a cloud-executor run).
-//!   A jobs-side type because jobs cannot depend on api (crate graph).
+//! * The admission cache: the shared
+//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache]
+//!   (PIDASHCONV-1487), built by each fire handler from `REDIS_URL` —
+//!   the same buckets the HTTP plane and the Django worker use.
 //! * [`JobsMatcher`]: the live [`PodRunnerMatcher`]. Mirrors the api
 //!   crate's `LiveMatcher` arm for arm over the same services
 //!   [`guards`](pidash_services::runner_sessions::guards) helpers.
@@ -36,82 +35,41 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
+use pidash_db::entity::{assistant_user_llm_config, issues, projects};
+use pidash_db::orm_tx::into_sqlx;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
-use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,
 };
-use pidash_services::runner_sessions::guards as g;
-
-// ---------------------------------------------------------------------------
-// Call cache
-// ---------------------------------------------------------------------------
-
-/// Per-call admission cache: [`CallCache::default`] per dispatch, the
-/// same call-scoped shape as the L6 drivers' caches.
-#[derive(Debug, Default)]
-pub(crate) struct CallCache {
-    buckets: Mutex<HashMap<String, i64>>,
-}
-
-/// The [`AdmissionCache::Error`] for [`CallCache`] (a poisoned mutex).
-#[derive(Debug)]
-pub(crate) struct CacheError(pub(crate) String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl AdmissionCache for CallCache {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.buckets
-            .lock()
-            .map(|buckets| buckets.get(key).copied())
-            .map_err(|error| CacheError(error.to_string()))
-    }
-
-    fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-        self.buckets
-            .lock()
-            .map(|mut buckets| {
-                buckets
-                    .entry(key.to_owned())
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            })
-            .map_err(|error| CacheError(error.to_string()))
-    }
-}
+use pidash_services::runner_sessions;
 
 // ---------------------------------------------------------------------------
 // Jobs matcher
 // ---------------------------------------------------------------------------
 
-/// Live [`PodRunnerMatcher`] over the merged D-14 guards helpers
-/// (`runner/services/matcher.py:375-412`): the managed narrow branch or
-/// the general owner-set branch, with the same no-query short-circuits.
-/// Mirrors the api crate's `LiveMatcher` (jobs cannot name it).
+/// Live [`PodRunnerMatcher`] (D-12 fire-tick driver): delegates to the
+/// single SeaORM implementation shared with api.
 pub(crate) struct JobsMatcher {
-    pool: PgPool,
+    inner: runner_sessions::SeaOrmPodMatcher,
 }
 
 impl JobsMatcher {
     pub(crate) fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            inner: runner_sessions::SeaOrmPodMatcher::new(pidash_db::pool::sea_orm_connection(
+                &pool,
+            )),
+        }
     }
 }
 
@@ -121,62 +79,11 @@ impl PodRunnerMatcher for JobsMatcher {
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
+        pod_once: bool,
     ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            use pidash_services::orchestration::creation::CreationError;
-            let db = |error: sqlx::Error| DispatchError::Db(error.to_string());
-            let issue: Option<(Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-                r#"SELECT "agent_executor", "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            )
-            .bind(issue_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db)?;
-            let Some((agent_executor, created_by_id, project_id)) = issue else {
-                return Ok(false);
-            };
-            let project_id = project_id.ok_or_else(|| {
-                DispatchError::Store(CreationError::MissingRow("issue has no project".to_owned()))
-            })?;
-            let default_executor: Option<String> = sqlx::query_scalar(
-                r#"SELECT "default_agent_executor" FROM "projects" WHERE "id" = $1"#,
-            )
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db)?
-            .flatten();
-            let default_executor = default_executor.unwrap_or_default();
-            if g::is_managed_runner_issue(agent_executor.as_deref(), &default_executor) {
-                let Some(creator) = creator_id else {
-                    return Ok(false);
-                };
-                let hit: Option<(i32,)> = sqlx::query_as(g::POD_HAS_RUNNER_MANAGED_SQL)
-                    .bind(creator)
-                    .bind(pod_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(db)?;
-                return Ok(hit.is_some());
-            }
-            let assignees: Vec<Uuid> = sqlx::query_scalar(g::ISSUE_ASSIGNEE_IDS_SQL)
-                .bind(issue_id)
-                .fetch_all(&pool)
-                .await
-                .map_err(db)?;
-            let owners = g::eligible_owner_ids(creator_id, created_by_id, &assignees);
-            let Some(sql) = g::pod_has_runner_general_sql(owners.len()) else {
-                return Ok(false);
-            };
-            let mut query = sqlx::query_as::<_, (i32,)>(&sql);
-            for owner in &owners {
-                query = query.bind(owner);
-            }
-            query = query.bind(pod_id);
-            let hit: Option<(i32,)> = query.fetch_optional(&pool).await.map_err(db)?;
-            Ok(hit.is_some())
-        })
+        self.inner
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human, pod_once)
     }
 }
 
@@ -223,12 +130,17 @@ pub(crate) async fn project_leads(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<(Option<Uuid>, Option<Uuid>), sqlx::Error> {
-    let row: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT "project_lead_id", "default_assignee_id" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await?;
+    let conn = sea_orm_connection(pool);
+    let row: Option<(Option<Uuid>, Option<Uuid>)> = projects::Entity::find_by_id(project_id)
+        .select_only()
+        .columns([
+            projects::Column::ProjectLeadId,
+            projects::Column::DefaultAssigneeId,
+        ])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
     Ok(row.unwrap_or((None, None)))
 }
 
@@ -242,11 +154,14 @@ pub(crate) async fn creator_universe(
     actor_id: Option<Uuid>,
     issue_id: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let issue: Option<(Option<Uuid>, Option<Uuid>)> =
-        sqlx::query_as(r#"SELECT "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await?;
+    let conn = sea_orm_connection(pool);
+    let issue: Option<(Option<Uuid>, Option<Uuid>)> = issues::Entity::find_by_id(issue_id)
+        .select_only()
+        .columns([issues::Column::CreatedById, issues::Column::ProjectId])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
     let (issue_created_by_id, project_id) = match issue {
         Some((created_by_id, project_id)) => (created_by_id, project_id),
         None => (None, None),
@@ -255,6 +170,7 @@ pub(crate) async fn creator_universe(
         Some(project_id) => project_leads(pool, project_id).await?,
         None => (None, None),
     };
+    // raw-sql: awaits dispatch kernel (live assignee candidates with active/bot flags owned by orchestration dispatch).
     let assignees: Vec<(Uuid, bool, bool)> = sqlx::query_as(LIVE_ASSIGNEE_CANDIDATES_SQL)
         .bind(issue_id)
         .fetch_all(pool)
@@ -278,11 +194,18 @@ pub(crate) async fn fetch_presence(
     if user_ids.is_empty() {
         return Ok(presence);
     }
-    let rows: Vec<(Uuid, Option<Vec<u8>>)> =
-        sqlx::query_as(r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#)
-            .bind(user_ids)
-            .fetch_all(pool)
-            .await?;
+    let conn = sea_orm_connection(pool);
+    let rows: Vec<(Uuid, Option<Vec<u8>>)> = assistant_user_llm_config::Entity::find()
+        .filter(assistant_user_llm_config::Column::UserId.is_in(user_ids.to_vec()))
+        .select_only()
+        .columns([
+            assistant_user_llm_config::Column::UserId,
+            assistant_user_llm_config::Column::ApiKeyEncrypted,
+        ])
+        .into_tuple()
+        .all(&conn)
+        .await
+        .map_err(into_sqlx)?;
     for id in user_ids {
         presence.insert(*id, false);
     }
@@ -340,26 +263,6 @@ pub(crate) fn profile_fn(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Parse one statement with the Postgres dialect (the scan-suite
-    /// precedent): new SQL must at least parse offline.
-    fn parse(sql: &str) -> sqlparser::ast::Statement {
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-            .expect("SQL parses")
-            .pop()
-            .expect("one statement")
-    }
-
-    #[test]
-    fn cache_counts_like_request_cache() {
-        let cache = CallCache::default();
-        assert_eq!(cache.bucket_count("k").unwrap(), None);
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(1));
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(2));
-        assert_eq!(cache.bucket_count("other").unwrap(), None);
-    }
 
     #[test]
     fn universe_orders_actor_first_deduped() {
@@ -476,19 +379,107 @@ mod tests {
     }
 
     #[test]
-    fn live_input_sql_parses() {
-        for sql in [
-            r#"SELECT "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            r#"SELECT "project_lead_id", "default_assignee_id" FROM "projects" WHERE "id" = $1"#,
-            r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#,
-            r#"SELECT "id", "name", "group" FROM "states" WHERE "deleted_at" IS NULL"#,
-            r#"SELECT "agent_executor", "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            r#"SELECT "default_agent_executor" FROM "projects" WHERE "id" = $1"#,
-        ] {
-            assert!(
-                matches!(parse(sql), sqlparser::ast::Statement::Query(_)),
-                "{sql}"
-            );
-        }
+    fn live_input_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let project_id = Uuid::from_u128(1);
+        let project_leads_sql = projects::Entity::find_by_id(project_id)
+            .select_only()
+            .columns([
+                projects::Column::ProjectLeadId,
+                projects::Column::DefaultAssigneeId,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            project_leads_sql.contains("\"projects\""),
+            "{project_leads_sql}"
+        );
+        assert!(
+            project_leads_sql.contains("\"project_lead_id\""),
+            "{project_leads_sql}"
+        );
+        assert!(
+            project_leads_sql.contains("\"default_assignee_id\""),
+            "{project_leads_sql}"
+        );
+
+        let issue_id = Uuid::from_u128(2);
+        let creator_sql = issues::Entity::find_by_id(issue_id)
+            .select_only()
+            .columns([issues::Column::CreatedById, issues::Column::ProjectId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(creator_sql.contains("\"issues\""), "{creator_sql}");
+        assert!(creator_sql.contains("\"created_by_id\""), "{creator_sql}");
+        assert!(creator_sql.contains("\"project_id\""), "{creator_sql}");
+
+        let matcher_sql = issues::Entity::find_by_id(issue_id)
+            .select_only()
+            .columns([
+                issues::Column::AgentExecutor,
+                issues::Column::CreatedById,
+                issues::Column::ProjectId,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(matcher_sql.contains("\"agent_executor\""), "{matcher_sql}");
+
+        let default_exec_sql = projects::Entity::find_by_id(project_id)
+            .select_only()
+            .column(projects::Column::DefaultAgentExecutor)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            default_exec_sql.contains("\"default_agent_executor\""),
+            "{default_exec_sql}"
+        );
+
+        let presence_sql = assistant_user_llm_config::Entity::find()
+            .filter(assistant_user_llm_config::Column::UserId.is_in(vec![Uuid::from_u128(3)]))
+            .select_only()
+            .columns([
+                assistant_user_llm_config::Column::UserId,
+                assistant_user_llm_config::Column::ApiKeyEncrypted,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            presence_sql.contains("\"assistant_user_llm_config\""),
+            "{presence_sql}"
+        );
+        assert!(presence_sql.contains("\"user_id\""), "{presence_sql}");
+        assert!(presence_sql.contains("IN"), "{presence_sql}");
+    }
+
+    #[tokio::test]
+    async fn live_inputs_read_migrated_tables() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        // Missing rows narrow to empty without error.
+        let missing_project = Uuid::new_v4();
+        assert_eq!(
+            project_leads(&pool, missing_project)
+                .await
+                .expect("missing project"),
+            (None, None)
+        );
+        let empty = fetch_presence(&pool, &[]).await.expect("empty presence");
+        assert!(empty.is_empty());
+        let unknown = Uuid::new_v4();
+        let presence = fetch_presence(&pool, &[unknown])
+            .await
+            .expect("unknown presence");
+        assert_eq!(presence.get(&unknown), Some(&false));
+        let missing_universe = creator_universe(&pool, None, Uuid::new_v4())
+            .await
+            .expect("missing issue universe");
+        assert!(missing_universe.is_empty());
     }
 }

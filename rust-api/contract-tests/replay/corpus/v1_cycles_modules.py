@@ -144,8 +144,18 @@ def _seed_extras(conn) -> None:
 
 
 _NOW = datetime.now(timezone.utc)
-_DATED_START = (_NOW + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-_DATED_END = (_NOW + timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+# 5/12-day window: far enough ahead that the import-time date can never be
+# "today" at request time. The previous 1/8-day window raced midnight — an
+# import at 23:xx on day D and execution at 00:xx on day D+1 made start ==
+# today, hitting convert_to_utc's same-day arm (apps/api/pi_dash/utils/
+# timezone_converter.py:82-83) which returns now() with microseconds. Django
+# and Rust sample now() ~55ms apart (CI 42716567965: 2026-11-10T00:06:05.643653Z
+# vs 2026-11-10T00:06:05.699580Z), failing the exact JSON compare because
+# start_date is not in TIMESTAMP_JSON_KEYS (NEWPIDASH-179). The 5/12 window
+# keeps the "future, deletable" intent while staying at least 4 days ahead
+# even after a midnight straddle.
+_DATED_START = (_NOW + timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+_DATED_END = (_NOW + timedelta(days=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 SESSIONS = (
     Session(

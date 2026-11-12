@@ -79,6 +79,8 @@ const RUNNER: IRunner = {
   enrolled_at: "2026-05-22T00:00:00Z",
   revoked_at: null,
   revoked_reason: "",
+  paused_at: null,
+  paused_by: null,
   created_at: "2026-05-22T00:00:00Z",
   updated_at: "2026-05-23T00:00:00Z",
 };

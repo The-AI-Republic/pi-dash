@@ -16,7 +16,7 @@ KEY = "dt"
 
 SCHEDULER_KEYS = [
     "id", "workspace", "slug", "name", "description", "prompt", "color",
-    "source", "is_enabled", "bindings", "created_at", "updated_at",
+    "source", "is_builtin", "is_enabled", "bindings", "created_at", "updated_at",
 ]
 
 FORBIDDEN_BODY = {"detail": "You do not have permission to perform this action."}

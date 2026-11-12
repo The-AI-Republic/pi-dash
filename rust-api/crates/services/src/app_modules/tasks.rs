@@ -107,13 +107,13 @@
 
 use serde_json::{Map, Value};
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`crate::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use crate::domain::activity::ISSUE_ACTIVITY_TASK;
 
-/// Celery wire name for `model_activity` (bare `@shared_task` default;
-/// pinned equal to the D-19/D-33 const — same string, this crate cannot
-/// import `pidash-jobs` so the pin is by value on both sides).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-export of the canonical [`crate::domain::activity::MODEL_ACTIVITY_TASK`]
+/// (the D-19/D-33 owners re-export the same const, so the pin is by
+/// construction now).
+pub use crate::domain::activity::MODEL_ACTIVITY_TASK;
 
 /// Celery wire name for `recent_visited_task` (bare `@shared_task` default).
 pub const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";

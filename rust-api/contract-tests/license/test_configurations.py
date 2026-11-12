@@ -118,22 +118,34 @@ def test_email_check_live_send_success(admin_api, world):
 def test_email_check_bad_header_receiver(admin_api, world):
     # Header validation still runs on the non-network backends: the
     # newline raises BadHeaderError inside msg.send(), inside the try.
+    # Under the SMTP backend Django dials before _send ever runs, so
+    # this unroutable seed answers the Network 400 there instead
+    # (PIDASHCONV-1445, probed live on Django 4.2.30 against an
+    # aiosmtpd sink); a routable seed would answer the generic 400
+    # (the envelope ValueError precedes the header render,
+    # `smtp.py:144-150`). Both listed answers are Django's.
     _seed_unroutable_mail(world["db"])
     res = admin_api.post(
         "/api/instances/email-credentials-check/",
         json={"receiver_email": "a@b.com\nBcc: x@example.com"},
     )
     assert res.status_code == 400
-    assert res.json() == {"error": "Invalid email header."}
+    assert res.json() in (
+        {"error": "Invalid email header."},
+        {"error": "Network connection error. Please check your internet connection."},
+    )
 
 
-def test_email_check_unparsable_port_is_500(admin_api, world):
-    # port=int(EMAIL_PORT) runs outside the try (BUG-2): ValueError
-    # escapes to the base 500 on every backend.
+def test_email_check_unparsable_port_is_400(admin_api, world):
+    # NEWFRONT-524 (Django main, configuration.py:152-158):
+    # int(str(...).strip()) runs in its own try, so an unparseable
+    # stored port is the fallthrough 400 on every backend (the old
+    # base 500 died with BUG-2). Needs main merged into rust-dev for
+    # the Django leg.
     _seed_unroutable_mail(world["db"], port="bogus")
     res = admin_api.post(
         "/api/instances/email-credentials-check/",
         json={"receiver_email": "probe@example.com"},
     )
-    assert res.status_code == 500
-    assert res.json() == {"error": "Something went wrong please try again later"}
+    assert res.status_code == 400
+    assert res.json() == {"error": "Could not send email. Please check your configuration"}

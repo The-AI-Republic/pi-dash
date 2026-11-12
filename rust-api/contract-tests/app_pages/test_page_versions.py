@@ -102,6 +102,10 @@ def test_duplicate_shape(user_client, world, db):
     assert body["owned_by"] == world["owner"]["id"]
     assert body["id"] != world["page"]["id"]
     assert body["project_ids"] == [world["project"]["id"]]
+    # `parent_id` is a model attribute; the un-annotated re-fetch drops
+    # `sub_pages_count` (SkipField), like `is_favorite` / `label_ids`.
+    assert body["parent_id"] is None
+    assert "sub_pages_count" not in body
     # The detail serializer never exposes the raw binary column.
     assert "description_binary" not in body
     row = db.fetchone(

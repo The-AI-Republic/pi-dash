@@ -57,7 +57,7 @@ impl OriginRedis {
                 );
                 Self { client: None }
             }
-            Some(url) => match redis::Client::open(url.as_str()) {
+            Some(url) => match pidash_db::redis::open_client(url.as_str()) {
                 Ok(client) => Self {
                     client: Some(client),
                 },

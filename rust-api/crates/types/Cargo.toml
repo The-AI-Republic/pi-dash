@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+pidash-compat = { path = "../compat" }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: correctly-rounded float parsing (CPython parity) in every
 # build graph; pidash-types sits at the bottom of the dep stack (PIDASHCONV-705).
@@ -21,4 +22,7 @@ base64 = "0.22"
 regex = "1"
 
 [dev-dependencies]
-serde_json = "1"
+# The shipped binary unifies `arbitrary_precision` in from pidash-api; pin it
+# here so `cargo test -p pidash-types` sees the same Number semantics as the
+# workspace build (big-integer renderer tests, PIDASHCONV-1332).
+serde_json = { version = "1", features = ["arbitrary_precision"] }

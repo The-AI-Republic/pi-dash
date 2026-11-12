@@ -40,8 +40,6 @@ pub mod intakes;
 pub mod issues;
 pub mod versions;
 
-use std::collections::HashMap;
-
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -49,7 +47,15 @@ use chrono_tz::Tz;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::app_issues::access;
+use crate::edge;
 use crate::state::AppState;
+use pidash_compat::py::python_dumps;
+pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
+use pidash_db::entity::{intakes as intake_entity, issues as issue_entity, projects, workspaces};
+use sea_orm::{
+    ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
 pub const UNAUTHENTICATED_BODY: &str =
@@ -57,23 +63,11 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// One query value, repeated or not. Mirrors the D-26 `app_issues` shape:
-/// callers read last-wins like Django's `QueryDict`.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Django `QueryDict.get`: the last value, or `None`.
 /// All values for `key`, in order; `None` when absent.
@@ -81,13 +75,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
     query.get(key).map(|value| match value {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
-    })
-}
-
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
     })
 }
 
@@ -202,114 +189,6 @@ pub fn guards_error(error: pidash_services::app_intake::permissions::ErrorBody) 
         .expect("guard denial response")
 }
 
-/// Render pre-serialized JSON bytes as the response body.
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
-/// `json.dumps` with CPython defaults (`, ` / `: ` separators): the task
-/// `requested_data` / `current_instance` / `updated_issue` payloads.
-/// Same algorithm as the D-02 `space` twin; kept per module so sibling
-/// handler issues never fork a shared helper.
-pub fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
-
-/// An intake path: the owned methods serve from Rust, everything else
-/// falls through to Django (its 405-after-auth and metadata responses
-/// live there). List `"HEAD"` alongside the other unowned methods: axum
-/// would auto-serve it from `get`, but Django defines no `head` and 405s
-/// after auth.
-pub fn owned(
-    handler: axum::routing::MethodRouter<AppState>,
-    unowned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = handler;
-    for method in unowned {
-        router = match *method {
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "OPTIONS" => router.options(crate::edge::proxy),
-            _ => router.get(crate::edge::proxy),
-        };
-    }
-    router
-}
-
 /// Register the owned intake-issue + versions routes (both aliases share
 /// the viewsets, exactly like the Django URL conf). Sibling handler
 /// issues merge their own routers here; merges keep both sides.
@@ -317,75 +196,75 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-issues/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intakes/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::list).post(intakes::create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intakes/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::retrieve)
                     .patch(intakes::partial_update)
                     .delete(intakes::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inboxes/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::list).post(intakes::create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inboxes/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::retrieve)
                     .patch(intakes::partial_update)
                     .delete(intakes::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::retrieve)
                     .patch(issues::partial_update)
                     .delete(issues::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::retrieve)
                     .patch(issues::partial_update)
                     .delete(issues::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/",
-            owned(axum::routing::get(versions::list), &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+            edge::owned(axum::routing::get(versions::list), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/{pk}/",
-            owned(axum::routing::get(versions::detail), &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+            edge::owned(axum::routing::get(versions::detail), &["GET", "TRACE"]),
         )
 }
 
@@ -448,6 +327,27 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
+/// Resolve `slug` + `project_id` to the id the permission gate scopes
+/// on, mirroring `_rewrite_project_kwarg` (`app/views/base.py:49-82`):
+/// a UUID `project_id` is returned untouched with NO row lookup (Django
+/// returns early there, before any project query); an identifier still
+/// resolves through the tenant lookup, which for non-UUID input is
+/// exactly `Project.resolve` (an unresolvable identifier answers
+/// `Http404("Project not found")` before the gate, like Django).
+/// Callers run the decorator gate on the returned id first and only
+/// then touch rows, so a denied caller never learns whether the
+/// project exists (PIDASHCONV-1433; the PIDASHCONV-1188 split).
+pub async fn resolve_project_id(
+    pool: &PgPool,
+    slug: &str,
+    project_raw: &str,
+) -> Result<Uuid, Denial> {
+    if let Ok(id) = project_raw.parse::<Uuid>() {
+        return Ok(id);
+    }
+    Ok(resolve_tenant(pool, slug, project_raw).await?.project_id)
+}
+
 /// Resolve `slug` + `project_id` the way the view kwargs do:
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
 /// or a workspace-scoped project identifier (upper-cased, like
@@ -460,15 +360,17 @@ pub async fn resolve_tenant(
     slug: &str,
     project_raw: &str,
 ) -> Result<Tenant, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
     if let Ok(id) = project_raw.parse::<Uuid>() {
-        let row: Option<(Uuid,)> = sqlx::query_as(
-            r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let Some((project_id,)) = row else {
+        let row: Option<Uuid> = projects::Entity::find_by_id(id)
+            .select_only()
+            .column(projects::Column::Id)
+            .filter(projects::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let Some(project_id) = row else {
             return Err(Denial::NotFound);
         };
         let workspace_id = workspace_of_project(pool, &project_id).await?;
@@ -478,15 +380,17 @@ pub async fn resolve_tenant(
         });
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(Uuid, Uuid)> = projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::WorkspaceId])
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match row {
         Some((project_id, workspace_id)) => Ok(Tenant {
             workspace_id,
@@ -497,14 +401,16 @@ pub async fn resolve_tenant(
 }
 
 async fn workspace_of_project(pool: &PgPool, project_id: &Uuid) -> Result<Uuid, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -531,49 +437,21 @@ pub async fn load_membership(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project_role = access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // `EXISTS` (never aggregates): an empty membership set reads as
     // `False`, exactly like the Django `.exists()` probes.
-    let workspace_member: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_admin: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_member, workspace_admin) =
-        (workspace_member.is_some(), workspace_admin.is_some());
+    let workspace_role = access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let workspace_admin = access::is_workspace_admin(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(Membership {
-        project_role: project_role.map(|row| row.0),
-        workspace_member,
+        project_role,
+        workspace_member: workspace_role.is_some(),
         workspace_admin,
     })
 }
@@ -586,14 +464,16 @@ pub async fn is_issue_creator(
     issue_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM issues WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = issue_entity::Entity::find_by_id(*issue_id)
+        .select_only()
+        .column(issue_entity::Column::Id)
+        .filter(issue_entity::Column::CreatedById.eq(*user_id))
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -686,31 +566,38 @@ pub async fn intake_id_for(
     slug: &str,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT i.id FROM intakes i
-           JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $1 AND i.project_id = $2 AND i.deleted_at IS NULL
-           ORDER BY i.name LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = intake_entity::Entity::find()
+        .select_only()
+        .column(intake_entity::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            intake_entity::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(intake_entity::Column::ProjectId.eq(*project_id))
+        .filter(intake_entity::Column::DeletedAt.is_null())
+        .order_by_asc(intake_entity::Column::Name)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row)
 }
 
 /// `project.guest_view_all_features` for the guest creator checks.
 pub async fn guest_view_all(pool: &PgPool, project_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        r#"SELECT p.guest_view_all_features FROM projects p
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<bool> = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .column(projects::Column::GuestViewAllFeatures)
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// Best-effort post-commit task enqueue (the D-02 intake pattern):

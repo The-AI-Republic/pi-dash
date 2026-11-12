@@ -156,6 +156,47 @@ def test_delete_bound_unbinds(admin, world, seeder):
     assert admin.get(proj_url(world, "github")).json() == {"bound": False}
 
 
+def test_delete_legacy_sync_soft_deletes_sync_bindings_and_children(admin, world, seeder, db):
+    """PIDASHCONV-1466: legacy-sync DELETE soft-deletes the sync, the git
+    bindings and every issue/comment child sync together.
+
+    Django runs the whole unbind in one ``transaction.atomic()`` so the
+    §6.8 lock rows release atomically with the unbind; a mid-unbind
+    failure must leave the sync live, never half-unbind the project.
+    Failure injection is impossible over HTTP, so this pins the joint
+    success path on both backends.
+    """
+    ws_id, proj_id = world["workspace"]["id"], world["project"]["id"]
+    owner_id = world["owner"]["id"]
+    wi = seeder.create_workspace_integration(ws_id, owner_id)
+    sync = seeder.create_github_repo_sync(ws_id, proj_id, owner_id, wi["id"])
+    account = seeder.create_git_provider_account(ws_id)
+    repo = seeder.create_git_repository()
+    binding = seeder.create_git_binding(ws_id, proj_id, owner_id, repo["id"], account["id"])
+    issue = seeder.create_issue(ws_id, proj_id, name="sync issue", sequence_id=201)
+    comment = seeder.create_comment(ws_id, proj_id, issue["id"], owner_id)
+    ghi = seeder.create_github_issue_sync(ws_id, proj_id, sync["id"], issue["id"])
+    ghc = seeder.create_github_comment_sync(ws_id, proj_id, ghi["id"], comment["id"])
+    gi = seeder.create_git_issue_sync(ws_id, proj_id, binding["id"], issue["id"])
+    gc = seeder.create_git_comment_sync(ws_id, proj_id, gi["id"], comment["id"])
+
+    response = admin.delete(proj_url(world, "github"))
+    assert response.status_code == 200
+    assert response.json() == {"bound": False}
+
+    for table, row_id in (
+        ("github_repository_syncs", sync["id"]),
+        ("github_issue_syncs", ghi["id"]),
+        ("github_comment_syncs", ghc["id"]),
+        ("git_repository_bindings", binding["id"]),
+        ("git_issue_syncs", gi["id"]),
+        ("git_comment_syncs", gc["id"]),
+    ):
+        assert (
+            db.fetchval(f"SELECT deleted_at FROM {table} WHERE id = %s", (row_id,)) is not None
+        ), table
+
+
 def test_delete_member_denied(member_client, world):
     response = member_client.delete(proj_url(world, "github"))
     assert response.status_code == 403

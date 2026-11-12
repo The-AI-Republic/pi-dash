@@ -60,10 +60,6 @@
 //!   `space/views/base.py:199-200`). [`group_values_requires_queryset`]
 //!   marks those branches; the builders still emit the intended SQL for the
 //!   follow-up fix only.
-//! * QUIRK-filtered-out-updated-at (`pi_dash/utils/issue_filters.py:230-238`):
-//!   `filter_updated_at` writes the `created_at__date` term, not
-//!   `updated_at__date` — an `updated_at` query param filters `created_at`.
-//!   [`compile_issue_filters`] keeps that mapping.
 //! * QUIRK-intake-status-fallback (`issue_filters.py:353-365`): the POST
 //!   branch of `filter_intake_status` reads `params.get("inbox_status")`,
 //!   not `"intake_status"`. This endpoint only uses `"GET"`, so the quirk
@@ -109,7 +105,12 @@ pub const NOT_PUBLISHED_BODY: &str = r#"{"error": "Project is not published"}"#;
 /// `WHERE` and the `sub_issues_count` subquery share one spelling.
 /// (Single-table rendering of `db::space::columns::issue_objects_scope`,
 /// plus the projects conjunct that scope leaves to the queries layer.)
-pub const ISSUE_OBJECTS_WHERE: &str = "\"issues\".\"deleted_at\" IS NULL AND \"states\".\"group\" != 'triage' AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false";
+///
+/// Triage trap: Django's `.exclude(state__group='triage')` negates
+/// null-safely over the nullable state FK (PB-0343, PIDASHCONV-1250), so
+/// the exclusion keeps the Django-exact `NOT (... AND ... IS NOT NULL)`
+/// form — a plain `!= 'triage'` would drop stateless issues.
+pub const ISSUE_OBJECTS_WHERE: &str = "\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false";
 
 /// Base `WHERE` before user filters: manager exclusions plus tenant scoping
 /// (`workspace__slug=slug, project_id=project_id`, `views/issue.py:88`).
@@ -148,9 +149,10 @@ pub fn attachment_count_annotation_sql() -> String {
 /// `sub_issues_count` annotation subquery (`views/issue.py:118-123`):
 /// `Issue.issue_objects.filter(parent=OuterRef("id"))` counted — the
 /// `IssueManager` exclusions are re-applied, so triage/archived/draft
-/// children are NOT counted.
+/// children are NOT counted. The `states` join is `LEFT OUTER` with the
+/// null-safe triage negation (PB-0343): stateless children ARE counted.
 pub fn sub_issues_count_annotation_sql() -> String {
-    "(SELECT COUNT(U0.\"id\") AS \"count\" FROM \"issues\" U0 INNER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND U1.\"group\" != 'triage' AND U0.\"archived_at\" IS NULL AND U2.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
+    "(SELECT COUNT(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = 'triage' AND U1.\"group\" IS NOT NULL) AND U0.\"archived_at\" IS NULL AND U2.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -475,9 +477,8 @@ pub fn compile_issue_filters(
                 }
                 next = n;
             }
-            // QUIRK-filtered-out-updated-at: writes the created_at term.
             "updated_at" => {
-                let (cs, n) = date_conjuncts("\"issues\".\"created_at\"", raw, true, next);
+                let (cs, n) = date_conjuncts("\"issues\".\"updated_at\"", raw, true, next);
                 for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
@@ -1243,9 +1244,16 @@ mod tests {
             &[],
             "U0.\"parent_id\" = (\"issues\".\"id\")",
         );
+        // PB-0343: the states leg must not inner-join stateless children
+        // away before the null-safe triage negation can keep them.
+        assert_builder_contains(
+            &sub_issues_count_annotation_sql(),
+            &[],
+            "LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\")",
+        );
         for conjunct in [
             "U0.\"deleted_at\" IS NULL",
-            "U1.\"group\" != 'triage'",
+            "NOT (U1.\"group\" = 'triage' AND U1.\"group\" IS NOT NULL)",
             "U0.\"archived_at\" IS NULL",
             "U2.\"archived_at\" IS NULL",
             "U0.\"is_draft\" = false",
@@ -1259,7 +1267,7 @@ mod tests {
         let sql = base_where_sql();
         for conjunct in [
             "\"issues\".\"deleted_at\" IS NULL",
-            "\"states\".\"group\" != 'triage'",
+            "NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL)",
             "\"issues\".\"archived_at\" IS NULL",
             "\"projects\".\"archived_at\" IS NULL",
             "\"issues\".\"is_draft\" = false",
@@ -1368,13 +1376,13 @@ mod tests {
     }
 
     #[test]
-    fn filters_updated_at_hits_created_at_and_type_always_emits() {
-        // QUIRK-filtered-out-updated-at: updated_at compiles to created_at,
-        // on the date part (`created_at__date`, `issue_filters.py:236`).
+    fn filters_updated_at_hits_updated_at_and_type_always_emits() {
+        // `updated_at` compares on the date part of the updated column
+        // (`updated_at__date`, `issue_filters.py:236`).
         let c = compile_issue_filters(&qp(&[("updated_at", "2026-01-01;after")]), 3);
         assert_eq!(
             c.conjuncts,
-            vec!["\"issues\".\"created_at\"::date >= $3".to_string()]
+            vec!["\"issues\".\"updated_at\"::date >= $3".to_string()]
         );
         assert_eq!(c.params, vec!["2026-01-01".to_string()]);
         // `start_date`/`target_date` are bare columns (no `__date` term).

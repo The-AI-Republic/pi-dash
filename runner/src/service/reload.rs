@@ -8,9 +8,21 @@
 //!    serve-IPC step. If the config change was malformed (bad TOML, bad
 //!    credentials, unknown agent), startup fails before this point.
 //!
-//! 2. The status snapshot reports `connected == true` — i.e. the WebSocket
-//!    to the cloud handshook. If this never flips, the config is syntactically
-//!    fine but semantically broken (wrong URL, invalid runner_secret, etc.).
+//! 2. The status snapshot shows the daemon reached the cloud. This is a
+//!    three-way verdict, not a boolean (PDASHOSS01-222):
+//!    - **all** runners hold a live cloud session → clean success;
+//!    - the cloud is reachable (the daemon-level flag or at least one
+//!      runner is connected) but some runners never opened their session
+//!      within the window → success **with warnings** naming the stragglers.
+//!      A per-runner session-open wedge is a cloud-side problem, not a
+//!      failed restart, so it must not read as "your restart broke";
+//!    - nothing reached the cloud at all → failure (wrong URL, invalid
+//!      runner_secret, network trouble).
+//!
+//!    Note `daemon.connected` in the snapshot is really the *first
+//!    configured runner's* session flag (`IpcServer.primary_state`), so a
+//!    verdict keyed on it alone misreports a wedged first runner as a
+//!    dead daemon — the exact failure this three-way split exists to fix.
 //!
 //! Callers (TUI Config save, CLI `pidash configure --<flag>`) turn the
 //! `ReloadOutcome` into either success UI or a loud error so the user
@@ -24,8 +36,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::ipc::client::Client;
-use crate::ipc::protocol::{Request, Response};
+use crate::ipc::probe::{legacy_daemon, status_at, unreachable_detail};
 use crate::util::paths::Paths;
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -62,6 +73,130 @@ pub struct ReloadOutcome {
     /// Last-known service state string (`active`, `inactive`, `failed`,
     /// or the raw `launchctl list` row). Handy for the TUI even on success.
     pub service_state: String,
+    /// Present only on a degraded success (`ok == true`): the daemon is up
+    /// and the cloud is reachable, but one or more runners failed to open
+    /// their own cloud session within the readiness window. Ready-to-print
+    /// multi-line block: one `- <name> (<project>) — <why>` line per
+    /// disconnected runner plus a closing "the daemon and the other N
+    /// runners are connected" line. `None` on clean success and on failure.
+    pub warnings: Option<String>,
+}
+
+/// Budget for one in-process runner change over IPC. Generous: stopping a
+/// runner waits up to 5 s for its HTTP loops to exit.
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What asking the running daemon to bring a runner up in-process did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivateOutcome {
+    /// The daemon activated the runner; nothing else was restarted.
+    Activated,
+    /// No daemon answers on this host's socket.
+    DaemonNotRunning,
+    /// The daemon answered but refused or failed; the message says why.
+    Failed(String),
+}
+
+/// Ask the running daemon to bring the runner `name` up from its block on
+/// disk (`RunnerActivateLocal`), without restarting it or any other
+/// runner (design §5, "No restart to add or remove a runner").
+pub async fn activate_runner_in_daemon(paths: &Paths, name: &str) -> ActivateOutcome {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let Ok(mut client) = Client::connect(paths.ipc_socket_path()).await else {
+        return ActivateOutcome::DaemonNotRunning;
+    };
+    let call = client.call(Request::RunnerActivateLocal {
+        runner: name.to_string(),
+    });
+    match tokio::time::timeout(ACTIVATE_TIMEOUT, call).await {
+        Ok(Ok(Response::Ack)) => ActivateOutcome::Activated,
+        Ok(Ok(Response::Error(e))) => ActivateOutcome::Failed(e.message),
+        Ok(Ok(other)) => ActivateOutcome::Failed(format!("unexpected IPC response: {other:?}")),
+        Ok(Err(e)) => ActivateOutcome::Failed(format!("{e:#}")),
+        Err(_) => ActivateOutcome::Failed("timed out waiting for the daemon".into()),
+    }
+}
+
+/// Bring a freshly written runner block live: in the running daemon when
+/// there is one (no restart, other runners keep running), else by starting
+/// the service, which loads every block. Used by `pidash runner add` and
+/// the TUI's add-runner modal.
+pub async fn activate_or_restart(paths: &Paths, name: &str) -> ReloadOutcome {
+    match activate_runner_in_daemon(paths, name).await {
+        ActivateOutcome::Activated => ReloadOutcome {
+            ok: true,
+            summary: format!("runner {name} activated in the running daemon (no restart)"),
+            detail: None,
+            service_state: "active".into(),
+            warnings: None,
+        },
+        ActivateOutcome::DaemonNotRunning => restart_and_verify(paths).await,
+        ActivateOutcome::Failed(why) => ReloadOutcome {
+            ok: false,
+            summary: format!("the running daemon did not activate runner {name}"),
+            detail: Some(match outdated_daemon_warning(paths).await {
+                Some(warning) => format!(
+                    "{why}\n{warning}\nThe runner block was written; `pidash restart` loads it."
+                ),
+                None => format!("{why}\nThe runner block was written; `pidash restart` loads it."),
+            }),
+            service_state: "active".into(),
+            warnings: None,
+        },
+    }
+}
+
+/// Tell a running daemon that the workspace tokens in `config.toml`
+/// changed (`pidash auth login` / `logout`), so it uses them without a
+/// restart. Best-effort: with no daemon, or an older one that does not
+/// know `CredentialsReload`, the tokens are used from its next start.
+pub async fn notify_credentials_changed(paths: &Paths) {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let Ok(mut client) = Client::connect(paths.ipc_socket_path()).await else {
+        return;
+    };
+    match tokio::time::timeout(ACTIVATE_TIMEOUT, client.call(Request::CredentialsReload)).await {
+        Ok(Ok(Response::Ack)) => {
+            tracing::debug!("daemon reloaded workspace credentials");
+            return;
+        }
+        Ok(Ok(other)) => tracing::debug!("daemon did not reload credentials: {other:?}"),
+        Ok(Err(e)) => tracing::debug!("credentials reload over IPC failed: {e:#}"),
+        Err(_) => tracing::debug!("credentials reload over IPC timed out"),
+    }
+    // An older daemon still running after `pidash update` (no `--restart`)
+    // neither picks up the new tokens nor keeps `[[cli.workspaces]]` when
+    // it rewrites `config.toml`, so say so.
+    if let Some(warning) = outdated_daemon_warning(paths).await {
+        eprintln!("warning: {warning}");
+    }
+}
+
+/// `Some(message)` when the daemon answering on this host's socket is not
+/// the same version as this `pidash` (typically: the binary was updated
+/// but the service not restarted). `None` when it matches or no daemon
+/// answers.
+pub async fn outdated_daemon_warning(paths: &Paths) -> Option<String> {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let mut client = Client::connect(paths.ipc_socket_path()).await.ok()?;
+    let running = match tokio::time::timeout(ACTIVATE_TIMEOUT, client.call(Request::Hello)).await {
+        Ok(Ok(Response::Hello(hello))) if hello.daemon_version == crate::RUNNER_VERSION => {
+            return None;
+        }
+        Ok(Ok(Response::Hello(hello))) => format!("version {}", hello.daemon_version),
+        // A daemon from before `Hello` answers with an error frame.
+        Ok(Ok(Response::Error(_))) => "an older version".to_string(),
+        _ => return None,
+    };
+    Some(format!(
+        "the running Pi Dash daemon is {running}, but this pidash is {}. \
+         Restart it with `pidash restart` so it uses this version; until then it may \
+         ignore this change or overwrite other workspaces' sign-ins in config.toml.",
+        crate::RUNNER_VERSION
+    ))
 }
 
 /// Write-then-restart flow. Starts the service if inactive, restarts if
@@ -136,6 +271,7 @@ where
                      current state: {state}"
                 )),
                 service_state: state,
+                warnings: None,
             };
         }
 
@@ -145,9 +281,10 @@ where
             "waiting up to {}s for daemon IPC",
             IPC_TIMEOUT.as_secs()
         ));
-        if let Some(s) = wait_for_ipc(paths, IPC_TIMEOUT, &mut progress).await {
-            break s;
-        }
+        let ipc_error = match wait_for_ipc(paths, IPC_TIMEOUT, &mut progress).await {
+            Ok(s) => break s,
+            Err(e) => e,
+        };
 
         // IPC never answered. If the daemon was SIGKILL'd on exec (the macOS
         // AMFI race) and attempts remain, re-kick and try again — the next
@@ -166,15 +303,20 @@ where
         // than "the IPC didn't answer."
         let diagnosis = svc.diagnose_recent_exit().await;
         let journal = capture_service_detail(&svc).await;
+        // Name the socket and the last IPC error, and check the legacy
+        // socket, so a path mismatch reads differently from a dead daemon
+        // (PDASHOSS01-311).
+        let legacy = legacy_daemon(paths).await.map(|(path, _)| path);
+        let ipc = unreachable_detail(&paths.ipc_socket_path(), &ipc_error, legacy.as_deref());
         let detail = match diagnosis {
             Some(diag) => format!(
-                "Daemon did not answer IPC within {}s after restart.\n\n\
+                "Daemon did not answer IPC within {}s after restart.\n{ipc}\n\n\
                  Diagnosis: {diag}\n\n\
                  Service state: {state}\n\n{journal}",
                 IPC_TIMEOUT.as_secs()
             ),
             None => format!(
-                "Daemon did not answer IPC within {}s after restart.\n\
+                "Daemon did not answer IPC within {}s after restart.\n{ipc}\n\
                  Service state: {state}\n\n{journal}",
                 IPC_TIMEOUT.as_secs()
             ),
@@ -184,11 +326,15 @@ where
             summary: "runner failed to come up".into(),
             detail: Some(detail),
             service_state: state,
+            warnings: None,
         };
     };
 
-    // Stage 2: wait for cloud-connected. Already connected? Return now.
-    if snapshot.daemon.connected {
+    // Stage 2: wait for cloud-connected. Already fully connected? Return now.
+    if matches!(
+        classify_cloud_readiness(&snapshot),
+        CloudReadiness::AllConnected
+    ) {
         let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
         return ReloadOutcome {
             ok: true,
@@ -199,14 +345,15 @@ where
             ),
             detail: None,
             service_state: state,
+            warnings: None,
         };
     }
     progress(format!(
         "waiting up to {}s for cloud connection",
         CLOUD_TIMEOUT.as_secs()
     ));
-    match wait_for_cloud_connected(paths, CLOUD_TIMEOUT, &mut progress).await {
-        Some(final_snap) => {
+    match wait_for_cloud_ready(paths, CLOUD_TIMEOUT, &mut progress).await {
+        CloudWait::AllConnected(final_snap) => {
             let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
             ReloadOutcome {
                 ok: true,
@@ -217,9 +364,30 @@ where
                 ),
                 detail: None,
                 service_state: state,
+                warnings: None,
             }
         }
-        None => {
+        // The daemon reached the cloud but some runners never opened their
+        // session. The restart itself worked — report success, name the
+        // stragglers, and leave the exit code clean so automation that only
+        // cares about the daemon keeps working (PDASHOSS01-222).
+        CloudWait::Degraded(final_snap) => {
+            let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
+            let failed = final_snap.runners.iter().filter(|r| !r.connected).count();
+            ReloadOutcome {
+                ok: true,
+                summary: format!(
+                    "restart succeeded with warnings: {failed} of {} runners \
+                     failed to connect to the cloud within {}s",
+                    final_snap.runners.len(),
+                    CLOUD_TIMEOUT.as_secs()
+                ),
+                detail: None,
+                service_state: state,
+                warnings: Some(render_degraded_warnings(&final_snap)),
+            }
+        }
+        CloudWait::NotConnected => {
             let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
             ReloadOutcome {
                 ok: false,
@@ -233,50 +401,157 @@ where
                     CLOUD_TIMEOUT.as_secs()
                 )),
                 service_state: state,
+                warnings: None,
             }
         }
     }
 }
 
+/// Cloud-connectivity verdict derived from one status snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudReadiness {
+    /// Every configured runner holds a live cloud session (or the daemon
+    /// hosts zero runners and its connection-level flag is up).
+    AllConnected,
+    /// The cloud is reachable — the daemon-level flag or at least one
+    /// runner is connected — but one or more runners are not.
+    Degraded,
+    /// Nothing has reached the cloud.
+    NotConnected,
+}
+
+fn classify_cloud_readiness(snap: &crate::ipc::protocol::StatusSnapshot) -> CloudReadiness {
+    if snap.runners.is_empty() {
+        // Zero-runner daemon (freshly enrolled machine): the per-runner
+        // signal doesn't exist, so the connection-level flag is the only
+        // evidence — same gate as before the three-way split.
+        return if snap.daemon.connected {
+            CloudReadiness::AllConnected
+        } else {
+            CloudReadiness::NotConnected
+        };
+    }
+    let connected = snap.runners.iter().filter(|r| r.connected).count();
+    if connected == snap.runners.len() {
+        CloudReadiness::AllConnected
+    } else if connected > 0 || snap.daemon.connected {
+        CloudReadiness::Degraded
+    } else {
+        CloudReadiness::NotConnected
+    }
+}
+
+/// Result of the stage-2 wait: the readiness verdict plus the snapshot it
+/// was derived from, so the caller can name the disconnected runners.
+enum CloudWait {
+    AllConnected(crate::ipc::protocol::StatusSnapshot),
+    Degraded(crate::ipc::protocol::StatusSnapshot),
+    NotConnected,
+}
+
+/// Human-readable warning block for a degraded restart: one line per
+/// disconnected runner — name first, then project, then the best failure
+/// hint the snapshot carries (the DISCONNECTED fields from `pidash status`:
+/// consecutive session-open failures, never-connected) — plus a closing
+/// line confirming what *did* connect and how to recheck.
+fn render_degraded_warnings(snap: &crate::ipc::protocol::StatusSnapshot) -> String {
+    let mut out = String::new();
+    for r in snap.runners.iter().filter(|r| !r.connected) {
+        let project = r.project_slug.as_deref().unwrap_or("no project");
+        out.push_str(&format!(
+            "  - {} ({project}) — {}\n",
+            r.name,
+            describe_disconnected(r)
+        ));
+    }
+    let connected = snap.runners.iter().filter(|r| r.connected).count();
+    match connected {
+        0 => out.push_str(
+            "The daemon is up but no runner has connected yet. \
+             Re-run `pidash status` to recheck.",
+        ),
+        1 => out.push_str(
+            "The daemon and the other runner are connected. \
+             Re-run `pidash status` to recheck.",
+        ),
+        n => out.push_str(&format!(
+            "The daemon and the other {n} runners are connected. \
+             Re-run `pidash status` to recheck."
+        )),
+    }
+    out
+}
+
+/// Best per-runner failure hint the status snapshot carries. There is no
+/// per-attempt error classification on the IPC wire (timeout vs. 401 vs.
+/// connect-refused), so this leans on the same fields `pidash status`
+/// prints for DISCONNECTED runners.
+fn describe_disconnected(r: &crate::ipc::protocol::RunnerStatusSnapshot) -> String {
+    if r.consecutive_bootstrap_failures > 0 {
+        let n = r.consecutive_bootstrap_failures;
+        format!(
+            "session-open failing ({n} consecutive failure{})",
+            if n == 1 { "" } else { "s" }
+        )
+    } else if r.last_session_open.is_none() {
+        "never connected since daemon start".to_string()
+    } else {
+        "not connected".to_string()
+    }
+}
+
+/// Poll until the daemon answers `StatusGet`, or return the last IPC error
+/// at the deadline so the failure report can say *why* it never answered.
 async fn wait_for_ipc(
     paths: &Paths,
     timeout: Duration,
     progress: &mut impl FnMut(String),
-) -> Option<crate::ipc::protocol::StatusSnapshot> {
+) -> Result<crate::ipc::protocol::StatusSnapshot, anyhow::Error> {
     let start = Instant::now();
     let deadline = start + timeout;
     let mut next_progress = start + PROGRESS_INTERVAL;
+    let socket = paths.ipc_socket_path();
     loop {
-        if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
-            && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
-        {
-            return Some(s);
-        }
+        let err = match status_at(&socket).await {
+            Ok(s) => return Ok(s),
+            Err(e) => e,
+        };
         if Instant::now() >= deadline {
-            return None;
+            return Err(err);
         }
         maybe_emit_wait_progress("daemon IPC", start, timeout, &mut next_progress, progress);
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-async fn wait_for_cloud_connected(
+/// Poll status until every runner is cloud-connected or the window closes.
+/// Returns early only on `AllConnected`; on timeout the verdict comes from
+/// the freshest snapshot observed — `Degraded` when the cloud was reached
+/// but stragglers remain, `NotConnected` when nothing connected (or IPC
+/// never answered during the window).
+async fn wait_for_cloud_ready(
     paths: &Paths,
     timeout: Duration,
     progress: &mut impl FnMut(String),
-) -> Option<crate::ipc::protocol::StatusSnapshot> {
+) -> CloudWait {
     let start = Instant::now();
     let deadline = start + timeout;
     let mut next_progress = start + PROGRESS_INTERVAL;
+    let mut last: Option<crate::ipc::protocol::StatusSnapshot> = None;
     loop {
-        if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
-            && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
-            && s.daemon.connected
-        {
-            return Some(s);
+        if let Ok(s) = status_at(&paths.ipc_socket_path()).await {
+            if classify_cloud_readiness(&s) == CloudReadiness::AllConnected {
+                return CloudWait::AllConnected(s);
+            }
+            last = Some(s);
         }
         if Instant::now() >= deadline {
-            return None;
+            return match last {
+                Some(s) if classify_cloud_readiness(&s) == CloudReadiness::Degraded => {
+                    CloudWait::Degraded(s)
+                }
+                _ => CloudWait::NotConnected,
+            };
         }
         maybe_emit_wait_progress(
             "cloud connection",
@@ -354,6 +629,153 @@ fn summarize_runners(snap: &crate::ipc::protocol::StatusSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::protocol::{DaemonInfo, RunnerStatusSnapshot, StatusSnapshot};
+    use pidash_ipc::RunnerStatus;
+
+    fn runner(
+        name: &str,
+        project: Option<&str>,
+        connected: bool,
+        fails: u32,
+    ) -> RunnerStatusSnapshot {
+        RunnerStatusSnapshot {
+            runner_id: uuid::Uuid::new_v4(),
+            name: name.to_string(),
+            project_slug: project.map(str::to_string),
+            pod_id: None,
+            status: RunnerStatus::Idle,
+            connected,
+            current_run: None,
+            approvals_pending: 0,
+            last_heartbeat: None,
+            last_session_open: None,
+            consecutive_bootstrap_failures: fails,
+            disconnect_reason: None,
+            next_retry_at: None,
+            cloud_deleted_confirmations: 0,
+            workspace_signed_out: false,
+            observability: None,
+        }
+    }
+
+    fn snapshot(daemon_connected: bool, runners: Vec<RunnerStatusSnapshot>) -> StatusSnapshot {
+        StatusSnapshot {
+            daemon: DaemonInfo {
+                cloud_url: "https://cloud.example".into(),
+                connected: daemon_connected,
+                uptime_secs: 1,
+                update: None,
+            },
+            runners,
+        }
+    }
+
+    #[test]
+    fn all_runners_connected_is_a_clean_success() {
+        let snap = snapshot(true, vec![runner("a", Some("P1"), true, 0)]);
+        assert_eq!(
+            classify_cloud_readiness(&snap),
+            CloudReadiness::AllConnected
+        );
+    }
+
+    #[test]
+    fn wedged_first_runner_no_longer_reads_as_daemon_down() {
+        // The incident shape from PDASHOSS01-222: `daemon.connected` mirrors
+        // the *first* runner (IpcServer.primary_state), so a wedged first
+        // runner used to fail the whole restart even with the rest healthy.
+        let snap = snapshot(
+            false,
+            vec![
+                runner("claude_macmini01", Some("PDASHOSS01"), false, 5),
+                runner("healthy_one", Some("PDASHOSS01"), true, 0),
+                runner("healthy_two", Some("PRIVATEPI1"), true, 0),
+            ],
+        );
+        assert_eq!(classify_cloud_readiness(&snap), CloudReadiness::Degraded);
+    }
+
+    #[test]
+    fn connected_first_runner_with_stragglers_is_degraded_not_clean() {
+        // Mirror bug: the old gate returned clean success as soon as the
+        // first runner (== daemon.connected) was up, hiding dead stragglers.
+        let snap = snapshot(
+            true,
+            vec![
+                runner("first", Some("P1"), true, 0),
+                runner("stuck", Some("P2"), false, 3),
+            ],
+        );
+        assert_eq!(classify_cloud_readiness(&snap), CloudReadiness::Degraded);
+    }
+
+    #[test]
+    fn nothing_connected_is_a_hard_failure() {
+        let snap = snapshot(
+            false,
+            vec![
+                runner("a", Some("P1"), false, 2),
+                runner("b", None, false, 0),
+            ],
+        );
+        assert_eq!(
+            classify_cloud_readiness(&snap),
+            CloudReadiness::NotConnected
+        );
+    }
+
+    #[test]
+    fn zero_runner_daemon_keeps_the_connection_flag_gate() {
+        assert_eq!(
+            classify_cloud_readiness(&snapshot(true, vec![])),
+            CloudReadiness::AllConnected
+        );
+        assert_eq!(
+            classify_cloud_readiness(&snapshot(false, vec![])),
+            CloudReadiness::NotConnected
+        );
+    }
+
+    #[test]
+    fn degraded_warnings_name_runner_project_and_failure_hint() {
+        let snap = snapshot(
+            false,
+            vec![
+                runner("claude_macmini01", Some("PDASHOSS01"), false, 5),
+                runner("private_pidash_codex001", Some("PRIVATEPI1"), false, 1),
+                runner("no_project_runner", None, false, 0),
+                runner("healthy_a", Some("PDASHOSS01"), true, 0),
+                runner("healthy_b", Some("PDASHOSS01"), true, 0),
+            ],
+        );
+        let w = render_degraded_warnings(&snap);
+        // Named by runner name + project so the message is actionable.
+        assert!(w.contains(
+            "claude_macmini01 (PDASHOSS01) — session-open failing (5 consecutive failures)"
+        ));
+        assert!(w.contains(
+            "private_pidash_codex001 (PRIVATEPI1) — session-open failing (1 consecutive failure)"
+        ));
+        assert!(w.contains("no_project_runner (no project) — never connected since daemon start"));
+        // Healthy runners are not in the warning list.
+        assert!(!w.contains("healthy_a ("));
+        // Closing line confirms what did connect and how to recheck.
+        assert!(w.contains("the other 2 runners are connected"));
+        assert!(w.contains("`pidash status`"));
+    }
+
+    #[test]
+    fn degraded_warnings_singular_connected_runner() {
+        let snap = snapshot(
+            false,
+            vec![
+                runner("stuck", Some("P1"), false, 2),
+                runner("healthy", Some("P1"), true, 0),
+            ],
+        );
+        let w = render_degraded_warnings(&snap);
+        assert!(w.contains("The daemon and the other runner are connected"));
+    }
 
     #[test]
     fn startup_retry_progress_names_amfi_and_counts_attempts() {

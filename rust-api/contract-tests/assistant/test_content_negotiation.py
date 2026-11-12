@@ -14,16 +14,28 @@ Covers the five write handlers named by the issue: thread create/patch,
 message POST, MCP create/patch — form bodies parse (urlencoded and
 multipart text), file parts in scalar positions keep Django's error
 shapes, and ``text/plain`` bodies are refused with the exact 415 detail.
+Bodies with no Content-Type at all are refused the same way, echoing the
+empty media type (PIDASHCONV-1414), on one endpoint per parse_body
+consumer family.
 """
 
 from .conftest import PUBLIC_BASE, threads_url
 
 MCP_URL = "/api/users/me/ai-assistant/mcp-servers/"
 SERVER_URL = "https://8.8.8.8/mcp"
+LLM_CONFIG_URL = "/api/users/me/ai-assistant/config/"
+STT_CONFIG_URL = "/api/users/me/ai-assistant/stt-config/"
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 PLAIN = {"Content-Type": "text/plain"}
 UNSUPPORTED = {"detail": 'Unsupported media type "text/plain" in request.'}
+MISSING_CT = {"detail": 'Unsupported media type "" in request.'}
 GENERIC_500 = {"error": "Something went wrong please try again later"}
+
+
+def _without_content_type(client, method, url, body: bytes):
+    request = client.build_request(method, url, content=body)
+    assert "content-type" not in request.headers
+    return client.send(request)
 
 
 def _configure_llm(client):
@@ -136,6 +148,21 @@ def test_text_plain_body_is_unsupported_media_type(world, member):
     )
     assert res.status_code == 415, res.text
     assert res.json() == UNSUPPORTED
+
+
+def test_missing_content_type_is_unsupported_media_type(world, member):
+    base = threads_url(world)
+    tid = _new_thread(member, base)
+    for method, url, body in (
+        ("PUT", LLM_CONFIG_URL, b'{"model_name":"m"}'),
+        ("PUT", STT_CONFIG_URL, b'{"model_name":"w"}'),
+        ("POST", f"{base}/threads/", b'{"title":"x"}'),
+        ("POST", f"{base}/threads/{tid}/messages/", b'{"content":"hi"}'),
+        ("POST", MCP_URL, b'{"name":"a","url":"https://8.8.8.8/mcp"}'),
+    ):
+        res = _without_content_type(member, method, url, body)
+        assert res.status_code == 415, (method, url, res.text)
+        assert res.json() == MISSING_CT, (method, url, res.text)
 
 
 def test_multipart_text_fields_parse_as_form(world, member):

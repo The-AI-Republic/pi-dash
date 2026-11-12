@@ -22,25 +22,25 @@
 //!   row (`description_binary` renders base64, null stays null).
 //! - `POST work-items/<pk>/move/` (`IssueMoveEndpoint.post`,
 //!   `move.py:28-46`): the ADMIN/MEMBER gate, the non-dict-body `{}` coercion,
-//!   `move_work_item_to_project` via the 650 port, `IssueMoveError` mapped
-//!   to `{"error"}` + status, the explicit 594 signal pair around the
-//!   state-changing save, then the 22-key APP `IssueSerializer` read shape
-//!   (a bare instance: the 7 annotation keys are `SkipField`-omitted, the
-//!   639 rule, verified live).
+//!   `domain::issues::move_to_project` over the 650 kernel, `MoveRejection`
+//!   mapped to `{"error"}` + status, the 594 signal pair and the enqueues
+//!   folded into the commit chain around the state-changing save, then the
+//!   22-key APP `IssueSerializer` read shape (a bare instance: the 7
+//!   annotation keys are `SkipField`-omitted, the 639 rule, verified live).
 //!
 //! Every other method on those paths proxies to Django (route table in
 //! `super::routes` via [`routes`]); `HEAD` rides axum's `get` handling
 //! on the GET-owned paths like Django's GET-backed `HEAD`.
 //!
-//! Reuse (call, don't copy): the 649 version SQL builders
-//! (`super::queries_engage`), pilot-2's `v2_page` cursor math
+//! Reuse (call, don't copy): the shared SeaORM gates (`super::access`),
+//! the version reads as SeaORM selects (batch 2c; the 649 key order in
+//! `super::queries_engage`), pilot-2's `v2_page` cursor math
 //! (`super::render`), the 640 version detail rendering
 //! (`serializers_assoc`), the 639 base-shape rendering
-//! (`serializers_detail`), the 650 move driver (`issue_move`), the 594
-//! signal entries (`orchestration::entries`), the D-14 drain recipe
-//! (`runner_sessions::drain`) + pubsub verbs, the shared DRF body
-//! negotiator (`v1_cycles_modules::body`), the D-12 creation seam
-//! (`crate::orchestration`), and the jobs Celery enqueue.
+//! (`serializers_detail`), the move domain service
+//! (`domain::issues::move_to_project`, with the 594 fire, the D-14
+//! pod drains and the D-12 creation drain behind its hooks), and the
+//! shared DRF body negotiator (`v1_cycles_modules::body`).
 //!
 //! # Ported bugs (translate, don't redesign — also listed in the PR)
 //!
@@ -48,7 +48,7 @@
 //!   gate) is an empty 200 page (`filter`, never `get`).
 //! * `IssueDescriptionVersion` declares no `Meta.ordering`, so the detail
 //!   `.get()` carries no `ORDER BY` (unlike its version sibling) — the
-//!   649 SQL preserves the asymmetry.
+//!   SeaORM detail select preserves the asymmetry.
 //! * `PaginateCursor`'s offset part is parsed but never read (`start_index`
 //!   derives from `current_page` alone) — inherited from pilot-2's
 //!   `v2_page`, reused, not re-ported.
@@ -71,7 +71,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use tokio::sync::Mutex;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -79,83 +79,50 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use pidash_db::entity::{issue_description_versions, issue_versions, issues, users, workspaces};
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_auth::permissions::membership::ProjectRoleFacts;
-use pidash_db::app_project::models::project::ProjectLookup;
-use pidash_db::config::RunnerSettings;
-use pidash_db::dispatch::AgentRunStatus;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
-use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
-use pidash_db::runner_sessions::models::runner_session;
-use pidash_db::runner_sessions::outbox as runner_outbox;
-use pidash_db::runner_sessions::outbox::OutboxError;
-use pidash_db::runner_sessions::RunnerSession;
-use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::app_issues::issue_move::{
-    CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
-    CREATE_SEQ_SCAN_SQL, DEFAULT_FOR_PROJECT_ID_SQL,
-};
+use crate::edge;
 use pidash_services::app_issues::serializers_assoc::{
     issue_description_version_detail_to_representation, issue_version_detail_to_representation,
     IssueDescriptionVersionDetailRow, IssueVersionDetailRow,
 };
+use pidash_services::app_issues::serializers_engage::{git_issue_synced, github_issue_synced};
 use pidash_services::app_issues::{
-    issue_detail_base_to_representation, issue_is_actively_synced, move_work_item_to_project,
-    repoint_sql, send_project_move_cancel, IssueDetailBaseRow, MoveError, MovePostCommit,
-    MoveResult, MoveStore, MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, SourceIssueRow,
-    StateRow, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL, CHILDREN_DETACH_SQL,
-    COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL, HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL,
-    INERT_RUN_UPDATE_SQL, ISSUE_MOVE_UPDATE_SQL, LABEL_DELETE_SQL, LABEL_IDS_SQL,
-    MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL, PROJECT_IDENTIFIER_SQL,
-    PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL, RELATION_DELETE_SQL,
-    SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL, SOURCE_ISSUE_SQL,
-    WORKSPACE_SLUG_SQL,
+    issue_detail_base_to_representation, issue_is_actively_synced, IssueDetailBaseRow,
+    SourceIssueRow,
 };
-use pidash_services::app_issues::{HandoffRunRow, RepointTarget};
-use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::orchestration::blockers::{has_open_blockers_sql, summary_sql, BlockerRow};
-use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
-use pidash_services::orchestration::creation::{
-    create_project_move_handoff_run, AdmissionError, CreationError, CreationSeam, ExecutionError,
-    ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, HandoffCreateRequest, IssueView,
-    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
-    RunnerView, StateView, STATE_SELECT_SQL,
+use pidash_services::domain;
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::{
+    CreationDeps, MoveDomainOutcome, MovePostCommitHook, MoveRejection,
 };
-use pidash_services::orchestration::entries::{
-    capture_prior_state, fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest,
-    NewSchedulerRun, PreflightSeam, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
-};
-use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
-use pidash_services::runner_sessions::drain::{
-    drain_pod_log, next_for_runner_sql, plan_assignment, AssignmentFacts, DrainEffect,
-    ASSIGN_RUN_UPDATE_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL, DRAIN_POD_IDLE_RUNNERS_SQL,
-};
-use pidash_services::runner_sessions::guards::alive_threshold;
-use pidash_services::runner_sessions::pubsub::{
-    send_to_runner, PubsubStore, CLOSE_ACTIVE_SESSIONS_SQL,
-};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 
-use super::queries_engage::{
-    description_count_sql, description_detail_sql, description_list_sql, version_count_sql,
-    version_detail_sql, version_list_sql, VERSION_PAGE_KEYS,
-};
+use super::access;
+use super::queries_engage::VERSION_PAGE_KEYS;
 use super::render::{v2_page, V2Page};
-use super::{query_last, Binder, QueryMap};
-use crate::orchestration::{
-    drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
-    SpanCreationDeps,
-};
+use super::{query_last, QueryMap};
+use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
+use crate::issue_transition::AppTransitionHook;
+use crate::middleware::body_limit::read_request_bytes;
+use crate::orchestration::SpanCreationDeps;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::datetime::{render_date, render_datetime_in, render_uuid_opt, uuid_string};
+use pidash_compat::response::escape_u2028 as escape_json_text;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -183,50 +150,24 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             VERSIONS_PATH,
-            owned(axum::routing::get(version_list), &["GET"]),
+            edge::owned(axum::routing::get(version_list), &["GET"]),
         )
         .route(
             VERSION_PATH,
-            owned(axum::routing::get(version_detail), &["GET"]),
+            edge::owned(axum::routing::get(version_detail), &["GET"]),
         )
         .route(
             DESC_VERSIONS_PATH,
-            owned(axum::routing::get(desc_version_list), &["GET"]),
+            edge::owned(axum::routing::get(desc_version_list), &["GET"]),
         )
         .route(
             DESC_VERSION_PATH,
-            owned(axum::routing::get(desc_version_detail), &["GET"]),
+            edge::owned(axum::routing::get(desc_version_detail), &["GET"]),
         )
-        .route(MOVE_PATH, owned(axum::routing::post(move_issue), &["POST"]))
-}
-
-/// A versions/move path: the owned methods serve from Rust, everything
-/// else falls through to Django (the engage cutover shape — DRF
-/// authenticates before it checks the method, so proxying reproduces
-/// the 401-anon and Django's own 405s with no per-method logic).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
+        .route(
+            MOVE_PATH,
+            edge::owned(axum::routing::post(move_issue), &["POST"]),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -255,8 +196,8 @@ enum Denial {
     MoveRejection { status: u16, message: String },
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -294,9 +235,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -324,21 +265,10 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// DRF `JSONRenderer` post-pass (`renderers.py`): U+2028/U+2029 escape to
-/// `\\u2028`/`\\u2029` in every response so the output stays a strict
-/// JavaScript subset.
-fn escape_json_text(body: &str) -> String {
-    body.replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
-
-/// Render `body` (already exact JSON bytes) with an explicit status.
+/// Render `body` (already exact JSON bytes) with an explicit status,
+/// escaped through the canonical `escape_u2028` (OVL-04).
 fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(escape_json_text(&body)))
-        .expect("versions/move json response")
+    pidash_compat::response::json_response(status, escape_json_text(&body))
 }
 
 type HandlerResult = Result<Response, Denial>;
@@ -362,9 +292,12 @@ async fn actor_user_id(
         .and_then(|value| value.as_str().to_owned())
         .ok_or(Denial::Unauthorized)?;
     let id = raw.parse::<Uuid>().map_err(|_| Denial::Unauthorized)?;
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    let exists: Option<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     if exists.is_none() {
@@ -381,16 +314,10 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<Uuid
         return Ok(id);
     }
     let upper = raw.trim().to_uppercase();
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    access::project_id_by_identifier(&orm(pool), slug, &upper)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// Parse a `<uuid:>` path segment the way Django's `UUIDConverter` does:
@@ -414,64 +341,27 @@ fn path_uuid(raw: &str) -> Result<Uuid, ()> {
     raw.parse::<Uuid>().map_err(|_| ())
 }
 
-/// Membership facts for one `(user, slug, project)` over the same rows
-/// the decorator reads: active project and workspace memberships scoped
-/// by slug/project, soft-deleted rows excluded (`SoftDeletionManager`).
-struct Membership {
-    project_role: Option<i16>,
-    workspace_role: Option<i16>,
-}
-
-async fn fetch_membership(
+/// `allow_permission(allowed_roles)` at `PROJECT` level
+/// (`app/permissions/base.py:19-86`) through the shared
+/// [`access::allows`] gate: an allowed active project role, or any active
+/// project membership plus an active workspace ADMIN membership
+/// (soft-deleted rows excluded, `SoftDeletionManager`). Denies with the
+/// decorator `error` body.
+async fn check_allow(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(Membership {
-        project_role: project_role.map(|row| row.0),
-        workspace_role: workspace_role.map(|row| row.0),
-    })
-}
-
-/// `allow_permission(allowed_roles)` at `PROJECT` level
-/// (`app/permissions/base.py:19-86`): an allowed project role, or any
-/// active project membership plus an active workspace ADMIN membership.
-/// Denies with the decorator `error` body.
-fn check_allow(membership: &Membership, allowed: &[i16]) -> Result<(), Denial> {
-    if membership
-        .project_role
-        .is_some_and(|role| allowed.contains(&role))
-    {
-        return Ok(());
+    allowed: &[i32],
+) -> Result<(), Denial> {
+    let allowed = access::allows(&orm(pool), slug, *project_id, *user_id, allowed)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Denial::Forbidden)
     }
-    if membership.project_role.is_some() && membership.workspace_role == Some(20) {
-        return Ok(());
-    }
-    Err(Denial::Forbidden)
 }
 
 /// View-body tenant facts: the actor's render timezone
@@ -483,15 +373,11 @@ struct Tenant {
 }
 
 async fn fetch_tenant(pool: &PgPool, user_id: &Uuid) -> Result<Tenant, Denial> {
-    let timezone_name: Option<(String,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let timezone_name = access::user_timezone(&orm(pool), *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let timezone: Tz = timezone_name
         .ok_or(Denial::ServerError)?
-        .0
         .parse()
         .map_err(|_| Denial::ServerError)?;
     Ok(Tenant { timezone })
@@ -506,6 +392,11 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// A SeaORM connection over the request pool (no I/O).
+fn orm(pool: &PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 // ---------------------------------------------------------------------------
 // Datetime rendering
 // ---------------------------------------------------------------------------
@@ -516,7 +407,7 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
 /// to the current timezone, `fields.py:1168-1231`, which `TimezoneMixin`
 /// set to the actor's).
 fn render_dt(dt: &DateTime<Utc>, tz: &Tz) -> String {
-    crate::serializer::render_datetime_in(&dt.fixed_offset(), tz)
+    render_datetime_in(dt, tz)
 }
 
 fn render_dt_opt(dt: Option<DateTime<Utc>>, tz: &Tz) -> Option<String> {
@@ -531,11 +422,6 @@ fn render_dt_utc(dt: &DateTime<Utc>) -> String {
     crate::serializer::render_datetime(dt)
 }
 
-/// DRF `DateField` wire format.
-fn render_date(value: &chrono::NaiveDate) -> String {
-    value.format("%Y-%m-%d").to_string()
-}
-
 /// A finite `sort_order` for the wire; a non-finite one answers 500
 /// (DRF renders with `allow_nan=False` under the default
 /// `STRICT_JSON=True`, so `ValueError` escapes into the generic 500).
@@ -544,17 +430,6 @@ fn render_sort_order(value: f64) -> Result<f64, Denial> {
         Ok(value)
     } else {
         Err(Denial::ServerError)
-    }
-}
-
-fn uuid_string(id: &Uuid) -> String {
-    id.to_string()
-}
-
-fn uuid_string_opt(id: Option<Uuid>) -> Value {
-    match id {
-        Some(id) => Value::String(id.to_string()),
-        None => Value::Null,
     }
 }
 
@@ -579,19 +454,14 @@ async fn version_list(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     let total = version_count(&pool, &slug, &project_id, &issue_id).await?;
     let cursor = query_last(&query, "cursor");
     let page = v2_page(cursor.as_deref(), total).map_err(|_| Denial::ServerError)?;
-    let mut binder = Binder::default();
-    let sql = version_list_sql(&mut binder, &slug, project_id, issue_id, &page);
-    let rows = sqlx::query(&sql)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_all(&pool)
+    let rows = version_page_query(&slug, project_id, issue_id, &page)?
+        .into_model::<VersionPageRow>()
+        .all(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut results = Vec::with_capacity(rows.len());
@@ -619,17 +489,10 @@ async fn version_detail(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
-    let mut binder = Binder::default();
-    let sql = version_detail_sql(&mut binder, &slug, project_id, issue_id, version_id);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(issue_id)
-        .bind(version_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_optional(&pool)
+    let row = version_detail_query(&slug, project_id, issue_id, version_id)
+        .one(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(row) = row else {
@@ -646,16 +509,170 @@ async fn version_count(
     project_id: &Uuid,
     issue_id: &Uuid,
 ) -> Result<i64, Denial> {
-    let mut binder = Binder::default();
-    let sql = version_count_sql(&mut binder, slug, *project_id, *issue_id);
-    let row: Option<(i64,)> = sqlx::query_as(&sql)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let total = version_scope(slug, *project_id, *issue_id)
+        .count(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
+    i64::try_from(total).map_err(|_| Denial::ServerError)
+}
+
+/// The issue-version list scope (`version.py:61-74`): live rows of this
+/// issue + project under the workspace slug (`INNER JOIN workspaces`).
+fn version_scope(slug: &str, project_id: Uuid, issue_id: Uuid) -> Select<issue_versions::Entity> {
+    issue_versions::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_versions::Relation::Workspaces.def(),
+        )
+        .filter(issue_versions::Column::DeletedAt.is_null())
+        .filter(issue_versions::Column::IssueId.eq(issue_id))
+        .filter(issue_versions::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+}
+
+/// The issue-version page (`version.py:61-74`): the 10
+/// `required_fields` over the model's `-created_at` ordering (no explicit
+/// `order_by`), sliced per [`V2Page`].
+fn version_page_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    page: &V2Page,
+) -> Result<Select<issue_versions::Entity>, Denial> {
+    paged(
+        version_scope(slug, project_id, issue_id)
+            .select_only()
+            .columns(VERSION_PAGE_COLUMNS)
+            .order_by_desc(issue_versions::Column::CreatedAt),
+        page,
+    )
+}
+
+/// The description-version page (`version.py:133-144`): the same 10
+/// columns over the endpoint's explicit `.order_by("-created_at")` (the
+/// model has no default ordering, so the call is load-bearing).
+fn desc_version_page_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    page: &V2Page,
+) -> Result<Select<issue_description_versions::Entity>, Denial> {
+    paged(
+        desc_version_scope(slug, project_id, issue_id)
+            .select_only()
+            .columns(DESC_VERSION_PAGE_COLUMNS)
+            .order_by_desc(issue_description_versions::Column::CreatedAt),
+        page,
+    )
+}
+
+/// The issue-version detail (`version.py:38-44`): the full row under the
+/// list scope plus the pk, model `-created_at` ordering. `.one()` reads
+/// `LIMIT 1`, matching Django's `.get()` on a unique pk.
+fn version_detail_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    version_id: Uuid,
+) -> Select<issue_versions::Entity> {
+    version_scope(slug, project_id, issue_id)
+        .filter(issue_versions::Column::Id.eq(version_id))
+        .order_by_desc(issue_versions::Column::CreatedAt)
+}
+
+/// The description-version scope (`version.py:133-144`), same predicates
+/// as [`version_scope`] over `issue_description_versions`.
+fn desc_version_scope(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> Select<issue_description_versions::Entity> {
+    issue_description_versions::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_description_versions::Relation::Workspaces.def(),
+        )
+        .filter(issue_description_versions::Column::DeletedAt.is_null())
+        .filter(issue_description_versions::Column::IssueId.eq(issue_id))
+        .filter(issue_description_versions::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+}
+
+/// The description-version detail (`version.py:107-116`).
+/// `IssueDescriptionVersion` declares no `Meta.ordering`, so there is no
+/// `ORDER BY` (unlike its version sibling) — the asymmetry is ported.
+fn desc_version_detail_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    version_id: Uuid,
+) -> Select<issue_description_versions::Entity> {
+    desc_version_scope(slug, project_id, issue_id)
+        .filter(issue_description_versions::Column::Id.eq(version_id))
+}
+
+/// The [`VERSION_PAGE_KEYS`] columns with FK attnames, in call order —
+/// both version lists select the same `required_fields`.
+const VERSION_PAGE_COLUMNS: [issue_versions::Column; 10] = [
+    issue_versions::Column::Id,
+    issue_versions::Column::WorkspaceId,
+    issue_versions::Column::ProjectId,
+    issue_versions::Column::IssueId,
+    issue_versions::Column::LastSavedAt,
+    issue_versions::Column::OwnedById,
+    issue_versions::Column::CreatedAt,
+    issue_versions::Column::UpdatedAt,
+    issue_versions::Column::CreatedById,
+    issue_versions::Column::UpdatedById,
+];
+
+/// [`VERSION_PAGE_COLUMNS`] over `issue_description_versions`.
+const DESC_VERSION_PAGE_COLUMNS: [issue_description_versions::Column; 10] = [
+    issue_description_versions::Column::Id,
+    issue_description_versions::Column::WorkspaceId,
+    issue_description_versions::Column::ProjectId,
+    issue_description_versions::Column::IssueId,
+    issue_description_versions::Column::LastSavedAt,
+    issue_description_versions::Column::OwnedById,
+    issue_description_versions::Column::CreatedAt,
+    issue_description_versions::Column::UpdatedAt,
+    issue_description_versions::Column::CreatedById,
+    issue_description_versions::Column::UpdatedById,
+];
+
+/// The `paginate` slice for a [`V2Page`]: `LIMIT end - start`, plus
+/// `OFFSET start` past the first row. A negative length (a negative
+/// cursor page size) is the generic 500, as Postgres rejecting
+/// `LIMIT -n` was.
+fn paged<E: EntityTrait>(select: Select<E>, page: &V2Page) -> Result<Select<E>, Denial> {
+    let length = u64::try_from(page.end - page.start).map_err(|_| Denial::ServerError)?;
+    let start = u64::try_from(page.start).map_err(|_| Denial::ServerError)?;
+    let select = select.limit(length);
+    Ok(if start == 0 {
+        select
+    } else {
+        select.offset(start)
+    })
+}
+
+/// One `.values(*required_fields)` version row, decoded by name. Every
+/// value reads DRF-nullable.
+#[derive(Debug, Clone, Copy, FromQueryResult)]
+struct VersionPageRow {
+    id: Option<Uuid>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    issue_id: Option<Uuid>,
+    last_saved_at: Option<DateTimeWithTimeZone>,
+    owned_by_id: Option<Uuid>,
+    created_at: Option<DateTimeWithTimeZone>,
+    updated_at: Option<DateTimeWithTimeZone>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+}
+
+fn utc(at: DateTimeWithTimeZone) -> DateTime<Utc> {
+    at.with_timezone(&Utc)
 }
 
 /// One `.values(*required_fields)` row in [`VERSION_PAGE_KEYS`] order.
@@ -663,29 +680,24 @@ async fn version_count(
 /// `created_at`/`updated_at` shift to the actor's zone (the explicit
 /// `user_timezone_converter` pass), `last_saved_at` renders as stored
 /// (the JSON-encoder path converts nothing).
-fn version_page_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denial> {
-    let id: Option<Uuid> = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Option<Uuid> = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let issue_id: Option<Uuid> = row.try_get("issue_id").map_err(|_| Denial::ServerError)?;
-    let last_saved_at: Option<DateTime<Utc>> = row
-        .try_get("last_saved_at")
-        .map_err(|_| Denial::ServerError)?;
-    let owned_by_id: Option<Uuid> = row
-        .try_get("owned_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let created_at: Option<DateTime<Utc>> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: Option<DateTime<Utc>> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_by_id: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by_id: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
+fn version_page_row(row: &VersionPageRow, tz: &Tz) -> Result<Value, Denial> {
+    let VersionPageRow {
+        id,
+        workspace_id,
+        project_id,
+        issue_id,
+        last_saved_at,
+        owned_by_id,
+        created_at,
+        updated_at,
+        created_by_id,
+        updated_by_id,
+    } = *row;
+    let (last_saved_at, created_at, updated_at) = (
+        last_saved_at.map(utc),
+        created_at.map(utc),
+        updated_at.map(utc),
+    );
     let last_saved_at = last_saved_at
         .as_ref()
         .map(render_dt_utc)
@@ -702,16 +714,16 @@ fn version_page_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denia
     let mut map = Map::with_capacity(VERSION_PAGE_KEYS.len());
     for &key in VERSION_PAGE_KEYS.iter() {
         let value = match key {
-            "id" => uuid_string_opt(id),
-            "workspace" => uuid_string_opt(workspace_id),
-            "project" => uuid_string_opt(project_id),
-            "issue" => uuid_string_opt(issue_id),
+            "id" => render_uuid_opt(&id),
+            "workspace" => render_uuid_opt(&workspace_id),
+            "project" => render_uuid_opt(&project_id),
+            "issue" => render_uuid_opt(&issue_id),
             "last_saved_at" => last_saved_at.clone(),
-            "owned_by" => uuid_string_opt(owned_by_id),
+            "owned_by" => render_uuid_opt(&owned_by_id),
             "created_at" => created_at.clone(),
             "updated_at" => updated_at.clone(),
-            "created_by" => uuid_string_opt(created_by_id),
-            "updated_by" => uuid_string_opt(updated_by_id),
+            "created_by" => render_uuid_opt(&created_by_id),
+            "updated_by" => render_uuid_opt(&updated_by_id),
             _ => unreachable!("VERSION_PAGE_KEYS"),
         };
         map.insert(key.to_owned(), value);
@@ -762,90 +774,40 @@ fn version_envelope(page: &V2Page, total_results: i64, results: Vec<Value>) -> S
 /// The full version row through the 640 detail rendering. All datetimes
 /// render in the request's zone (DRF `DateTimeField`); dates render
 /// bare; the UUID arrays render hyphenated strings.
-fn render_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String, Denial> {
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Uuid = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let issue_id: Uuid = row.try_get("issue_id").map_err(|_| Denial::ServerError)?;
-    let id = uuid_string(&id);
-    let workspace = uuid_string(&workspace_id);
-    let project = uuid_string(&project_id);
-    let issue = uuid_string(&issue_id);
-    let parent: Option<Uuid> = row.try_get("parent").map_err(|_| Denial::ServerError)?;
-    let state: Option<Uuid> = row.try_get("state").map_err(|_| Denial::ServerError)?;
-    let estimate_point: Option<Uuid> = row
-        .try_get("estimate_point")
-        .map_err(|_| Denial::ServerError)?;
-    let parent = parent.map(|id| uuid_string(&id));
-    let state = state.map(|id| uuid_string(&id));
-    let estimate_point = estimate_point.map(|id| uuid_string(&id));
-    let name: String = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let priority: String = row.try_get("priority").map_err(|_| Denial::ServerError)?;
-    let start_date: Option<chrono::NaiveDate> =
-        row.try_get("start_date").map_err(|_| Denial::ServerError)?;
-    let target_date: Option<chrono::NaiveDate> = row
-        .try_get("target_date")
-        .map_err(|_| Denial::ServerError)?;
-    let start_date = start_date.as_ref().map(render_date);
-    let target_date = target_date.as_ref().map(render_date);
-    let assignees: Vec<Uuid> = row.try_get("assignees").map_err(|_| Denial::ServerError)?;
-    let labels: Vec<Uuid> = row.try_get("labels").map_err(|_| Denial::ServerError)?;
-    let modules: Vec<Uuid> = row.try_get("modules").map_err(|_| Denial::ServerError)?;
-    let assignees: Vec<String> = assignees.iter().map(uuid_string).collect();
-    let labels: Vec<String> = labels.iter().map(uuid_string).collect();
-    let modules: Vec<String> = modules.iter().map(uuid_string).collect();
+fn render_version_detail(row: &issue_versions::Model, tz: &Tz) -> Result<String, Denial> {
+    let id = uuid_string(&row.id);
+    let workspace = uuid_string(&row.workspace_id);
+    let project = uuid_string(&row.project_id);
+    let issue = uuid_string(&row.issue_id);
+    let parent = row.parent.map(|id| uuid_string(&id));
+    let state = row.state.map(|id| uuid_string(&id));
+    let estimate_point = row.estimate_point.map(|id| uuid_string(&id));
+    let name = &row.name;
+    let priority = &row.priority;
+    let start_date = row.start_date.as_ref().map(render_date);
+    let target_date = row.target_date.as_ref().map(render_date);
+    let assignees: Vec<String> = row.assignees.iter().map(uuid_string).collect();
+    let labels: Vec<String> = row.labels.iter().map(uuid_string).collect();
+    let modules: Vec<String> = row.modules.iter().map(uuid_string).collect();
     let assignees_ref: Vec<&str> = assignees.iter().map(String::as_str).collect();
     let labels_ref: Vec<&str> = labels.iter().map(String::as_str).collect();
     let modules_ref: Vec<&str> = modules.iter().map(String::as_str).collect();
-    let sequence_id: i32 = row
-        .try_get("sequence_id")
-        .map_err(|_| Denial::ServerError)?;
-    let sort_order: f64 = row.try_get("sort_order").map_err(|_| Denial::ServerError)?;
-    let sort_order = render_sort_order(sort_order)?;
-    let completed_at: Option<DateTime<Utc>> = row
-        .try_get("completed_at")
-        .map_err(|_| Denial::ServerError)?;
-    let archived_at: Option<chrono::NaiveDate> = row
-        .try_get("archived_at")
-        .map_err(|_| Denial::ServerError)?;
-    let completed_at = render_dt_opt(completed_at, tz);
-    let archived_at = archived_at.as_ref().map(render_date);
-    let is_draft: bool = row.try_get("is_draft").map_err(|_| Denial::ServerError)?;
-    let external_source: Option<String> = row
-        .try_get("external_source")
-        .map_err(|_| Denial::ServerError)?;
-    let external_id: Option<String> = row
-        .try_get("external_id")
-        .map_err(|_| Denial::ServerError)?;
-    let r#type: Option<Uuid> = row.try_get("type").map_err(|_| Denial::ServerError)?;
-    let cycle: Option<Uuid> = row.try_get("cycle").map_err(|_| Denial::ServerError)?;
-    let r#type = r#type.map(|id| uuid_string(&id));
-    let cycle = cycle.map(|id| uuid_string(&id));
-    let meta: Value = row.try_get("meta").map_err(|_| Denial::ServerError)?;
-    let last_saved_at: DateTime<Utc> = row
-        .try_get("last_saved_at")
-        .map_err(|_| Denial::ServerError)?;
-    let last_saved_at = render_dt(&last_saved_at, tz);
-    let owned_by_id: Uuid = row
-        .try_get("owned_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let owned_by = uuid_string(&owned_by_id);
-    let created_at: Option<DateTime<Utc>> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: Option<DateTime<Utc>> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_at = render_dt_opt(created_at, tz);
-    let updated_at = render_dt_opt(updated_at, tz);
-    let created_by_id: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by_id: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let created_by = created_by_id.map(|id| uuid_string(&id));
-    let updated_by = updated_by_id.map(|id| uuid_string(&id));
+    let sequence_id = row.sequence_id;
+    let sort_order = render_sort_order(row.sort_order)?;
+    let completed_at = render_dt_opt(row.completed_at.map(utc), tz);
+    let archived_at = row.archived_at.as_ref().map(render_date);
+    let is_draft = row.is_draft;
+    let external_source = row.external_source.clone();
+    let external_id = row.external_id.clone();
+    let r#type = row.r#type.map(|id| uuid_string(&id));
+    let cycle = row.cycle.map(|id| uuid_string(&id));
+    let meta = &row.meta;
+    let last_saved_at = render_dt(&utc(row.last_saved_at), tz);
+    let owned_by = uuid_string(&row.owned_by_id);
+    let created_at = render_dt_opt(Some(utc(row.created_at)), tz);
+    let updated_at = render_dt_opt(Some(utc(row.updated_at)), tz);
+    let created_by = row.created_by_id.map(|id| uuid_string(&id));
+    let updated_by = row.updated_by_id.map(|id| uuid_string(&id));
     let row = IssueVersionDetailRow {
         id: &id,
         workspace: &workspace,
@@ -854,8 +816,8 @@ fn render_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String,
         parent: parent.as_deref(),
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
-        name: &name,
-        priority: &priority,
+        name,
+        priority,
         start_date: start_date.as_deref(),
         target_date: target_date.as_deref(),
         assignees: &assignees_ref,
@@ -870,7 +832,7 @@ fn render_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String,
         r#type: r#type.as_deref(),
         cycle: cycle.as_deref(),
         modules: &modules_ref,
-        meta: &meta,
+        meta,
         last_saved_at: &last_saved_at,
         owned_by: &owned_by,
         created_at: created_at.as_deref(),
@@ -902,20 +864,15 @@ async fn desc_version_list(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     desc_version_parents(&pool, &slug, &project_id, &work_item_id, &user_id).await?;
     let total = desc_version_count(&pool, &slug, &project_id, &work_item_id).await?;
     let cursor = query_last(&query, "cursor");
     let page = v2_page(cursor.as_deref(), total).map_err(|_| Denial::ServerError)?;
-    let mut binder = Binder::default();
-    let sql = description_list_sql(&mut binder, &slug, project_id, work_item_id, &page);
-    let rows = sqlx::query(&sql)
-        .bind(work_item_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_all(&pool)
+    let rows = desc_version_page_query(&slug, project_id, work_item_id, &page)?
+        .into_model::<VersionPageRow>()
+        .all(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut results = Vec::with_capacity(rows.len());
@@ -942,18 +899,11 @@ async fn desc_version_detail(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     desc_version_parents(&pool, &slug, &project_id, &work_item_id, &user_id).await?;
-    let mut binder = Binder::default();
-    let sql = description_detail_sql(&mut binder, &slug, project_id, work_item_id, version_id);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(work_item_id)
-        .bind(version_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_optional(&pool)
+    let row = desc_version_detail_query(&slug, project_id, work_item_id, version_id)
+        .one(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(row) = row else {
@@ -976,46 +926,49 @@ async fn desc_version_parents(
     work_item_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Denial> {
-    let project: Option<(bool,)> = sqlx::query_as(
-        "SELECT guest_view_all_features FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((guest_view_all,)) = project else {
+    let db = orm(pool);
+    let Some((_, guest_view_all)) = access::project_tenant(&db, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    else {
         return Err(Denial::NotFound);
     };
-    let issue: Option<(Option<Uuid>,)> = sqlx::query_as(
-        r#"SELECT i.created_by_id FROM issues i
-           JOIN workspaces w ON w.id = i.workspace_id
-           WHERE i.deleted_at IS NULL AND w.slug = $1 AND i.project_id = $2 AND i.id = $3"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(work_item_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((issue_created_by,)) = issue else {
+    let Some(issue_created_by) = desc_version_issue_creator(&db, slug, *project_id, *work_item_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    else {
         return Err(Denial::NotFound);
     };
-    let is_guest: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if is_guest.is_some() && !guest_view_all && issue_created_by != Some(*user_id) {
+    let is_guest = access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        == Some(5);
+    if is_guest && !guest_view_all && issue_created_by != Some(*user_id) {
         return Err(Denial::GuestView);
     }
     Ok(())
+}
+
+/// `Issue.objects.get(workspace__slug, project_id, pk)` for the
+/// description-version preamble: the live issue's `created_by_id`
+/// (outer `None` is the miss; triage/archived/draft rows stay visible).
+async fn desc_version_issue_creator(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> Result<Option<Option<Uuid>>, sea_orm::DbErr> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::CreatedById)
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::Id.eq(issue_id))
+        .into_tuple()
+        .one(db)
+        .await
 }
 
 /// `paginate`'s `base_queryset.count()` for description versions.
@@ -1025,74 +978,38 @@ async fn desc_version_count(
     project_id: &Uuid,
     work_item_id: &Uuid,
 ) -> Result<i64, Denial> {
-    let mut binder = Binder::default();
-    let sql = description_count_sql(&mut binder, slug, *project_id, *work_item_id);
-    let row: Option<(i64,)> = sqlx::query_as(&sql)
-        .bind(work_item_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let total = desc_version_scope(slug, *project_id, *work_item_id)
+        .count(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
+    i64::try_from(total).map_err(|_| Denial::ServerError)
 }
 
 /// The full description-version row through the 640 rendering
 /// (`description_binary` re-encodes base64 inside the port).
-fn render_desc_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String, Denial> {
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Uuid = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let issue_id: Uuid = row.try_get("issue_id").map_err(|_| Denial::ServerError)?;
-    let id = uuid_string(&id);
-    let workspace = uuid_string(&workspace_id);
-    let project = uuid_string(&project_id);
-    let issue = uuid_string(&issue_id);
-    let description_binary: Option<Vec<u8>> = row
-        .try_get("description_binary")
-        .map_err(|_| Denial::ServerError)?;
-    let description_html: String = row
-        .try_get("description_html")
-        .map_err(|_| Denial::ServerError)?;
-    let description_stripped: Option<String> = row
-        .try_get("description_stripped")
-        .map_err(|_| Denial::ServerError)?;
-    let description_json: Value = row
-        .try_get("description_json")
-        .map_err(|_| Denial::ServerError)?;
-    let last_saved_at: DateTime<Utc> = row
-        .try_get("last_saved_at")
-        .map_err(|_| Denial::ServerError)?;
-    let last_saved_at = render_dt(&last_saved_at, tz);
-    let owned_by_id: Uuid = row
-        .try_get("owned_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let owned_by = uuid_string(&owned_by_id);
-    let created_at: Option<DateTime<Utc>> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: Option<DateTime<Utc>> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_at = render_dt_opt(created_at, tz);
-    let updated_at = render_dt_opt(updated_at, tz);
-    let created_by_id: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by_id: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let created_by = created_by_id.map(|id| uuid_string(&id));
-    let updated_by = updated_by_id.map(|id| uuid_string(&id));
+fn render_desc_version_detail(
+    row: &issue_description_versions::Model,
+    tz: &Tz,
+) -> Result<String, Denial> {
+    let id = uuid_string(&row.id);
+    let workspace = uuid_string(&row.workspace_id);
+    let project = uuid_string(&row.project_id);
+    let issue = uuid_string(&row.issue_id);
+    let last_saved_at = render_dt(&utc(row.last_saved_at), tz);
+    let owned_by = uuid_string(&row.owned_by_id);
+    let created_at = render_dt_opt(Some(utc(row.created_at)), tz);
+    let updated_at = render_dt_opt(Some(utc(row.updated_at)), tz);
+    let created_by = row.created_by_id.map(|id| uuid_string(&id));
+    let updated_by = row.updated_by_id.map(|id| uuid_string(&id));
     let row = IssueDescriptionVersionDetailRow {
         id: &id,
         workspace: &workspace,
         project: &project,
         issue: &issue,
-        description_binary: description_binary.as_deref(),
-        description_html: &description_html,
-        description_stripped: description_stripped.as_deref(),
-        description_json: &description_json,
+        description_binary: row.description_binary.as_deref(),
+        description_html: &row.description_html,
+        description_stripped: row.description_stripped.as_deref(),
+        description_json: &row.description_json,
         last_saved_at: &last_saved_at,
         owned_by: &owned_by,
         created_at: created_at.as_deref(),
@@ -1108,10 +1025,6 @@ fn render_desc_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<St
 // Move (`move.py:17-46`)
 // ---------------------------------------------------------------------------
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB): past it the
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Move body shape for the shared negotiator: a single scalar,
 /// last-value-wins; uploads are dropped (the view reads `request.data`
 /// only, and no contract body is multipart).
@@ -1121,9 +1034,11 @@ const MOVE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 };
 
 /// `POST .../work-items/<pk>/move/`: the ADMIN/MEMBER gate, the body
-/// read, the pre-save snapshot, the 650 move driver over the pool
-/// store, the creation-outbox drain, the post-commit cancel/drain,
-/// the explicit 594 fire, the two enqueues, then the refreshed issue
+/// read, the pre-save snapshot, `domain::issues::move_to_project`
+/// inside a write transaction (the 650 kernel over the SeaORM move
+/// store, with the creation-outbox drain, the post-commit
+/// cancel/drain, the 594 fire, the completion comment and the
+/// enqueues folded into the commit chain), then the refreshed issue
 /// in the 22-key APP read shape.
 async fn move_issue(
     State(state): State<AppState>,
@@ -1137,101 +1052,87 @@ async fn move_issue(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     let target_ref = read_move_target(req).await?;
     let origin = move_origin(&state)?;
     let web_base_url = move_web_base_url(&state);
     let now = Utc::now();
     // The pre-save snapshot, before the move's own write.
-    let mut signal = MoveSignalSeam { pool: &pool };
-    let prev = capture_prior_state(&mut signal, Some(pk))
+    let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let store = PoolMoveStore::new(&pool, SpanCreationDeps::from_state(&state));
-    let outcome = match move_work_item_to_project(
-        &store,
-        &slug,
-        project_id,
-        pk,
-        &target_ref,
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = WriteCtx::new(WriteActor {
         user_id,
-        &origin,
-        web_base_url.as_deref(),
-        &now,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            store.abort().await;
-            return Err(map_move_error(error));
-        }
+        timezone: Some(tenant.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: None,
+        project_id: Some(project_id),
+    });
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let span_deps = SpanCreationDeps::from_state(&state);
+    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
+        &pool,
+        &state,
+        span_deps.cache.clone(),
+    ));
+    let creation = CreationDeps {
+        pool: pool.clone(),
+        cloud: span_deps.cloud.clone(),
+        managed: span_deps.managed.clone(),
+        now_unix_secs: span_deps.now_unix_secs,
+        toolsets: span_deps.toolsets.clone(),
+        assistant_seam: span_deps.assistant_seam.clone(),
+        admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
     };
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let drain = drain.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            txn.hooks_mut().register(drain);
+            domain_issues::move_to_project(
+                &ctx,
+                txn,
+                domain_issues::MoveInput {
+                    slug: &slug,
+                    project_id,
+                    pk,
+                    target_ref: &target_ref,
+                    origin: Some(origin.clone()),
+                    web_base_url: web_base_url.as_deref(),
+                    now,
+                    prev_state: prev,
+                    options: domain_issues::MoveOptions::django(),
+                    creation,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(map_move_domain_error)?;
     match outcome {
-        MoveResult::AlreadyThere(source) => {
+        MoveDomainOutcome::AlreadyThere { row, .. } => {
             // Same project: no writes at all, no signals, no enqueues —
             // just the issue in the read shape.
-            let body = render_moved_issue(&pool, &source, &tenant.timezone).await?;
+            let body = render_moved_issue(&pool, &row, &tenant.timezone).await?;
             Ok(json_response(StatusCode::OK, body))
         }
-        MoveResult::Moved(moved) => {
-            // The creation registered its `on_commit` entries first
-            // (the dispatch precedes the cancel send and pod drains),
-            // so its outboxes drain before the move's own post-commit
-            // work. A drain failure is a 500 with the move standing.
-            if let Some(outboxes) = store.take_creation_outboxes().await {
-                let redis = redis_client(&state);
-                let pubsub = MovePubsub {
-                    pool: &pool,
-                    redis: redis.as_ref(),
-                    runner: &state.settings().runner,
-                };
-                drain_creation_outboxes(&pool, &state, outboxes, |pod_id| {
-                    drain_pod_by_id(&pool, &pubsub, pod_id)
-                })
-                .await
-                .map_err(|error| {
-                    match error {
-                        CreationDrainError::Dispatch(db) => {
-                            tracing::warn!("move creation dispatch failed: {db}")
-                        }
-                        CreationDrainError::PodDrain(denial) => {
-                            tracing::warn!("move creation pod drain failed: {denial:?}")
-                        }
-                    }
-                    Denial::ServerError
-                })?;
+        MoveDomainOutcome::Moved { row, chain } => {
+            if chain.stopped().is_some() {
+                return Err(Denial::ServerError);
             }
-            run_post_commit(&state, &pool, &moved.post_commit).await?;
-            fire_after_move(
-                &pool,
-                pk,
-                prev,
-                moved.issue.row.state_id,
-                moved.dispatch_immediate,
-                Some(user_id),
-                now,
-            )
-            .await?;
-            for enqueue in &moved.enqueues {
-                let job = pidash_jobs::queue::NewJob::new(
-                    enqueue.task,
-                    Value::Array(enqueue.args.clone()),
-                    Value::Object(enqueue.kwargs.clone()),
-                );
-                // `.delay` past the commit: best-effort, the response
-                // stands on enqueue failure, as in Django (where the
-                // broker is up so `.delay` never raises here) and as in
-                // every sibling app_issues handler.
-                if let Err(error) = pidash_jobs::queue::enqueue(&pool, &job).await {
-                    tracing::warn!(%error, task = enqueue.task, "task enqueue failed; response stands");
-                }
-            }
-            let body = render_moved_issue(&pool, &moved.issue.row, &tenant.timezone).await?;
+            let body = render_moved_issue(&pool, &row.row, &tenant.timezone).await?;
             Ok(json_response(StatusCode::OK, body))
         }
+        MoveDomainOutcome::Rejected(rejection) => Err(map_move_rejection(rejection)),
     }
 }
 
@@ -1240,9 +1141,9 @@ async fn move_issue(
 /// JSON null, which the driver blanks to the required-400).
 async fn read_move_target(req: axum::extract::Request) -> Result<Value, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &MOVE_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(Value::Null),
         Ok(shared_body::NegotiatedBody::JsonText { text, .. }) => {
@@ -1275,1460 +1176,61 @@ async fn read_move_target(req: axum::extract::Request) -> Result<Value, Denial> 
 
 /// `base_host(request, is_app=True)`: `APP_BASE_URL` when set, else the
 /// `WEB_URL or APP_BASE_URL` origin — unset everywhere is a 500
-/// (`ImproperlyConfigured`).
+/// (`ImproperlyConfigured`). Empty strings fall through like Python's
+/// `or`, as in the v1 twin.
 fn move_origin(state: &AppState) -> Result<String, Denial> {
     let urls = &state.settings().urls;
     urls.app_base_url
         .clone()
-        .or_else(|| urls.web_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
 /// `web_base_url()`: `WEB_URL`, falling back to `APP_BASE_URL`, trailing
 /// slash stripped — `None` when neither is configured, so the
-/// `current_instance` render omits the url.
+/// `current_instance` render omits the url. Empty strings fall through
+/// like Python's `or`, as in the v1 twin.
 fn move_web_base_url(state: &AppState) -> Option<String> {
     let urls = &state.settings().urls;
     urls.web_url
         .clone()
-        .or_else(|| urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
         .map(|base| base.trim_end_matches('/').to_owned())
 }
 
 /// Map the 650 driver's failures onto the view's responses: the
 /// recoverable `{"error"}` + status, the source-miss 404, the
 /// resolve-miss 404 detail, anything else the 500.
-fn map_move_error(error: MoveError) -> Denial {
-    match error {
-        MoveError::Issue(issue) => Denial::MoveRejection {
-            status: issue.status_code,
-            message: issue.message,
-        },
-        MoveError::IssueNotFound => Denial::NotFound,
-        MoveError::ProjectNotFound => Denial::ProjectNotFound,
-        MoveError::Store(_) => Denial::ServerError,
-    }
-}
-
-/// Run the driver's post-commit actions in order (the cancel first,
-/// then one drain per source pod): the cancel send is best-effort with
-/// logged warnings; a drain failure propagates (rows already
-/// committed — the delete-cmds precedent, mirroring `on_commit`
-/// raising past the commit).
-async fn run_post_commit(
-    state: &AppState,
-    pool: &PgPool,
-    actions: &[MovePostCommit],
-) -> Result<(), Denial> {
-    if actions.is_empty() {
-        return Ok(());
-    }
-    let redis = redis_client(state);
-    let pubsub = MovePubsub {
-        pool,
-        redis: redis.as_ref(),
-        runner: &state.settings().runner,
-    };
-    for action in actions {
-        match action {
-            MovePostCommit::SendCancel { runner_id, run_id } => {
-                let outcome = send_project_move_cancel(&pubsub, *runner_id, *run_id).await;
-                for warning in outcome.warnings {
-                    tracing::warn!("{warning}");
-                }
-            }
-            MovePostCommit::DrainPod { pod_id } => {
-                drain_pod_by_id(pool, &pubsub, *pod_id).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Api-crate-owned Redis client (the delete-cmds precedent): `None`
-/// when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
-}
-
-/// Fire the state-transition handler after the move's save: the state
-/// always changes here, `dispatch_immediate` is false exactly when
-/// handoff runs exist, `moved_by_run` stays `None`. A handler failure
-/// answers `Failed` with the verbatim log line — the move stands.
-async fn fire_after_move(
-    pool: &PgPool,
-    issue_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    dispatch_immediate: bool,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let mut seam = MoveSignalSeam { pool };
-    let mut preflight = MovePreflight;
-    let outcome = fire_state_transition(
-        &mut seam,
-        &mut preflight,
-        &FireRequest {
-            issue_id,
-            prev_state_id,
-            current_state_id,
-            dispatch_immediate,
-            moved_by_run: None,
-            now,
-            jitter_secs: 0.0,
-            created_by,
-        },
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Pool `MoveStore`
-// ---------------------------------------------------------------------------
-
-/// The 650 [`MoveStore`] over the pool: guard reads run on pool
-/// checkouts, the `:173-373` span runs on one held transaction
-/// (`BEGIN` at [`MoveStore::lock_source_issue`], `COMMIT` at
-/// [`MoveStore::moved_issue`], `ROLLBACK` via [`PoolMoveStore::abort`]
-/// on any driver error), and every statement is the 650 SQL text
-/// executed verbatim.
-///
-/// The span is a [`DbTransaction`], borrowed from the pool, so
-/// [`MoveStore::create_handoff_run`] can lend it to the D-12 creation
-/// seam in-span; the creation outboxes wait on the store for the
-/// handler's post-commit drain.
-///
-/// The mutex only bridges `&self` to the held transaction — the store
-/// is per-request, so it is never contended. It is a tokio mutex so
-/// the guard stays `Send` across awaits (a std guard would poison the
-/// handler future's `Send` bound).
-struct PoolMoveStore<'p> {
-    pool: &'p PgPool,
-    txn: Mutex<Option<DbTransaction<'p>>>,
-    creation_deps: SpanCreationDeps,
-    creation: Mutex<Option<CreationOutboxes>>,
-}
-
-impl<'p> PoolMoveStore<'p> {
-    fn new(pool: &'p PgPool, creation_deps: SpanCreationDeps) -> Self {
-        Self {
-            pool,
-            txn: Mutex::new(None),
-            creation_deps,
-            creation: Mutex::new(None),
-        }
-    }
-
-    /// Take the creation outboxes for the post-commit drain (`None`
-    /// when the move created no handoff run — every pre-743 path).
-    async fn take_creation_outboxes(&self) -> Option<CreationOutboxes> {
-        self.creation.lock().await.take()
-    }
-
-    /// Roll back the span when the driver failed (Django's
-    /// `transaction.atomic` exit on raise). A no-op when no span is
-    /// open (pre-span failures).
-    async fn abort(&self) {
-        let tx = self.txn.lock().await.take();
-        if let Some(tx) = tx {
-            if let Err(error) = tx.rollback().await {
-                tracing::warn!(%error, "move store: rollback failed");
-            }
-        }
-    }
-
-    /// Open the span: hold one transaction on the pool.
-    async fn begin_span(&self) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let tx = DbTransaction::begin(self.pool)
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        self.txn.lock().await.replace(tx);
-        Ok(())
-    }
-
-    /// Close the span: `COMMIT` and release the connection.
-    async fn commit_span(&self) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let tx = self
-            .txn
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| StoreError("move store: commit without a span".to_owned()))?;
-        tx.commit()
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(())
-    }
-}
-
-fn store_error(
-    error: impl std::fmt::Display,
-) -> pidash_services::app_issues::issue_move::StoreError {
-    pidash_services::app_issues::issue_move::StoreError(error.to_string())
-}
-
-/// Map one `SOURCE_ISSUE_SQL` / `SOURCE_ISSUE_LOCK_SQL` /
-/// `MOVED_ISSUE_REFETCH_SQL` row. The int4 columns (`point`,
-/// `complexity_score`, `sequence_id`) widen to the driver's i64s;
-/// `type_id` stringifies (the 650 row carries the hyphenated form);
-/// the `archived_at` date widens to midnight UTC (the 650 row types it
-/// a datetime; the move's SQL filters it NULL in every one of these
-/// reads, so the widening only ever sees `None`).
-fn map_source_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<SourceIssueRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    let point: Option<i32> = row.try_get("point").map_err(fail)?;
-    let complexity_score: i32 = row.try_get("complexity_score").map_err(fail)?;
-    let sequence_id: i32 = row.try_get("sequence_id").map_err(fail)?;
-    let type_id: Option<Uuid> = row.try_get("type_id").map_err(fail)?;
-    let archived_at: Option<chrono::NaiveDate> = row.try_get("archived_at").map_err(fail)?;
-    let archived_at = archived_at
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|naive| naive.and_utc());
-    Ok(SourceIssueRow {
-        id: row.try_get("id").map_err(fail)?,
-        project_id: row.try_get("project_id").map_err(fail)?,
-        workspace_id: row.try_get("workspace_id").map_err(fail)?,
-        state_id: row.try_get("state_id").map_err(fail)?,
-        parent_id: row.try_get("parent_id").map_err(fail)?,
-        estimate_point_id: row.try_get("estimate_point_id").map_err(fail)?,
-        assigned_pod_id: row.try_get("assigned_pod_id").map_err(fail)?,
-        type_id: type_id.map(|id| id.to_string()),
-        created_at: row.try_get("created_at").map_err(fail)?,
-        updated_at: row.try_get("updated_at").map_err(fail)?,
-        deleted_at: row.try_get("deleted_at").map_err(fail)?,
-        point: point.map(i64::from),
-        name: row.try_get("name").map_err(fail)?,
-        description_html: row.try_get("description_html").map_err(fail)?,
-        description_binary: row.try_get("description_binary").map_err(fail)?,
-        priority: row.try_get("priority").map_err(fail)?,
-        complexity_score: i64::from(complexity_score),
-        start_date: row.try_get("start_date").map_err(fail)?,
-        target_date: row.try_get("target_date").map_err(fail)?,
-        sequence_id: i64::from(sequence_id),
-        sort_order: row.try_get("sort_order").map_err(fail)?,
-        completed_at: row.try_get("completed_at").map_err(fail)?,
-        archived_at,
-        is_draft: row.try_get("is_draft").map_err(fail)?,
-        external_source: row.try_get("external_source").map_err(fail)?,
-        external_id: row.try_get("external_id").map_err(fail)?,
-        git_work_branch: row.try_get("git_work_branch").map_err(fail)?,
-        created_via: row.try_get("created_via").map_err(fail)?,
-        agent_executor: row.try_get("agent_executor").map_err(fail)?,
-        created_by_id: row.try_get("created_by_id").map_err(fail)?,
-        updated_by_id: row.try_get("updated_by_id").map_err(fail)?,
-    })
-}
-
-/// Map one `HANDOFF_RUNS_LOCK_SQL` row. An unknown stored `status`
-/// is a store failure (loud 500, never a silent coercion); `trigger`
-/// crosses verbatim — `agent_run.trigger` is a plain varchar and
-/// migration 0029 keeps `blocker_completed` rows readable as an
-/// unknown trigger (the 731 tolerance: unknown is neither human nor
-/// automatic).
-fn map_handoff_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<HandoffRunRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    let status: String = row.try_get("status").map_err(fail)?;
-    let status = AgentRunStatus::from_value(&status)
-        .ok_or_else(|| StoreError(format!("move store: unknown agent_run.status {status:?}")))?;
-    let trigger: String = row.try_get("trigger").map_err(fail)?;
-    let run_config: Option<Value> = row.try_get("run_config").map_err(fail)?;
-    Ok(HandoffRunRow {
-        id: row.try_get("id").map_err(fail)?,
-        status,
-        runner_id: row.try_get("runner_id").map_err(fail)?,
-        pod_id: row.try_get("pod_id").map_err(fail)?,
-        created_by_id: row.try_get("created_by_id").map_err(fail)?,
-        run_config: run_config.unwrap_or(Value::Null),
-        trigger,
-    })
-}
-
-/// Map one `blockers::summary_sql` row.
-fn map_blocker_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<BlockerRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    Ok(BlockerRow {
-        issue_id: row.try_get("id").map_err(fail)?,
-        sequence_id: row.try_get("sequence_id").map_err(fail)?,
-        project_identifier: row.try_get("identifier").map_err(fail)?,
-        state_name: row.try_get("name").map_err(fail)?,
-        state_group: row.try_get("group").map_err(fail)?,
-    })
-}
-
-/// Replace the `:issue_id` anchor placeholder the blocker builders emit
-/// with the caller's `$1` bind.
-fn issue_param(sql: String) -> String {
-    sql.replace(":issue_id", "$1")
-}
-
-#[allow(async_fn_in_trait)]
-impl MoveStore for PoolMoveStore<'_> {
-    async fn source_issue(
-        &self,
-        slug: &str,
-        project_id: Uuid,
-        pk: Uuid,
-    ) -> Result<Option<SourceIssueRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(SOURCE_ISSUE_SQL)
-            .bind(slug)
-            .bind(project_id)
-            .bind(pk)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        row.map(|row| map_source_row(&row)).transpose()
-    }
-
-    async fn resolve_project(
-        &self,
-        slug: &str,
-        lookup: &ProjectLookup,
-    ) -> Result<Option<ProjectRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(Uuid, Uuid, String)> = match lookup {
-            ProjectLookup::Pk(id) => sqlx::query_as(PROJECT_RESOLVE_BY_PK_SQL)
-                .bind(id)
-                .bind(slug)
-                .fetch_optional(self.pool)
-                .await
-                .map_err(store_error)?,
-            ProjectLookup::Identifier(identifier) => {
-                sqlx::query_as(PROJECT_RESOLVE_BY_IDENTIFIER_SQL)
-                    .bind(identifier)
-                    .bind(slug)
-                    .fetch_optional(self.pool)
-                    .await
-                    .map_err(store_error)?
-            }
-        };
-        Ok(row.map(|(id, workspace_id, identifier)| ProjectRow {
-            id,
-            workspace_id,
-            identifier,
-        }))
-    }
-
-    async fn can_move_into_target(
-        &self,
-        slug: &str,
-        target_project_id: Uuid,
-        actor_id: Uuid,
-    ) -> Result<bool, pidash_services::app_issues::issue_move::StoreError> {
-        let hit: Option<(i32,)> = sqlx::query_as(MEMBER_EXISTS_SQL)
-            .bind(slug)
-            .bind(target_project_id)
-            .bind(actor_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(hit.is_some())
-    }
-
-    async fn representation_workspace_slug(
-        &self,
-        workspace_id: Uuid,
-    ) -> Result<Option<String>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(String,)> = sqlx::query_as(WORKSPACE_SLUG_SQL)
-            .bind(workspace_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| row.0))
-    }
-
-    async fn representation_project_identifier(
-        &self,
-        project_id: Uuid,
-    ) -> Result<Option<String>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(String,)> = sqlx::query_as(PROJECT_IDENTIFIER_SQL)
-            .bind(project_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| row.0))
-    }
-
-    async fn representation_assignee_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows: Vec<(Uuid,)> = sqlx::query_as(ASSIGNEE_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn representation_label_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows: Vec<(Uuid,)> = sqlx::query_as(LABEL_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn representation_blocked_by(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<BlockerRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows = sqlx::query(&issue_param(summary_sql(false)))
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        rows.iter().map(map_blocker_row).collect()
-    }
-
-    async fn representation_blocking(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<BlockerRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows = sqlx::query(&issue_param(summary_sql(true)))
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        rows.iter().map(map_blocker_row).collect()
-    }
-
-    async fn representation_has_open_blockers(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<bool, pidash_services::app_issues::issue_move::StoreError> {
-        let hit: Option<(i32,)> = sqlx::query_as(&issue_param(has_open_blockers_sql()))
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(hit.is_some())
-    }
-
-    async fn target_default_state(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<StateRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(CREATE_SAVE_DEFAULT_STATE_SQL)
-            .bind(target_project_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| StateRow { id: row.0 }))
-    }
-
-    async fn target_fallback_state(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<StateRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(CREATE_SAVE_FALLBACK_STATE_SQL)
-            .bind(target_project_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| StateRow { id: row.0 }))
-    }
-
-    async fn lock_source_issue(
-        &self,
-        slug: &str,
-        project_id: Uuid,
-        pk: Uuid,
-    ) -> Result<Option<SourceIssueRow>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        self.begin_span().await?;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: span lost".to_owned()))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(SOURCE_ISSUE_LOCK_SQL)
-            .bind(slug)
-            .bind(project_id)
-            .bind(pk)
-            .fetch_optional(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        row.map(|row| map_source_row(&row)).transpose()
-    }
-
-    async fn advisory_lock_project(
-        &self,
-        lock_key: i64,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: advisory lock outside a span".to_owned()))?;
-        sqlx::query(CREATE_ADVISORY_LOCK_SQL)
-            .bind(lock_key)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn lock_handoff_runs(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<HandoffRunRow>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: handoff lock outside a span".to_owned()))?;
-        let rows = sqlx::query(HANDOFF_RUNS_LOCK_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        rows.iter().map(map_handoff_row).collect()
-    }
-
-    async fn max_target_sequence(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<i64>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: sequence scan outside a span".to_owned()))?;
-        let row: Option<(Option<i64>,)> = sqlx::query_as(CREATE_SEQ_SCAN_SQL)
-            .bind(target_project_id)
-            .fetch_optional(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(row.and_then(|row| row.0))
-    }
-
-    async fn target_default_pod(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<PodRow>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: pod lookup outside a span".to_owned()))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(DEFAULT_FOR_PROJECT_ID_SQL)
-            .bind(target_project_id)
-            .fetch_optional(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        row.map(|row| {
-            row.try_get("id")
-                .map(|id| PodRow { id })
-                .map_err(|error| StoreError(error.to_string()))
-        })
-        .transpose()
-    }
-
-    async fn save_moved_issue(
-        &self,
-        issue_id: Uuid,
-        fields: &MovedIssueFields,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let sequence = i32::try_from(fields.sequence_id)
-            .map_err(|_| StoreError("move store: sequence_id overflows int4".to_owned()))?;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: save outside a span".to_owned()))?;
-        sqlx::query(ISSUE_MOVE_UPDATE_SQL)
-            .bind(fields.project_id)
-            .bind(fields.workspace_id)
-            .bind(sequence)
-            .bind(fields.state_id)
-            .bind(fields.assigned_pod_id)
-            .bind(None::<Uuid>)
-            .bind(None::<Uuid>)
-            .bind(None::<Uuid>)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn cancel_inert_run(
-        &self,
-        run_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: inert cancel outside a span".to_owned()))?;
-        sqlx::query(INERT_RUN_UPDATE_SQL)
-            .bind(run_id)
-            .bind(now)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn mark_handoff_parent(
-        &self,
-        run_id: Uuid,
-        run_config: &Value,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: handoff mark outside a span".to_owned()))?;
-        sqlx::query(HANDOFF_PARENT_UPDATE_SQL)
-            .bind(run_id)
-            .bind(run_config)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn detach_old_sequences(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: sequence detach outside a span".to_owned()))?;
-        sqlx::query(SEQUENCE_DETACH_SQL)
-            .bind(issue_id)
-            .bind(target_project_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn create_target_sequence(
-        &self,
-        sequence_id: Uuid,
-        issue_id: Uuid,
-        sequence: i64,
-        target_project_id: Uuid,
-        target_workspace_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Uuid,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: sequence create outside a span".to_owned()))?;
-        sqlx::query(SEQUENCE_CREATE_SQL)
-            .bind(sequence_id)
-            .bind(now)
-            .bind(now)
-            .bind(actor_id)
-            .bind(issue_id)
-            .bind(sequence)
-            .bind(target_project_id)
-            .bind(target_workspace_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn prune_assignees(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: assignee prune outside a span".to_owned()))?;
-        sqlx::query(ASSIGNEE_PRUNE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .bind(target_project_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn repoint_assignees(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-        target_workspace_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: assignee repoint outside a span".to_owned()))?;
-        sqlx::query(ASSIGNEE_REPOINT_SQL)
-            .bind(target_project_id)
-            .bind(target_workspace_id)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_issue_labels(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: label wipe outside a span".to_owned()))?;
-        sqlx::query(LABEL_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_cycle_issues(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: cycle wipe outside a span".to_owned()))?;
-        sqlx::query(CYCLE_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_module_issues(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: module wipe outside a span".to_owned()))?;
-        sqlx::query(MODULE_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_issue_relations(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: relation wipe outside a span".to_owned()))?;
-        sqlx::query(RELATION_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn detach_children(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: children detach outside a span".to_owned()))?;
-        sqlx::query(CHILDREN_DETACH_SQL)
-            .bind(issue_id)
-            .bind(target_project_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn moved_comment_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: comment ids outside a span".to_owned()))?;
-        let rows: Vec<(Uuid,)> = sqlx::query_as(COMMENT_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn moved_description_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: description ids outside a span".to_owned()))?;
-        let rows: Vec<(Uuid,)> = sqlx::query_as(DESCRIPTION_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn repoint_related(
-        &self,
-        target: RepointTarget,
-        issue_id: Uuid,
-        comment_ids: &[Uuid],
-        description_ids: &[Uuid],
-        target_project_id: Uuid,
-        target_workspace_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: repoint outside a span".to_owned()))?;
-        let sql = repoint_sql(target);
-        let mut query = sqlx::query(sql)
-            .bind(target_project_id)
-            .bind(target_workspace_id)
-            .bind(issue_id);
-        query = match target {
-            RepointTarget::IssueActivity
-            | RepointTarget::CommentReaction
-            | RepointTarget::FileAsset => query.bind(comment_ids.to_vec()),
-            RepointTarget::Description => query.bind(description_ids.to_vec()),
-            _ => query,
-        };
-        query
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn create_handoff_run(
-        &self,
-        issue_id: Uuid,
-        parent_run: &HandoffRunRow,
-        pod_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        // Lend the span to the D-12 creation seam: the create must see
-        // the move's uncommitted writes (the moved issue, the cancelled
-        // parent, the repoints), exactly like Python's in-atomic call
-        // (`issue_move.py:353-362`).
-        let tx =
-            self.txn.lock().await.take().ok_or_else(|| {
-                StoreError("move store: handoff create outside a span".to_owned())
-            })?;
-        let mut creation = handoff_store(tx, self.pool, &self.creation_deps);
-        // The locked row is the parent's pre-cancel snapshot, and the
-        // `RunView` projection needs the full row: re-read it in-span,
-        // under the held lock. The cancel touched only
-        // status/ended_at/queue_position, so this is the row Python's
-        // mutated in-memory instance describes.
-        let parent = creation
-            .run(parent_run.id)
-            .await
-            .map_err(|error| StoreError(error.to_string()))?
-            .ok_or_else(|| {
-                StoreError(format!(
-                    "move store: handoff parent {} gone under its lock",
-                    parent_run.id
-                ))
-            })?;
-        let outcome = create_project_move_handoff_run(
-            &mut creation,
-            &HandoffCreateRequest {
-                issue_id,
-                parent,
-                pod_id,
-                now: *now,
-            },
-        )
-        .await;
-        // The span goes back on the store before any error return, so
-        // `abort` still rolls it back.
-        let (tx, outboxes) = split_outboxes(creation);
-        self.txn.lock().await.replace(tx);
-        let _created = outcome.map_err(|error| StoreError(error.to_string()))?;
-        self.creation.lock().await.replace(outboxes);
-        Ok(())
-    }
-
-    async fn moved_issue(
-        &self,
-        pk: Uuid,
-    ) -> Result<Option<MovedIssueRow>, pidash_services::app_issues::issue_move::StoreError> {
-        self.commit_span().await?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(MOVED_ISSUE_REFETCH_SQL)
-            .bind(pk)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        row.map(|row| {
-            let workspace_slug: String = row.try_get("slug").map_err(|error| {
-                pidash_services::app_issues::issue_move::StoreError(error.to_string())
-            })?;
-            let project_identifier: String = row.try_get("identifier").map_err(|error| {
-                pidash_services::app_issues::issue_move::StoreError(error.to_string())
-            })?;
-            Ok(MovedIssueRow {
-                row: map_source_row(&row)?,
-                workspace_slug,
-                project_identifier,
-            })
-        })
-        .transpose()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Move signal seam (594)
-// ---------------------------------------------------------------------------
-
-/// The 594 [`EntriesSeam`] for the move's save: `state` + `prior_state_id`
-/// are live (they cover the capture and the driver's non-trigger early
-/// return — every gate seed, the backlog norm); the ticker/creation
-/// surface answers store errors, which the fire swallows by design
-/// (counter + the verbatim log line) while the move stands. The archive
-/// handler's precedent, with the live lookups this path needs.
-struct MoveSignalSeam<'a> {
-    pool: &'a PgPool,
-}
-
-/// A creation-runtime method the move's fire reached past a ticking
-/// transition without the D-11/D-12 runtime. The fire maps it to
-/// `Failed` (logged); the move stands.
-fn move_seam_gap<T>(method: &str) -> Result<T, CreationError> {
-    Err(CreationError::Db(format!(
-        "move signal seam: {method} needs the D-12 creation runtime"
-    )))
-}
-
-impl CreationSeam for MoveSignalSeam<'_> {
-    async fn issue(&mut self, _issue_id: Uuid) -> Result<IssueView, CreationError> {
-        move_seam_gap("issue")
-    }
-
-    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
-        move_seam_gap("project")
-    }
-
-    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
-        let Some(state_id) = state_id else {
-            return Ok(None);
-        };
-        let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        row.map(|(id, name, group)| StateView { id, name, group })
-            .ok_or_else(|| CreationError::MissingRow("state".to_owned()))
-            .map(Some)
-    }
-
-    async fn latest_prior_run(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("latest_prior_run")
-    }
-
-    async fn active_run_for(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("active_run_for")
-    }
-
-    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("run")
-    }
-
-    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        move_seam_gap("runner")
-    }
-
-    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("assigned_pod")
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("default_pod_for_project")
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<Uuid>, CreationError> {
-        move_seam_gap("resume_parent_run_id")
-    }
-
-    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        move_seam_gap("work_item_id_for_run")
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        move_seam_gap("lock_issue_for_handoff")
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("lock_run_for_handoff")
-    }
-
-    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
-        move_seam_gap("user_flags")
-    }
-
-    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
-        move_seam_gap("insert_run")
-    }
-
-    async fn save_prompt(
-        &mut self,
-        _run_id: Uuid,
-        _prompt: &str,
-        _manifest: &Value,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_prompt")
-    }
-
-    async fn save_run_config(
-        &mut self,
-        _run_id: Uuid,
-        _config: &Value,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_run_config")
-    }
-
-    async fn execution_fields(
-        &mut self,
-        _req: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        Err(ExecutionError::Store(CreationError::Db(
-            "move signal seam: execution_fields needs the D-12 creation runtime".to_owned(),
-        )))
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        _workspace_id: Uuid,
-        _executor_kind: AgentExecutorKind,
-        _automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        move_seam_gap("lock_cloud_creation_capacity")
-    }
-
-    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
-
-    async fn render_bundle(
-        &mut self,
-        _issue_id: Uuid,
-        _run_id: Uuid,
-        _parent_run_id: Option<Uuid>,
-        _trigger: &str,
-        _created_by_id: Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        move_seam_gap("render_bundle")
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        String::new()
-    }
-}
-
-impl FinalizeAgentRunSeam for MoveSignalSeam<'_> {
-    async fn finalize_failed_run(
-        &mut self,
-        _run_id: Uuid,
-        _error_code: &str,
-        _error: &str,
-        _now: DateTime<Utc>,
-    ) -> Result<RunView, CreationError> {
-        move_seam_gap("finalize_failed_run")
-    }
-}
-
-impl EntriesSeam for MoveSignalSeam<'_> {
-    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        Ok(row.and_then(|(_, state_id)| state_id))
-    }
-
-    async fn queued_follow_up(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("queued_follow_up")
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        move_seam_gap("lock_ticker")
-    }
-
-    async fn save_ticker(
-        &mut self,
-        _row: &IssueAgentTicker,
-        _write: ClockWrite,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_ticker")
-    }
-
-    fn set_rollback(&mut self) {}
-
-    async fn clock_policy(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        move_seam_gap("clock_policy")
-    }
-
-    async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
-        move_seam_gap("binding")
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        _pod_id: Uuid,
-        _project_id: Option<Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("scheduler_override_pod")
-    }
-
-    async fn workspace(&mut self, _workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
-        move_seam_gap("workspace")
-    }
-
-    async fn scheduler_row(&mut self, _scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
-        move_seam_gap("scheduler_row")
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        _workspace_id: Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        move_seam_gap("scheduler_override_rows")
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        _user_id: Uuid,
-        _workspace_slug: &str,
-        _project_id: Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        move_seam_gap("project_role_facts")
-    }
-
-    async fn has_usable_llm_config(&mut self, _user_id: Uuid) -> Result<bool, CreationError> {
-        move_seam_gap("has_usable_llm_config")
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
-        move_seam_gap("agent_system_user")
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        _row: &NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        move_seam_gap("insert_scheduler_run")
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        _context: &Value,
-        _index: &OverrideIndex,
-        _workspace_id: Option<&str>,
-        _executor_kind: Option<&str>,
-        _tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        Err("move signal seam: compose_scheduler_turn needs the D-12 creation runtime".to_owned())
-    }
-}
-
-/// Preflight for the move's fire: the L8 eligibility check is unmerged,
-/// so any dispatch decision fails closed (the entry aborts loudly, the
-/// move stands).
-struct MovePreflight;
-
-impl PreflightSeam for MovePreflight {
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-        _triggered_by: &str,
-    ) -> Result<bool, CreationError> {
-        move_seam_gap("preflight_eligibility_or_bounce")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Post-commit: cancel send + pod drain
-// ---------------------------------------------------------------------------
-
-/// The 552 [`PubsubStore`] over the pool + Redis (the delete-cmds
-/// shape): same verbs, same outbox helpers, no runner-enroll
-/// dependency.
-struct MovePubsub<'p> {
-    pool: &'p PgPool,
-    redis: Option<&'p redis::Client>,
-    runner: &'p RunnerSettings,
-}
-
-impl PubsubStore for MovePubsub<'_> {
-    async fn enqueue_for_runner(
-        &self,
-        runner_id: Uuid,
-        message: &Map<String, Value>,
-    ) -> Result<Option<String>, OutboxError> {
-        runner_outbox::enqueue_for_runner(self.redis, self.pool, self.runner, runner_id, message)
-            .await
-    }
-
-    async fn enqueue_for_machine(
-        &self,
-        dev_machine_id: Uuid,
-        message: &Map<String, Value>,
-    ) -> Result<Option<String>, MachineOutboxError> {
-        machine_outbox::enqueue_for_machine(
-            self.redis,
-            self.pool,
-            self.runner,
-            dev_machine_id,
+fn map_move_rejection(rejection: MoveRejection) -> Denial {
+    match rejection {
+        MoveRejection::Issue {
             message,
-        )
-        .await
-    }
-
-    async fn active_runner_sessions(
-        &self,
-        runner_id: Uuid,
-    ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
-    }
-
-    async fn revoke_runner_session(
-        &self,
-        session_id: Uuid,
-        reason: &str,
-    ) -> Result<(), OutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map(|_| ())
-            .map_err(OutboxError::from)
-    }
-
-    async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {
-        runner_outbox::clear_session_marker(self.redis, &session_id.to_string()).await
-    }
-
-    async fn publish_session_eviction(
-        &self,
-        runner_id: Uuid,
-        old_session_id: Uuid,
-        new_session_id: &str,
-    ) -> Result<(), OutboxError> {
-        runner_outbox::publish_session_eviction(
-            self.redis,
-            &runner_id.to_string(),
-            Some(&old_session_id.to_string()),
-            new_session_id,
-        )
-        .await
+            status_code,
+        } => Denial::MoveRejection {
+            status: status_code,
+            message,
+        },
+        MoveRejection::SourceNotFound => Denial::NotFound,
+        MoveRejection::TargetNotFound => Denial::ProjectNotFound,
+        // Unreachable: this driver passes `TargetOnly` (the view checked
+        // the source project up front).
+        MoveRejection::SourceDenied => Denial::Forbidden,
     }
 }
 
-/// The `drain_pod_by_id` executor (`runner/services/matcher.py`,
-/// through the 552 recipe): miss → 0 with no transaction; else one
-/// transaction over the idle list, one `next_for_runner` claim per
-/// runner, the `ASSIGN_RUN_UPDATE_SQL` write per claim — then, past
-/// the commit, one `assign` send per claim. Effects dispatch in
-/// idle-list order; the log line fires only when claims happened.
-///
-/// A dispatch failure propagates (the drain contract: the offline
-/// error must not be swallowed) — rows already committed, mirroring
-/// `on_commit` raising past the commit.
-async fn drain_pod_by_id(
-    pool: &PgPool,
-    pubsub: &MovePubsub<'_>,
-    pod_id: Uuid,
-) -> Result<(), Denial> {
-    let pod: Option<(Uuid,)> = sqlx::query_as(DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if pod.is_none() {
-        return Ok(());
+/// Map a domain-run failure: a store error is the generic 500; a work
+/// error is the kernel's post-save 409 (the multiple-executing-runs
+/// arm — the span rolled back, as Django's `atomic` exit on raise).
+fn map_move_domain_error(error: domain::DomainError) -> Denial {
+    match error {
+        domain::DomainError::Db(_) => Denial::ServerError,
+        domain::DomainError::Work(message) => Denial::MoveRejection {
+            status: 409,
+            message,
+        },
     }
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    let threshold = alive_threshold(Utc::now());
-    let runners = sqlx::query(DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut effects = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get("id").map_err(|_| Denial::ServerError)?;
-        let owner_id: Uuid = runner
-            .try_get("owner_id")
-            .map_err(|_| Denial::ServerError)?;
-        let provisioning: String = runner
-            .try_get("provisioning")
-            .map_err(|_| Denial::ServerError)?;
-        let visibility: i32 = runner
-            .try_get("visibility")
-            .map_err(|_| Denial::ServerError)?;
-        let Some(next_sql) = next_for_runner_sql(&provisioning, visibility) else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get("id").map_err(|_| Denial::ServerError)?;
-        let work_item_id: Option<Uuid> = run
-            .try_get("work_item_id")
-            .map_err(|_| Denial::ServerError)?;
-        let prompt: String = run.try_get("prompt").map_err(|_| Denial::ServerError)?;
-        let run_config: Option<Value> =
-            run.try_get("run_config").map_err(|_| Denial::ServerError)?;
-        let run_config = run_config
-            .and_then(|config| config.as_object().cloned())
-            .ok_or(Denial::ServerError)?;
-        let plan = plan_assignment(&AssignmentFacts {
-            run_id,
-            runner_id,
-            owner_id,
-            work_item_id,
-            prompt,
-            run_config,
-        });
-        sqlx::query(ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        effects.push(plan.after_commit);
-    }
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    for effect in &effects {
-        let DrainEffect::SendAssign { runner_id, message } = effect;
-        send_to_runner(pubsub, *runner_id, message)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    }
-    if !effects.is_empty() {
-        tracing::info!("{}", drain_pod_log(&pod_id, effects.len()));
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2738,7 +1240,7 @@ async fn drain_pod_by_id(
 /// The move's 200 body: `IssueSerializer(issue).data` over the
 /// refreshed (or same-project) issue — a bare instance, so the 7
 /// queryset-annotation keys omit via `SkipField` and the 639 base shape
-/// renders 22 keys. Datetimes render in the request's zone (DRF
+/// renders 24 keys. Datetimes render in the request's zone (DRF
 /// `DateTimeField`); `archived_at` renders a bare date; `is_synced`
 /// answers the merged predicate against the live sync tables.
 async fn render_moved_issue(
@@ -2755,10 +1257,12 @@ async fn render_moved_issue(
         .as_ref()
         .map(|at| render_date(&at.date_naive()));
     let is_synced = moved_is_synced(pool, issue).await?;
+    let is_epic = moved_is_epic(pool, issue.type_id.as_deref()).await?;
     let id = uuid_string(&issue.id);
     let state_id = issue.state_id.map(|id| uuid_string(&id));
     let parent_id = issue.parent_id.map(|id| uuid_string(&id));
     let assigned_pod_id = issue.assigned_pod_id.map(|id| uuid_string(&id));
+    let assigned_runner_id = issue.assigned_runner_id.map(|id| uuid_string(&id));
     let project_id = uuid_string(&issue.project_id);
     let estimate_point = issue.estimate_point_id.map(|id| uuid_string(&id));
     let created_by = issue.created_by_id.map(|id| uuid_string(&id));
@@ -2783,7 +1287,10 @@ async fn render_moved_issue(
         project_id: &project_id,
         parent_id: parent_id.as_deref(),
         cycle_id: None,
+        type_id: issue.type_id.as_deref(),
+        is_epic,
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
         module_ids: None,
         label_ids: None,
@@ -2803,6 +1310,21 @@ async fn render_moved_issue(
     serde_json::to_string(&view).map_err(|_| Denial::ServerError)
 }
 
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn moved_is_epic(pool: &PgPool, type_id: Option<&str>) -> Result<bool, Denial> {
+    let Some(raw) = type_id else {
+        return Ok(false);
+    };
+    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+    access::issue_type_is_epic(&orm(pool), id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
+}
+
 /// The move's `is_synced` (`serializers/issue.py:297-323`): the bare
 /// instance carries no annotation, so the merged predicate runs — no
 /// probe when `external_source` is blank, else git then github.
@@ -2819,12 +1341,11 @@ async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, 
             || false,
         ));
     }
-    let git_hit: Option<(i32,)> = sqlx::query_as(GIT_ISSUE_SYNC_PROBE_SQL)
-        .bind(issue.id)
-        .fetch_optional(pool)
+    let db = orm(pool);
+    let git_hit = git_issue_synced(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git_hit.is_some() {
+    if git_hit {
         return Ok(issue_is_actively_synced(
             issue.external_source.as_deref(),
             None,
@@ -2832,16 +1353,14 @@ async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, 
             || false,
         ));
     }
-    let github_hit: Option<(i32,)> = sqlx::query_as(GITHUB_ISSUE_SYNC_PROBE_SQL)
-        .bind(issue.id)
-        .fetch_optional(pool)
+    let github_hit = github_issue_synced(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(issue_is_actively_synced(
         issue.external_source.as_deref(),
         None,
         || false,
-        || github_hit.is_some(),
+        || github_hit,
     ))
 }
 
@@ -2963,9 +1482,9 @@ mod tests {
         .status_and_body();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, r#"{"error":"Target project has no default pod"}"#);
-        let (status, body) = Denial::RequestTooLarge.status_and_body();
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(body.contains("REQUEST_BODY_TOO_LARGE"));
+        let (status, body) = Denial::TruncatedBody.status_and_body();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body, crate::edge::BAD_GATEWAY_BODY);
         let (status, body) = Denial::UnsupportedMediaType("m".to_owned()).status_and_body();
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(body, r#"{"detail":"m"}"#);
@@ -3022,38 +1541,17 @@ mod tests {
     }
 
     #[test]
-    fn allow_matrix() {
-        let member = |project_role, workspace_role| Membership {
-            project_role,
-            workspace_role,
-        };
-        assert!(check_allow(&member(Some(20), None), &[20, 15]).is_ok());
-        assert!(check_allow(&member(Some(15), None), &[20, 15]).is_ok());
-        assert!(check_allow(&member(Some(5), None), &[20, 15, 5]).is_ok());
-        assert!(check_allow(&member(Some(5), None), &[20, 15]).is_err());
-        assert!(check_allow(&member(Some(5), Some(20)), &[20, 15]).is_ok());
-        assert!(check_allow(&member(Some(10), Some(20)), &[20, 15, 5]).is_ok());
-        assert!(check_allow(&member(Some(10), Some(15)), &[20, 15, 5]).is_err());
-        assert!(check_allow(&member(None, Some(20)), &[20, 15, 5]).is_err());
-        assert!(check_allow(&member(None, None), &[20, 15, 5]).is_err());
-    }
-
-    #[test]
     fn move_error_mapping() {
-        let denial = map_move_error(MoveError::IssueNotFound);
+        let denial = map_move_rejection(MoveRejection::SourceNotFound);
         assert!(matches!(denial, Denial::NotFound));
-        let denial = map_move_error(MoveError::ProjectNotFound);
+        let denial = map_move_rejection(MoveRejection::TargetNotFound);
         assert!(matches!(denial, Denial::ProjectNotFound));
-        let denial = map_move_error(MoveError::Store(
-            pidash_services::app_issues::issue_move::StoreError("x".to_owned()),
-        ));
-        assert!(matches!(denial, Denial::ServerError));
-        let denial = map_move_error(MoveError::Issue(
-            pidash_services::app_issues::IssueMoveError {
-                message: "m".to_owned(),
-                status_code: 403,
-            },
-        ));
+        let denial = map_move_rejection(MoveRejection::SourceDenied);
+        assert!(matches!(denial, Denial::Forbidden));
+        let denial = map_move_rejection(MoveRejection::Issue {
+            message: "m".to_owned(),
+            status_code: 403,
+        });
         match denial {
             Denial::MoveRejection { status, message } => {
                 assert_eq!(status, 403);
@@ -3061,21 +1559,18 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-    }
-
-    #[test]
-    fn blocker_anchor_rewrites() {
-        assert_eq!(
-            issue_param("a :issue_id b :issue_id".to_owned()),
-            "a $1 b $1"
-        );
-        let blocked = issue_param(summary_sql(false));
-        let blocking = issue_param(summary_sql(true));
-        let open = issue_param(has_open_blockers_sql());
-        for sql in [&blocked, &blocking, &open] {
-            assert!(!sql.contains(":issue_id"), "{sql}");
-            assert!(sql.contains("$1"), "{sql}");
+        let denial = map_move_domain_error(domain::DomainError::Work("m".to_owned()));
+        match denial {
+            Denial::MoveRejection { status, message } => {
+                assert_eq!(status, 409);
+                assert_eq!(message, "m");
+            }
+            other => panic!("unexpected {other:?}"),
         }
+        let denial = map_move_domain_error(domain::DomainError::Db(sea_orm::DbErr::Custom(
+            "x".to_owned(),
+        )));
+        assert!(matches!(denial, Denial::ServerError));
     }
 
     #[test]
@@ -3112,5 +1607,361 @@ mod tests {
         assert_eq!(render_dt_opt(None, &utc), None);
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 4).expect("date");
         assert_eq!(render_date(&date), "2026-10-04");
+    }
+
+    const SLUG: &str = "acme";
+    const PROJECT: Uuid = Uuid::from_u128(0x10);
+    const ISSUE: Uuid = Uuid::from_u128(0x20);
+    const VERSION: Uuid = Uuid::from_u128(0x30);
+
+    fn pg(select: impl sea_orm::QueryTrait) -> String {
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    /// The version reads keep the old statements' scope, joins, ordering
+    /// and slicing: `INNER JOIN workspaces`, the soft-delete guard, the
+    /// model `-created_at` order, `LIMIT` alone on the first page.
+    #[test]
+    fn version_statement_shapes() {
+        let first = v2_page(None, 2500).expect("page");
+        let sql = pg(version_page_query(SLUG, PROJECT, ISSUE, &first).expect("query"));
+        assert!(sql.starts_with(
+            r#"SELECT "issue_versions"."id", "issue_versions"."workspace_id", "issue_versions"."project_id", "issue_versions"."issue_id", "issue_versions"."last_saved_at", "issue_versions"."owned_by_id", "issue_versions"."created_at", "issue_versions"."updated_at", "issue_versions"."created_by_id", "issue_versions"."updated_by_id" FROM "issue_versions" INNER JOIN "workspaces" ON "issue_versions"."workspace_id" = "workspaces"."id""#
+        ), "{sql}");
+        assert!(sql.contains(r#""issue_versions"."deleted_at" IS NULL"#));
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#));
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_versions"."created_at" DESC LIMIT 1000"#),
+            "{sql}"
+        );
+        let later = v2_page(Some("10:2:0"), 100).expect("page");
+        let sql = pg(version_page_query(SLUG, PROJECT, ISSUE, &later).expect("query"));
+        assert!(sql.ends_with("DESC LIMIT 10 OFFSET 20"), "{sql}");
+
+        let detail = pg(version_detail_query(SLUG, PROJECT, ISSUE, VERSION));
+        assert!(detail.starts_with(r#"SELECT "issue_versions"."created_at""#));
+        assert!(detail.contains(r#""issue_versions"."meta""#));
+        assert!(detail.contains(&format!(r#""issue_versions"."id" = '{VERSION}'"#)));
+        assert!(
+            detail.ends_with(r#"ORDER BY "issue_versions"."created_at" DESC"#),
+            "{detail}"
+        );
+    }
+
+    /// `IssueDescriptionVersion` has no `Meta.ordering`: the detail
+    /// carries no `ORDER BY`, the list orders explicitly.
+    #[test]
+    fn description_version_ordering_differs_from_issue_version() {
+        let detail = pg(desc_version_detail_query(SLUG, PROJECT, ISSUE, VERSION));
+        assert!(!detail.contains("ORDER BY"), "{detail}");
+        assert!(detail.contains(
+            r#"INNER JOIN "workspaces" ON "issue_description_versions"."workspace_id" = "workspaces"."id""#
+        ));
+        assert!(detail.contains(r#""issue_description_versions"."deleted_at" IS NULL"#));
+        let page = v2_page(None, 5).expect("page");
+        let sql = pg(desc_version_page_query(SLUG, PROJECT, ISSUE, &page).expect("query"));
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_description_versions"."created_at" DESC LIMIT 5"#),
+            "{sql}"
+        );
+    }
+
+    /// A negative cursor page size made `LIMIT -n`, which Postgres
+    /// rejected into the generic 500; the builder refuses it the same way.
+    #[test]
+    fn negative_page_length_is_server_error() {
+        let page = v2_page(Some("-5:0:0"), 10).expect("page");
+        assert!(matches!(
+            version_page_query(SLUG, PROJECT, ISSUE, &page),
+            Err(Denial::ServerError)
+        ));
+    }
+
+    /// The versions/move reads against constraint-free temp tables on a
+    /// one-connection pool.
+    #[tokio::test]
+    async fn live_version_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "users",
+            "workspaces",
+            "projects",
+            "project_members",
+            "workspace_members",
+            "issues",
+            "issue_versions",
+            "issue_description_versions",
+            "issue_types",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let id = Uuid::new_v4;
+        let (ws, project, issue, actor, guest, admin) = (id(), id(), id(), id(), id(), id());
+        let (v_old, v_new, v_gone, d_one, d_two, epic) = (id(), id(), id(), id(), id(), id());
+        let version = |vid: Uuid, age: i32, deleted: bool| {
+            format!(
+                "INSERT INTO issue_versions (id, created_at, updated_at, deleted_at, name, priority, \
+                 sequence_id, sort_order, is_draft, last_saved_at, owned_by_id, assignees, labels, \
+                 modules, properties, meta, issue_id, project_id, workspace_id, created_by_id) \
+                 VALUES ('{vid}', now() - interval '{age} min', now(), {}, 'n', 'none', 1, 65535, \
+                 false, now(), '{actor}', '{{{actor}}}', '{{}}', '{{}}', '{{}}', '{{\"k\": 1}}', \
+                 '{issue}', '{project}', '{ws}', '{actor}')",
+                if deleted { "now()" } else { "NULL" }
+            )
+        };
+        let desc = |did: Uuid, age: i32| {
+            format!(
+                "INSERT INTO issue_description_versions (id, created_at, updated_at, deleted_at, \
+                 description_html, description_json, last_saved_at, owned_by_id, issue_id, \
+                 project_id, workspace_id) VALUES ('{did}', now() - interval '{age} min', now(), \
+                 NULL, '<p/>', '{{}}', now(), '{actor}', '{issue}', '{project}', '{ws}')"
+            )
+        };
+        for sql in [
+            format!(
+                "INSERT INTO users (id, user_timezone) VALUES ('{actor}', 'Asia/Kolkata'), \
+                 ('{guest}', 'UTC'), ('{admin}', 'UTC')"
+            ),
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, guest_view_all_features, \
+                 deleted_at) VALUES ('{project}', '{ws}', 'ENG', false, NULL)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, member_id, project_id, workspace_id, role, \
+                 is_active, deleted_at) VALUES ('{}', '{actor}', '{project}', '{ws}', 15, true, NULL), \
+                 ('{}', '{guest}', '{project}', '{ws}', 5, true, NULL), \
+                 ('{}', '{admin}', '{project}', '{ws}', 10, true, NULL)",
+                id(),
+                id(),
+                id()
+            ),
+            format!(
+                "INSERT INTO workspace_members (id, member_id, workspace_id, role, is_active, \
+                 deleted_at) VALUES ('{}', '{admin}', '{ws}', 20, true, NULL)",
+                id()
+            ),
+            format!(
+                "INSERT INTO issues (id, workspace_id, project_id, created_by_id, deleted_at) \
+                 VALUES ('{issue}', '{ws}', '{project}', '{actor}', NULL)"
+            ),
+            version(v_old, 2, false),
+            version(v_new, 1, false),
+            version(v_gone, 0, true),
+            desc(d_one, 2),
+            desc(d_two, 1),
+            format!("INSERT INTO issue_types (id, is_epic) VALUES ('{epic}', true)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        // Tenant and gates.
+        assert_eq!(
+            resolve_project_id(&pool, "acme", " eng ")
+                .await
+                .expect("identifier"),
+            project
+        );
+        assert!(matches!(
+            resolve_project_id(&pool, "other", "ENG").await,
+            Err(Denial::ProjectNotFound)
+        ));
+        assert_eq!(
+            resolve_project_id(&pool, "x", &project.to_string())
+                .await
+                .expect("uuid"),
+            project
+        );
+        check_allow(&pool, "acme", &project, &actor, &[20, 15])
+            .await
+            .expect("member");
+        assert!(matches!(
+            check_allow(&pool, "acme", &project, &guest, &[20, 15]).await,
+            Err(Denial::Forbidden)
+        ));
+        check_allow(&pool, "acme", &project, &guest, &[20, 15, 5])
+            .await
+            .expect("guest");
+        // A non-listed project role passes through the workspace-admin fallback.
+        check_allow(&pool, "acme", &project, &admin, &[20, 15])
+            .await
+            .expect("admin");
+        let tenant = fetch_tenant(&pool, &actor).await.expect("tenant");
+        assert_eq!(tenant.timezone.name(), "Asia/Kolkata");
+        assert!(matches!(
+            fetch_tenant(&pool, &Uuid::new_v4()).await,
+            Err(Denial::ServerError)
+        ));
+
+        // Issue versions: the soft-deleted row is out, newest first.
+        let db = orm(&pool);
+        assert_eq!(
+            version_count(&pool, "acme", &project, &issue)
+                .await
+                .expect("count"),
+            2
+        );
+        assert_eq!(
+            version_count(&pool, "other", &project, &issue)
+                .await
+                .expect("count"),
+            0
+        );
+        let page = v2_page(None, 2).expect("page");
+        let rows = version_page_query("acme", project, issue, &page)
+            .expect("query")
+            .into_model::<VersionPageRow>()
+            .all(&db)
+            .await
+            .expect("page rows");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(v_new), Some(v_old)]
+        );
+        let value = version_page_row(&rows[0], &tenant.timezone).expect("row");
+        assert_eq!(value["workspace"], Value::String(ws.to_string()));
+        assert_eq!(value["created_by"], Value::String(actor.to_string()));
+        let second = v2_page(Some("1:1:0"), 2).expect("page");
+        let rows = version_page_query("acme", project, issue, &second)
+            .expect("query")
+            .into_model::<VersionPageRow>()
+            .all(&db)
+            .await
+            .expect("second page");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(v_old)]
+        );
+        let row = version_detail_query("acme", project, issue, v_new)
+            .one(&db)
+            .await
+            .expect("detail")
+            .expect("hit");
+        let body: Value =
+            serde_json::from_str(&render_version_detail(&row, &tenant.timezone).expect("render"))
+                .expect("json");
+        assert_eq!(body["id"], Value::String(v_new.to_string()));
+        assert_eq!(body["assignees"], serde_json::json!([actor.to_string()]));
+        assert_eq!(body["meta"], serde_json::json!({"k": 1}));
+        assert!(version_detail_query("acme", project, issue, v_gone)
+            .one(&db)
+            .await
+            .expect("detail")
+            .is_none());
+
+        // Description versions: parents, guest gate, list, detail.
+        desc_version_parents(&pool, "acme", &project, &issue, &actor)
+            .await
+            .expect("creator");
+        assert!(matches!(
+            desc_version_parents(&pool, "acme", &project, &issue, &guest).await,
+            Err(Denial::GuestView)
+        ));
+        desc_version_parents(&pool, "acme", &project, &issue, &admin)
+            .await
+            .expect("non-guest");
+        assert!(matches!(
+            desc_version_parents(&pool, "acme", &project, &Uuid::new_v4(), &actor).await,
+            Err(Denial::NotFound)
+        ));
+        assert!(matches!(
+            desc_version_parents(&pool, "acme", &Uuid::new_v4(), &issue, &actor).await,
+            Err(Denial::NotFound)
+        ));
+        assert_eq!(
+            desc_version_count(&pool, "acme", &project, &issue)
+                .await
+                .expect("count"),
+            2
+        );
+        let rows = desc_version_page_query("acme", project, issue, &page)
+            .expect("query")
+            .into_model::<VersionPageRow>()
+            .all(&db)
+            .await
+            .expect("desc rows");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(d_two), Some(d_one)]
+        );
+        let row = desc_version_detail_query("acme", project, issue, d_one)
+            .one(&db)
+            .await
+            .expect("detail")
+            .expect("hit");
+        let body: Value = serde_json::from_str(
+            &render_desc_version_detail(&row, &tenant.timezone).expect("render"),
+        )
+        .expect("json");
+        assert_eq!(body["description_html"], Value::String("<p/>".to_owned()));
+        assert_eq!(body["description_binary"], Value::Null);
+
+        // Move response: the epic flag.
+        assert!(moved_is_epic(&pool, Some(&epic.to_string()))
+            .await
+            .expect("epic"));
+        assert!(!moved_is_epic(&pool, None).await.expect("untyped"));
+        assert!(matches!(
+            moved_is_epic(&pool, Some(&Uuid::new_v4().to_string())).await,
+            Err(Denial::ServerError)
+        ));
+    }
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1577): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is the 500.
+    #[test]
+    fn move_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(move_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(move_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(move_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(
+            move_origin(&state).expect("app base wins"),
+            "https://app.example.invalid"
+        );
+    }
+
+    /// `web_base_url()` treats `""` as missing (PIDASHCONV-1577): empty
+    /// everywhere is `None` (callers omit the url), and an empty
+    /// `WEB_URL` falls back to `APP_BASE_URL`.
+    #[test]
+    fn move_web_base_url_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(move_web_base_url(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(move_web_base_url(&state), None);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(move_web_base_url(&state).as_deref(), Some(app));
+        let state = origin_state(Some(app), Some("https://web.example.invalid/"));
+        assert_eq!(
+            move_web_base_url(&state).as_deref(),
+            Some("https://web.example.invalid")
+        );
     }
 }

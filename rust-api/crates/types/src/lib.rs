@@ -2,13 +2,15 @@
 
 //! Shared value types for the Pi Dash Rust backend.
 //!
-//! This crate holds identifiers, enums, DTOs and the error type. It performs
-//! no I/O: no database, no network, no filesystem.
+//! This crate holds identifiers, enums, DTOs, shared parity helpers and the
+//! error type. It performs no I/O: no database, no network, no filesystem.
 
 pub mod assistant;
 pub mod dispatch;
 pub mod error;
 pub mod health;
+pub mod html_entities;
+mod html_entities_generated;
 pub mod ids;
 pub mod integrations;
 pub mod license;

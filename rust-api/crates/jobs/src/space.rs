@@ -52,8 +52,8 @@ use serde_json::{Map, Value};
 
 use crate::task_message::TaskMessage;
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// Celery wire name for `get_asset_object_metadata` (bare default).
 pub const GET_ASSET_OBJECT_METADATA_TASK: &str =

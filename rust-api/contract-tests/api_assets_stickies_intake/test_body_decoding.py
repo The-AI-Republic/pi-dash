@@ -20,9 +20,19 @@
 
 The controls the fix must not regress: ``text/plain`` with a body is still
 415, and malformed JSON is still the 400 ``ParseError``.
+
+(c) intake PATCH form bodies (PIDASHCONV-1402): Django 500s without writing
+    anything. The update view pops ``request.data.pop("issue", False)``
+    (``intake.py:344``), but for form/multipart bodies without files — and
+    for an empty body with a form content type — DRF hands it an immutable
+    ``QueryDict``, so the pop raises ``AttributeError`` and
+    ``BaseAPIView.handle_exception`` answers 500. Rust must match: 500,
+    intake status unchanged, no activity written.
 """
 
 import pytest
+
+from . import seed_d21
 
 FORM = "application/x-www-form-urlencoded"
 
@@ -233,3 +243,85 @@ def test_sticky_create_malformed_json_still_400(org):
     )
     assert r.status_code == 400
     assert r.text.startswith('{"detail":"JSON parse error - ')
+
+
+# --- (c) intake PATCH form bodies: Django 500s (PIDASHCONV-1402) ------------
+
+
+SERVER_ERROR = {"error": "Something went wrong please try again later"}
+
+
+def _intake_status(org, issue_id):
+    return org.conn.execute(
+        "SELECT status FROM intake_issues WHERE issue_id = %s", (issue_id,)
+    ).fetchone()[0]
+
+
+def _activity_count(org, issue_id):
+    return org.conn.execute(
+        "SELECT count(*) FROM issue_activities WHERE issue_id = %s", (issue_id,)
+    ).fetchone()[0]
+
+
+def _seed_default_state(org):
+    seed_d21.create_state(
+        org.conn, workspace_id=org.workspace["id"], project_id=org.project["id"],
+        name="Backlog", group="backlog", default=True,
+    )
+
+
+def _assert_intake_patch_500_without_writes(org, issue_id, response):
+    assert response.status_code == 500, response.text[:500]
+    assert response.json() == SERVER_ERROR
+    assert _intake_status(org, issue_id) == -2
+    assert _activity_count(org, issue_id) == 0
+    r = org.request("GET", f"{_intake(org)}{issue_id}/", "admin")
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["status"] == -2
+
+
+def test_intake_update_form_encoded_is_500_without_writes(org):
+    # A default state keeps the accept path live, so a backend that
+    # processes the form body (rather than 500ing on the pop) moves the
+    # item instead of failing validation.
+    _seed_default_state(org)
+    created = _make_intake_issue(org)
+    assert _intake_status(org, created["issue"]) == -2
+    assert _activity_count(org, created["issue"]) == 0
+    r = org.request(
+        "PATCH",
+        f"{_intake(org)}{created['issue']}/",
+        "admin",
+        content=b"status=1",
+        headers={"Content-Type": FORM},
+    )
+    _assert_intake_patch_500_without_writes(org, created["issue"], r)
+
+
+def test_intake_update_empty_form_body_is_500_without_writes(org):
+    _seed_default_state(org)
+    created = _make_intake_issue(org)
+    assert _intake_status(org, created["issue"]) == -2
+    assert _activity_count(org, created["issue"]) == 0
+    r = org.request(
+        "PATCH",
+        f"{_intake(org)}{created['issue']}/",
+        "admin",
+        content=b"",
+        headers={"Content-Type": FORM},
+    )
+    _assert_intake_patch_500_without_writes(org, created["issue"], r)
+
+
+def test_intake_update_multipart_without_files_is_500_without_writes(org):
+    _seed_default_state(org)
+    created = _make_intake_issue(org)
+    assert _intake_status(org, created["issue"]) == -2
+    assert _activity_count(org, created["issue"]) == 0
+    r = org.request(
+        "PATCH",
+        f"{_intake(org)}{created['issue']}/",
+        "admin",
+        files={"status": (None, "1")},
+    )
+    _assert_intake_patch_500_without_writes(org, created["issue"], r)

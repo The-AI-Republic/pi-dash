@@ -11,7 +11,10 @@ test_archive.py (archive/unarchive). The follow-up session below covers
 the rest of the domain: test_labels.py, test_relations_links.py,
 test_attachments.py, test_versions_move.py, the bulk legs of
 test_archive.py, and the dates/user-properties legs of
-test_issue_core.py.
+test_issue_core.py. The drift session (NEWPIDASH-32) covers the newer
+writes: test_issue_bulk.py (bulk-operation, bulk-subscribe),
+test_epics.py (epics CRUD + epic-issues attach), test_issue_types.py
+(type create), test_issue_worklogs.py (worklog CRUD).
 """
 
 from psycopg.rows import dict_row
@@ -70,11 +73,12 @@ def _seed_followup(conn) -> None:
                 repo_url, base_branch, agent_default_interval_seconds,
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
+                dedicated_runner_lost_action,
                 agent_test_default_interval_seconds)
             VALUES (now(), now(), %s, 'Replay Project 2', '', 0, 'RPJ2', %s,
                 true, true, true, true, true, 0, 0, '{}', true, true,
                 true, 'UTC', true, '', '', 3600, 100, true, false, 10800,
-                'muse', 10800)
+                'muse', 'fail_to_backlog', 10800)
             """,
             (PROJ2_ID, ws_id),
         )
@@ -731,6 +735,130 @@ SESSIONS = (
             Request(
                 "DELETE", _F + "/issues/{rel_b}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
+                auth="admin", expect_status=204,
+            ),
+        ),
+    ),
+    Session(
+        name="app_issues_drift",
+        domain="app_issues",
+        source="app_issues/test_issue_bulk.py, test_epics.py, "
+        "test_issue_types.py, test_issue_worklogs.py (NEWPIDASH-32)",
+        auth_users=("admin", "member"),
+        # Same epoch rule as the lifecycle session: issue_activity
+        # (incl. the worklog.* variants, which ride the same task)
+        # carries int(timezone.now()), so the exact second compares
+        # within the plausibly-now window instead.
+        payload_time_paths={
+            "pi_dash.bgtasks.issue_activities_task.issue_activity": ["kwargs/epoch"],
+        },
+        requests=(
+            # -- bulk-operation + bulk-subscribe (two API-created issues) --
+            Request(
+                "POST", _WS + "/issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/",
+                json={"name": "Bulk drift a"},
+                auth="member", capture={"bulka": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/",
+                json={"name": "Bulk drift b"},
+                auth="member", capture={"bulkb": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/bulk-operation-issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/bulk-operation-issues/",
+                json={"issue_ids": ["{bulka}", "{bulkb}"],
+                      "properties": {"priority": "high",
+                                     "state_id": "{state_completed}"}},
+                auth="member", expect_status=200,
+            ),
+            Request(
+                "POST", _WS + "/bulk-operation-issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/bulk-operation-issues/",
+                json={"issue_ids": ["{bulka}"], "properties": {}},
+                auth="member", expect_status=400,
+            ),
+            Request(
+                "POST", _WS + "/bulk-subscribe-issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/bulk-subscribe-issues/",
+                json={"issue_ids": ["{bulka}", "{bulkb}"]},
+                auth="member", expect_status=200,
+            ),
+            Request(
+                "POST", _WS + "/bulk-subscribe-issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/bulk-subscribe-issues/",
+                json={"issue_ids": ["{bulka}", "{bulkb}"]},
+                auth="member", expect_status=200,
+            ),
+            # -- issue-types + epics (admin mints the epic type, member
+            # works the epics) --
+            Request(
+                "POST", _WS + "/issue-types/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issue-types/",
+                json={"name": "Drift Epic", "is_epic": True},
+                auth="admin", capture={"epictype": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/issue-types/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issue-types/",
+                json={"name": "Drift Task", "description": "Time-boxed research",
+                      "is_epic": False},
+                auth="admin", capture={"tasktype": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/epics/",
+                route="/api/workspaces/{slug}/projects/{project_id}/epics/",
+                json={"name": "Drift epic", "state_id": "{state_backlog}"},
+                auth="member", capture={"epic": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/",
+                json={"name": "Drift plain"},
+                auth="member", capture={"plain": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/epics/{epic}/issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/epics/{epic_id}/issues/",
+                json={"sub_issue_ids": ["{plain}"]},
+                auth="member", expect_status=200,
+            ),
+            Request(
+                "PATCH", _WS + "/epics/{epic}/",
+                route="/api/workspaces/{slug}/projects/{project_id}/epics/{pk}/",
+                json={"name": "Drift epic renamed"},
+                auth="member", expect_status=204,
+            ),
+            Request(
+                "DELETE", _WS + "/epics/{epic}/",
+                route="/api/workspaces/{slug}/projects/{project_id}/epics/{pk}/",
+                auth="admin", expect_status=204,
+            ),
+            # -- worklogs (admin logs without needing an assignment) --
+            Request(
+                "POST", _WS + "/issues/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/",
+                json={"name": "Drift worklog issue"},
+                auth="admin", capture={"wissue": "id"}, expect_status=201,
+            ),
+            Request(
+                "POST", _WS + "/issues/{wissue}/worklogs/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/",
+                json={"minutes": 90, "logged_on": "2026-10-20",
+                      "note": "Deep work"},
+                auth="admin", capture={"wlog": "id"}, expect_status=201,
+            ),
+            Request(
+                "PATCH", _WS + "/issues/{wissue}/worklogs/{wlog}/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/{pk}/",
+                json={"minutes": 120, "note": "Still going"},
+                auth="admin", expect_status=200,
+            ),
+            Request(
+                "DELETE", _WS + "/issues/{wissue}/worklogs/{wlog}/",
+                route="/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/{pk}/",
                 auth="admin", expect_status=204,
             ),
         ),

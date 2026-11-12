@@ -50,7 +50,17 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// Leaf `(app_label, migration_name)` nodes of the Django migration graph —
 /// `MigrationExecutor(connection).loader.graph.leaf_nodes()`, computed with
 /// the real Django 4.2 loader over `INSTALLED_APPS`
-/// (`settings/common.py:44-68`) at the ported commit (261 graph nodes):
+/// (`settings/common.py:44-68`) at the ported commit (261 graph nodes),
+/// re-synced for the post-port drift: db 0168→0170 (`b4defc50f`, NEWFRONT
+/// merge #2801), runner 0029→0033 (`b790ee7fa` #1851, `09738d222` #1944,
+/// `04b6d3784` #386, `1998bc658` #447), then db 0170→0172 and runner
+/// 0033→0038 (c0ee3148b: #2903, #2910, #2912, #2907), then db 0172→0173 and
+/// runner 0038→0039 (PDASHOSS01-297 dedicated-runner assignment, `42f93b62b`),
+/// then db 0173→0174 (PR #3144, `ea5db8e3d`): `db/0174` depends on
+/// `runner/0039` across apps, but Django's `leaf_nodes()` only counts
+/// same-app children, so `runner/0039` stayed a leaf — Django (4.2 loader,
+/// verified live) still reported the same nine leaves with `db/0174`;
+/// then runner 0039→0040 (PDASHOSS01-142 `dev_machine.supported_agents`, PR #539):
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
@@ -59,11 +69,11 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0168_ticker_stop_signal_disarm_reason"),
+    ("db", "0174_legacy_creation_defaults"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+    ("runner", "0040_devmachine_supported_agents"),
     ("sessions", "0001_initial"),
 ];
 
@@ -93,16 +103,40 @@ pub fn migrations_pending_from_applied(applied: &HashSet<(String, String)>) -> b
         .any(|(app, name)| !applied.contains(&(app.to_string(), name.to_string())))
 }
 
-/// `SELECT app, name FROM django_migrations` — the `MigrationLoader`
-/// applied set. A missing table errors (fresh database, migrator not run
-/// yet); the caller maps every error to pending.
+/// The `django_migrations` applied-set read, as a sea-query select
+/// over the table (`MigrationLoader` reads the same). The table has no
+/// SeaORM entity (it is Django's own bookkeeping), but its shape is
+/// fixed, so the builder carries it; the select runs on the probe's
+/// single connection through [`TxConn`] (`orm-migration.md`). A missing
+/// table errors (fresh database, migrator not run yet); the caller maps
+/// every error to pending.
+fn applied_migrations_stmt() -> sea_query::SelectStatement {
+    let mut stmt = sea_query::Query::select();
+    stmt.columns([sea_query::Alias::new("app"), sea_query::Alias::new("name")]);
+    stmt.from(sea_query::Alias::new("django_migrations"));
+    stmt
+}
+
 pub async fn fetch_applied_migrations(
     connection: &mut sqlx::postgres::PgConnection,
 ) -> Result<HashSet<(String, String)>, sqlx::Error> {
-    let rows: Vec<(String, String)> = sqlx::query_as("SELECT app, name FROM django_migrations")
-        .fetch_all(&mut *connection)
-        .await?;
-    Ok(rows.into_iter().collect())
+    use sea_orm::{ConnectionTrait, DbBackend};
+    let conn = pidash_db::orm_tx::TxConn::new(connection);
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&applied_migrations_stmt()))
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let mut applied = HashSet::with_capacity(rows.len());
+    for row in &rows {
+        let app: String = row
+            .try_get_by("app")
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
+        let name: String = row
+            .try_get_by("name")
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
+        applied.insert((app, name));
+    }
+    Ok(applied)
 }
 
 /// Postgres `undefined_table`: the migrator hasn't run yet. Django's
@@ -254,7 +288,7 @@ pub async fn clear_cache(redis_url: Option<&str>, key: Option<&str>) -> String {
 
 async fn clear_cache_inner(redis_url: Option<&str>, key: Option<&str>) -> Result<String, ()> {
     let url = redis_url.filter(|url| !url.is_empty()).ok_or(())?;
-    let client = redis::Client::open(url).map_err(|_| ())?;
+    let client = pidash_db::redis::open_client(url).map_err(|_| ())?;
     // Deliberate CLI bounds (2s connect, 5s command): django-redis
     // itself runs with blocking sockets here — `REDIS_SOCKET_*`
     // (`settings/common.py:238-239`) feed `redis_instance()`, not the
@@ -302,11 +336,11 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-                ("db", "0168_ticker_stop_signal_disarm_reason"),
+                ("db", "0174_legacy_creation_defaults"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),
-                ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+                ("runner", "0040_devmachine_supported_agents"),
                 ("sessions", "0001_initial"),
             ]
         );
@@ -335,6 +369,13 @@ mod tests {
         full.push(("db", "0001_initial"));
         full.push(("removed_app", "0001_gone"));
         assert!(!migrations_pending_from_applied(&applied_set(&full)));
+    }
+
+    #[test]
+    fn applied_migrations_stmt_reads_app_name() {
+        use sea_query::PostgresQueryBuilder;
+        let sql = applied_migrations_stmt().to_string(PostgresQueryBuilder);
+        assert_eq!(sql, r#"SELECT "app", "name" FROM "django_migrations""#);
     }
 
     #[test]

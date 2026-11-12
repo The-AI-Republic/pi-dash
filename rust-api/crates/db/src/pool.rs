@@ -19,7 +19,7 @@
 //! The ambient flag defaults to the primary when no scope is set, exactly
 //! like `should_use_read_replica()` returning `False` with no context.
 
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 use crate::config::DbConfig;
 use crate::context::RequestContext;
@@ -85,15 +85,22 @@ pub struct Pools {
 impl Pools {
     /// Connect both pools. `replica` is `None` when no read replica is
     /// configured (the `ENABLE_READ_REPLICA != "1"` case), in which case
-    /// every statement runs on the primary.
+    /// every statement runs on the primary. Every connection carries
+    /// Django's idle guards ([`connect_options`]).
     pub async fn connect(
         primary: &DbConfig,
         replica: Option<&DbConfig>,
     ) -> Result<Self, sqlx::Error> {
-        let primary = pool_options(primary).connect(primary.url()).await?;
+        let primary = pool_options(primary)
+            .connect_with(connect_options(primary.url())?)
+            .await?;
         let mut replica_pool = None;
         if let Some(cfg) = replica {
-            replica_pool = Some(pool_options(cfg).connect(cfg.url()).await?);
+            replica_pool = Some(
+                pool_options(cfg)
+                    .connect_with(connect_options(cfg.url())?)
+                    .await?,
+            );
         }
         Ok(Self {
             primary,
@@ -140,8 +147,42 @@ impl Pools {
     }
 }
 
+/// Build the shared SeaORM connection over the existing primary pool
+/// (ORM-01, design D5). The connector wraps the pool — it opens no
+/// connections of its own, so there is still exactly one pool. Pure
+/// constructor: no I/O, safe on a lazy pool in unit tests.
+pub fn sea_orm_connection(primary: &PgPool) -> sea_orm::DatabaseConnection {
+    sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(primary.clone())
+}
+
+/// Django's per-connection idle guards
+/// (`apps/api/pi_dash/settings/common.py:188-212`), in milliseconds: a
+/// transaction left idle 60s is terminated, releasing its row locks, and a
+/// plain-idle backend is reaped after 10min.
+const IDLE_IN_TRANSACTION_TIMEOUT_MS: &str = "60000";
+const IDLE_SESSION_TIMEOUT_MS: &str = "600000";
+
+/// sqlx-side idle reap, strictly below Postgres's own 600s
+/// `idle_session_timeout` so the pool closes idle connections before the
+/// server kills them out from under it.
+const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(9 * 60);
+
+/// Connect options for one pool: the URL plus Django's `-c` idle guards
+/// (sqlx sends them in the startup packet, exactly like libpq).
+fn connect_options(url: &str) -> Result<PgConnectOptions, sqlx::Error> {
+    Ok(url.parse::<PgConnectOptions>()?.options([
+        (
+            "idle_in_transaction_session_timeout",
+            IDLE_IN_TRANSACTION_TIMEOUT_MS,
+        ),
+        ("idle_session_timeout", IDLE_SESSION_TIMEOUT_MS),
+    ]))
+}
+
 fn pool_options(cfg: &DbConfig) -> PgPoolOptions {
-    PgPoolOptions::new().max_connections(cfg.max_connections())
+    PgPoolOptions::new()
+        .max_connections(cfg.max_connections())
+        .idle_timeout(POOL_IDLE_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -199,5 +240,49 @@ mod tests {
             assert_eq!(route_for(false, &ctx(false), true), Route::Primary);
         })
         .await;
+    }
+
+    /// Django's per-connection idle guards
+    /// (`apps/api/pi_dash/settings/common.py:188-212`): a transaction left
+    /// idle 60s is terminated, releasing its row locks, and a plain-idle
+    /// backend is reaped after 10min. Both pools must carry them, since a
+    /// stalled future between `BEGIN` and `COMMIT` would otherwise hold row
+    /// locks with no upper bound. Needs `DATABASE_URL` (the `live_state`
+    /// precedent: no database, no run).
+    #[tokio::test]
+    async fn pooled_connections_carry_django_idle_timeouts() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            return;
+        };
+        let cfg = DbConfig::new(url, 2).expect("db config");
+        // Same URL for both arms: the assertion is per-pool, not per-host.
+        let pools = Pools::connect(&cfg, Some(&cfg))
+            .await
+            .expect("connect pools");
+        for pool in [pools.primary(), pools.replica().expect("replica pool")] {
+            let in_txn: String = sqlx::query_scalar("SHOW idle_in_transaction_session_timeout")
+                .fetch_one(pool)
+                .await
+                .expect("show in-txn timeout");
+            let idle: String = sqlx::query_scalar("SHOW idle_session_timeout")
+                .fetch_one(pool)
+                .await
+                .expect("show idle timeout");
+            assert_eq!(in_txn, "1min");
+            assert_eq!(idle, "10min");
+        }
+    }
+
+    /// sqlx must reap idle connections before Postgres's own 600s
+    /// `idle_session_timeout` kills them, so the pool never hands out a
+    /// server-killed connection.
+    #[test]
+    fn pool_reaps_idle_connections_before_postgres_does() {
+        let cfg = DbConfig::new("postgres://localhost:1/unused", 1).expect("db config");
+        let idle = pool_options(&cfg).get_idle_timeout().expect("idle timeout");
+        assert!(
+            idle < std::time::Duration::from_secs(600),
+            "sqlx must reap idle connections before Postgres kills them at 600s: {idle:?}"
+        );
     }
 }

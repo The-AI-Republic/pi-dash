@@ -120,9 +120,6 @@ class RunAcceptEndpoint(_RunEndpointBase):
                 return pending
             AgentRun.objects.filter(pk=locked.pk).update(
                 status=AgentRunStatus.RUNNING,
-                # The run left the daemon's local worktree queue — a stale
-                # position must not linger on a now-running row.
-                queue_position=None,
             )
         return Response({"ok": True})
 
@@ -135,7 +132,7 @@ class RunQueuedEndpoint(_RunEndpointBase):
     enter ``WAITING_FOR_WORKTREE``. Pre-retirement daemons may still POST here
     after this ships, so the endpoint stays and acknowledges the post (never
     404s it and never makes the daemon retry), but it performs no state
-    transition and writes no ``queue_position``. A run simply stays
+    transition and records nothing from the post body. A run simply stays
     ``ASSIGNED`` until the runner posts ``accept`` (which drives ``RUNNING``).
     Historical rows that already hold ``WAITING_FOR_WORKTREE`` are untouched
     and keep rendering / redelivering via their status-set membership.

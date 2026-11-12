@@ -15,8 +15,8 @@
 //! Rows reuse the D-11 [`AgentRun`] read shape and [`AgentRunStatus`]
 //! (`pidash_db::dispatch`, never re-ported): the lookup `SELECT`s
 //! project [`READ_COLUMNS`] (22 columns) where Django selects the full
-//! 41-column row — same row-selection semantics, narrower projection.
-//! The fixture (`active_run.sql`) pins the 41-column Django text; the
+//! 39-column row — same row-selection semantics, narrower projection.
+//! The fixture (`active_run.sql`) pins the 39-column Django text; the
 //! tests pin our projection against [`READ_COLUMNS`] and the
 //! `WHERE`/`ORDER BY`/`LIMIT` tails against the fixture.
 //!
@@ -30,12 +30,19 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
+    QuerySelect,
+};
 use serde_json::Value;
-use sqlx::postgres::PgRow;
-use sqlx::Row;
 
 use crate::dispatch::agent_run::{AgentRun, READ_COLUMNS};
 use crate::dispatch::status::AgentRunStatus;
+use crate::entity::agent_run;
+use crate::orm_tx;
+use crate::runner_runs::agent_run::merge_error_details;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{parse, DoneSignal};
 
@@ -96,88 +103,159 @@ fn decode_error(column: &str, value: &str) -> sqlx::Error {
     sqlx::Error::Decode(format!("unknown agent_run.{column} {value:?}").into())
 }
 
-/// Map one lookup row onto the dispatch read shape. The trigger
-/// rides through unparsed: Django's `TextChoices` are
-/// choices-only (no DB check), so the stored value may sit outside
-/// `AgentRunTrigger` (runner migration 0029) and every read path
-/// must tolerate it.
-pub fn map_agent_run(row: &PgRow) -> Result<AgentRun, sqlx::Error> {
-    let status: String = row.try_get("status")?;
-    let status =
-        AgentRunStatus::from_value(&status).ok_or_else(|| decode_error("status", &status))?;
-    let trigger: String = row.try_get("trigger")?;
-    let executor_kind: String = row.try_get("executor_kind")?;
-    let executor_kind = AgentExecutorKind::from_value(&executor_kind)
-        .ok_or_else(|| decode_error("executor_kind", &executor_kind))?;
+/// One [`READ_COLUMNS`] lookup row, decoded by name into the dispatch
+/// read shape. The trigger rides through unparsed: Django's
+/// `TextChoices` are choices-only (no DB check), so the stored value
+/// may sit outside `AgentRunTrigger` (runner migration 0029) and
+/// every read path must tolerate it.
+#[derive(Debug, Clone, FromQueryResult)]
+struct RunProjection {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    created_by_id: uuid::Uuid,
+    pod_id: uuid::Uuid,
+    pinned_runner_id: Option<uuid::Uuid>,
+    work_item_id: Option<uuid::Uuid>,
+    scheduler_binding_id: Option<uuid::Uuid>,
+    status: String,
+    executor_kind: String,
+    dispatch_attempts: i32,
+    cancel_requested_at: Option<DateTimeWithTimeZone>,
+    cancel_reason: String,
+    tool_plan: Value,
+    prompt: String,
+    trigger: String,
+    lease_expires_at: Option<DateTimeWithTimeZone>,
+    started_at: Option<DateTimeWithTimeZone>,
+    llm_model: String,
+    usage: Value,
+    done_payload: Option<Value>,
+    error_details: Value,
+}
+
+/// Map one lookup row onto the dispatch read shape. The strict
+/// status/executor decode (unknown stored values fail loudly) is the
+/// same rule the former `sqlx` row mapper applied.
+fn map_run_projection(row: RunProjection) -> Result<AgentRun, sqlx::Error> {
+    let status = AgentRunStatus::from_value(&row.status)
+        .ok_or_else(|| decode_error("status", &row.status))?;
+    let executor_kind = AgentExecutorKind::from_value(&row.executor_kind)
+        .ok_or_else(|| decode_error("executor_kind", &row.executor_kind))?;
     Ok(AgentRun {
-        id: row.try_get("id")?,
-        workspace_id: row.try_get("workspace_id")?,
-        created_by_id: row.try_get("created_by_id")?,
-        pod_id: row.try_get("pod_id")?,
-        pinned_runner_id: row.try_get("pinned_runner_id")?,
-        work_item_id: row.try_get("work_item_id")?,
-        scheduler_binding_id: row.try_get("scheduler_binding_id")?,
+        id: row.id,
+        workspace_id: row.workspace_id,
+        created_by_id: row.created_by_id,
+        pod_id: row.pod_id,
+        pinned_runner_id: row.pinned_runner_id,
+        work_item_id: row.work_item_id,
+        scheduler_binding_id: row.scheduler_binding_id,
         status,
         executor_kind,
-        dispatch_attempts: row.try_get("dispatch_attempts")?,
-        cancel_requested_at: row.try_get("cancel_requested_at")?,
-        cancel_reason: row.try_get("cancel_reason")?,
-        error_code: row.try_get("error_code")?,
-        tool_plan: row.try_get("tool_plan")?,
-        prompt: row.try_get("prompt")?,
-        trigger,
-        lease_expires_at: row.try_get("lease_expires_at")?,
-        started_at: row.try_get("started_at")?,
-        llm_model: row.try_get("llm_model")?,
-        usage: row.try_get("usage")?,
-        done_payload: row.try_get("done_payload")?,
-        error: row.try_get("error")?,
+        dispatch_attempts: row.dispatch_attempts,
+        cancel_requested_at: row
+            .cancel_requested_at
+            .map(|at| at.with_timezone(&chrono::Utc)),
+        cancel_reason: row.cancel_reason,
+        tool_plan: row.tool_plan,
+        prompt: row.prompt,
+        trigger: row.trigger,
+        lease_expires_at: row
+            .lease_expires_at
+            .map(|at| at.with_timezone(&chrono::Utc)),
+        started_at: row.started_at.map(|at| at.with_timezone(&chrono::Utc)),
+        llm_model: row.llm_model,
+        usage: row.usage,
+        done_payload: row.done_payload,
+        error_details: row.error_details,
     })
+}
+
+/// The newest run for the work item (`_active_run_for` when
+/// `active_only`, else `_latest_prior_run`): the [`READ_COLUMNS`]
+/// projection, newest-first, one row.
+fn newest_run_statement(
+    work_item_id: uuid::Uuid,
+    active_only: bool,
+) -> sea_orm::Select<agent_run::Entity> {
+    let mut statement = agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::WorkspaceId,
+            agent_run::Column::CreatedById,
+            agent_run::Column::PodId,
+            agent_run::Column::PinnedRunnerId,
+            agent_run::Column::WorkItemId,
+            agent_run::Column::SchedulerBindingId,
+            agent_run::Column::Status,
+            agent_run::Column::ExecutorKind,
+            agent_run::Column::DispatchAttempts,
+            agent_run::Column::CancelRequestedAt,
+            agent_run::Column::CancelReason,
+            agent_run::Column::ToolPlan,
+            agent_run::Column::Prompt,
+            agent_run::Column::Trigger,
+            agent_run::Column::LeaseExpiresAt,
+            agent_run::Column::StartedAt,
+            agent_run::Column::LlmModel,
+            agent_run::Column::Usage,
+            agent_run::Column::DonePayload,
+            agent_run::Column::ErrorDetails,
+        ])
+        .filter(agent_run::Column::WorkItemId.eq(work_item_id));
+    if active_only {
+        statement = statement.filter(
+            agent_run::Column::Status.is_in(
+                ACTIVE_STATUSES
+                    .iter()
+                    .map(|status| status.value().to_string())
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+    statement
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(1)
 }
 
 /// Newest active run for the work item, or `None`
 /// (`service.py:84-103`).
-pub async fn active_run_for<'e, E>(
-    ex: E,
+pub async fn active_run_for(
+    db: &impl ConnectionTrait,
     work_item_id: uuid::Uuid,
-) -> Result<Option<AgentRun>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&active_run_sql())
-        .bind(work_item_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|row| map_agent_run(&row)).transpose()
+) -> Result<Option<AgentRun>, sqlx::Error> {
+    let row = newest_run_statement(work_item_id, true)
+        .into_model::<RunProjection>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    row.map(map_run_projection).transpose()
 }
 
 /// Newest run for the work item regardless of status, or `None`
 /// (`service.py:106-107`).
-pub async fn latest_prior_run<'e, E>(
-    ex: E,
+pub async fn latest_prior_run(
+    db: &impl ConnectionTrait,
     work_item_id: uuid::Uuid,
-) -> Result<Option<AgentRun>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&latest_prior_run_sql())
-        .bind(work_item_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|row| map_agent_run(&row)).transpose()
+) -> Result<Option<AgentRun>, sqlx::Error> {
+    let row = newest_run_statement(work_item_id, false)
+        .into_model::<RunProjection>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    row.map(map_run_projection).transpose()
 }
 
 /// State [`ingest_into_run`] re-reads: Python holds the run instance
 /// in memory (`done_signal.py:141`), so it issues only the `UPDATE`;
-/// the stateless port re-reads the two columns the decision needs.
-pub const INGEST_SELECT_SQL: &str = "SELECT status, ended_at FROM agent_run WHERE id = $1";
-
-/// The single ingest `UPDATE` (`done_signal.py:162+180`). `SET` order
-/// follows Django's `_meta` field order per the fixture
-/// (`status, done_payload, error, ended_at`); `$1..$4` are the new
-/// values, `$5` the run id.
-pub const INGEST_UPDATE_SQL: &str =
-    "UPDATE agent_run SET status = $1, done_payload = $2, error = $3, ended_at = $4 WHERE id = $5";
+/// the stateless port re-reads the three columns the decision needs
+/// (`error_details` is merged, not overwritten — PDASHOSS01-187).
+#[derive(Debug, Clone, FromQueryResult)]
+struct IngestState {
+    status: String,
+    ended_at: Option<DateTimeWithTimeZone>,
+    error_details: Value,
+}
 
 /// The pure half of [`ingest_into_run`]: the parsed signal (if any)
 /// plus the four columns the `UPDATE` writes.
@@ -186,14 +264,15 @@ pub struct IngestPlan {
     pub signal: Option<DoneSignal>,
     pub status: AgentRunStatus,
     pub done_payload: Option<Value>,
-    pub error: String,
+    pub error_details: Value,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Decide the ingest outcome without touching the database
 /// (`done_signal.py:153-181`).
 ///
-/// * Parse error: `error` records `done-signal parse error: {exc}`,
+/// * Parse error: `error` (the `message` key of `error_details`)
+///   records `done-signal parse error: {exc}`,
 ///   `done_payload` is cleared, `ended_at` is stamped, and the status
 ///   becomes `FAILED` unless the run is already terminal (kept).
 /// * `completed`/`blocked`/`noop`: payload stored, `error` cleared,
@@ -204,6 +283,7 @@ pub struct IngestPlan {
 pub fn plan_ingest(
     current_status: AgentRunStatus,
     current_ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    current_error_details: &Value,
     text: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> IngestPlan {
@@ -217,7 +297,13 @@ pub fn plan_ingest(
                     AgentRunStatus::Failed
                 },
                 done_payload: None,
-                error: format!("done-signal parse error: {err}"),
+                error_details: merge_error_details(
+                    current_error_details,
+                    &[(
+                        "error",
+                        Value::String(format!("done-signal parse error: {err}")),
+                    )],
+                ),
                 ended_at: Some(now),
             }
         }
@@ -236,7 +322,10 @@ pub fn plan_ingest(
     IngestPlan {
         status,
         done_payload: Some(signal.payload.clone()),
-        error: String::new(),
+        error_details: merge_error_details(
+            current_error_details,
+            &[("error", Value::String(String::new()))],
+        ),
         ended_at,
         signal: Some(signal),
     }
@@ -247,44 +336,68 @@ pub fn plan_ingest(
 /// when the text had no usable fence (the run is then failed or
 /// annotated per [`plan_ingest`]).
 ///
-/// Takes `&mut PgConnection` (an acquired connection, or `&mut *tx`
-/// inside a transaction): the re-read plus the write are two
-/// statements on one session.
+/// Takes a [`ConnectionTrait`] (the pool connection or a
+/// transaction-held [`TxConn`](crate::orm_tx::TxConn)): the re-read
+/// plus the write are two statements on one session.
 pub async fn ingest_into_run(
-    conn: &mut sqlx::PgConnection,
+    db: &impl ConnectionTrait,
     run_id: uuid::Uuid,
     text: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<DoneSignal>, sqlx::Error> {
-    let row: Option<PgRow> = sqlx::query(INGEST_SELECT_SQL)
-        .bind(run_id)
-        .fetch_optional(&mut *conn)
-        .await?;
+    let state = agent_run::Entity::find_by_id(run_id)
+        .select_only()
+        .columns([
+            agent_run::Column::Status,
+            agent_run::Column::EndedAt,
+            agent_run::Column::ErrorDetails,
+        ])
+        .into_model::<IngestState>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     // Python's `save()` on a deleted row would fall back to an
     // `INSERT`; that path is unreachable from live callers, so a
     // missing row surfaces as `RowNotFound` instead of recreating it.
-    let Some(row) = row else {
+    let Some(state) = state else {
         return Err(sqlx::Error::RowNotFound);
     };
-    let status: String = row.try_get("status")?;
-    let current =
-        AgentRunStatus::from_value(&status).ok_or_else(|| decode_error("status", &status))?;
-    let ended_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("ended_at")?;
-    let plan = plan_ingest(current, ended_at, text, now);
-    sqlx::query(INGEST_UPDATE_SQL)
-        .bind(plan.status.value())
-        .bind(&plan.done_payload)
-        .bind(&plan.error)
-        .bind(plan.ended_at)
-        .bind(run_id)
-        .execute(&mut *conn)
-        .await?;
+    let current = AgentRunStatus::from_value(&state.status)
+        .ok_or_else(|| decode_error("status", &state.status))?;
+    let plan = plan_ingest(
+        current,
+        state.ended_at.map(|at| at.with_timezone(&chrono::Utc)),
+        &state.error_details,
+        text,
+        now,
+    );
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::Status, Expr::value(plan.status.value()))
+        .col_expr(
+            agent_run::Column::DonePayload,
+            Expr::value(plan.done_payload.clone()),
+        )
+        .col_expr(
+            agent_run::Column::ErrorDetails,
+            Expr::value(plan.error_details.clone()),
+        )
+        .col_expr(
+            agent_run::Column::EndedAt,
+            Expr::value(plan.ended_at.map(|at| at.fixed_offset())),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     Ok(plan.signal)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner_runs::agent_run::{error_details_text, ERROR_DETAILS_MESSAGE};
+    use sqlx::postgres::PgRow;
+    use sqlx::Row;
 
     static ACTIVE_RUN_SQL_FIXTURE: &str =
         include_str!("../../../../fixtures/orchestration/fx02_reads/active_run.sql");
@@ -354,7 +467,7 @@ mod tests {
     fn active_run_sql_projects_dispatch_columns_with_fixture_tail() {
         let sql = active_run_sql();
         let columns: Vec<String> = READ_COLUMNS.iter().map(|name| name.to_string()).collect();
-        assert_eq!(columns.len(), 22);
+        assert_eq!(columns.len(), 21);
         assert!(sql.starts_with(&format!(
             "SELECT {} FROM agent_run WHERE ",
             columns.join(", ")
@@ -423,12 +536,13 @@ mod tests {
         let plan = plan_ingest(
             AgentRunStatus::Running,
             Some(prior),
+            &serde_json::json!({}),
             "x\n```pi-dash-done\n{\"status\": \"paused\", \"autonomy\": {\"question_for_human\": \"q?\"}}\n```\n",
             now,
         );
         assert_eq!(plan.status, AgentRunStatus::PausedAwaitingInput);
         assert_eq!(plan.ended_at, Some(prior));
-        assert_eq!(plan.error, "");
+        assert_eq!(plan.error_details, serde_json::json!({}));
     }
 
     fn ingest_cases() -> Value {
@@ -457,6 +571,7 @@ mod tests {
             let plan = plan_ingest(
                 before_status,
                 fixture_time(&case["before"]["ended_at"]),
+                &case["before"]["error_details"],
                 case["input_text"].as_str().expect("input_text"),
                 now,
             );
@@ -480,9 +595,8 @@ mod tests {
             };
             assert_eq!(plan.done_payload, expected_payload, "{name}: done_payload");
             assert_eq!(
-                plan.error,
-                case["after"]["error"].as_str().expect("after.error"),
-                "{name}: error"
+                plan.error_details, case["after"]["error_details"],
+                "{name}: error_details"
             );
             assert_eq!(
                 plan.ended_at,
@@ -513,17 +627,17 @@ mod tests {
         }
     }
 
-    /// Temp `agent_run`: the 22 dispatch columns plus `ended_at` (the
+    /// Temp `agent_run`: the 21 dispatch columns plus `ended_at` (the
     /// ingest re-read) and `created_at` (the ordering key).
     const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
         id UUID PRIMARY KEY, workspace_id UUID NOT NULL, created_by_id UUID NOT NULL,
         pod_id UUID NOT NULL, pinned_runner_id UUID, work_item_id UUID,
         scheduler_binding_id UUID, status TEXT NOT NULL, executor_kind TEXT NOT NULL,
         dispatch_attempts INTEGER NOT NULL, cancel_requested_at TIMESTAMPTZ,
-        cancel_reason TEXT NOT NULL, error_code TEXT NOT NULL, tool_plan JSONB NOT NULL,
+        cancel_reason TEXT NOT NULL, tool_plan JSONB NOT NULL,
         prompt TEXT NOT NULL, trigger TEXT NOT NULL, lease_expires_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ, llm_model TEXT NOT NULL, usage JSONB NOT NULL,
-        done_payload JSONB, error TEXT NOT NULL, ended_at TIMESTAMPTZ,
+        done_payload JSONB, error_details JSONB NOT NULL, ended_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL)";
 
     async fn live_tx(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
@@ -556,10 +670,10 @@ mod tests {
         let id = live_uuid(tag);
         sqlx::query(
             "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, work_item_id,
-             status, executor_kind, dispatch_attempts, cancel_reason, error_code, tool_plan,
-             prompt, trigger, llm_model, usage, error, created_at)
-             VALUES ($1, $2, $2, $2, $3, $4, 'local_runner', 0, '', '', '{}', '', 'direct',
-             '', '{}', '', $5)",
+             status, executor_kind, dispatch_attempts, cancel_reason, tool_plan,
+             prompt, trigger, llm_model, usage, error_details, created_at)
+             VALUES ($1, $2, $2, $2, $3, $4, 'local_runner', 0, '', '{}', '', 'direct',
+             '', '{}', '{}', $5)",
         )
         .bind(id)
         .bind(live_uuid(9000 + tag))
@@ -602,13 +716,13 @@ mod tests {
                 live_time(50 + index as u32),
             )
             .await;
-            let active = active_run_for(&mut *tx, issue)
+            let active = active_run_for(&crate::orm_tx::TxConn::new(&mut tx), issue)
                 .await
                 .expect("active lookup")
                 .expect("one active run");
             assert_eq!(active.id, id);
             assert_eq!(active.status.value(), *status);
-            let latest = latest_prior_run(&mut *tx, issue)
+            let latest = latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), issue)
                 .await
                 .expect("latest lookup");
             assert_eq!(latest.map(|run| run.id), Some(id));
@@ -618,11 +732,11 @@ mod tests {
         seed_run(&mut tx, 4010, term_issue, "queued", live_time(10)).await;
         seed_run(&mut tx, 4011, term_issue, "failed", live_time(9)).await;
         let newest = seed_run(&mut tx, 4012, term_issue, "completed", live_time(30)).await;
-        let active = active_run_for(&mut *tx, term_issue)
+        let active = active_run_for(&crate::orm_tx::TxConn::new(&mut tx), term_issue)
             .await
             .expect("active lookup");
         assert_eq!(active.map(|run| run.id), Some(live_uuid(4010)));
-        let latest = latest_prior_run(&mut *tx, term_issue)
+        let latest = latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), term_issue)
             .await
             .expect("latest lookup");
         assert_eq!(latest.map(|run| run.id), Some(newest));
@@ -636,24 +750,30 @@ mod tests {
             live_time(30),
         )
         .await;
-        assert!(active_run_for(&mut *tx, paused_issue)
-            .await
-            .expect("active lookup")
-            .is_none());
-        let latest = latest_prior_run(&mut *tx, paused_issue)
+        assert!(
+            active_run_for(&crate::orm_tx::TxConn::new(&mut tx), paused_issue)
+                .await
+                .expect("active lookup")
+                .is_none()
+        );
+        let latest = latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), paused_issue)
             .await
             .expect("latest lookup");
         assert_eq!(latest.map(|run| run.id), Some(paused));
         // Empty issue: both lookups are `None`.
         let empty_issue = live_uuid(3130);
-        assert!(active_run_for(&mut *tx, empty_issue)
-            .await
-            .expect("active lookup")
-            .is_none());
-        assert!(latest_prior_run(&mut *tx, empty_issue)
-            .await
-            .expect("latest lookup")
-            .is_none());
+        assert!(
+            active_run_for(&crate::orm_tx::TxConn::new(&mut tx), empty_issue)
+                .await
+                .expect("active lookup")
+                .is_none()
+        );
+        assert!(
+            latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), empty_issue)
+                .await
+                .expect("latest lookup")
+                .is_none()
+        );
     }
 
     /// Unknown stored status / executor values fail the mapping
@@ -669,7 +789,7 @@ mod tests {
         let mut tx = live_tx(&pool).await;
         let issue = live_uuid(3200);
         seed_run(&mut tx, 4020, issue, "bogus", live_time(30)).await;
-        let err = latest_prior_run(&mut *tx, issue)
+        let err = latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), issue)
             .await
             .expect_err("bogus status fails");
         assert!(matches!(err, sqlx::Error::Decode(_)), "got {err:?}");
@@ -681,7 +801,7 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("stage bogus kind");
-        let err = latest_prior_run(&mut *tx, kind_issue)
+        let err = latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), kind_issue)
             .await
             .expect_err("bogus kind fails");
         assert!(matches!(err, sqlx::Error::Decode(_)), "got {err:?}");
@@ -714,13 +834,13 @@ mod tests {
                 .execute(&mut *tx)
                 .await
                 .expect("stage trigger");
-            let active = active_run_for(&mut *tx, issue)
+            let active = active_run_for(&crate::orm_tx::TxConn::new(&mut tx), issue)
                 .await
                 .expect("active read tolerates unknown trigger")
                 .expect("one active run");
             assert_eq!(active.id, id);
             assert_eq!(active.trigger, *trigger);
-            let latest = latest_prior_run(&mut *tx, issue)
+            let latest = latest_prior_run(&crate::orm_tx::TxConn::new(&mut tx), issue)
                 .await
                 .expect("latest read tolerates unknown trigger")
                 .expect("one run");
@@ -745,32 +865,41 @@ mod tests {
         // Completed path.
         let issue = live_uuid(3300);
         let run = seed_run(&mut tx, 4030, issue, "running", live_time(30)).await;
-        sqlx::query("UPDATE agent_run SET error = 'prior error' WHERE id = $1")
+        sqlx::query(
+            "UPDATE agent_run SET error_details = '{\"code\": \"kept\", \"message\": \"prior error\"}' WHERE id = $1",
+        )
             .bind(run)
             .execute(&mut *tx)
             .await
             .expect("stage prior error");
-        let signal = ingest_into_run(&mut tx, run, completed_text, now)
-            .await
-            .expect("ingest completed");
+        let signal = ingest_into_run(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            run,
+            completed_text,
+            now,
+        )
+        .await
+        .expect("ingest completed");
         assert_eq!(
             signal.map(|signal| signal.status),
             Some("completed".to_string())
         );
         let row: PgRow = sqlx::query(
-            "SELECT status, done_payload, error, ended_at FROM agent_run WHERE id = $1",
+            "SELECT status, done_payload, error_details, ended_at FROM agent_run WHERE id = $1",
         )
         .bind(run)
         .fetch_one(&mut *tx)
         .await
         .expect("read back");
         let status: String = row.try_get("status").expect("status");
-        let error: String = row.try_get("error").expect("error");
+        let error_details: Value = row.try_get("error_details").expect("error_details");
         let ended_at: Option<chrono::DateTime<chrono::Utc>> =
             row.try_get("ended_at").expect("ended_at");
         let payload: Value = row.try_get("done_payload").expect("payload");
         assert_eq!(status, "completed");
-        assert_eq!(error, "");
+        // The cleared message drops its key; the unrelated code survives
+        // the merge.
+        assert_eq!(error_details, serde_json::json!({"code": "kept"}));
         assert_eq!(ended_at, Some(now));
         assert_eq!(payload["status"], Value::String("completed".to_string()));
         assert_eq!(
@@ -781,9 +910,14 @@ mod tests {
         // Paused path: `ended_at` stays `NULL`.
         let paused_issue = live_uuid(3301);
         let paused_run = seed_run(&mut tx, 4031, paused_issue, "running", live_time(31)).await;
-        let signal = ingest_into_run(&mut tx, paused_run, paused_text, now)
-            .await
-            .expect("ingest paused");
+        let signal = ingest_into_run(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            paused_run,
+            paused_text,
+            now,
+        )
+        .await
+        .expect("ingest paused");
         assert_eq!(
             signal.map(|signal| signal.status),
             Some("paused".to_string())
@@ -801,25 +935,30 @@ mod tests {
 
         // Parse-error on a non-terminal row: `FAILED` + error text.
         let failing = seed_run(&mut tx, 4032, live_uuid(3302), "running", live_time(32)).await;
-        let signal = ingest_into_run(&mut tx, failing, "no fence here", now)
-            .await
-            .expect("ingest parse error");
+        let signal = ingest_into_run(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            failing,
+            "no fence here",
+            now,
+        )
+        .await
+        .expect("ingest parse error");
         assert_eq!(signal, None);
         let row: PgRow = sqlx::query(
-            "SELECT status, done_payload, error, ended_at FROM agent_run WHERE id = $1",
+            "SELECT status, done_payload, error_details, ended_at FROM agent_run WHERE id = $1",
         )
         .bind(failing)
         .fetch_one(&mut *tx)
         .await
         .expect("read back");
         let status: String = row.try_get("status").expect("status");
-        let error: String = row.try_get("error").expect("error");
+        let error_details: Value = row.try_get("error_details").expect("error_details");
         let ended_at: Option<chrono::DateTime<chrono::Utc>> =
             row.try_get("ended_at").expect("ended_at");
         let payload: Option<Value> = row.try_get("done_payload").expect("payload");
         assert_eq!(status, "failed");
         assert_eq!(
-            error,
+            error_details_text(&error_details, ERROR_DETAILS_MESSAGE),
             "done-signal parse error: no pi-dash-done fenced block found"
         );
         assert_eq!(ended_at, Some(now));
@@ -827,15 +966,21 @@ mod tests {
 
         // Parse-error on a terminal row: status kept, error recorded.
         let kept = seed_run(&mut tx, 4033, live_uuid(3303), "completed", live_time(33)).await;
-        let signal = ingest_into_run(&mut tx, kept, "no fence here", now)
-            .await
-            .expect("ingest parse error");
+        let signal = ingest_into_run(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            kept,
+            "no fence here",
+            now,
+        )
+        .await
+        .expect("ingest parse error");
         assert_eq!(signal, None);
-        let row: PgRow = sqlx::query("SELECT status, error, ended_at FROM agent_run WHERE id = $1")
-            .bind(kept)
-            .fetch_one(&mut *tx)
-            .await
-            .expect("read back");
+        let row: PgRow =
+            sqlx::query("SELECT status, error_details, ended_at FROM agent_run WHERE id = $1")
+                .bind(kept)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
         let status: String = row.try_get("status").expect("status");
         assert_eq!(status, "completed");
         let ended_at: Option<chrono::DateTime<chrono::Utc>> =
@@ -853,9 +998,14 @@ mod tests {
         };
         let mut tx = live_tx(&pool).await;
         let now = fixture_time(&serde_json::json!("2026-10-03T12:00:00+00:00")).expect("T0");
-        let err = ingest_into_run(&mut tx, live_uuid(9999), "no fence here", now)
-            .await
-            .expect_err("missing run fails");
+        let err = ingest_into_run(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            live_uuid(9999),
+            "no fence here",
+            now,
+        )
+        .await
+        .expect_err("missing run fails");
         assert!(matches!(err, sqlx::Error::RowNotFound), "got {err:?}");
     }
 }
