@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Merged over the bundle's generated Info.plist by
+         bundle.macOS.infoPlist. TCC refuses microphone capture from an
+         app without this string, and macOS may terminate the app for
+         touching the mic without one, so chat dictation needs it. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Pi Dash needs microphone access so you can dictate messages in chat.</string>
+</dict>
+</plist>
