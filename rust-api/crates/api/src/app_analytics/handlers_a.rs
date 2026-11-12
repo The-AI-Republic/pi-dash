@@ -89,8 +89,14 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_db::entity::{analytic_views, workspace_members, workspaces};
 use pidash_services::app_analytics::queries;
 use pidash_types::WorkspaceId;
+use sea_orm::{
+    sea_query::{Alias, Order},
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, RelationTrait,
+};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -285,17 +291,24 @@ async fn workspace_role(
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0).map(i32::from))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<i16>> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.flatten().map(i32::from))
 }
 
 /// Membership facts for one route's gate: the caller passes the route's
@@ -970,6 +983,7 @@ async fn fetch_count(
 ) -> Result<i64, Denial> {
     let sql = queries::base_count_sql(fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
+    // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
     let row: (i64,) = bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
         .fetch_one(pool)
         .await
@@ -1008,6 +1022,7 @@ async fn fetch_count_plot(
     let wrapped = wrapped_plot_sql(sql, "count", segment);
     if segment.filter(|segment| !segment.is_empty()).is_some() {
         let rows: Vec<(Option<String>, Option<String>, i64)> =
+            // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
                 .await
@@ -1015,6 +1030,7 @@ async fn fetch_count_plot(
         Ok(rows)
     } else {
         let rows: Vec<(Option<String>, i64)> =
+            // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
                 .await
@@ -1038,6 +1054,7 @@ async fn fetch_estimate_plot(
     let wrapped = wrapped_plot_sql(sql, "estimate", segment);
     if segment.filter(|segment| !segment.is_empty()).is_some() {
         let rows: Vec<(Option<String>, Option<String>, Option<f64>)> =
+            // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
                 .await
@@ -1045,6 +1062,7 @@ async fn fetch_estimate_plot(
         Ok(rows)
     } else {
         let rows: Vec<(Option<String>, Option<f64>)> =
+            // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
                 .await
@@ -1074,6 +1092,7 @@ async fn fetch_state_details(
     // `state_id` is nullable (`Issue.state`, `null=True`): a NULL group
     // renders `{"state_id": null, ...}`, never a 500.
     let rows: Vec<(Option<Uuid>, Option<String>, Option<String>)> =
+        // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
             .fetch_all(pool)
             .await
@@ -1114,6 +1133,7 @@ async fn fetch_label_details(
     let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, false));
     let rows: Vec<(Uuid, Option<String>, Option<String>)> =
+        // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
             .fetch_all(pool)
             .await
@@ -1159,6 +1179,7 @@ async fn fetch_assignee_details(
     let sql = queries::base_assignee_details_sql(fragment);
     let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
+    // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
     let rows: Vec<AssigneeDetailRow> = bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
         .fetch_all(pool)
         .await
@@ -1202,6 +1223,7 @@ async fn fetch_cycle_details(
     let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<(Uuid, Option<String>)> =
+        // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
             .fetch_all(pool)
             .await
@@ -1236,6 +1258,7 @@ async fn fetch_module_details(
     let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<(Uuid, Option<String>)> =
+        // raw-sql: dynamic Q-01 SQL from services base_* builder (shared with jobs/analytic.rs outside this batch's exclusive scope); sea-query rebuild requires the shared-helper change (dependency).
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
             .fetch_all(pool)
             .await
@@ -1279,24 +1302,89 @@ pub struct ViewRow {
     pub query_dict: Value,
 }
 
-const VIEW_COLUMNS: &str = "\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \
-     \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"name\", \"description\", \
-     \"query\", \"query_dict\"";
+/// One decoded analytic-view row. The statement selects every concrete
+/// column (the `ViewRow` struct order); `deleted_at` is selected for
+/// statement-shape parity but not decoded — the `ViewRow` serializer
+/// hardcodes `"deleted_at": null`, and the statements' soft-delete arm
+/// is what keeps reads after `destroy` at 404.
+#[derive(Debug, FromQueryResult)]
+struct ViewRowDecoded {
+    id: Uuid,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    workspace_id: Uuid,
+    name: String,
+    description: String,
+    query: Value,
+    query_dict: Value,
+}
 
-/// One decoded analytic-view row: the [`VIEW_COLUMNS`] order.
-type ViewRowTuple = (
-    Uuid,
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Uuid,
-    String,
-    String,
-    Value,
-    Value,
-);
+impl From<ViewRowDecoded> for ViewRow {
+    fn from(decoded: ViewRowDecoded) -> Self {
+        ViewRow {
+            id: decoded.id,
+            created_at: decoded.created_at,
+            updated_at: decoded.updated_at,
+            created_by_id: decoded.created_by_id,
+            updated_by_id: decoded.updated_by_id,
+            workspace_id: decoded.workspace_id,
+            name: decoded.name,
+            description: decoded.description,
+            query: decoded.query,
+            query_dict: decoded.query_dict,
+        }
+    }
+}
+
+/// `table`.`column` as a sea-query expression (the 1c services idiom).
+fn col(table: &str, column: &str) -> sea_orm::sea_query::Expr {
+    use sea_orm::sea_query::Expr;
+    Expr::col((Alias::new(table), Alias::new(column)))
+}
+
+/// The workspace-slug `IN` subquery both Q-02 reads share:
+/// `SELECT "workspaces"."id" FROM "workspaces" WHERE "workspaces"."slug" = ?`.
+fn workspace_slug_subquery(slug: &str) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::Query as SeaQuery;
+    let mut sub = SeaQuery::select();
+    sub.column(workspaces::Column::Id)
+        .from(workspaces::Entity)
+        .and_where(workspaces::Column::Slug.eq(slug));
+    sub.to_owned()
+}
+
+/// Select the eleven concrete columns (Django `_meta` field order)
+/// aliased to their decode keys, so every column decodes by name.
+fn view_columns_stmt(slug: &str, pk: Option<&Uuid>) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::Query as SeaQuery;
+    let mut stmt = SeaQuery::select();
+    for column in [
+        "id",
+        "created_at",
+        "updated_at",
+        "created_by_id",
+        "updated_by_id",
+        "deleted_at",
+        "workspace_id",
+        "name",
+        "description",
+        "query",
+        "query_dict",
+    ] {
+        stmt.expr_as(col("analytic_views", column), Alias::new(column));
+    }
+    stmt.from(analytic_views::Entity)
+        .and_where(col("analytic_views", "workspace_id").in_subquery(workspace_slug_subquery(slug)))
+        .and_where(col("analytic_views", "deleted_at").is_null());
+    if let Some(pk) = pk {
+        stmt.and_where(col("analytic_views", "id").eq(*pk));
+        stmt.limit(1);
+    }
+    stmt.order_by(("analytic_views", "created_at"), Order::Desc);
+    stmt.to_owned()
+}
 
 /// Q-02a list (`base.py:186-187`): the default-manager queryset filtered by
 /// `workspace__slug`, ordered `-created_at` (`Meta.ordering`). The
@@ -1305,48 +1393,19 @@ type ViewRowTuple = (
 /// `destroy` would 200 instead of the pinned 404.
 #[allow(clippy::result_large_err)]
 async fn fetch_view_list(pool: &sqlx::PgPool, slug: &str) -> Result<Vec<ViewRow>, Denial> {
-    let sql = format!(
-        "SELECT {VIEW_COLUMNS} FROM \"analytic_views\" WHERE (\"analytic_views\".\"workspace_id\" IN \
-         (SELECT \"workspaces\".\"id\" FROM \"workspaces\" WHERE \"workspaces\".\"slug\" = $1) \
-         AND \"analytic_views\".\"deleted_at\" IS NULL) \
-         ORDER BY \"analytic_views\".\"created_at\" DESC"
-    );
-    let rows: Vec<ViewRowTuple> = sqlx::query_as(&sql)
-        .bind(slug)
-        .fetch_all(pool)
+    let stmt = view_columns_stmt(slug, None);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                created_at,
-                updated_at,
-                created_by_id,
-                updated_by_id,
-                _,
-                workspace_id,
-                name,
-                description,
-                query,
-                query_dict,
-            )| {
-                ViewRow {
-                    id,
-                    created_at,
-                    updated_at,
-                    created_by_id,
-                    updated_by_id,
-                    workspace_id,
-                    name,
-                    description,
-                    query,
-                    query_dict,
-                }
-            },
-        )
-        .collect())
+    rows.into_iter()
+        .map(|row| {
+            ViewRowDecoded::from_query_result(&row, "")
+                .map(ViewRow::from)
+                .map_err(|_| Denial::ServerError)
+        })
+        .collect()
 }
 
 /// Detail lookup: `get_object()` — pk scoped to the workspace through the
@@ -1354,47 +1413,21 @@ async fn fetch_view_list(pool: &sqlx::PgPool, slug: &str) -> Result<Vec<ViewRow>
 /// DRF's `Http404`, the `{"detail": "No AnalyticView ..."}` body.
 #[allow(clippy::result_large_err)]
 async fn fetch_view_detail(pool: &sqlx::PgPool, slug: &str, pk: &Uuid) -> Result<ViewRow, Denial> {
-    let sql = format!(
-        "SELECT {VIEW_COLUMNS} FROM \"analytic_views\" WHERE (\"analytic_views\".\"id\" = $1 \
-         AND \"analytic_views\".\"workspace_id\" IN \
-         (SELECT \"workspaces\".\"id\" FROM \"workspaces\" WHERE \"workspaces\".\"slug\" = $2) \
-         AND \"analytic_views\".\"deleted_at\" IS NULL) LIMIT 1"
-    );
-    let row: Option<ViewRowTuple> = sqlx::query_as(&sql)
-        .bind(pk)
-        .bind(slug)
-        .fetch_optional(pool)
+    let stmt = view_columns_stmt(slug, Some(pk));
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(
-        |(
-            id,
-            created_at,
-            updated_at,
-            created_by_id,
-            updated_by_id,
-            _,
-            workspace_id,
-            name,
-            description,
-            query,
-            query_dict,
-        )| {
-            ViewRow {
-                id,
-                created_at,
-                updated_at,
-                created_by_id,
-                updated_by_id,
-                workspace_id,
-                name,
-                description,
-                query,
-                query_dict,
-            }
-        },
-    )
-    .ok_or(Denial::ViewNotFound)
+    rows.into_iter()
+        .next()
+        .map(|row| {
+            ViewRowDecoded::from_query_result(&row, "")
+                .map(ViewRow::from)
+                .map_err(|_| Denial::ServerError)
+        })
+        .transpose()?
+        .ok_or(Denial::ViewNotFound)
 }
 
 /// `AnalyticViewSerializer.to_representation`: `Meta.fields = "__all__"`
@@ -1913,14 +1946,19 @@ async fn create_view(
     // `perform_create`: `Workspace.objects.get(slug=slug)` — miss is the
     // `ObjectDoesNotExist` 404. (Unreachable when the gate passes, since
     // the gate needs a membership row on the same workspace; kept for
-    // parity.)
-    let workspace: Option<(Uuid,)> =
-        sqlx::query_as("SELECT \"id\" FROM \"workspaces\" WHERE \"slug\" = $1 LIMIT 1")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace else {
+    // parity.) Note this lookup carries no soft-delete guard (the
+    // Django `Workspace.objects.get(slug=...)` does not filter either).
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let workspace: Option<Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = workspace else {
         return Err(Denial::ObjectNotFound);
     };
     let today = chrono::Utc::now().date_naive();
@@ -1928,24 +1966,22 @@ async fn create_view(
     let query_dict = input.query_dict.clone().unwrap_or_else(empty_query_dict);
     let now = chrono::Utc::now();
     let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO \"analytic_views\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \
-         \"name\", \"description\", \"query\", \"query_dict\") \
-         VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9)",
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(workspace_id)
-    .bind(input.name.clone().unwrap_or_default())
-    .bind(input.description.clone().unwrap_or_default())
-    .bind(&query)
-    .bind(&query_dict)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    {
+        use sea_orm::{ActiveModelTrait, Set};
+        let active = analytic_views::ActiveModel {
+            id: Set(id),
+            created_at: Set(chrono::DateTime::<chrono::FixedOffset>::from(now)),
+            updated_at: Set(chrono::DateTime::<chrono::FixedOffset>::from(now)),
+            created_by_id: Set(Some(actor.id)),
+            workspace_id: Set(workspace_id),
+            name: Set(input.name.clone().unwrap_or_default()),
+            description: Set(input.description.clone().unwrap_or_default()),
+            query: Set(query.clone()),
+            query_dict: Set(query_dict.clone()),
+            ..Default::default()
+        };
+        active.insert(&db).await.map_err(|_| Denial::ServerError)?;
+    }
     Ok(ViewRow {
         id,
         created_at: now,
@@ -2057,21 +2093,23 @@ async fn patch_view(
     row.query = Value::Object(Map::new());
     row.updated_by_id = Some(actor.id);
     row.updated_at = chrono::Utc::now();
-    sqlx::query(
-        "UPDATE \"analytic_views\" SET \"name\" = $1, \"description\" = $2, \
-         \"query\" = $3, \"query_dict\" = $4, \"updated_by_id\" = $5, \
-         \"updated_at\" = $6 WHERE \"id\" = $7",
-    )
-    .bind(&row.name)
-    .bind(&row.description)
-    .bind(&row.query)
-    .bind(&row.query_dict)
-    .bind(actor.id)
-    .bind(row.updated_at)
-    .bind(row.id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let active = analytic_views::ActiveModel {
+            id: Set(row.id),
+            name: Set(row.name.clone()),
+            description: Set(row.description.clone()),
+            query: Set(row.query.clone()),
+            query_dict: Set(row.query_dict.clone()),
+            updated_by_id: Set(row.updated_by_id),
+            updated_at: Set(chrono::DateTime::<chrono::FixedOffset>::from(
+                row.updated_at,
+            )),
+            ..Default::default()
+        };
+        active.update(&db).await.map_err(|_| Denial::ServerError)?;
+    }
     Ok(row)
 }
 
@@ -2158,16 +2196,20 @@ async fn destroy_view(
     // `SoftDeleteModel.delete` stamps `deleted_at` then `save()`s, so the
     // `auto_now` `updated_at` moves too — and `BaseModel.save` on the
     // updating instance stamps `updated_by` (`db/models/base.py:40-42`).
-    sqlx::query(
-        "UPDATE \"analytic_views\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \
-         \"updated_by_id\" = $2 WHERE \"id\" = $3",
-    )
-    .bind(chrono::Utc::now())
-    .bind(actor.id)
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // One `now` stamps both columns (the hand-written `$1` reuse).
+    let now = chrono::Utc::now();
+    {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let active = analytic_views::ActiveModel {
+            id: Set(*id),
+            deleted_at: Set(Some(chrono::DateTime::<chrono::FixedOffset>::from(now))),
+            updated_at: Set(chrono::DateTime::<chrono::FixedOffset>::from(now)),
+            updated_by_id: Set(Some(actor.id)),
+            ..Default::default()
+        };
+        active.update(&db).await.map_err(|_| Denial::ServerError)?;
+    }
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
     // then enqueue — same order as the mixin.
     enqueue_soft_delete(pool, "analyticview", id).await;
@@ -2778,5 +2820,106 @@ mod tests {
         );
         assert_eq!(message.kwargs.len(), 1);
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+
+    fn view_sql_of(stmt: &sea_orm::sea_query::SelectStatement) -> String {
+        sea_orm::DbBackend::Postgres.build(stmt).sql.to_lowercase()
+    }
+
+    #[test]
+    fn view_statement_shapes_pin_queries() {
+        let list = view_sql_of(&view_columns_stmt("acme", None));
+        assert!(
+            list.contains("from \"analytic_views\""),
+            "list from: {list}"
+        );
+        assert!(list.contains("in (select"), "list in-subquery: {list}");
+        assert!(
+            list.contains("deleted_at\" is null"),
+            "list soft delete: {list}"
+        );
+        assert!(list.contains("desc"), "list order: {list}");
+        assert!(list.contains("as \"id\""), "list alias: {list}");
+        assert!(list.contains("as \"query_dict\""), "list alias: {list}");
+        assert!(!list.contains("limit"), "list has no limit: {list}");
+
+        let detail = {
+            let id = Uuid::nil();
+            view_sql_of(&view_columns_stmt("acme", Some(&id)))
+        };
+        assert!(detail.contains("limit $"), "detail limit bound: {detail}");
+        assert!(detail.contains("\"id\" ="), "detail pk filter: {detail}");
+    }
+
+    /// TEMP tables shadow public (no FKs needed for statement execution).
+    #[tokio::test]
+    async fn live_view_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in ["workspaces", "workspace_members", "analytic_views"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, user, view, dead) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{ws}', 'acme_view', NULL)"),
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES ('{view}', now() - interval '2 days', now() - interval '2 days', '{user}', NULL, NULL, '{ws}', 'First', '', '{{}}', '{{}}')"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES (gen_random_uuid(), now() - interval '1 day', now() - interval '1 day', '{user}', NULL, NULL, '{ws}', 'Second', '', '{{\"priority\":[\"high\"]}}', '{{}}')"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES ('{dead}', now(), now(), '{user}', NULL, now(), '{ws}', 'Gone', '', '{{}}', '{{}}')"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // role lookup: member role passes through unchanged (Option<i32>).
+        assert_eq!(
+            workspace_role(&pool, &user, "acme_view")
+                .await
+                .expect("role"),
+            Some(20)
+        );
+        assert_eq!(
+            workspace_role(&pool, &user, "missing").await.expect("miss"),
+            None
+        );
+        // list: live rows newest-first, soft-deleted excluded.
+        let list = fetch_view_list(&pool, "acme_view").await.expect("list");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "Second");
+        assert_eq!(list[1].name, "First");
+        assert_eq!(list[1].id, view);
+        // detail: hit, soft-deleted miss, unknown miss.
+        let detail = fetch_view_detail(&pool, "acme_view", &view)
+            .await
+            .expect("detail");
+        assert_eq!(detail.name, "First");
+        assert_eq!(detail.workspace_id, ws);
+        assert!(matches!(
+            fetch_view_detail(&pool, "acme_view", &dead).await,
+            Err(Denial::ViewNotFound)
+        ));
+        assert!(matches!(
+            fetch_view_detail(&pool, "acme_view", &user).await,
+            Err(Denial::ViewNotFound)
+        ));
+        assert!(fetch_view_list(&pool, "missing")
+            .await
+            .expect("empty")
+            .is_empty());
     }
 }

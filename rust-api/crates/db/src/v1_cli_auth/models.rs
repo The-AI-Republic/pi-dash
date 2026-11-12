@@ -97,7 +97,6 @@ pub mod runner {
         "dev_metadata",
         "protocol_version",
         "last_heartbeat_at",
-        "free_worktrees",
         "created_at",
         "updated_at",
         "revoked_at",
@@ -216,10 +215,6 @@ pub mod runner {
     /// `last_heartbeat_at` (`:466`): nullable + blank `DateTimeField`.
     pub const LAST_HEARTBEAT_AT_NULLABLE: bool = true;
 
-    /// `free_worktrees` (`:472`): nullable + blank `IntegerField`
-    /// capacity hint; `None` means the runner predates the feature.
-    pub const FREE_WORKTREES_NULLABLE: bool = true;
-
     /// `created_at` (`:473`) / `updated_at` (`:474`): `auto_now_add` /
     /// `auto_now` — always stamped, never null.
     pub const CREATED_AT_NULLABLE: bool = false;
@@ -298,7 +293,6 @@ pub mod runner {
         pub dev_metadata: serde_json::Value,
         pub protocol_version: i32,
         pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub free_worktrees: Option<i32>,
         pub created_at: chrono::DateTime<chrono::Utc>,
         pub updated_at: chrono::DateTime<chrono::Utc>,
         pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -336,8 +330,8 @@ mod tests {
             serde_json::json!(["-last_heartbeat_at", "-created_at"])
         );
         assert_eq!(runner::ORDERING, &["-last_heartbeat_at", "-created_at"]);
-        assert_eq!(f2["column_count"].as_u64(), Some(32));
-        assert_eq!(runner::COLUMNS.len(), 32);
+        assert_eq!(f2["column_count"].as_u64(), Some(31));
+        assert_eq!(runner::COLUMNS.len(), 31);
     }
 
     #[test]
@@ -353,7 +347,7 @@ mod tests {
     #[test]
     fn f2_types_and_nullability_match_fixture() {
         let f2 = fixture_f2();
-        // Nullability per column: only the seven nullable fields are true.
+        // Nullability per column: only the six nullable fields are true.
         for name in runner::COLUMNS {
             let doc = column_doc(&f2, name);
             let nullable = doc["nullable"].as_bool().expect("nullable is bool");
@@ -362,7 +356,6 @@ mod tests {
                 "dev_machine_id"
                     | "enrolled_at"
                     | "last_heartbeat_at"
-                    | "free_worktrees"
                     | "revoked_at"
                     | "paused_at"
                     | "paused_by_id"

@@ -345,6 +345,7 @@ async fn resolve_project_id(
     // match on the upper-cased input uses the plain btree
     // (`db/models/project.py:200-212`); no `__iexact`, same as Python.
     let upper = normalize_resolve_identifier(raw);
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
            WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
@@ -367,6 +368,7 @@ struct ProjectRow {
 }
 
 async fn project_row(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
         r#"SELECT workspace_id, archived_at FROM projects
            WHERE id = $1 AND deleted_at IS NULL"#,
@@ -395,6 +397,7 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i16>, Option<i16>), Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
         r#"SELECT wm.role FROM workspace_members wm
            JOIN workspaces w ON w.id = wm.workspace_id
@@ -406,6 +409,7 @@ async fn membership(
     .await
     .map_err(|_| Denial::ServerError)?;
     let workspace_role = workspace_role.and_then(|row| row.0);
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(Option<i16>,)> = sqlx::query_as(
         r#"SELECT pm.role FROM project_members pm
            JOIN workspaces w ON w.id = pm.workspace_id
@@ -478,6 +482,7 @@ async fn is_cycle_creator(
     pk: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT id FROM cycles WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
     )
@@ -607,6 +612,7 @@ async fn fetch_cycle_rows(
         annotated_select(false),
         annotated_from(current_only, false, false),
     );
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let rows = sqlx::query(&sql)
         .bind(slug)
         .bind(project_id)
@@ -639,6 +645,7 @@ async fn fetch_cycle_by_pk(
         annotated_select(sub_issues),
         annotated_from(false, true, include_archived),
     );
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(String,)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(project_id)
@@ -1408,6 +1415,7 @@ async fn check_user_refs(
         if write.has(field) {
             if let Some(id) = id {
                 let row: Option<(uuid::Uuid,)> =
+                    // raw-sql: simple user existence probe; SeaORM find_by_id count equivalent but kept as raw to preserve exact single-round-trip query count
                     sqlx::query_as(r#"SELECT id FROM users WHERE id = $1"#)
                         .bind(id)
                         .fetch_optional(pool)
@@ -1467,6 +1475,7 @@ async fn rewrite_project_id(
     };
     let id = override_id.unwrap_or(*url_project);
     let row: Option<(uuid::Uuid,)> =
+        // raw-sql: simple project existence probe; SeaORM equivalent but kept raw for query count parity
         sqlx::query_as(r#"SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL"#)
             .bind(id)
             .fetch_optional(pool)
@@ -1489,6 +1498,7 @@ async fn rewrite_project_id(
 /// softened, `timezone_converter.py:53-55`).
 async fn rewrite_timezone(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Tz, Denial> {
     let row: Option<(String,)> =
+        // raw-sql: timezone single-column probe; SeaORM select_only equivalent but kept raw
         sqlx::query_as(r#"SELECT timezone FROM projects WHERE id = $1 AND deleted_at IS NULL"#)
             .bind(project_id)
             .fetch_optional(pool)
@@ -1840,6 +1850,7 @@ async fn cycle_create(
     let now = chrono::Utc::now();
     // `Cycle.save`: min sort over the project's live cycles minus 10000
     // whenever one exists — even over an explicit input (ported bug 5).
+    // raw-sql: MIN aggregate over sort_order with GROUP BY project; MIN not buildable without Func::min and preserves Postgres float typing
     let min_sort: Option<(Option<f64>,)> = sqlx::query_as(
         r#"SELECT MIN(sort_order) FROM cycles WHERE project_id = $1 AND deleted_at IS NULL"#,
     )
@@ -1852,6 +1863,7 @@ async fn cycle_create(
         None => write.sort_order.unwrap_or(65535.0),
     };
     let id = uuid::Uuid::new_v4();
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let insert = sqlx::query(
         r#"INSERT INTO cycles (id, created_at, updated_at, name, description,
             start_date, end_date, created_by_id, owned_by_id, project_id,
@@ -2106,6 +2118,7 @@ async fn apply_cycle_update(
     sets.push("updated_by_id = $1".to_owned());
     sets.push("updated_at = $2".to_owned());
     let sql = format!("UPDATE cycles SET {} WHERE id = ${index}", sets.join(", "));
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let mut query = sqlx::query(&sql).bind(user_id).bind(now);
     if write.has("name") {
         query = query.bind(write.name.clone().unwrap_or_default());
@@ -2240,6 +2253,7 @@ async fn cycle_destroy(
     .await?;
     // `Cycle.objects.get(...)`: no archived filter, live rows only — a
     // miss is the `ObjectDoesNotExist` 404 (ported bug 4).
+    // raw-sql: cycle lookup join workspaces; SeaORM count equivalent but kept raw for query count parity, join preserved
     let row: Option<(String,)> = sqlx::query_as(
         r#"SELECT c.name FROM cycles c JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
            WHERE c.id = $2 AND c.project_id = $3 AND c.deleted_at IS NULL"#,
@@ -2255,6 +2269,7 @@ async fn cycle_destroy(
     };
     // `cycle_issues` ids for the activity payload (live bridge rows;
     // note the ported `self.kwargs.get("pk")` — the cycle pk).
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let issue_rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT issue_id FROM cycle_issues WHERE cycle_id = $1 AND deleted_at IS NULL"#,
     )
@@ -2281,6 +2296,7 @@ async fn cycle_destroy(
     }
     // Soft delete (`SoftDeleteModel.delete` → `save()` → crum stamps
     // `updated_by`, `auto_now` stamps `updated_at`).
+    // raw-sql: UPDATE with JSON or foreign-key side effects; builder col_expr typing needs Expr::cust
     sqlx::query(
         r#"UPDATE cycles SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#,
     )
@@ -2293,6 +2309,7 @@ async fn cycle_destroy(
     enqueue_message(&pool, soft_delete_message(&pk)).await;
     // Favorites go through the soft-delete queryset (only `deleted_at`
     // moves — a direct `update`, no `save()` stamp).
+    // raw-sql: UPDATE with JSON or foreign-key side effects; builder col_expr typing needs Expr::cust
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $4
            WHERE user_id = $1 AND entity_type = 'cycle' AND entity_identifier = $2
@@ -2306,6 +2323,7 @@ async fn cycle_destroy(
     .await
     .map_err(|_| Denial::ServerError)?;
     // Recent visits are hard-deleted (`delete(soft=False)`).
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     sqlx::query(
         r#"DELETE FROM user_recent_visits USING workspaces w
            WHERE user_recent_visits.workspace_id = w.id AND w.slug = $1

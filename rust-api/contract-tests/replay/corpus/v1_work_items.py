@@ -68,6 +68,7 @@ def _seed_move_target(conn) -> None:
                 repo_url, base_branch, agent_default_interval_seconds,
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
+                dedicated_runner_lost_action,
                 agent_test_default_interval_seconds, created_at, updated_at)
             VALUES (%s, 'Replay Move Target', '', 0, 'RPJMOVE',
                 %s, %s, true, true,
@@ -76,7 +77,7 @@ def _seed_move_target(conn) -> None:
                 false, 'UTC', false,
                 '', '', 0,
                 0, false, false,
-                0, '', 0, now(), now())
+                0, '', 'fail_to_backlog', 0, now(), now())
             """,
             (TARGET_PROJECT_ID, str(ws_id), str(admin_id)),
         )
@@ -240,14 +241,14 @@ def _seed_followup(conn) -> None:
         cur.execute(
             """
             INSERT INTO agent_run
-               (failure_reason, id, status, prompt, run_config, required_capabilities, thread_id,
-                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
-                refusal_category, trigger, executor_kind, dispatch_attempts,
-                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
-            VALUES ('', %s,'running','contract prompt','{}','{}','contract-thread','',
-                    %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                    '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
+               (id, status, prompt, run_config, required_capabilities, thread_id,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                trigger, executor_kind, dispatch_attempts,
+                cancel_reason, tool_plan, phase_kind, agent_metadata,
+                usage, pin_kind, created_at)
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}','',
+                    %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
+                    '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())
             """,
             (RUN_ID, ws_id, ISS_B_ID, POD_ID, admin_id),
         )
@@ -257,14 +258,14 @@ def _seed_followup(conn) -> None:
         cur.execute(
             """
             INSERT INTO agent_run
-               (failure_reason, id, status, prompt, run_config, required_capabilities, thread_id,
-                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
-                refusal_category, trigger, executor_kind, dispatch_attempts,
-                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
-            VALUES ('', %s,'running','contract prompt','{}','{}','contract-thread','',
-                    %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                    '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
+               (id, status, prompt, run_config, required_capabilities, thread_id,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                trigger, executor_kind, dispatch_attempts,
+                cancel_reason, tool_plan, phase_kind, agent_metadata,
+                usage, pin_kind, created_at)
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}','',
+                    %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
+                    '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())
             """,
             (RUN2_ID, ws_id, ISS_C_ID, POD_ID, admin_id),
         )

@@ -25,7 +25,7 @@ it with `psycopg` and never touches Django. Both variables are required —
 the suite errors out when either is missing.
 
 The server under test should run with a generous `API_KEY_RATE_LIMIT`
-(e.g. `100000/minute`): the default `60/minute` per-key throttle is real
+(e.g. `100000/minute`): the default `120/minute` per-key throttle is real
 backend behavior, but the suite is a contract check, not a throttle check.
 Each test module authenticates with its own API key so per-key budgets stay
 independent either way.

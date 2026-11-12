@@ -26,6 +26,11 @@
 //!   `rmcp`): [`tool_schemas`] returns the same JSON Schema documents as
 //!   `serde_json::Value`, built by hand from the Python signatures.
 //!
+//! Dedicated-runner inputs (PDASHOSS01-350, design §14.6) extend the
+//! port: `create_issue`/`update_issue` accept `assigned_runner` /
+//! `assigned_pod` through the shared service, `get_issue` returns the
+//! assignment, its detail and `dispatch_wait`.
+//!
 //! Fixture: `rust-api/fixtures/assistant/tools-tasks.json` (`F-A6-10`,
 //! `tools.issues` + `tools.caps`); scoping/error vectors under
 //! `tools-tasks.json#/scoping` and `#/results_helpers`.
@@ -239,6 +244,8 @@ pub struct BriefRow<'a> {
     pub state_name: Option<&'a str>,
     pub state_group: Option<&'a str>,
     pub priority: &'a str,
+    pub assigned_pod_id: Option<&'a str>,
+    pub assigned_runner_id: Option<&'a str>,
 }
 
 /// `_brief` (`issues.py:41-53`): name wrapped + truncated at 200 code
@@ -256,6 +263,8 @@ pub fn brief_row(row: &BriefRow<'_>) -> Value {
         "state": row.state_name,
         "state_group": row.state_group,
         "priority": row.priority,
+        "assigned_pod_id": row.assigned_pod_id,
+        "assigned_runner_id": row.assigned_runner_id,
     })
 }
 
@@ -412,6 +421,171 @@ pub fn parent_update<'a>(parent_issue_id: Option<&'a str>) -> ParentUpdate<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Dedicated runner / pod inputs (design §14.6)
+// ---------------------------------------------------------------------------
+
+/// Sentinel default for `update_issue.assigned_runner` /
+/// `assigned_pod`; distinguishes "argument omitted" from explicit
+/// `null` (clear), mirroring `PARENT_UNSET`.
+pub const EXECUTION_TARGET_UNSET: &str = "__unset__";
+
+/// `update_issue` execution-target tri-state (`issues.py` after
+/// PDASHOSS01-350): the sentinel means untouched, `None` means clear,
+/// anything else resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionTarget<'a> {
+    Untouched,
+    Clear,
+    Set(&'a str),
+}
+
+pub fn execution_target<'a>(raw: Option<&'a str>) -> ExecutionTarget<'a> {
+    match raw {
+        None => ExecutionTarget::Clear,
+        Some(EXECUTION_TARGET_UNSET) => ExecutionTarget::Untouched,
+        Some(raw) => ExecutionTarget::Set(raw),
+    }
+}
+
+/// Whether an execution-target ref is a UUID (passthrough lookup) or a
+/// name resolved within the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionRef {
+    Id,
+    Name,
+}
+
+pub fn classify_execution_ref(raw: &str) -> ExecutionRef {
+    if is_uuid_token(raw) {
+        ExecutionRef::Id
+    } else {
+        ExecutionRef::Name
+    }
+}
+
+/// Match a runner name among a project's visible runners.
+/// Case-insensitive exact match (the states/labels resolution
+/// precedent); returns the row index or the tool-channel error quoting
+/// the available names / ambiguous matches.
+pub fn match_runner_name(rows: &[(uuid::Uuid, String)], name: &str) -> Result<usize, ToolError> {
+    let needle = py_strip(name).to_lowercase();
+    let matches: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, row_name))| row_name.trim().to_lowercase() == needle)
+        .map(|(index, _)| index)
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => {
+            let available = rows
+                .iter()
+                .map(|(_, row_name)| row_name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let available = if available.is_empty() {
+                "(none)".to_owned()
+            } else {
+                available
+            };
+            Err(ToolError::Retry(format!(
+                "assigned_runner '{name}' not found; available: {available}"
+            )))
+        }
+        n => {
+            let listed = matches
+                .iter()
+                .map(|index| format!("{} ({})", rows[*index].1, rows[*index].0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ToolError::Retry(format!(
+                "assigned_runner '{name}' matched {n} runners; disambiguate with the UUID: {listed}"
+            )))
+        }
+    }
+}
+
+/// Match a pod name among a project's pods: full `<PROJ>_<name>` first,
+/// then the bare `<name>` suffix.
+pub fn match_pod_name(rows: &[(uuid::Uuid, String)], name: &str) -> Result<usize, ToolError> {
+    let needle = py_strip(name);
+    let mut matches: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, row_name))| row_name == needle)
+        .map(|(index, _)| index)
+        .collect();
+    if matches.is_empty() {
+        matches = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, row_name))| {
+                row_name
+                    .split_once('_')
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or(row_name.as_str())
+                    == needle
+            })
+            .map(|(index, _)| index)
+            .collect();
+    }
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => {
+            let available = rows
+                .iter()
+                .map(|(_, row_name)| row_name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let available = if available.is_empty() {
+                "(none)".to_owned()
+            } else {
+                available
+            };
+            Err(ToolError::Retry(format!(
+                "assigned_pod '{name}' not found; available: {available}"
+            )))
+        }
+        n => {
+            let listed = matches
+                .iter()
+                .map(|index| format!("{} ({})", rows[*index].1, rows[*index].0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ToolError::Retry(format!(
+                "assigned_pod '{name}' matched {n} pods; disambiguate with the UUID: {listed}"
+            )))
+        }
+    }
+}
+
+/// Render an E-code refusal for the tool channel: the API's detail,
+/// byte-exact, with the machine code appended (`{detail} [{code}]`),
+/// mirroring `_validate_execution_target_or_retry`.
+pub fn execution_refusal_message(detail: &str, code: &str) -> String {
+    if code.is_empty() {
+        detail.to_owned()
+    } else {
+        format!("{detail} [{code}]")
+    }
+}
+
+/// Runners of a project visible to the acting user, for name
+/// resolution (owner-private rows are invisible to non-owners, so a
+/// private runner fails closed at "not found" instead of leaking).
+/// `$1` is the project id, `$2` the acting user id.
+pub const RUNNERS_IN_PROJECT_SQL: &str = "SELECT runner.id, runner.name FROM runner \
+     INNER JOIN pod ON pod.id = runner.pod_id \
+     WHERE pod.project_id = $1 \
+     AND runner.owner_id = $2 AND runner.visibility = 0 \
+     AND runner.deleted_at IS NULL ORDER BY runner.name";
+
+/// Pods of a project, for name resolution. `$1` is the project id.
+pub const PODS_IN_PROJECT_SQL: &str = "SELECT pod.id, pod.name FROM pod \
+     INNER JOIN projects ON projects.id = pod.project_id \
+     WHERE pod.project_id = $1 AND pod.deleted_at IS NULL ORDER BY pod.name";
+
+// ---------------------------------------------------------------------------
 // create_issue / update_issue validation + write plans
 // ---------------------------------------------------------------------------
 
@@ -462,6 +636,8 @@ pub struct UpdateInput<'a> {
     pub priority: Option<&'a str>,
     pub state_given: bool,
     pub parent: ParentUpdate<'a>,
+    pub pod: ExecutionTarget<'a>,
+    pub runner: ExecutionTarget<'a>,
 }
 
 /// Column writes plus the `changed` labels, in Python append order
@@ -495,6 +671,17 @@ pub fn plan_update(
     if !matches!(input.parent, ParentUpdate::Untouched) {
         changed.push("parent");
         update_fields.push("parent");
+    }
+    // Pod and dedicated runner ride the same persisted patch as the
+    // other fields (design §14.6); the handler persists the resolved
+    // values and runs them through the shared service.
+    if !matches!(input.pod, ExecutionTarget::Untouched) {
+        changed.push("pod");
+        update_fields.push("assigned_pod");
+    }
+    if !matches!(input.runner, ExecutionTarget::Untouched) {
+        changed.push("runner");
+        update_fields.push("assigned_runner");
     }
     if changed.is_empty() {
         // `issues.py:320-327` — note the em dash (U+2014), byte-exact.
@@ -1358,6 +1545,8 @@ pub fn detail_shape(
     description: &str,
     description_truncated: bool,
     recent_comments: Vec<Value>,
+    assigned_runner_detail: &Value,
+    dispatch_wait: &Value,
 ) -> Value {
     let mut data = brief;
     if let Value::Object(ref mut map) = data {
@@ -1367,6 +1556,11 @@ pub fn detail_shape(
             description_truncated.into(),
         );
         map.insert("recent_comments".to_owned(), recent_comments.into());
+        map.insert(
+            "assigned_runner_detail".to_owned(),
+            assigned_runner_detail.clone(),
+        );
+        map.insert("dispatch_wait".to_owned(), dispatch_wait.clone());
     }
     data
 }
@@ -1540,7 +1734,7 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "create_issue",
-            description: "Create an issue. Requires Member or Admin role. Pass parent_issue_id to link it as a sub-issue of another issue in the same project. (Assignees/labels: set them afterwards in the UI — not yet supported by this tool.)",
+            description: "Create an issue. Requires Member or Admin role. Pass parent_issue_id to link it as a sub-issue of another issue in the same project. Pass assigned_runner (UUID or name) to dedicate the issue to one runner and assigned_pod (UUID or name) to set its pod; eligibility follows the shared E-code rules and any E-code is returned to the model. (Assignees/labels: set them afterwards in the UI — not yet supported by this tool.)",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -1550,6 +1744,8 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                     "state_id": optional_string_param("State id; defaults to the project's default state."),
                     "priority": optional_string_param("One of urgent, high, medium, low, none (default none)."),
                     "parent_issue_id": optional_string_param("Parent issue in the same project (cycle-checked)."),
+                    "assigned_runner": optional_string_param("Dedicated runner (UUID or name in the project); eligibility follows the shared E-code rules."),
+                    "assigned_pod": optional_string_param("Pod (UUID or name, full or bare); follows the runner when only a runner is given."),
                 },
                 "required": ["project_id", "name"],
                 "additionalProperties": false,
@@ -1557,7 +1753,7 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "update_issue",
-            description: "Update an issue's name, description, state, or priority. Requires write access. Changing the state may dispatch a coding run if it moves the issue into a delegated/ticking state (same as moving it in the UI). Pass parent_issue_id to re-parent the issue (must be another issue in the same project); pass null to unlink it from its current parent; omit it to leave the parent unchanged.",
+            description: "Update an issue's name, description, state, priority, parent, pod or dedicated runner. Requires write access. Changing the state may dispatch a coding run if it moves the issue into a delegated/ticking state (same as moving it in the UI). Pass parent_issue_id to re-parent the issue (must be another issue in the same project); pass null to unlink it from its current parent; omit it to leave the parent unchanged. assigned_runner (UUID or name) dedicates the issue to one runner; null clears it back to \"any runner in the pod\". assigned_pod (UUID or name) sets the pod; null clears it; a pod change with no runner in the same update also clears the dedicated runner (§13.1). Eligibility follows the shared E-code rules and any E-code is returned to the model.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -1569,6 +1765,16 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                     "parent_issue_id": {
                         "type": ["string", "null"],
                         "description": "Re-parent target; null unlinks; omission (sentinel __unset__) leaves it unchanged.",
+                        "default": "__unset__",
+                    },
+                    "assigned_runner": {
+                        "type": ["string", "null"],
+                        "description": "Dedicated runner (UUID or name); null clears it; omission (sentinel __unset__) leaves it unchanged.",
+                        "default": "__unset__",
+                    },
+                    "assigned_pod": {
+                        "type": ["string", "null"],
+                        "description": "Pod (UUID or name); null clears it; omission (sentinel __unset__) leaves it unchanged. A pod change without a runner in the same update also clears the dedicated runner.",
                         "default": "__unset__",
                     },
                 },
@@ -1710,6 +1916,8 @@ mod tests {
             state_name: Some("Backlog"),
             state_group: Some("backlog"),
             priority: "high",
+            assigned_pod_id: None,
+            assigned_runner_id: None,
         };
         let value = brief_row(&row);
         assert_eq!(value["identifier"], "PROJ-7");
@@ -1790,6 +1998,8 @@ mod tests {
             priority: Some("high"),
             state_given: true,
             parent: ParentUpdate::Unlink,
+            pod: ExecutionTarget::Untouched,
+            runner: ExecutionTarget::Untouched,
         };
         let (changed, fields) = plan_update(&input).unwrap();
         assert_eq!(
@@ -1819,6 +2029,8 @@ mod tests {
             priority: None,
             state_given: false,
             parent: ParentUpdate::Untouched,
+            pod: ExecutionTarget::Untouched,
+            runner: ExecutionTarget::Untouched,
         };
         let err = plan_update(&input).unwrap_err();
         assert_eq!(
@@ -1833,6 +2045,8 @@ mod tests {
             priority: None,
             state_given: false,
             parent: ParentUpdate::Untouched,
+            pod: ExecutionTarget::Untouched,
+            runner: ExecutionTarget::Untouched,
         };
         assert!(plan_update(&blank).is_err());
     }
@@ -2346,11 +2560,25 @@ mod tests {
             state_name: None,
             state_group: None,
             priority: "none",
+            assigned_pod_id: Some("pod-1"),
+            assigned_runner_id: Some("runner-1"),
         };
-        let value = detail_shape(brief_row(&row), "Desc", false, vec![]);
+        let runner_detail = json!({"id": "runner-1", "name": "gpu-box"});
+        let value = detail_shape(
+            brief_row(&row),
+            "Desc",
+            false,
+            vec![],
+            &runner_detail,
+            &Value::Null,
+        );
         assert_eq!(value["identifier"], "PROJ-1");
         assert_eq!(value["description"], "<untrusted>Desc</untrusted>");
         assert_eq!(value["recent_comments"], json!([]));
+        assert_eq!(value["assigned_pod_id"], "pod-1");
+        assert_eq!(value["assigned_runner_id"], "runner-1");
+        assert_eq!(value["assigned_runner_detail"], runner_detail);
+        assert_eq!(value["dispatch_wait"], Value::Null);
     }
 
     #[test]

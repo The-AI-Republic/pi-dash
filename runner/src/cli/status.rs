@@ -42,10 +42,19 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         },
     };
 
+    // The machine-level built-in engine state (design §4.3), from the
+    // daemon when it answers.
+    let engine = if daemon.is_some() {
+        engine_status(&socket).await
+    } else {
+        None
+    };
+
     if args.json {
         let payload = serde_json::json!({
             "service": service_state,
             "daemon": daemon,
+            "engine": engine,
             "ipc_socket": socket,
             "ipc_error": ipc_error.as_ref().map(|e| format!("{e:#}")),
             "legacy_socket": legacy_socket,
@@ -56,6 +65,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         match (&daemon, &ipc_error) {
             (Some(s), _) => {
                 s.print_compact();
+                if let Some(engine) = &engine {
+                    println!("{}", crate::cli::engine_cmd::describe_status(engine));
+                }
                 if let Some(legacy) = &legacy_socket {
                     eprintln!(
                         "note: reached the daemon at legacy socket {} (started by an older \
@@ -81,4 +93,18 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn engine_status(socket: &std::path::Path) -> Option<crate::ipc::protocol::EngineStatusInfo> {
+    use crate::ipc::protocol::{Request, Response};
+    let mut client = crate::ipc::client::Client::connect(socket).await.ok()?;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.call(Request::EngineStatus),
+    )
+    .await
+    {
+        Ok(Ok(Response::EngineStatus(st))) => Some(st),
+        _ => None,
+    }
 }

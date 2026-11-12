@@ -11,6 +11,12 @@
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::Response;
+use sea_orm::sea_query::{Asterisk, Expr, Func};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+
+use pidash_db::entity as orm;
+use pidash_db::pool::sea_orm_connection;
+use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus};
 
 use super::{pool_of, view_response, ALLOW_RUNNER_METRICS};
 use crate::state::AppState;
@@ -32,32 +38,70 @@ pub const ACTIVE_RUN_STATUSES: [&str; 5] = [
 /// Runner status counts with the per-status paused count
 /// (`values("status").annotate(c=Count("id"), paused=Count("id",
 /// filter=Q(paused_at__isnull=False, revoked_at__isnull=True)))`,
-/// `09738d222` adds the `paused` arm).
-pub fn runner_status_counts_sql() -> String {
-    r#"SELECT "runner"."status", COUNT("runner"."id") AS "c", COUNT("runner"."id") FILTER (WHERE ("runner"."paused_at" IS NOT NULL AND "runner"."revoked_at" IS NULL)) AS "paused" FROM "runner" GROUP BY "runner"."status""#
-        .to_owned()
+/// `09738d222` adds the `paused` arm). The filtered count is
+/// `COUNT(CASE WHEN .. THEN id END)` — the same non-null count as
+/// Django's `FILTER (WHERE ..)` rendering.
+pub fn runner_status_counts_select(
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(String, i64, i64)>> {
+    use orm::runner::{Column, Entity};
+    let paused = Expr::col((Entity, Column::PausedAt))
+        .is_not_null()
+        .and(Expr::col((Entity, Column::RevokedAt)).is_null());
+    Entity::find()
+        .select_only()
+        .column(Column::Status)
+        .column_as(Expr::col((Entity, Column::Id)).count(), "c")
+        .expr_as(
+            Func::count(Expr::case(paused, Expr::col((Entity, Column::Id)))),
+            "paused",
+        )
+        .group_by(Column::Status)
+        .into_tuple::<(String, i64, i64)>()
 }
 
-/// In-flight run count. Params `$1..=$5` the [`ACTIVE_RUN_STATUSES`].
-pub fn active_runs_count_sql() -> String {
-    r#"SELECT COUNT(*) FROM "agent_run" WHERE "agent_run"."status" IN ($1, $2, $3, $4, $5)"#
-        .to_owned()
+/// In-flight run count over the [`ACTIVE_RUN_STATUSES`].
+pub fn active_runs_count_select() -> sea_orm::Selector<sea_orm::SelectGetableTuple<i64>> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .expr_as(Func::count(Expr::col(Asterisk)), "count")
+        .filter(Column::Status.is_in(ACTIVE_RUN_STATUSES))
+        .into_tuple::<i64>()
 }
 
-/// Pending-approval count. Param `$1` `pending`.
-pub fn pending_approvals_count_sql() -> String {
-    r#"SELECT COUNT(*) FROM "agent_run_approval" WHERE "agent_run_approval"."status" = $1"#
-        .to_owned()
+/// Pending-approval count.
+pub fn pending_approvals_count_select() -> sea_orm::Selector<sea_orm::SelectGetableTuple<i64>> {
+    use orm::agent_run_approval::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .expr_as(Func::count(Expr::col(Asterisk)), "count")
+        .filter(Column::Status.eq(ApprovalStatus::Pending.value()))
+        .into_tuple::<i64>()
 }
 
 /// FAILED-run counts per canonical `failure_reason` (`metrics.py`,
 /// PDASHOSS01-183): `filter(status=FAILED).exclude(failure_reason="")
 /// .values_list("failure_reason").annotate(Count("id"))` — rows that
-/// predate the taxonomy backfill (blank reason) are omitted. Param `$1`
-/// `failed`. Sorted by the caller (Python `sorted()` over the tuples).
+/// predate the taxonomy backfill (blank reason) are omitted. Sorted by
+/// the caller (Python `sorted()` over the tuples).
 pub fn failed_by_reason_counts_sql() -> String {
-    r#"SELECT "agent_run"."failure_reason", COUNT("agent_run"."id") FROM "agent_run" WHERE ("agent_run"."status" = $1 AND NOT ("agent_run"."failure_reason" = '')) GROUP BY "agent_run"."failure_reason""#
+    r#"SELECT "agent_run"."failure_reason", COUNT("agent_run"."id") FROM "agent_run" WHERE ("agent_run"."status" = 'failed' AND NOT ("agent_run"."failure_reason" = '')) GROUP BY "agent_run"."failure_reason""#
         .to_owned()
+}
+
+/// SeaORM twin of [`failed_by_reason_counts_sql`]: the `(reason, count)`
+/// rows the `pi_dash_runs_failed_by_reason` gauge renders.
+pub fn failed_by_reason_counts_select(
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(String, i64)>> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::FailureReason)
+        .expr_as(Func::count(Expr::col(Column::Id)), "c")
+        .filter(Column::Status.eq(AgentRunStatus::Failed.value()))
+        .filter(Column::FailureReason.ne(""))
+        .group_by(Column::FailureReason)
+        .into_tuple::<(String, i64)>()
 }
 
 /// One gauge family with a single label (`_labeled_gauge`, `metrics.py`):
@@ -149,10 +193,8 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let status_rows: Vec<(String, i64, i64)> = match sqlx::query_as(&runner_status_counts_sql())
-        .fetch_all(pool)
-        .await
-    {
+    let db = sea_orm_connection(pool);
+    let status_rows: Vec<(String, i64, i64)> = match runner_status_counts_select().all(&db).await {
         Ok(rows) => rows,
         Err(_) => return server_error(),
     };
@@ -176,29 +218,16 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
             _ => {}
         }
     }
-    let active_sql = active_runs_count_sql();
-    let mut active_query = sqlx::query_scalar::<_, i64>(&active_sql);
-    for status in ACTIVE_RUN_STATUSES {
-        active_query = active_query.bind(status);
-    }
-    let active_runs: i64 = match active_query.fetch_one(pool).await {
-        Ok(count) => count,
-        Err(_) => return server_error(),
+    let active_runs: i64 = match active_runs_count_select().one(&db).await {
+        Ok(Some(count)) => count,
+        Ok(None) | Err(_) => return server_error(),
     };
-    let pending_approvals: i64 = match sqlx::query_scalar::<_, i64>(&pending_approvals_count_sql())
-        .bind(pidash_types::runner_runs::ApprovalStatus::Pending.value())
-        .fetch_one(pool)
-        .await
-    {
-        Ok(count) => count,
-        Err(_) => return server_error(),
+    let pending_approvals: i64 = match pending_approvals_count_select().one(&db).await {
+        Ok(Some(count)) => count,
+        Ok(None) | Err(_) => return server_error(),
     };
     let mut failed_by_reason: Vec<(String, i64)> =
-        match sqlx::query_as(&failed_by_reason_counts_sql())
-            .bind(pidash_types::runner_runs::AgentRunStatus::Failed.value())
-            .fetch_all(pool)
-            .await
-        {
+        match failed_by_reason_counts_select().all(&db).await {
             Ok(rows) => rows,
             Err(_) => return server_error(),
         };
@@ -269,6 +298,36 @@ mod tests {
         assert_eq!(
             labeled_gauge("g", "h", &[("reason", "a\"b\\c", 1)]),
             "# HELP g h\n# TYPE g gauge\ng{reason=\"a\\\"b\\\\c\"} 1\n"
+        );
+    }
+
+    #[test]
+    fn gauge_statement_shapes() {
+        let counts = runner_status_counts_select()
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert_eq!(
+            counts,
+            "SELECT \"runner\".\"status\", COUNT(\"runner\".\"id\") AS \"c\", \
+             COUNT((CASE WHEN (\"runner\".\"paused_at\" IS NOT NULL AND \
+             \"runner\".\"revoked_at\" IS NULL) THEN \"runner\".\"id\" END)) AS \"paused\" \
+             FROM \"runner\" GROUP BY \"runner\".\"status\""
+        );
+        let active = active_runs_count_select()
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert_eq!(
+            active,
+            "SELECT COUNT(*) AS \"count\" FROM \"agent_run\" WHERE \"agent_run\".\"status\" IN \
+             ('assigned', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth')"
+        );
+        let pending = pending_approvals_count_select()
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert_eq!(
+            pending,
+            "SELECT COUNT(*) AS \"count\" FROM \"agent_run_approval\" WHERE \
+             \"agent_run_approval\".\"status\" = 'pending'"
         );
     }
 

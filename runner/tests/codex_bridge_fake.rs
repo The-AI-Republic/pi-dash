@@ -5,7 +5,9 @@
 use pidash::codex::app_server::AppServer;
 use pidash::codex::bridge::{Bridge, BridgeEvent, RunPayload};
 use pidash::codex::jsonrpc::{self, Incoming};
-use pidash::codex::schema::{ClientInfo, InitializeParams, TurnInputItem, TurnStartParams};
+use pidash::codex::schema::{
+    ClientInfo, InitializeParams, ThreadResumeParams, TurnInputItem, TurnStartParams,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
@@ -309,4 +311,118 @@ fn codex_request_params_serialize_in_v2_shape() {
     assert_eq!(turn["params"]["threadId"], "thread-123");
     assert_eq!(turn["params"]["input"][0]["type"], "text");
     assert_eq!(turn["params"]["input"][0]["text"], "hello");
+
+    let resume = jsonrpc::request(
+        3,
+        "thread/resume",
+        &ThreadResumeParams {
+            thread_id: "thread-123".into(),
+        },
+    )
+    .expect("serialize thread/resume");
+    let resume: serde_json::Value = serde_json::from_str(&resume).unwrap();
+    assert_eq!(resume["method"], "thread/resume");
+    assert_eq!(resume["params"]["threadId"], "thread-123");
+}
+
+/// A continuing chat must resume the saved thread: the first warm sends
+/// `thread/resume` with the stored id, not `thread/start`.
+#[tokio::test]
+async fn warm_resumes_saved_thread() {
+    let script = r#"
+        set -e
+        read init
+        case "$init" in *'"method":"initialize"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"expected initialize"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+        read initialized
+        case "$initialized" in *'"method":"initialized"'*) ;; *) exit 1;; esac
+        read resume
+        case "$resume" in *'"method":"thread/resume"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/resume, got: '"$resume"'"}}'; exit 0;; esac
+        case "$resume" in *'"threadId":"th_saved"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected threadId th_saved, got: '"$resume"'"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"th_saved"}}}'
+        sleep 0.1
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd)
+        .await
+        .expect("spawn fake codex");
+    let mut bridge = Bridge::from_server(server, None);
+    bridge.set_resume_thread_id(Some("th_saved"));
+
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let thread_id = bridge.warm(&cwd).await.expect("warm should resume");
+    assert_eq!(thread_id, "th_saved");
+}
+
+/// When the engine no longer knows the saved thread (e.g. after Delete
+/// chat history wiped CODEX_HOME), warm falls back to `thread/start` so
+/// the chat still proceeds on a new thread.
+#[tokio::test]
+async fn warm_falls_back_to_start_when_resume_unknown() {
+    let script = r#"
+        set -e
+        read _
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+        read _
+        read resume
+        case "$resume" in *'"method":"thread/resume"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/resume"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"thread not found"}}'
+        read start
+        case "$start" in *'"method":"thread/start"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32600,"message":"expected thread/start fallback, got: '"$start"'"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"threadId":"th_new"}}'
+        sleep 0.1
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd)
+        .await
+        .expect("spawn fake codex");
+    let mut bridge = Bridge::from_server(server, None);
+    bridge.set_resume_thread_id(Some("th_deleted"));
+
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let thread_id = bridge
+        .warm(&cwd)
+        .await
+        .expect("warm should fall back to start");
+    assert_eq!(thread_id, "th_new");
+}
+
+/// A resumed thread runs its next turn on the same id: `run` after resume
+/// issues `turn/start` for the resumed thread, not a new one.
+#[tokio::test]
+async fn resumed_bridge_runs_turn_on_resumed_thread() {
+    let script = r#"
+        set -e
+        read _
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+        read _
+        read resume
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"th_saved"}}}'
+        read turn
+        case "$turn" in *'"method":"turn/start"'*'"threadId":"th_saved"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32600,"message":"expected turn/start on th_saved"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"resumed"}}}'
+        sleep 0.1
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd)
+        .await
+        .expect("spawn fake codex");
+    let mut bridge = Bridge::from_server(server, None);
+    bridge.set_resume_thread_id(Some("th_saved"));
+
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let payload = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "what was the codeword?".into(),
+        model: None,
+    };
+    let mut cursor = bridge
+        .run(&payload, &cwd)
+        .await
+        .expect("run should resume then turn");
+    assert_eq!(cursor.thread_id, "th_saved");
+    wait_completed(&mut bridge, &mut cursor).await;
 }

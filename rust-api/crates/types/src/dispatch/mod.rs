@@ -5,8 +5,9 @@
 //! * [`error`] — `cloud_agent/errors.py:7-44` (`sanitize_error`,
 //!   `_is_usage_limit`, `classify_error`).
 //! * [`output`] — `cloud_agent/output.py:1-13` (`CloudAgentOutput`).
-//! * [`executor`] — `core/agent_execution.py:7-31` (`AgentExecutorKind`,
-//!   `MACHINE_EXECUTORS`, `get_default_agent_executor` only).
+//! * [`executor`] — `core/agent_execution.py:7-55` (`AgentExecutorKind`,
+//!   `MACHINE_EXECUTORS`, `DEPRECATED_EXECUTORS`, `normalize_executor_write`,
+//!   `get_default_agent_executor`).
 //! * [`managed_runner`] — `managed_runner/errors.py:15-45`
 //!   (`ManagedRunnerReason`, `ManagedRunnerUnavailable`).
 //!
@@ -20,7 +21,10 @@ pub mod output;
 
 pub use error::MAX_ERROR_TEXT_CHARS;
 pub use error::{classify_error, is_usage_limit, sanitize_error, ErrorCode, UsageLimitExceeded};
-pub use executor::{get_default_agent_executor, AgentExecutorKind, MACHINE_EXECUTORS};
+pub use executor::{
+    get_default_agent_executor, normalize_executor_write, AgentExecutorKind, DEPRECATED_EXECUTORS,
+    MACHINE_EXECUTORS,
+};
 pub use managed_runner::{ManagedRunnerReason, ManagedRunnerUnavailable};
 pub use output::{CloudAgentOutput, Outcome, OutputValidationError};
 pub use output::{

@@ -8,19 +8,24 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select,
+};
+use sea_query::{Expr, Func};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::db::is_unique_violation;
+use pidash_db::entity::{issue_relations, issues, project_members, projects, states, workspaces};
 
 use crate::domain::relations as relation_domain;
 use crate::domain::WriteCtx;
-use crate::read;
 use crate::v1_work_items::queries_sub::actual_relation;
 use crate::v1_work_items::tasks as work_tasks;
 
-use super::common::{db_error, map_read_error, now_utc};
+use super::common::{db_error, now_utc};
 use super::deps::Deps;
 use super::error::{Error, Outcome};
 
@@ -149,26 +154,53 @@ impl ResolvedIssue {
     }
 }
 
-/// The shared visible-pool predicates: `member_project_issues(user, slug)`
+/// `_source`/visible-pool predicates shared by [`visible_pool_query`]
+/// and [`fetch_source`]: the `IssueManager` scope plus triage, archive
+/// and draft guards. The triage guard keeps stateless rows open: `group
+/// IS NULL` is a separate positive arm because `<>` excludes NULLs.
+fn live_manager_scope() -> Condition {
+    Condition::all()
+        .add(issues::Column::DeletedAt.is_null())
+        .add(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .add(issues::Column::ArchivedAt.is_null())
+        .add(projects::Column::ArchivedAt.is_null())
+        .add(issues::Column::IsDraft.eq(false))
+}
+
+/// The shared visible-pool select: `member_project_issues(user, slug)`
 /// (`core/querysets.py:19-30`) — the `IssueManager` scope plus workspace
 /// slug plus an active project membership of the caller. The membership
-/// join carries NO `deleted_at` guard (fixture-verbatim
-/// `member_guard_sql`).
-const VISIBLE_POOL_JOINS: &str = r#"FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")"#;
+/// carries NO `deleted_at` guard (fixture-verbatim `member_guard_sql`);
+/// the raw `EXISTS` becomes an `INNER JOIN` on `project_members` — the
+/// row multiplicity it adds is unobservable: the callers take `.first()`
+/// (identical duplicate rows) or key by `id` in a `HashMap`.
+fn visible_pool_query(slug: &str, user_id: &Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .filter(live_manager_scope())
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+}
 
-const VISIBLE_POOL_WHERE: &str = r#""issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND EXISTS(SELECT 1 FROM "project_members"
-                        WHERE "project_members"."project_id" = "issues"."project_id"
-                          AND "project_members"."member_id" = $2
-                          AND "project_members"."is_active")"#;
+/// One resolved pool issue, in the raw's output columns.
+#[derive(Debug, Clone, FromQueryResult)]
+struct ResolvedRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    identifier: String,
+    sequence_id: i32,
+}
 
 /// `resolve_refs(refs, visible)` (`relations.py:138-163`): each raw ref is
 /// `str(raw or "").strip()`, tried as a UUID first (flexible parse),
@@ -407,19 +439,27 @@ async fn resolve_by_id(
     user_id: &Uuid,
     id: &Uuid,
 ) -> Result<Option<ResolvedIssue>, Error> {
-    let row = sqlx::query(&format!(
-        r#"SELECT "issues"."id", "issues"."workspace_id", "projects"."identifier", "issues"."sequence_id"
-           {VISIBLE_POOL_JOINS}
-           WHERE ({VISIBLE_POOL_WHERE}) AND "issues"."id" = $3
-           ORDER BY "issues"."created_at" DESC LIMIT 1"#
-    ))
-    .bind(slug)
-    .bind(user_id)
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "resolve-ref-id"))?;
-    row.map(decode_resolved).transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = visible_pool_query(slug, user_id)
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+        ])
+        .column_as(projects::Column::Identifier, "identifier")
+        .filter(issues::Column::Id.eq(*id))
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_model::<ResolvedRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "resolve-ref-id"))?;
+    Ok(row.map(|row| ResolvedIssue {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
+    }))
 }
 
 /// The identifier attempt (`relations.py:157-158`): `UPPER(identifier) =
@@ -435,30 +475,34 @@ async fn resolve_by_identifier(
     if sequence > i64::from(i32::MAX) || sequence < i64::from(i32::MIN) {
         return Ok(None);
     }
-    let row = sqlx::query(&format!(
-        r#"SELECT "issues"."id", "issues"."workspace_id", "projects"."identifier", "issues"."sequence_id"
-           {VISIBLE_POOL_JOINS}
-           WHERE ({VISIBLE_POOL_WHERE}) AND UPPER("projects"."identifier") = UPPER($3)
-             AND "issues"."sequence_id" = $4
-           ORDER BY "issues"."created_at" DESC LIMIT 1"#
-    ))
-    .bind(slug)
-    .bind(user_id)
-    .bind(ident)
-    .bind(sequence as i32)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "resolve-ref-identifier"))?;
-    row.map(decode_resolved).transpose()
-}
-
-fn decode_resolved(row: sqlx::postgres::PgRow) -> Result<ResolvedIssue, Error> {
-    Ok(ResolvedIssue {
-        id: read::row_uuid(&row, "id").map_err(map_read_error)?,
-        workspace_id: read::row_uuid(&row, "workspace_id").map_err(map_read_error)?,
-        project_identifier: read::row_string(&row, "identifier").map_err(map_read_error)?,
-        sequence_id: row.try_get("sequence_id").map_err(|_| Error::ServerError)?,
-    })
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = visible_pool_query(slug, user_id)
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+        ])
+        .column_as(projects::Column::Identifier, "identifier")
+        .filter(
+            Expr::expr(Func::upper(Expr::col((
+                projects::Entity,
+                projects::Column::Identifier,
+            ))))
+            .eq(Func::upper(Expr::val(ident))),
+        )
+        .filter(issues::Column::SequenceId.eq(sequence as i32))
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_model::<ResolvedRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "resolve-ref-identifier"))?;
+    Ok(row.map(|row| ResolvedIssue {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
+    }))
 }
 
 /// `_source` (`views/issue.py:3153-3156`): the manager-scoped issue plus
@@ -478,57 +522,68 @@ impl SourceIssue {
     }
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+struct SourceRow {
+    id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    identifier: String,
+    sequence_id: i32,
+}
+
 pub async fn fetch_source(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     issue_id: &Uuid,
 ) -> Result<SourceIssue, Error> {
-    let row = sqlx::query(
-        r#"SELECT "issues"."id", "issues"."project_id", "issues"."workspace_id",
-                  "projects"."identifier", "issues"."sequence_id"
-           FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-           WHERE ("issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND "issues"."project_id" = $2
-             AND "issues"."id" = $3)"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "relation-source"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = issues::Entity::find()
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+        ])
+        .column_as(projects::Column::Identifier, "identifier")
+        .filter(live_manager_scope())
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::Id.eq(*issue_id))
+        .into_model::<SourceRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "relation-source"))?;
     let Some(row) = row else {
         return Err(Error::NotFound);
     };
     Ok(SourceIssue {
-        id: read::row_uuid(&row, "id").map_err(map_read_error)?,
-        project_id: read::row_uuid(&row, "project_id").map_err(map_read_error)?,
-        workspace_id: read::row_uuid(&row, "workspace_id").map_err(map_read_error)?,
-        project_identifier: read::row_string(&row, "identifier").map_err(map_read_error)?,
-        sequence_id: row.try_get("sequence_id").map_err(|_| Error::ServerError)?,
+        id: row.id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
     })
 }
 
 /// `_check_targets` (`relations.py:166-177`): self-relation and
 /// cross-workspace refusals, then first-seen dedupe. The refusals fire
-/// before the dedupe check, so a duplicate self-ref still 400s.
+/// before the dedupe check, so a duplicate self-ref still 400s. With
+/// `raw_targets` the self-refusal and the dedupe are skipped (the MCP
+/// per-iteration loop); the cross-workspace refusal still runs.
 fn check_targets(
     source: &SourceIssue,
     targets: Vec<ResolvedIssue>,
+    raw_targets: bool,
 ) -> Result<Vec<ResolvedIssue>, Error> {
     let mut unique = Vec::with_capacity(targets.len());
     let mut seen = std::collections::HashSet::new();
     for target in targets {
-        if target.id == source.id {
+        if !raw_targets && target.id == source.id {
             return Err(Error::BadError(format!(
                 "{} cannot be related to itself",
                 source.identifier()
@@ -540,7 +595,7 @@ fn check_targets(
                 target.identifier()
             )));
         }
-        if seen.insert(target.id) {
+        if raw_targets || seen.insert(target.id) {
             unique.push(target);
         }
     }
@@ -601,30 +656,52 @@ fn type_from(row: &PairRow, viewpoint_id: &Uuid) -> String {
 
 /// `_pair_rows` (`relations.py:117-120`): live rows between the two ids in
 /// either direction, `Meta.ordering` (`-created_at`).
+#[derive(Debug, Clone, FromQueryResult)]
+struct PairStoredRow {
+    id: Uuid,
+    issue_id: Uuid,
+    related_issue_id: Uuid,
+    relation_type: String,
+}
+
 async fn fetch_pair_rows(pool: &PgPool, a_id: &Uuid, b_id: &Uuid) -> Result<Vec<PairRow>, Error> {
-    let rows = sqlx::query(
-        r#"SELECT "id", "issue_id", "related_issue_id", "relation_type" FROM "issue_relations"
-           WHERE "deleted_at" IS NULL
-             AND (("issue_id" = $1 AND "related_issue_id" = $2)
-               OR ("issue_id" = $2 AND "related_issue_id" = $1))
-           ORDER BY "created_at" DESC"#,
-    )
-    .bind(a_id)
-    .bind(b_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "relation-pair-rows"))?;
-    rows.iter()
-        .map(|row| {
-            Ok(PairRow {
-                id: read::row_uuid(row, "id").map_err(map_read_error)?,
-                issue_id: read::row_uuid(row, "issue_id").map_err(map_read_error)?,
-                related_issue_id: read::row_uuid(row, "related_issue_id")
-                    .map_err(map_read_error)?,
-                relation_type: read::row_string(row, "relation_type").map_err(map_read_error)?,
-            })
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::Id,
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::RelationType,
+        ])
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(issue_relations::Column::IssueId.eq(*a_id))
+                        .add(issue_relations::Column::RelatedIssueId.eq(*b_id)),
+                )
+                .add(
+                    Condition::all()
+                        .add(issue_relations::Column::IssueId.eq(*b_id))
+                        .add(issue_relations::Column::RelatedIssueId.eq(*a_id)),
+                ),
+        )
+        .order_by_desc(issue_relations::Column::CreatedAt)
+        .into_model::<PairStoredRow>()
+        .all(&db)
+        .await
+        .map_err(|error| db_error(error, "relation-pair-rows"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PairRow {
+            id: row.id,
+            issue_id: row.issue_id,
+            related_issue_id: row.related_issue_id,
+            relation_type: row.relation_type,
         })
-        .collect()
+        .collect())
 }
 
 /// The related-objects sweep payload (`SoftDeleteModel.delete()` calls
@@ -687,26 +764,44 @@ pub async fn grouped_relations(
     user_id: &Uuid,
     source: &SourceIssue,
 ) -> Result<Map<String, Value>, Error> {
-    let rows = sqlx::query(
-        r#"SELECT "issue_id", "related_issue_id", "relation_type" FROM "issue_relations"
-           WHERE "deleted_at" IS NULL
-             AND ("issue_id" = $1 OR "related_issue_id" = $1)
-             AND "workspace_id" = $2
-             AND NOT ("issue_id" = $1 AND "related_issue_id" = $1)"#,
-    )
-    .bind(source.id)
-    .bind(source.workspace_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "grouped-rows"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    #[derive(Debug, Clone, FromQueryResult)]
+    struct RawPair {
+        issue_id: Uuid,
+        related_issue_id: Uuid,
+        relation_type: String,
+    }
+    let rows = issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::RelationType,
+        ])
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.eq(source.id))
+                .add(issue_relations::Column::RelatedIssueId.eq(source.id)),
+        )
+        .filter(issue_relations::Column::WorkspaceId.eq(source.workspace_id))
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.ne(source.id))
+                .add(issue_relations::Column::RelatedIssueId.ne(source.id)),
+        )
+        .into_model::<RawPair>()
+        .all(&db)
+        .await
+        .map_err(|error| db_error(error, "grouped-rows"))?;
     let mut other_by_type: HashMap<&str, std::collections::HashSet<Uuid>> = HashMap::new();
     for relation in RELATION_TYPES {
         other_by_type.insert(*relation, std::collections::HashSet::new());
     }
     for row in &rows {
-        let issue_id = read::row_uuid(row, "issue_id").map_err(map_read_error)?;
-        let related_id = read::row_uuid(row, "related_issue_id").map_err(map_read_error)?;
-        let relation_type = read::row_string(row, "relation_type").map_err(map_read_error)?;
+        let issue_id = row.issue_id;
+        let related_id = row.related_issue_id;
+        let relation_type = row.relation_type.clone();
         let other = if issue_id == source.id {
             related_id
         } else {
@@ -730,31 +825,39 @@ pub async fn grouped_relations(
         .collect();
     let mut others: HashMap<Uuid, GroupedItem> = HashMap::new();
     if !wanted.is_empty() {
-        let pool_rows = sqlx::query(&format!(
-            r#"SELECT "issues"."id", "issues"."name", "issues"."sequence_id",
-                      "projects"."identifier" AS "project_identifier",
-                      "states"."name" AS "state_name", "states"."group" AS "state_group"
-               {VISIBLE_POOL_JOINS}
-               WHERE ({VISIBLE_POOL_WHERE})
-                 AND "issues"."id" = ANY($3)
-                 AND "issues"."workspace_id" = $4"#
-        ))
-        .bind(slug)
-        .bind(user_id)
-        .bind(&wanted)
-        .bind(source.workspace_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "grouped-pool"))?;
-        for row in &pool_rows {
+        #[derive(Debug, Clone, FromQueryResult)]
+        struct PoolRow {
+            id: Uuid,
+            name: String,
+            sequence_id: i32,
+            project_identifier: String,
+            state_name: Option<String>,
+            state_group: Option<String>,
+        }
+        let pool_rows = visible_pool_query(slug, user_id)
+            .select_only()
+            .columns([
+                issues::Column::Id,
+                issues::Column::Name,
+                issues::Column::SequenceId,
+            ])
+            .column_as(projects::Column::Identifier, "project_identifier")
+            .column_as(states::Column::Name, "state_name")
+            .column_as(states::Column::Group, "state_group")
+            .filter(issues::Column::Id.is_in(wanted.clone()))
+            .filter(issues::Column::WorkspaceId.eq(source.workspace_id))
+            .into_model::<PoolRow>()
+            .all(&db)
+            .await
+            .map_err(|error| db_error(error, "grouped-pool"))?;
+        for row in pool_rows {
             let item = GroupedItem {
-                id: read::row_uuid(row, "id").map_err(map_read_error)?,
-                project_identifier: read::row_string(row, "project_identifier")
-                    .map_err(map_read_error)?,
-                sequence_id: row.try_get("sequence_id").map_err(|_| Error::ServerError)?,
-                name: read::row_string(row, "name").map_err(map_read_error)?,
-                state_name: read::row_string_opt(row, "state_name").map_err(map_read_error)?,
-                state_group: read::row_string_opt(row, "state_group").map_err(map_read_error)?,
+                id: row.id,
+                project_identifier: row.project_identifier,
+                sequence_id: row.sequence_id,
+                name: row.name,
+                state_name: row.state_name,
+                state_group: row.state_group,
             };
             others.insert(item.id, item);
         }
@@ -848,7 +951,9 @@ async fn insert_relation_row(
         related_issue_id: related_id,
         relation_type: stored,
     };
-    match relation_domain::relate_row_or_nothing(pool, &row).await {
+    match relation_domain::relate_row_or_nothing(&pidash_db::pool::sea_orm_connection(pool), &row)
+        .await
+    {
         Ok(created) => Ok(created),
         Err(error) if is_unique_violation(&error) => Ok(false),
         Err(error) => Err(db_error(error, "relate-insert")),
@@ -859,7 +964,10 @@ async fn insert_relation_row(
 /// target", idempotent. Returns the response map minus `relations` (the
 /// caller appends the grouped read). With `pair_exact`, creation matches
 /// the exact oriented pair (the MCP `get_or_create`) instead of deduping
-/// across orientations.
+/// across orientations. With `raw_targets`, self ids and duplicate ids
+/// are processed per-iteration instead of refused/deduped (the MCP
+/// loop over the raw `related_issue_ids`).
+#[allow(clippy::too_many_arguments)]
 async fn relate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -868,9 +976,10 @@ async fn relate_op(
     actor_id: &Uuid,
     emit_activity: bool,
     pair_exact: bool,
+    raw_targets: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
-    let targets = check_targets(source, targets)?;
+    let targets = check_targets(source, targets, raw_targets)?;
     let mut created: Vec<&ResolvedIssue> = Vec::new();
     let mut unchanged: Vec<String> = Vec::new();
     let mut conflicts: Vec<Value> = Vec::new();
@@ -990,7 +1099,10 @@ async fn relate_op(
 /// response map minus `relations`. With `newest_only`, only the first
 /// match is removed: [`fetch_pair_rows`] returns newest-first (the
 /// model's `-created_at` ordering), so that is the row the MCP
-/// queryset's `.first()` deletes.
+/// queryset's `.first()` deletes. With `raw_targets`, self ids and
+/// duplicate ids are processed per-iteration instead of
+/// refused/deduped (the MCP loop over the raw `related_issue_ids`).
+#[allow(clippy::too_many_arguments)]
 async fn unrelate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -999,16 +1111,31 @@ async fn unrelate_op(
     actor_id: &Uuid,
     emit_activity: bool,
     newest_only: bool,
+    raw_targets: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
-    let targets = check_targets(source, targets)?;
+    let targets = check_targets(source, targets, raw_targets)?;
     let mut removed: Vec<String> = Vec::new();
     let mut not_related: Vec<String> = Vec::new();
     for target in &targets {
         let rows = fetch_pair_rows(pool, &source.id, &target.id).await?;
+        // Self targets only arrive in raw mode (the default refuses
+        // them in `check_targets`): the MCP queryset names the stored
+        // endpoints and the canonical type
+        // (`pi_dash_cloud/mcp/tools.py:726-732`), so a reverse-named
+        // request (`blocking`) still matches the canonically stored
+        // self row (`blocked_by`) — the viewpoint classifier would
+        // only echo the stored name from the issue side.
+        let self_target = target.id == source.id;
         let mut matching: Vec<&PairRow> = rows
             .iter()
-            .filter(|row| type_from(row, &source.id) == relation_type)
+            .filter(|row| {
+                if self_target {
+                    row.relation_type == actual_relation(relation_type)
+                } else {
+                    type_from(row, &source.id) == relation_type
+                }
+            })
             .collect();
         if matching.is_empty() {
             not_related.push(target.identifier());
@@ -1023,7 +1150,7 @@ async fn unrelate_op(
         }
         for row in matching {
             relation_domain::soft_delete_relation_row(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 row.id,
                 *actor_id,
                 now_utc(),
@@ -1107,7 +1234,9 @@ async fn unrelate_op(
 /// pre-fetched `write.source` before parsing the body, so a bogus issue
 /// 404s before a malformed body 400s (`:3165-3167`). `pair_exact` is
 /// the relate leg's option only and `newest_only` the unrelate leg's;
-/// each leg ignores the other's.
+/// each leg ignores the other's. `raw_targets` applies to both legs'
+/// target check.
+#[allow(clippy::too_many_arguments)]
 async fn relate_shared(
     deps: &Deps,
     ctx: &WriteCtx,
@@ -1116,6 +1245,7 @@ async fn relate_shared(
     is_relate: bool,
     newest_only: bool,
     pair_exact: bool,
+    raw_targets: bool,
 ) -> Result<Outcome, Error> {
     let pool = &deps.pool;
     let slug = write.slug;
@@ -1156,6 +1286,7 @@ async fn relate_shared(
             &actor_id,
             emit_activity,
             pair_exact,
+            raw_targets,
         )
         .await?
     } else {
@@ -1167,6 +1298,7 @@ async fn relate_shared(
             &actor_id,
             emit_activity,
             newest_only,
+            raw_targets,
         )
         .await?
     };
@@ -1207,6 +1339,15 @@ pub struct RelateOptions {
     /// `pi_dash_cloud/mcp/tools.py:664-675`). The v1 handler passes
     /// `false`; MCP passes `true`.
     pub pair_exact: bool,
+    /// Skip the self-refusal and the first-seen dedupe in
+    /// [`check_targets`] and loop the raw targets (design D6: the v1
+    /// agent endpoint refuses self-relations and dedupes —
+    /// `orchestration/relations.py:166-177` — while the MCP tool loops
+    /// the raw `related_issue_ids` — `pi_dash_cloud/mcp/tools.py:660`
+    /// — so a self id `get_or_create`s a row and duplicate ids report
+    /// per-iteration). The cross-workspace refusal still runs. The v1
+    /// handler passes `false`; MCP passes `true`.
+    pub raw_targets: bool,
 }
 
 /// Per-caller options for [`unrelate`].
@@ -1226,6 +1367,15 @@ pub struct UnrelateOptions {
     /// on both sides). The v1 handler passes `false`; MCP passes
     /// `true`.
     pub newest_only: bool,
+    /// Skip the self-refusal and the first-seen dedupe in
+    /// [`check_targets`] and loop the raw targets (design D6: the v1
+    /// agent endpoint refuses self-relations and dedupes —
+    /// `orchestration/relations.py:166-177` — while the MCP tool loops
+    /// the raw `related_issue_ids` — `pi_dash_cloud/mcp/tools.py:722`
+    /// — so a self id deletes the newest self row when one exists and
+    /// duplicate ids delete per-iteration). The cross-workspace refusal
+    /// still runs. The v1 handler passes `false`; MCP passes `true`.
+    pub raw_targets: bool,
 }
 
 /// `POST .../relations/relate/` (`views/issue.py:3232-3235`): record
@@ -1245,6 +1395,7 @@ pub async fn relate(
         true,
         false,
         options.pair_exact,
+        options.raw_targets,
     )
     .await
 }
@@ -1266,6 +1417,7 @@ pub async fn unrelate(
         false,
         options.newest_only,
         false,
+        options.raw_targets,
     )
     .await
 }
@@ -1273,6 +1425,31 @@ pub async fn unrelate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn visible_pool_joins_and_guards_match_the_manager_scope() {
+        let user = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = visible_pool_query("acme", &user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"FROM "issues""#), "{sql}");
+        assert!(sql.contains(r#"LEFT JOIN "states""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "projects""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "project_members""#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""project_members"."is_active""#), "{sql}");
+        // No deleted-at guard on the membership (fixture-verbatim).
+        assert!(
+            !sql.contains(r#""project_members"."deleted_at""#),
+            "membership carries no deleted-at guard: {sql}"
+        );
+        // Stateless rows stay visible; triage rows do not.
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+    }
 
     #[test]
     fn relation_type_validation_matrix() {
@@ -1560,6 +1737,7 @@ mod tests {
                 target("22222222-2222-2222-2222-222222222222", workspace),
                 target("22222222-2222-2222-2222-222222222222", workspace),
             ],
+            false,
         )
         .expect("dedupe");
         assert_eq!(kept.len(), 1);
@@ -1568,6 +1746,7 @@ mod tests {
             check_targets(
                 &source,
                 vec![target("11111111-1111-1111-1111-111111111111", workspace)],
+                false,
             ),
             Err(Error::BadError(
                 "CT-1 cannot be related to itself".to_owned()
@@ -1576,10 +1755,38 @@ mod tests {
         // Cross-workspace 400s.
         let elsewhere = Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("uuid");
         assert!(matches!(
-            check_targets(&source, vec![target(
-                "22222222-2222-2222-2222-222222222222",
-                elsewhere
-            )]),
+            check_targets(
+                &source,
+                vec![target(
+                    "22222222-2222-2222-2222-222222222222",
+                    elsewhere
+                )],
+                false,
+            ),
+            Err(Error::BadError(message)) if message.ends_with("is in a different workspace"),
+        ));
+        // Raw targets: self passes through and duplicates are kept.
+        let kept = check_targets(
+            &source,
+            vec![
+                target("11111111-1111-1111-1111-111111111111", workspace),
+                target("22222222-2222-2222-2222-222222222222", workspace),
+                target("22222222-2222-2222-2222-222222222222", workspace),
+            ],
+            true,
+        )
+        .expect("raw keeps self and dupes");
+        assert_eq!(kept.len(), 3);
+        // Raw targets still refuse cross-workspace ids.
+        assert!(matches!(
+            check_targets(
+                &source,
+                vec![target(
+                    "22222222-2222-2222-2222-222222222222",
+                    elsewhere
+                )],
+                true,
+            ),
             Err(Error::BadError(message)) if message.ends_with("is in a different workspace"),
         ));
     }
@@ -1709,6 +1916,16 @@ mod tests {
                 project_identifier: self.project_identifier.clone(),
                 sequence_id: self.target_seq,
             }]
+        }
+
+        fn targets_twice(&self) -> Vec<ResolvedIssue> {
+            let one = ResolvedIssue {
+                id: self.target_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.target_seq,
+            };
+            vec![one.clone(), one]
         }
 
         fn target_identifier(&self) -> String {
@@ -1927,6 +2144,7 @@ mod tests {
             &scope.actor,
             false,
             true,
+            false,
         )
         .await
         .expect("unrelate newest-only");
@@ -1978,6 +2196,7 @@ mod tests {
             "duplicate",
             scope.targets(),
             &scope.actor,
+            false,
             false,
             false,
         )
@@ -2036,6 +2255,7 @@ mod tests {
             &scope.actor,
             false,
             true,
+            false,
         )
         .await
         .expect("relate exact");
@@ -2053,6 +2273,7 @@ mod tests {
             &scope.actor,
             false,
             true,
+            false,
         )
         .await
         .expect("relate exact reversed");
@@ -2089,6 +2310,7 @@ mod tests {
             &scope.actor,
             false,
             false,
+            false,
         )
         .await
         .expect("relate default");
@@ -2104,6 +2326,7 @@ mod tests {
             "duplicate",
             scope.source_targets(),
             &scope.actor,
+            false,
             false,
             false,
         )
@@ -2124,5 +2347,313 @@ mod tests {
             rows,
             vec![(scope.source_id, scope.target_id, "duplicate".to_owned())]
         );
+    }
+
+    // --- Live-DB raw-target tests (PIDASHCONV-1659) ---
+
+    #[tokio::test]
+    async fn live_raw_targets_self_relate_creates_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawself").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The MCP relate combo (pair-exact + raw): a self id creates
+        // the row instead of 400ing (`pi_dash_cloud/mcp/tools.py:664-675`).
+        let out = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate");
+        assert_eq!(
+            out.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(out.get("unchanged"), Some(&Value::Array(vec![])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.source_id).await;
+        assert_eq!(
+            rows,
+            vec![(scope.source_id, scope.source_id, "duplicate".to_owned())]
+        );
+        // The v1 default still refuses the same input.
+        let err = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect_err("default self relate 400s");
+        assert_eq!(
+            err,
+            Error::BadError(format!(
+                "{} cannot be related to itself",
+                scope.source_identifier()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_relate_dupes_created_plus_unchanged() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawdupe").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The MCP relate combo: [A, A] with no live row creates once
+        // and reports the second iteration under `unchanged` (MCP
+        // shapes it as `skipped`).
+        let out = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw relate dupes");
+        let item = Value::String(scope.target_identifier());
+        assert_eq!(out.get("created"), Some(&Value::Array(vec![item.clone()])));
+        assert_eq!(out.get("unchanged"), Some(&Value::Array(vec![item])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.target_id).await;
+        assert_eq!(
+            rows,
+            vec![(scope.source_id, scope.target_id, "duplicate".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_default_relate_dupes_deduped() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "ddupes").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The v1 default dedupes [A, A] to one target: created once,
+        // with no second-iteration report.
+        let out = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("default relate dupes");
+        assert_eq!(
+            out.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        assert_eq!(out.get("unchanged"), Some(&Value::Array(vec![])));
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_dupes_delete_per_iteration() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawundup").await;
+        let now = Utc::now();
+        let older = insert_relation(
+            &pool,
+            &scope,
+            scope.source_id,
+            scope.target_id,
+            now - chrono::Duration::hours(1),
+        )
+        .await;
+        let newer = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
+        let (deps, enqueue) = op_deps(&pool);
+        // The MCP unrelate combo (newest-only + raw): [A, A] over the
+        // symmetric-duplicate pair deletes one row per iteration and
+        // reports the target twice.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw unrelate dupes");
+        let item = Value::String(scope.target_identifier());
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![item.clone(), item]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(deleted_at_of(&pool, newer).await.is_some());
+        assert!(deleted_at_of(&pool, older).await.is_some());
+        // One sweep per deleted row (newest first); no activity.
+        let calls = enqueue.calls.lock().expect("calls lock");
+        assert_eq!(
+            sweep_pks(&calls),
+            vec![newer.to_string(), older.to_string()]
+        );
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn live_default_unrelate_dupes_deduped() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "dundup").await;
+        let now = Utc::now();
+        let first = insert_relation(
+            &pool,
+            &scope,
+            scope.source_id,
+            scope.target_id,
+            now - chrono::Duration::hours(1),
+        )
+        .await;
+        let second = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The v1 default dedupes [A, A] to one target and deletes every
+        // matching row for it, reporting the target once.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("default unrelate dupes");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(deleted_at_of(&pool, first).await.is_some());
+        assert!(deleted_at_of(&pool, second).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_self_deletes_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawunself").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate");
+        // The MCP unrelate combo (newest-only + raw): [S, S] deletes
+        // the live self row on the first iteration and reports the
+        // second under `not_related`
+        // (`pi_dash_cloud/mcp/tools.py:722-734`).
+        let mut twice = scope.source_targets();
+        twice.extend(scope.source_targets());
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            twice,
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self unrelate dupes");
+        let item = Value::String(scope.source_identifier());
+        assert_eq!(out.get("removed"), Some(&Value::Array(vec![item.clone()])));
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![item])));
+        assert!(live_pair_rows(&pool, scope.source_id, scope.source_id)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_self_reverse_type_deletes_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawunrev").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // Relating self under the reverse name stores the canonical
+        // row (the endpoint swap is a no-op when both ends are the
+        // source).
+        relate_op(
+            &deps,
+            &scope.source(),
+            "blocking",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate reverse");
+        assert_eq!(
+            live_pair_rows(&pool, scope.source_id, scope.source_id).await,
+            vec![(scope.source_id, scope.source_id, "blocked_by".to_owned())]
+        );
+        // The MCP queryset names the canonical stored type
+        // (`pi_dash_cloud/mcp/tools.py:729-732`), so the
+        // reverse-named request matches the self row.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "blocking",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self unrelate reverse");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(live_pair_rows(&pool, scope.source_id, scope.source_id)
+            .await
+            .is_empty());
     }
 }

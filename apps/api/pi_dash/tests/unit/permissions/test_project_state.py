@@ -10,7 +10,6 @@ from pi_dash.db.models import (
     Project,
     ProjectMember,
     User,
-    Workspace,
     WorkspaceMember,
 )
 

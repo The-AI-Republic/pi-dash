@@ -150,7 +150,7 @@ update_env_file(){
     # Optional environment variables
     update_env_value "FILE_SIZE_LIMIT" "${FILE_SIZE_LIMIT:-5242880}"
 
-    update_env_value "API_KEY_RATE_LIMIT" "${API_KEY_RATE_LIMIT:-60/minute}"
+    update_env_value "API_KEY_RATE_LIMIT" "${API_KEY_RATE_LIMIT:-120/minute}"
 
     echo "✅ Environment file updated"
     echo ""
