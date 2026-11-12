@@ -86,7 +86,9 @@ use pidash_auth::permissions::allow::{
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
 use pidash_db::config::Settings;
+use pidash_db::entity::{project_members, workspace_members, workspaces};
 use pidash_types::WorkspaceId;
+use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 
 use crate::state::AppState;
 use pidash_compat::response::json_response;
@@ -489,14 +491,24 @@ pub async fn tenant_context(
 
 /// `workspaces` id for the URL slug. `None` is an unknown slug, which
 /// denies at the gate (403), never 404s.
+/// `workspaces` id for the URL slug, as a `Select` (statement-shape tests
+/// pin it, orm-migration.md §3.2). No `deleted_at` predicate — exactly the
+/// old SQL.
+fn workspace_id_select(slug: &str) -> sea_orm::Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .columns([workspaces::Column::Id])
+}
+
 async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<Option<uuid::Uuid>, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT w.id FROM workspaces w WHERE w.slug = $1"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = workspace_id_select(slug)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row)
 }
 
 /// `WorkspaceMember.objects.filter(member, workspace__slug=slug,
@@ -504,45 +516,82 @@ async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<Option<uuid::Uu
 /// `role=ADMIN` bypass row at `:69-76` when `admin_only`). The role
 /// literals are the `ROLE` values (`base.py:13-17`); the `#[cfg(test)]`
 /// module pins them against the foundation constants.
+/// [`exists_workspace_role`] as a `Select`: one active membership row with
+/// a listed role in the named workspace. The role column is `i16`; the
+/// `ROLE_*` constants are `i32` (cast at the filter site). Kept as the same
+/// single-statement join the old SQL issued — statement counts preserved.
+fn exists_workspace_role_select(
+    slug: &str,
+    user_id: &uuid::Uuid,
+    admin_only: bool,
+) -> sea_orm::Select<workspace_members::Entity> {
+    let roles: Vec<i16> = if admin_only {
+        vec![ROLE_ADMIN as i16]
+    } else {
+        vec![ROLE_ADMIN as i16, ROLE_MEMBER as i16, ROLE_GUEST as i16]
+    };
+    workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::Role.is_in(roles))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([workspace_members::Column::Id])
+        .limit(1)
+}
+
 async fn exists_workspace_role(
     pool: &sqlx::PgPool,
     slug: &str,
     user_id: &uuid::Uuid,
     admin_only: bool,
 ) -> Result<bool, Denial> {
-    // `SELECT 1` yields int4: decode as `i32`.
-    let row: Option<(i32,)> = if admin_only {
-        sqlx::query_as(
-            r#"SELECT 1 FROM workspace_members wm
-               JOIN workspaces w ON w.id = wm.workspace_id
-               WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-               AND wm.is_active AND wm.deleted_at IS NULL
-               LIMIT 1"#,
-        )
-        .bind(user_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = exists_workspace_role_select(slug, user_id, admin_only)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-    } else {
-        sqlx::query_as(
-            r#"SELECT 1 FROM workspace_members wm
-               JOIN workspaces w ON w.id = wm.workspace_id
-               WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role IN (20, 15, 5)
-               AND wm.is_active AND wm.deleted_at IS NULL
-               LIMIT 1"#,
-        )
-        .bind(user_id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-    };
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
 /// `ProjectMember.objects.filter(member, workspace__slug=slug,
 /// project_id, role__in, is_active=True).exists()` (`base.py:52-60`).
+/// [`exists_project_role`] as a `Select`: one active project-membership row
+/// with a listed role in the named workspace + project. Same single-statement
+/// join as the old SQL; roles cast `i32` → `i16` at the filter site.
+fn exists_project_role_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    admin_only: bool,
+) -> sea_orm::Select<project_members::Entity> {
+    let roles: Vec<i16> = if admin_only {
+        vec![ROLE_ADMIN as i16]
+    } else {
+        vec![ROLE_ADMIN as i16, ROLE_MEMBER as i16, ROLE_GUEST as i16]
+    };
+    project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::Role.is_in(roles))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([project_members::Column::Id])
+        .limit(1)
+}
+
 async fn exists_project_role(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -550,60 +599,51 @@ async fn exists_project_role(
     user_id: &uuid::Uuid,
     admin_only: bool,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = if admin_only {
-        sqlx::query_as(
-            r#"SELECT 1 FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id
-               WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3 AND pm.role = 20
-               AND pm.is_active AND pm.deleted_at IS NULL
-               LIMIT 1"#,
-        )
-        .bind(user_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = exists_project_role_select(slug, project_id, user_id, admin_only)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-    } else {
-        sqlx::query_as(
-            r#"SELECT 1 FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id
-               WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-               AND pm.role IN (20, 15, 5)
-               AND pm.is_active AND pm.deleted_at IS NULL
-               LIMIT 1"#,
-        )
-        .bind(user_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-    };
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
 /// The bypass's project-membership conjunct (`base.py:64-69`): any
 /// active project row, regardless of role.
+/// [`exists_any_project_membership`] as a `Select`: any active
+/// project-membership row, regardless of role. Same single-statement join.
+fn exists_any_project_membership_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([project_members::Column::Id])
+        .limit(1)
+}
+
 async fn exists_any_project_membership(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = exists_any_project_membership_select(slug, project_id, user_id)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -639,6 +679,44 @@ pub fn ensure_feature_enabled(settings: &Settings) -> Result<(), Denial> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    /// The gate selects keep the old single-statement join shape: workspace
+    /// slug filter, role filter, active + live rows, id-only projection
+    /// (orm-migration.md §3.2, no database needed).
+    #[test]
+    fn gate_selects_pin_join_and_filters() {
+        let user = uuid::Uuid::nil();
+        let ws = exists_workspace_role_select("acme", &user, false);
+        let sql = ws.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("INNER JOIN"), "ws join: {sql}");
+        assert!(sql.contains("\"slug\""), "ws slug: {sql}");
+        assert!(sql.contains("\"role\" IN"), "ws open roles: {sql}");
+        assert!(sql.contains("\"is_active\""), "ws active: {sql}");
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "ws live rows: {sql}"
+        );
+        let admin = exists_workspace_role_select("acme", &user, true);
+        let sql = admin.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("\"role\" IN (20)"), "ws admin role: {sql}");
+
+        let project = uuid::Uuid::nil();
+        let proj = exists_project_role_select("acme", &project, &user, false);
+        let sql = proj.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("INNER JOIN"), "proj join: {sql}");
+        assert!(sql.contains("\"project_id\""), "proj id: {sql}");
+        assert!(sql.contains("\"role\" IN"), "proj open roles: {sql}");
+        let any = exists_any_project_membership_select("acme", &project, &user);
+        let sql = any.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("INNER JOIN"), "any join: {sql}");
+        assert!(!sql.contains("\"role\""), "any has no role filter: {sql}");
+
+        let wsid = workspace_id_select("acme");
+        let sql = wsid.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains("FROM"), "wsid select: {sql}");
+        assert!(sql.contains("\"slug\""), "wsid slug: {sql}");
+    }
 
     fn scope() -> TenantScope {
         tenant_scope("acme")

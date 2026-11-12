@@ -65,9 +65,12 @@ def _seed_claim(seeder, daemon_world, machine_flow, *, status, error_code=""):
         machine_flow["runner_id"],
         status=status,
     )
+    bag = {"message": "seeded claim"}
+    if error_code:
+        bag["code"] = error_code
     seeder.db.execute(
-        "UPDATE agent_run SET error_code = %s, error = %s WHERE id = %s",
-        (error_code, "seeded claim", run["id"]),
+        "UPDATE agent_run SET error_details = %s::jsonb WHERE id = %s",
+        (json.dumps(bag), run["id"]),
     )
     return run
 

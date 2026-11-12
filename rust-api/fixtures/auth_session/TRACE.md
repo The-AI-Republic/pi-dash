@@ -95,9 +95,11 @@ calls captured via mock as call sequences (per the issue). Live Django on
   (`adapter/error.py:82`) — mutations leak across instances (probe-verified).
 - BUG-2: `is_signup = bool(user)` is inverted (`adapter/base.py:299`) —
   new-user signup reports False, existing-user login reports True.
-- BUG-3: `ProjectMember` bulk_create omits `project_id`
-  (`utils/workspace_project_join.py:76-87`) — Postgres IntegrityError on any
-  signup with an accepted project invite (reproduced on real Postgres).
+- BUG-3 (RETIRED by PIDASHCONV-1686): `ProjectMember` bulk_create sets
+  `project_id` (`authentication/utils/workspace_project_join.py:76-87`,
+  Django main) — the join succeeds and the invite is consumed. Was:
+  omitted `project_id` → Postgres IntegrityError on any signup with an
+  accepted project invite (reproduced on real Postgres).
 - BUG-4: magic-generate invalid/empty email raises uncaught django
   `ValidationError` → 500 (`views/app/magic.py:50`, `space/magic.py:46`).
 - BUG-5: reset app malformed uidb64 raises uncaught UUID `ValidationError` →

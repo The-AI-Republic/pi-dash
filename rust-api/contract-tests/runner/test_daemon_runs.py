@@ -161,12 +161,16 @@ def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "failed"
     )
+    # The failure lands in the ``error_details`` bag (PDASHOSS01-187).
+    assert seeder.db.fetchval(
+        "SELECT error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == {"message": "boom"}
 
 
 def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
     response = machine_client.post(
         f"{DAEMON}/runs/{daemon_run['id']}/fail/",
-        json={"reason": "refusal", "category": "cyber", "detail": "declined"},
+        json={"reason": "refusal", "category": " CYBER ", "detail": "declined"},
         headers=_idem(),
     )
     assert response.json() == {"ok": True, "refused": True}
@@ -175,6 +179,14 @@ def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "refused"
     )
+    # The normalized category lands in the bag and the generated column
+    # derives from it (PDASHOSS01-187).
+    assert seeder.db.fetchval(
+        "SELECT error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == {"message": "declined", "refusal_category": "cyber"}
+    assert seeder.db.fetchval(
+        "SELECT refusal_category FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == "cyber"
 
 
 def test_daemon_run_cancelled_shape(machine_client, daemon_run, seeder):
@@ -390,3 +402,82 @@ def test_daemon_run_fail_comment_stamped_with_owner(
         (comment_world["issue_id"], comment_world["run_id"]),
         "boom",
     )
+
+
+# -- stale-busy release on finalization (PDASHOSS01-231) ------------------
+
+def _set_runner_status(seeder, runner_id: str, status: str) -> None:
+    seeder.db.execute("UPDATE runner SET status = %s WHERE id = %s", (status, runner_id))
+
+
+def _runner_status(seeder, runner_id: str) -> str:
+    return seeder.db.fetchval("SELECT status FROM runner WHERE id = %s", (runner_id,))
+
+
+def test_daemon_run_shutdown_fail_releases_busy_runner(
+    machine_client, machine_flow, daemon_run, seeder
+):
+    # The daemon-shutdown drain fails the in-flight run; the runner row
+    # must not stay ``busy`` once nothing occupies it.
+    machine_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
+    _set_runner_status(seeder, machine_flow["runner_id"], "busy")
+    response = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "daemon shutdown requested"},
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    assert (
+        seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
+        == "failed"
+    )
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "online"
+
+
+def test_daemon_run_complete_releases_busy_runner(
+    machine_client, machine_flow, daemon_run, seeder
+):
+    machine_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
+    _set_runner_status(seeder, machine_flow["runner_id"], "busy")
+    response = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/complete/",
+        json={"done_payload": {"summary": "done"}},
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "online"
+
+
+def test_daemon_run_fail_keeps_runner_busy_with_other_active_run(
+    machine_client, machine_flow, daemon_run, daemon_world, seeder
+):
+    seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    machine_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
+    _set_runner_status(seeder, machine_flow["runner_id"], "busy")
+    response = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "boom"},
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "busy"
+
+
+def test_daemon_run_fail_never_resurrects_offline_runner(
+    machine_client, machine_flow, daemon_run, seeder
+):
+    machine_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    response = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "daemon shutdown requested"},
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "offline"

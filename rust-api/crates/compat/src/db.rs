@@ -75,10 +75,17 @@ pub fn bind_sea_value<'q>(
 /// `api/src/app_issues/mod.rs::bind_all`; the `bind_values` copies in
 /// `app_cycles/handlers_cycle_issues.rs` and
 /// `app_modules/handlers_module_issues.rs` carried the same mapping).
+///
+/// Callers (api/app_cycles, api/app_modules, api/app_issues) assemble SQL
+/// text dynamically, so they cannot be built with sea-query; the binder is
+/// the single canonical copy they share.
 pub fn bind_all<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, PgArguments>, BindError> {
+    // Generic binder for caller-assembled dynamic SQL
+    // (app_cycles/app_modules/app_issues); sea-query cannot build unseen SQL
+    // raw-sql: generic binder for caller-assembled dynamic SQL below
     let mut query = sqlx::query(sql);
     for value in &values {
         query = bind_sea_value(query, value)?;

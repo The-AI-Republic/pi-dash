@@ -436,10 +436,13 @@ async fn post_test(
         ProbeOutcome::Classified(code, detail) => ok_false_detail(code, detail),
         ProbeOutcome::Ok => {
             let now = chrono::Utc::now();
-            if let Err(failure) =
-                pidash_services::domain::assistant::stamp_llm_config_verified(&pool, actor.id, now)
-                    .await
-                    .map_err(|_| Failure::server_error())
+            if let Err(failure) = pidash_services::domain::assistant::stamp_llm_config_verified(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                actor.id,
+                now,
+            )
+            .await
+            .map_err(|_| Failure::server_error())
             {
                 return failure.into_response();
             }

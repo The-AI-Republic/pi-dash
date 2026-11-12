@@ -93,28 +93,9 @@
 //! (PIDASHCONV-613); Celery enqueues (PIDASHCONV-614); the timezone
 //! table (static — handler only, PIDASHCONV-624, no query surface).
 
-use std::fmt::Write as _;
-
-// ---------------------------------------------------------------------------
-// Shared vocabulary
-// ---------------------------------------------------------------------------
-
-/// `ROLE.ADMIN.value` (`app/permissions/base.py:14`) — the `role=20`
-/// literal inside the deactivate `When` clauses.
-pub const ROLE_ADMIN: i32 = 20;
-
 // ---------------------------------------------------------------------------
 // Unit 1a — settings serializer reads (serializers/user.py:90-139)
 // ---------------------------------------------------------------------------
-
-/// Invite count (`user.py:99`):
-/// `WorkspaceMemberInvite.objects.filter(email=obj.email).count()`.
-///
-/// `COUNT(*)` under the soft-delete manager. Ported bug 1: there is NO
-/// `accepted` filter — accepted and pending invites count alike.
-pub fn invite_count_sql() -> String {
-    "SELECT COUNT(*) FROM workspace_member_invites WHERE workspace_member_invites.email = :email AND workspace_member_invites.deleted_at IS NULL".to_owned()
-}
 
 /// Profile read (`user.py:102`): `Profile.objects.get(user=obj)`.
 ///
@@ -124,60 +105,6 @@ pub fn invite_count_sql() -> String {
 /// `MultipleObjectsReturned` is impossible on the `OneToOne`).
 pub fn profile_by_user_sql() -> String {
     "SELECT profiles.* FROM profiles WHERE profiles.user_id = :user".to_owned()
-}
-
-/// Shared join for the last-workspace check, fetch, and fallback
-/// (`user.py:105-109`, `:111-115`, `:128-130`): the reverse
-/// `workspace_member__` traversal.
-///
-/// Ported bug 2 (probed live on Django 4.2): the joined
-/// `workspace_members` rows carry NO `deleted_at IS NULL` guard —
-/// cross-FK filters never apply the related model's manager. Only the
-/// base `workspaces.deleted_at IS NULL` (from `Workspace.objects`)
-/// applies. A soft-deleted membership therefore still satisfies every
-/// branch below.
-pub fn last_workspace_join_sql() -> String {
-    "INNER JOIN workspace_members ON (workspaces.id = workspace_members.workspace_id)".to_owned()
-}
-
-/// Last-workspace membership check (`user.py:104-110`):
-/// `.filter(pk=last_workspace_id, workspace_member__member=...,
-/// workspace_member__is_active=True).exists()`.
-///
-/// Runs only when `profile.last_workspace_id is not None` (`:104`).
-/// `.exists()` renders `SELECT 1 ... LIMIT 1`.
-pub fn last_workspace_exists_sql() -> String {
-    format!(
-        "SELECT 1 FROM workspaces {} WHERE workspaces.deleted_at IS NULL AND workspaces.id = :ws AND workspace_members.member_id = :user AND workspace_members.is_active LIMIT 1",
-        last_workspace_join_sql()
-    )
-}
-
-/// Last-workspace fetch (`user.py:111-115`): the SAME filter as
-/// [`last_workspace_exists_sql`] re-run with `.first()`.
-///
-/// Ported bug 3: the check row is not reused — this is a second
-/// round-trip. `.first()` applies the default `-created_at` ordering
-/// (`db/models/workspace.py:186`) with `LIMIT 1`.
-pub fn last_workspace_fetch_sql() -> String {
-    format!(
-        "SELECT workspaces.* FROM workspaces {} WHERE workspaces.deleted_at IS NULL AND workspaces.id = :ws AND workspace_members.member_id = :user AND workspace_members.is_active ORDER BY workspaces.created_at DESC LIMIT 1",
-        last_workspace_join_sql()
-    )
-}
-
-/// Fallback earliest membership (`user.py:127-131`):
-/// `.filter(workspace_member__member_id=..., ...is_active=True)`
-/// `.order_by("created_at").first()`.
-///
-/// Same unscoped join as [`last_workspace_join_sql`], explicit
-/// ascending order, `LIMIT 1`. Reached when `last_workspace_id` is
-/// `None` OR the membership check above fails.
-pub fn fallback_workspace_sql() -> String {
-    format!(
-        "SELECT workspaces.* FROM workspaces {} WHERE workspaces.deleted_at IS NULL AND workspace_members.member_id = :user AND workspace_members.is_active ORDER BY workspaces.created_at ASC LIMIT 1",
-        last_workspace_join_sql()
-    )
 }
 
 /// Logo-asset lazy follow (`user.py:116`):
@@ -197,23 +124,6 @@ pub fn logo_asset_lookup_sql() -> String {
 // ---------------------------------------------------------------------------
 // Unit 1b — instance-admin + session reads (views/user/base.py:87-90, 359-371)
 // ---------------------------------------------------------------------------
-
-/// `Instance.objects.first()` (`base.py:88`): soft-delete scope
-/// (`Instance` extends `BaseModel`, `license/models/instance.py:22`),
-/// default `-created_at` ordering, `LIMIT 1`. May yield no row — the
-/// caller binds `None` into [`instance_admin_exists_sql`].
-pub fn instance_first_sql() -> String {
-    "SELECT instances.* FROM instances WHERE instances.deleted_at IS NULL ORDER BY instances.created_at DESC LIMIT 1".to_owned()
-}
-
-/// `InstanceAdmin.objects.filter(instance=instance,
-/// user=request.user).exists()` (`base.py:89`).
-///
-/// When `Instance.objects.first()` returned no row, `instance` binds
-/// `None` and the predicate renders `instance_id IS NULL`.
-pub fn instance_admin_exists_sql() -> String {
-    "SELECT 1 FROM instance_admins WHERE instance_admins.instance_id = :instance AND instance_admins.user_id = :user AND instance_admins.deleted_at IS NULL LIMIT 1".to_owned()
-}
 
 /// Session user re-read (`base.py:364`):
 /// `User.objects.get(pk=request.user.id)`.
@@ -260,194 +170,17 @@ pub fn email_update_cache_value(code: &str) -> String {
     format!(r#"{{"token": "{code}"}}"#)
 }
 
-/// Availability check (`:129`, re-checked finally at `:225`):
-/// `User.objects.filter(email=new_email).exclude(id=user.id).exists()`.
-///
-/// `new_email` is pre-normalized (see [`email_update_cache_key`]);
-/// `User.save()` lowercases again on write, a no-op). `users` has no
-/// soft-delete scope. Django renders the `.exclude()` as `NOT (...)`.
-pub fn email_availability_exists_sql() -> String {
-    "SELECT 1 FROM users WHERE users.email = :email AND NOT (users.id = :user) LIMIT 1".to_owned()
-}
-
-pub use crate::domain::identity::email_save_sql;
-
-/// Session invalidation for `logout(request)` (`:241`, also `:355`):
-/// the session flush deletes the current session row by key
-/// (`Session` extends Django's `AbstractBaseSession` — hard delete,
-/// no soft-delete manager).
-pub fn session_flush_sql() -> String {
-    "DELETE FROM sessions WHERE session_key = :key".to_owned()
-}
-
 // ---------------------------------------------------------------------------
 // Unit 3 — deactivate bundle (views/user/base.py:252-357)
 // ---------------------------------------------------------------------------
 
-/// Instance-admin guard (`:257`):
-/// `InstanceAdmin.objects.filter(user=user).exists()`.
-///
-/// NOTE the asymmetry with [`instance_admin_exists_sql`]: this guard
-/// filters on the user ALONE — no `instance` predicate — so an admin
-/// row on ANY (non-soft-deleted) instance blocks deactivation.
-pub fn deactivate_instance_admin_guard_sql() -> String {
-    "SELECT 1 FROM instance_admins WHERE instance_admins.user_id = :user AND instance_admins.deleted_at IS NULL LIMIT 1".to_owned()
-}
-
-/// `project_members` concrete columns in `_meta` order (abstract
-/// parents first, then `id`, then per-level declared fields — probed
-/// against Django 4.2 field ordering): the SELECT/GROUP BY column set
-/// for [`project_deactivate_scan_sql`].
-pub const PROJECT_DEACTIVATE_SCAN_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "project_id",
-    "workspace_id",
-    "member_id",
-    "comment",
-    "role",
-    "view_props",
-    "default_props",
-    "preferences",
-    "sort_order",
-    "is_active",
-];
-
-/// `workspace_members` concrete columns in `_meta` order (same
-/// convention): the SELECT/GROUP BY column set for
-/// [`workspace_deactivate_scan_sql`].
-pub const WORKSPACE_DEACTIVATE_SCAN_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "workspace_id",
-    "member_id",
-    "role",
-    "company_role",
-    "view_props",
-    "default_props",
-    "issue_props",
-    "is_active",
-    "getting_started_checklist",
-    "tips",
-    "explored_features",
-];
-
-/// Shared `COUNT(CASE ...)` annotation expression
-/// (`:267-273`, `:288-294`):
-/// `Count(Case(When(Q(role=20, is_active=True) & ~Q(member=user),
-/// then=1), default=0))`.
-///
-/// `nullable_member` selects the `IS NOT NULL` inside the negation:
-/// `ProjectMember.member` is nullable (`project.py:333-338`) so Django
-/// renders `NOT (member_id = :user AND member_id IS NOT NULL)`
-/// (probed verbatim); `WorkspaceMember.member` is NOT NULL
-/// (`workspace.py:199-203`) so the guard is omitted. Predicate order
-/// (`is_active` before `role`) is the probed Django 4.2 render order.
-fn sole_admin_case_sql(table: &str, nullable_member: bool) -> String {
-    if nullable_member {
-        format!(
-            "COUNT(CASE WHEN ({table}.is_active AND {table}.role = {admin} AND NOT ({table}.member_id = :user AND {table}.member_id IS NOT NULL)) THEN 1 ELSE 0 END) AS other_admin_exists",
-            admin = ROLE_ADMIN,
-        )
-    } else {
-        format!(
-            "COUNT(CASE WHEN ({table}.is_active AND {table}.role = {admin} AND NOT ({table}.member_id = :user)) THEN 1 ELSE 0 END) AS other_admin_exists",
-            admin = ROLE_ADMIN,
-        )
-    }
-}
-
-/// Shared scan renderer: `SELECT <cols>, <case>, COUNT(<table>.id)
-/// AS total_members FROM <table> WHERE member + active + manager
-/// scope GROUP BY <cols>`.
-///
-/// Ported bug 4 (probed live on Django 4.2): the annotation groups BY
-/// the row itself — `GROUP BY` every selected column — and Django
-/// strips the default ordering when the annotation lands, so there is
-/// NO `ORDER BY`. Consequence: `other_admin_exists` counts
-/// `CASE ... ELSE 0`, whose `ELSE 0` is never NULL, so `COUNT`
-/// yields 1 for every group of one; `total_members` is 1 too. The
-/// caller's `other_admin_exists > 0 or total_members == 1` is
-/// therefore always true and the `400` "only admin" branches are
-/// unreachable — every active membership is collected.
-fn deactivate_scan_sql(table: &str, columns: &[&str], nullable_member: bool) -> String {
-    let mut select_cols = String::new();
-    let mut group_cols = String::new();
-    for (i, col) in columns.iter().enumerate() {
-        if i > 0 {
-            select_cols.push_str(", ");
-            group_cols.push_str(", ");
-        }
-        let _ = write!(select_cols, "{table}.{col}");
-        let _ = write!(group_cols, "{table}.{col}");
-    }
-    format!(
-        "SELECT {select_cols}, {case_expr}, COUNT({table}.id) AS total_members FROM {table} WHERE {table}.member_id = :user AND {table}.is_active AND {table}.deleted_at IS NULL GROUP BY {group_cols}",
-        case_expr = sole_admin_case_sql(table, nullable_member),
-    )
-}
-
-/// Project sole-admin annotation scan (`:266-275`):
-/// `ProjectMember.objects.filter(member=user,
-/// is_active=True).annotate(other_admin_exists=...,
-/// total_members=Count("id"))`. See [`deactivate_scan_sql`] for the
-/// vacuous-guard consequence (ported bug 4).
-pub fn project_deactivate_scan_sql() -> String {
-    deactivate_scan_sql("project_members", PROJECT_DEACTIVATE_SCAN_COLUMNS, true)
-}
-
-/// Workspace sole-admin annotation scan (`:287-296`): same shape over
-/// `workspace_members` (non-nullable `member_id`, so no `IS NOT NULL`
-/// inside the negation). See [`deactivate_scan_sql`].
-pub fn workspace_deactivate_scan_sql() -> String {
-    deactivate_scan_sql(
-        "workspace_members",
-        WORKSPACE_DEACTIVATE_SCAN_COLUMNS,
-        false,
-    )
-}
-
 /// `bulk_update` batch size (`:308`, `:310`): `batch_size=100`.
 pub const BULK_DEACTIVATE_BATCH_SIZE: usize = 100;
-
-pub use crate::domain::workspaces::members::workspace_bulk_deactivate_sql;
-
-/// Invite purge (`:313`):
-/// `WorkspaceMemberInvite.objects.filter(email=user.email).delete()`.
-///
-/// `QuerySet.delete()` on a soft-delete model renders `UPDATE ...
-/// SET deleted_at = :now` — a second `updated_at` stamp is NOT
-/// applied (`QuerySet.update` bypasses `auto_now`). Manager scope on
-/// the read side is preserved in the `WHERE`.
-pub fn deactivate_invite_purge_sql() -> String {
-    "UPDATE workspace_member_invites SET deleted_at = :now WHERE workspace_member_invites.email = :email AND workspace_member_invites.deleted_at IS NULL".to_owned()
-}
-
-/// Session purge (`:316`): `Session.objects.filter(user_id=...).delete()`.
-///
-/// HARD `DELETE` — `Session` has no soft-delete manager. Ported bug
-/// 11: `user_id` is a `CharField` (`session.py:21`), so the UUID
-/// binds as text.
-pub fn deactivate_session_purge_sql() -> String {
-    "DELETE FROM sessions WHERE sessions.user_id = :user".to_owned()
-}
 
 /// Onboarding-step reset value (`:325-330`), exact key order as
 /// written in the view (JSON object insertion order is preserved on
 /// the wire).
 pub const ONBOARDING_RESET_JSON: &str = r#"{"workspace_join": false, "profile_complete": false, "workspace_create": false, "workspace_invite": false}"#;
-
-pub use crate::domain::identity::deactivate_profile_reset_sql;
-
-pub use crate::domain::identity::deactivate_user_save_sql;
 
 // ---------------------------------------------------------------------------
 // Unit 4a — accounts + profile (views/user/base.py:373-462)
@@ -478,12 +211,8 @@ pub use crate::domain::identity::account_hard_delete_sql;
 /// Onboard-patch `update_fields` (`:380`).
 pub const ONBOARD_UPDATE_FIELDS: &[&str] = &["is_onboarded", "updated_at"];
 
-pub use crate::domain::identity::onboard_patch_sql;
-
 /// Tour-patch `update_fields` (`:388`).
 pub const TOUR_UPDATE_FIELDS: &[&str] = &["is_tour_completed", "updated_at"];
-
-pub use crate::domain::identity::tour_patch_sql;
 
 /// Profile locked read (`:455`):
 /// `Profile.objects.select_for_update().get(user=request.user)`
@@ -613,12 +342,6 @@ mod tests {
         // profiles / accounts / sessions carry no deleted_at (not
         // BaseModels); every other read does.
         for sql in [
-            invite_count_sql(),
-            instance_first_sql(),
-            instance_admin_exists_sql(),
-            deactivate_instance_admin_guard_sql(),
-            project_deactivate_scan_sql(),
-            workspace_deactivate_scan_sql(),
             api_token_list_sql(),
             api_token_detail_sql(),
             api_token_delete_lookup_sql(),
@@ -629,22 +352,6 @@ mod tests {
                 "missing soft-delete scope: {sql}"
             );
         }
-        // The last-workspace statements scope the BASE table while the
-        // joined member table stays deliberately unscoped (ported bug 2).
-        for sql in [
-            last_workspace_exists_sql(),
-            last_workspace_fetch_sql(),
-            fallback_workspace_sql(),
-        ] {
-            assert!(
-                sql.contains("workspaces.deleted_at IS NULL"),
-                "missing base scope: {sql}"
-            );
-            assert!(
-                !sql.contains("workspace_members.deleted_at"),
-                "joined member table must stay unscoped: {sql}"
-            );
-        }
         // The logo-asset follow is deliberately UNSCOPED even though
         // the table has the column: forward-FK access uses the plain
         // `_base_manager` (ported bug 13).
@@ -652,71 +359,17 @@ mod tests {
             !logo_asset_lookup_sql().contains("deleted_at"),
             "FK follow must stay unscoped"
         );
-        // Writes: the invite purge preserves the manager scope in its
-        // WHERE; bulk deactivations are pk-direct (ported bug 5);
-        // session/account deletes are hard (no soft-delete mixin).
-        assert!(deactivate_invite_purge_sql().contains("deleted_at IS NULL"));
-        assert!(!workspace_bulk_deactivate_sql().contains("deleted_at"));
         // users / profiles / accounts / sessions have no deleted_at
         // column — assert absence, not scope.
         for sql in [
             profile_by_user_sql(),
             session_user_sql(),
-            email_availability_exists_sql(),
             account_list_sql(),
             account_detail_sql(),
             profile_lock_sql(),
         ] {
             assert!(!sql.contains("deleted_at"), "no such column: {sql}");
         }
-    }
-
-    #[test]
-    fn unit1_invite_count_has_no_accepted_filter() {
-        // Ported bug 1 (serializers/user.py:99).
-        let sql = invite_count_sql();
-        assert!(sql.contains("COUNT(*)"));
-        assert!(sql.contains("workspace_member_invites.email = :email"));
-        assert!(!sql.contains("accepted"));
-    }
-
-    #[test]
-    fn unit1_last_workspace_branches() {
-        // Check (user.py:104-110): pk + member + active, SELECT 1 LIMIT 1.
-        let exists = last_workspace_exists_sql();
-        assert!(exists.starts_with("SELECT 1 FROM workspaces "));
-        assert!(exists.contains("workspaces.id = :ws"));
-        assert!(exists.contains("workspace_members.member_id = :user"));
-        assert!(exists.contains("workspace_members.is_active"));
-        assert!(exists.ends_with("LIMIT 1"));
-        assert!(!exists.contains("ORDER BY"));
-        // Fetch (user.py:111-115): same filter re-run with .first() —
-        // ported bug 3 — default -created_at order, LIMIT 1.
-        let fetch = last_workspace_fetch_sql();
-        assert!(fetch.starts_with("SELECT workspaces.* FROM workspaces "));
-        assert!(fetch.contains("workspaces.id = :ws"));
-        assert!(fetch.contains("ORDER BY workspaces.created_at DESC LIMIT 1"));
-        // Fallback (user.py:127-131): no pk, explicit ASC, LIMIT 1.
-        let fallback = fallback_workspace_sql();
-        assert!(!fallback.contains("workspaces.id = :ws"));
-        assert!(fallback.contains("ORDER BY workspaces.created_at ASC LIMIT 1"));
-    }
-
-    #[test]
-    fn unit1_instance_and_session_reads() {
-        let first = instance_first_sql();
-        assert!(first.contains("FROM instances"));
-        assert!(first.contains("ORDER BY instances.created_at DESC LIMIT 1"));
-        let admin = instance_admin_exists_sql();
-        assert!(admin.contains("instance_admins.instance_id = :instance"));
-        assert!(admin.contains("instance_admins.user_id = :user"));
-        // Deactivate guard filters on the user ALONE (no instance
-        // predicate) — the documented asymmetry.
-        let guard = deactivate_instance_admin_guard_sql();
-        assert!(!guard.contains("instance_id = :instance"));
-        assert!(guard.contains("instance_admins.user_id = :user"));
-        let session = session_user_sql();
-        assert_eq!(session, "SELECT users.* FROM users WHERE users.id = :user");
     }
 
     #[test]
@@ -735,96 +388,6 @@ mod tests {
         );
         // Value (:159): {"token": "<code>"}.
         assert_eq!(email_update_cache_value("482910"), r#"{"token": "482910"}"#);
-        // Availability (:129, :225): email match minus self, no scope.
-        let avail = email_availability_exists_sql();
-        assert!(avail.contains("users.email = :email"));
-        assert!(avail.contains("NOT (users.id = :user)"));
-        // Save (:232-235): email + unverified + stamp.
-        let save = email_save_sql();
-        assert!(save.contains("email = :email"));
-        assert!(save.contains("is_email_verified = FALSE"));
-        assert!(save.contains("updated_at = :now"));
-        // Logout flush (:241, :355): hard delete by session key.
-        assert_eq!(
-            session_flush_sql(),
-            "DELETE FROM sessions WHERE session_key = :key"
-        );
-    }
-
-    #[test]
-    fn unit3_deactivate_scans_group_by_the_row() {
-        // Ported bug 4 (base.py:266-296, probed live on Django 4.2).
-        assert_eq!(ROLE_ADMIN, 20);
-        assert_eq!(PROJECT_DEACTIVATE_SCAN_COLUMNS.len(), 16);
-        assert_eq!(WORKSPACE_DEACTIVATE_SCAN_COLUMNS.len(), 17);
-        for (sql, table, nullable) in [
-            (project_deactivate_scan_sql(), "project_members", true),
-            (workspace_deactivate_scan_sql(), "workspace_members", false),
-        ] {
-            // WHERE: member + active + manager scope.
-            assert!(sql.contains(&format!("{table}.member_id = :user")));
-            assert!(sql.contains(&format!("{table}.is_active")));
-            // COUNT(CASE ... ELSE 0) — ELSE 0 is never NULL so COUNT
-            // always yields 1 per group of one (vacuous guard).
-            assert!(sql.contains("COUNT(CASE WHEN ("));
-            assert!(sql.contains("THEN 1 ELSE 0 END) AS other_admin_exists"));
-            assert!(sql.contains(&format!("COUNT({table}.id) AS total_members")));
-            // GROUP BY every selected column; NO ORDER BY.
-            let group_by = sql.split("GROUP BY ").nth(1).expect("GROUP BY present");
-            assert_eq!(group_by.split(", ").count(), if nullable { 16 } else { 17 });
-            assert!(!sql.contains("ORDER BY"));
-        }
-        // Nullable-FK negation guard only on the project variant.
-        assert!(project_deactivate_scan_sql().contains(
-            "NOT (project_members.member_id = :user AND project_members.member_id IS NOT NULL)"
-        ));
-        assert!(
-            workspace_deactivate_scan_sql().contains("NOT (workspace_members.member_id = :user)")
-        );
-        assert!(!workspace_deactivate_scan_sql().contains("IS NOT NULL"));
-    }
-
-    #[test]
-    fn unit3_deactivate_writes() {
-        // bulk_update batch 100, is_active only, no stamp, no scope
-        // (the project twin moved to `domain::projects::members`).
-        assert_eq!(BULK_DEACTIVATE_BATCH_SIZE, 100);
-        assert_eq!(
-            workspace_bulk_deactivate_sql(),
-            "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)"
-        );
-        // Invite purge: soft, no updated_at stamp.
-        let purge = deactivate_invite_purge_sql();
-        assert!(purge.contains("SET deleted_at = :now WHERE"));
-        assert!(!purge.contains("updated_at"));
-        assert!(purge.contains("workspace_member_invites.email = :email"));
-        // Session purge: hard delete, text user_id.
-        assert_eq!(
-            deactivate_session_purge_sql(),
-            "DELETE FROM sessions WHERE sessions.user_id = :user"
-        );
-        // Profile reset: exact update_fields + reset JSON key order.
-        assert_eq!(
-            ONBOARDING_RESET_JSON,
-            r#"{"workspace_join": false, "profile_complete": false, "workspace_create": false, "workspace_invite": false}"#
-        );
-        assert_eq!(
-            deactivate_profile_reset_sql(),
-            "UPDATE profiles SET last_workspace_id = NULL, is_tour_completed = FALSE, is_onboarded = FALSE, onboarding_step = :step_json, updated_at = :now WHERE id = :pk"
-        );
-        // User save: hash + autoset + deactivate + logout stamps.
-        let save = deactivate_user_save_sql();
-        for frag in [
-            "password = :hash",
-            "is_password_autoset = TRUE",
-            "is_active = FALSE",
-            "last_logout_ip = :ip",
-            "last_logout_time = :now",
-            "updated_at = :now",
-            "WHERE id = :pk",
-        ] {
-            assert!(save.contains(frag), "missing {frag}");
-        }
     }
 
     #[test]
@@ -841,14 +404,6 @@ mod tests {
         // Onboard / tour: single-flag update_fields writes.
         assert_eq!(ONBOARD_UPDATE_FIELDS, &["is_onboarded", "updated_at"]);
         assert_eq!(TOUR_UPDATE_FIELDS, &["is_tour_completed", "updated_at"]);
-        assert_eq!(
-            onboard_patch_sql(),
-            "UPDATE profiles SET is_onboarded = :value, updated_at = :now WHERE id = :pk"
-        );
-        assert_eq!(
-            tour_patch_sql(),
-            "UPDATE profiles SET is_tour_completed = :value, updated_at = :now WHERE id = :pk"
-        );
         // Locked read: FOR UPDATE, unscoped.
         assert!(profile_lock_sql().ends_with("FOR UPDATE"));
         // Full save: every column incl. settings, pk-addressed.

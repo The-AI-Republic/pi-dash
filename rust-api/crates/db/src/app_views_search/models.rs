@@ -172,8 +172,9 @@ pub mod issue_view {
     /// Columns in Django `_meta` field order: `BaseModel.id`
     /// (`db/models/base.py:18`), audit columns (`db/mixins.py:19-42` plus
     /// `deleted_at`, `:62`), workspace/project FKs (`WorkspaceBaseModel`,
-    /// `db/models/workspace.py:185-187`), then `view.py:59-71` in
-    /// declaration order. FK entries use the Django attnames.
+    /// `db/models/workspace.py:185-187`), then `view.py:59-75` in
+    /// declaration order (`anchor` sits between `access` and `sort_order`,
+    /// NEWFRONT-972). FK entries use the Django attnames.
     pub const COLUMNS: &[&str] = &[
         "id",
         "created_at",
@@ -191,6 +192,7 @@ pub mod issue_view {
         "display_properties",
         "rich_filters",
         "access",
+        "anchor",
         "sort_order",
         "logo_props",
         "owned_by_id",
@@ -200,6 +202,9 @@ pub mod issue_view {
 
     /// `name` bound (`view.py:59`, `max_length=255`).
     pub const NAME_MAX_LENGTH: usize = 255;
+
+    /// `anchor` bound (`view.py:70`, `max_length=255`, NEWFRONT-972).
+    pub const ANCHOR_MAX_LENGTH: usize = 255;
 
     /// `access` default (`view.py:66`): public.
     pub const DEFAULT_ACCESS: i16 = 1;
@@ -316,6 +321,7 @@ pub mod issue_view {
         pub display_properties: serde_json::Value,
         pub rich_filters: serde_json::Value,
         pub access: i16,
+        pub anchor: Option<String>,
         pub sort_order: f64,
         pub logo_props: serde_json::Value,
         pub owned_by_id: uuid::Uuid,
@@ -645,6 +651,7 @@ mod tests {
             display_properties: issue_view::default_display_properties(),
             rich_filters: serde_json::json!({}),
             access: issue_view::DEFAULT_ACCESS,
+            anchor: None,
             sort_order: issue_view::DEFAULT_SORT_ORDER,
             logo_props: serde_json::json!({}),
             owned_by_id: uuid::Uuid::nil(),
@@ -681,9 +688,9 @@ mod tests {
         let columns = fx["columns"].as_array().expect("issue_view has columns");
         let rust: &[&str] = issue_view::COLUMNS;
         // The fixture folds the five audit columns into one descriptive
-        // entry, so 17 entries cover 21 physical columns.
-        assert_eq!(columns.len(), 17);
-        assert_eq!(rust.len(), 21);
+        // entry, so 18 entries cover 22 physical columns.
+        assert_eq!(columns.len(), 18);
+        assert_eq!(rust.len(), 22);
         // Spot-check the descriptive entries stay pinned to the sources.
         assert_eq!(columns[0], "id (BaseModel UUID pk)");
         assert_eq!(
@@ -696,8 +703,9 @@ mod tests {
             columns[11],
             "access PositiveSmallInt default 1 choices (0 Private / 1 Public)"
         );
-        assert_eq!(columns[12], "sort_order Float default 65535");
-        assert_eq!(columns[16], "archived_at DateTime null");
+        assert_eq!(columns[12], "anchor Char(255) null unique");
+        assert_eq!(columns[13], "sort_order Float default 65535");
+        assert_eq!(columns[17], "archived_at DateTime null");
         // The audit entry names all five audit columns.
         let audit = columns[1].as_str().unwrap().to_lowercase();
         for col in [
@@ -759,6 +767,8 @@ mod tests {
         assert!(!locked);
         let name_len: usize = issue_view::NAME_MAX_LENGTH;
         assert_eq!(name_len, 255);
+        let anchor_len: usize = issue_view::ANCHOR_MAX_LENGTH;
+        assert_eq!(anchor_len, 255);
         assert_eq!(issue_view::WORKSPACE_ON_DELETE, OnDelete::Cascade);
         assert_eq!(issue_view::PROJECT_ON_DELETE, OnDelete::Cascade);
         assert_eq!(issue_view::OWNED_BY_ON_DELETE, OnDelete::Cascade);

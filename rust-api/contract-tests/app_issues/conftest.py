@@ -70,13 +70,13 @@ PROJECT_COLUMNS = (
     " repo_url, base_branch, agent_default_interval_seconds,"
     " agent_default_max_ticks, agent_ticking_enabled, is_default,"
     " agent_review_default_interval_seconds, default_agent_executor,"
-    " agent_test_default_interval_seconds, default_work_type"
+    " dedicated_runner_lost_action, agent_test_default_interval_seconds"
 )
 
 PROJECT_VALUES = (
     NOW, NOW, None, None, "", 0, None, None, True,
     True, True, True, True, 0, 0, "{}", True, True, True, "UTC",
-    True, "", "", 3600, 100, True, False, 10800, "muse", 10800, "software",
+    True, "", "", 3600, 100, True, False, 10800, "muse", "fail_to_backlog", 10800,
 )
 
 
@@ -111,12 +111,17 @@ WORLD_TABLES = (
     "issue_sequences",
     "project_user_properties",
     "issue_reactions", "comment_reactions", "issue_subscribers",
+    "issue_worklogs",
     "issue_links", "issue_relations", "issue_labels", "labels",
     "issue_activities", "issue_comments", "descriptions",
     "issue_versions",
     "issue_description_versions", "file_assets",
     "github_pull_request_links", "git_code_review_links",
-    "issue_assignees", "issues", "states", "project_members",
+    "issue_assignees", "intake_issues", "intakes",
+    "cycle_issues", "module_issues", "issues",
+    "cycles", "modules", "estimate_points", "estimates",
+    "states", "project_members",
+    "project_issue_types", "issue_types",
     "projects", "workspace_members",
 )
 

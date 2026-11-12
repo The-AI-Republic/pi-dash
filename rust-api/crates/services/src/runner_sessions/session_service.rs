@@ -17,6 +17,8 @@
 //!   [`LIVE_STATE_SELECT_SQL`], [`LIVE_STATE_INSERT_SQL`],
 //!   [`live_state_update_sql`]. (`normalize_usage` is
 //!   [`super::usage::normalize_usage`], re-exported from D-15 L1.)
+//! * `apply_hello` stale-busy reconcile (`:149-164`, PDASHOSS01-231)
+//!   → [`should_release_on_open`], [`release_on_open_log`].
 //! * `mark_runner_online` / `mark_runner_offline`
 //!   (`:454-459`) → [`MARK_RUNNER_ONLINE_SQL`],
 //!   [`MARK_RUNNER_OFFLINE_SQL`].
@@ -90,7 +92,7 @@
 //!   `capabilities` first (`:130-141`), and the live-state
 //!   `sorted(set(update_fields))` (`:448`) is cosmetic —
 //!   `observed_run_id` still leads. `.update()` instead preserves
-//!   call order (barrier: `status, ended_at, queue_position`).
+//!   call order (barrier: `status, ended_at`).
 //! * `pod_ids` is a `set`, so multi-pod drain order is arbitrary in
 //!   Python; Rust drains in first-seen order (reaped runs, then
 //!   stopped cancels), which is deterministic for the same rows.
@@ -628,6 +630,25 @@ pub fn parse_in_flight_id(in_flight: Option<&Value>) -> Option<String> {
     parse_uuid_arg(&text).map(|id| id.to_string())
 }
 
+/// The `apply_hello` stale-busy reconcile gate (`:149-164`,
+/// PDASHOSS01-231): `if not body.get("in_flight_run")` — Python
+/// truthiness of the raw value, so any truthy value (even an
+/// unparseable id) skips the release. When it passes, the open
+/// transaction runs
+/// [`release_runner_if_idle_stmt`](super::drain::release_runner_if_idle_stmt)
+/// after the reaper and logs [`release_on_open_log`] when a row
+/// flipped. No drain is scheduled: dispatch still waits for the
+/// session's first poll.
+pub fn should_release_on_open(in_flight: Option<&Value>) -> bool {
+    !in_flight.is_some_and(py_truthy)
+}
+
+/// The info line `apply_hello` logs when the reconcile flipped a
+/// stale `busy` runner back to `online`.
+pub fn release_on_open_log(runner_id: &uuid::Uuid) -> String {
+    format!("session open released stale busy runner {runner_id} back to online")
+}
+
 /// The statuses the reaper may reap (`:197-204`): [`BUSY_STATUSES`]
 /// in source-tuple order, minus `ASSIGNED` / `WAITING_FOR_WORKTREE`
 /// / `CANCEL_REQUESTED` on the session-open path
@@ -732,11 +753,12 @@ pub const CANCEL_REQUESTED_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"agent_ru
 pub const RUNNER_OFFLINE_ERROR_CODE: &str = "runner_offline";
 
 /// In-flight claim probe (`70d684af`): the reported run's `status`
-/// and `error_code` (`filter(id, runner).values("status",
-/// "error_code").first()`). `$1` in-flight id, `$2` runner id.
+/// and `error_details` (`filter(id, runner).values("status",
+/// "error_details").first()`; the caller reads its `code` key —
+/// PDASHOSS01-187). `$1` in-flight id, `$2` runner id.
 /// Replaces [`CANCEL_REQUESTED_EXISTS_SQL`] on the poll path so a
 /// daemon that returns to a sweep-finalized run is told to stop.
-pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
+pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
 
 /// The cancel reason for a claimed in-flight run (`70d684af`):
 /// `cancellation_pending` while the run is still
@@ -803,14 +825,14 @@ pub fn cancel_retry_error_line(run_id: &str, error: &str) -> String {
 
 /// Stopped-cancel barrier write (`:249-253`,
 /// `reap_cancel_barrier.sql[2]`): `.update()` preserves call order
-/// (`status, ended_at, queue_position`). `$1` is `now` (`ended_at`),
+/// (`status, ended_at`). `$1` is `now` (`ended_at`),
 /// `$2…` the stopped-cancel ids. Call only with a non-empty id
 /// list — the source guards the write with `if stopped_cancel_ids:`.
 pub fn cancel_barrier_update_sql(id_count: usize) -> String {
     debug_assert_ne!(id_count, 0, "barrier write needs stopped-cancel ids");
     let params: Vec<String> = (0..id_count).map(|i| format!("${}", i + 2)).collect();
     format!(
-        "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" IN ({})",
+        "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1 WHERE \"agent_run\".\"id\" IN ({})",
         params.join(", ")
     )
 }
@@ -1863,6 +1885,37 @@ mod tests {
     }
 
     #[test]
+    fn release_on_open_follows_python_truthiness() {
+        // Absent / falsy: release.
+        assert!(should_release_on_open(None));
+        for falsy in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(should_release_on_open(Some(&falsy)), "{falsy}");
+        }
+        // Truthy, parseable or not: keep busy.
+        for truthy in [
+            serde_json::json!("7f0a8e4c-2f0e-4a51-9c1e-3a3b2f1b9d10"),
+            serde_json::json!("bogus"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(["x"]),
+        ] {
+            assert!(!should_release_on_open(Some(&truthy)), "{truthy}");
+        }
+        let runner = uuid::Uuid::nil();
+        assert_eq!(
+            release_on_open_log(&runner),
+            "session open released stale busy runner 00000000-0000-0000-0000-000000000000 back to online"
+        );
+    }
+
+    #[test]
     fn in_flight_id_normalizes_or_ignores() {
         assert_eq!(parse_in_flight_id(None), None);
         assert_eq!(parse_in_flight_id(Some(&Value::Null)), None);
@@ -2190,7 +2243,6 @@ mod tests {
         let barrier = fx()["reap_cancel_barrier"].clone();
         assert_eq!(barrier["status_after"], "cancelled");
         assert_eq!(barrier["ended_at_set"], true);
-        assert_eq!(barrier["queue_position"], Value::Null);
     }
 
     #[test]
@@ -2287,21 +2339,22 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
-                "error",
-                "error_code"
+                "error_details"
             ]
         );
         assert_eq!(
             values.clauses[0].value,
             SetValue::Text("failed".to_string())
         );
-        assert_eq!(values.clauses[5].value, SetValue::Text(detail.clone()));
+        // `error` / `error_code` fold into one bag patch (PDASHOSS01-187).
         assert_eq!(
-            values.clauses[6].value,
-            SetValue::Text("heartbeat_reaped".to_string())
+            values.clauses[4].value,
+            SetValue::Json(serde_json::json!({
+                "message": detail.clone(),
+                "code": "heartbeat_reaped"
+            }))
         );
         // Lock text pins (the terminal IN-list binds $2..$6; Django
         // inlines the same five values in set-hash order — order-free
@@ -2327,16 +2380,19 @@ mod tests {
             .split(" WHERE ")
             .next()
             .unwrap();
-        let set_columns: Vec<&str> = set_part
-            .split(", ")
-            .map(|assign| assign.split(" = ").next().unwrap().trim_matches('"'))
+        // Each assignment's column is the quoted identifier right before
+        // its ` = ` (the jsonb literal carries `, ` of its own).
+        let segments: Vec<&str> = set_part.split(" = ").collect();
+        let set_columns: Vec<&str> = segments[..segments.len() - 1]
+            .iter()
+            .map(|segment| segment.trim_end_matches('"').rsplit('"').next().unwrap())
             .collect();
         assert_eq!(set_columns, columns);
         assert!(update.contains(&detail));
-        assert!(update.contains("'heartbeat_reaped'"));
+        assert!(update.contains("\"code\": \"heartbeat_reaped\""));
         // The rendered D-15 UPDATE binds one param per clause, id last.
         let rendered = finalize_update_sql(&values);
-        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $8"));
+        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $6"));
         // Lock predicate for the reaper call: expected runner, no status.
         assert!(finalize_lock_passes(
             AgentRunStatus::Running,
@@ -2392,7 +2448,7 @@ mod tests {
         assert_eq!(RUNNER_OFFLINE_ERROR_CODE, "runner_offline");
         assert_eq!(
             IN_FLIGHT_CLAIM_SQL,
-            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" \
+            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" \
              WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1",
         );

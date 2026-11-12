@@ -22,8 +22,8 @@ DETAIL_KEYS = [
     "agent_test_default_interval_seconds", "agent_ticking_enabled", "anchor",
     "archive_in", "archived_at", "base_branch", "close_in", "cover_image",
     "cover_image_asset", "cover_image_url", "created_at", "created_by",
-    "cycle_view", "default_agent_executor", "default_assignee",
-    "default_state", "default_work_type", "deleted_at", "description", "description_html",
+    "cycle_view", "dedicated_runner_lost_action", "default_agent_executor", "default_assignee",
+    "default_state", "deleted_at", "description", "description_html",
     "description_text", "emoji", "estimate", "external_id", "external_source",
     "guest_view_all_features", "icon_prop", "id", "identifier", "inbox_view",
     "intake_view", "is_default", "is_favorite", "is_issue_type_enabled",
@@ -49,6 +49,73 @@ def test_list_projects_shape(world):
     assert isinstance(body, list) and len(body) == 1
     assert_keys(body[0], LIST_KEYS, "list")
     assert body[0]["id"] == project["id"]
+    assert body[0]["member_role"] == 20
+
+
+def test_list_projects_with_intake_rows(world):
+    """NEWPIDASH-130: the intake_count CASE must qualify its columns.
+
+    The list joins projects (deleted_at/id) to intake_issues
+    (deleted_at/id); bare columns are Postgres 42702 (500 on Rust).
+    Seeds one live intake_issue (status=-2) plus a non-pending one
+    (status=1) and pins 200 + intake_count==1 on both backends. The
+    project is seeded via SQL, not POST, because Rust project create
+    is still drift-broken on dedicated_runner_lost_action — this case
+    isolates the list query.
+    """
+    from _harness import seed as _seed
+
+    user = world.user()
+    ws = world.workspace(user)
+    world.ws_member(ws, user, 20)
+    client = world.client(user)
+    project = _seed.project(
+        world.conn, ws["id"], network=2,
+        dedicated_runner_lost_action="fail_to_backlog",
+    )
+    _seed.project_member(world.conn, project["id"], ws["id"], user["id"], role=20)
+    state = _seed.state(world.conn, project["id"], ws["id"])
+    intake = _seed.intake(world.conn, ws["id"], project["id"], is_default=True)
+
+    def _issue(name):
+        return _seed.insert_row(
+            world.conn,
+            "issues",
+            {
+                "workspace_id": str(ws["id"]),
+                "project_id": str(project["id"]),
+                "state_id": str(state["id"]),
+                "name": name,
+                "description_json": {},
+                "description_html": "<p></p>",
+                "priority": "none",
+                "complexity_score": 0,
+                "sequence_id": 1,
+                "sort_order": 65535,
+                "is_draft": False,
+                "git_work_branch": "",
+                "workpad": "",
+            },
+        )
+
+    pending = _issue("pending intake")
+    other = _issue("other intake")
+    _seed.intake_issue(
+        world.conn, ws["id"], project["id"], intake["id"], pending["id"],
+        status=-2,
+    )
+    _seed.intake_issue(
+        world.conn, ws["id"], project["id"], intake["id"], other["id"],
+        status=1,
+    )
+
+    resp = client.get(f"/api/workspaces/{ws['slug']}/projects/")
+    assert resp.status_code == 200, resp.text[:500]
+    body = resp.json()
+    assert isinstance(body, list) and len(body) == 1
+    assert_keys(body[0], LIST_KEYS, "list_with_intake")
+    assert body[0]["id"] == str(project["id"])
+    assert body[0]["intake_count"] == 1
     assert body[0]["member_role"] == 20
 
 
@@ -146,6 +213,38 @@ def test_create_project_duplicate_identifier_400(world):
     resp = client.post(f"/api/workspaces/{ws['slug']}/projects/",
                        json={"name": "Dupe Other", "identifier": project["identifier"]})
     assert resp.status_code == 400
+
+
+def test_executor_options_carry_deprecated(world, db):
+    # #2903: every agent_executor_options entry gains "deprecated",
+    # true for cloud_agent/managed_runner, false for local_runner.
+    client, _, ws, project = world.full_stack()
+    resp = client.get(f"/api/workspaces/{ws['slug']}/projects/{project['id']}/")
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["agent_executor_options"]
+    options = {row["kind"]: row for row in rows}
+    assert [row["kind"] for row in rows] == [
+        "cloud_agent", "local_runner", "managed_runner",
+    ]
+    assert options["local_runner"]["deprecated"] is False
+    assert options["cloud_agent"]["deprecated"] is True
+    assert options["managed_runner"]["deprecated"] is True
+
+
+def test_default_executor_write_translates(world, db):
+    # #2903: a deprecated default is normalized to local_runner on write.
+    client, _, ws, project = world.full_stack()
+    resp = client.patch(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/",
+        json={"default_agent_executor": "managed_runner"},
+    )
+    assert resp.status_code == 200, resp.text
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT default_agent_executor FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["default_agent_executor"] == "local_runner"
 
 
 def test_partial_update_project(world):
@@ -732,13 +831,61 @@ def test_archive_unarchive_cycle(world, db):
         assert cur.fetchone()["archived_at"] is None
 
 
-def test_favorites_list_empty_is_500_known_bug(world):
-    # Known bug, pinned: the favorites list queryset/serializer raises, so
-    # the endpoint 500s even with no favorites. The Rust port must reproduce.
+FAVORITE_KEYS = ["id", "entity_type", "entity_identifier", "entity_data", "name",
+                 "is_folder", "sequence", "parent", "workspace_id", "project_id"]
+
+
+def test_favorites_list_empty(world):
+    # PDASHOSS01-293 (PB-0500 retired): the viewset now lists through
+    # UserFavoriteSerializer, so an empty list is 200 [] instead of 500.
     client, _, ws, _ = world.full_stack()
     resp = client.get(f"/api/workspaces/{ws['slug']}/user-favorite-projects/")
-    assert resp.status_code == 500
-    assert resp.json() == {"error": "Something went wrong please try again later"}
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_favorites_list_shape(world):
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/user-favorite-projects/"
+    assert client.post(url, json={"project": str(project["id"])}).status_code == 204
+    resp = client.get(url)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    fav = body[0]
+    assert list(fav.keys()) == FAVORITE_KEYS
+    assert fav["entity_type"] == "project"
+    assert fav["entity_identifier"] == str(project["id"])
+    assert fav["project_id"] == str(project["id"])
+    assert fav["workspace_id"] == str(ws["id"])
+    assert fav["name"] is None
+    assert fav["is_folder"] is False
+    assert fav["parent"] is None
+    assert fav["sequence"] == 65535.0
+    assert list(fav["entity_data"].keys()) == ["id", "name", "logo_props"]
+    assert fav["entity_data"]["id"] == str(project["id"])
+    assert fav["entity_data"]["name"] == project["name"]
+
+
+def test_favorites_list_only_callers_rows_newest_first(world, db):
+    client, user, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/user-favorite-projects/"
+    assert client.post(url, json={"project": str(project["id"])}).status_code == 204
+    # A second live row of the caller's (a folder, older) and a deleted
+    # row: the list keeps every live entity type, drops the deleted one.
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_favorites (id, workspace_id, project_id, user_id, entity_type,"
+            " entity_identifier, name, is_folder, sequence, parent_id, created_at, updated_at,"
+            " deleted_at) VALUES (gen_random_uuid(), %s, NULL, %s, 'folder', NULL, 'F', true,"
+            " 1, NULL, now() - interval '1 day', now(), NULL),"
+            " (gen_random_uuid(), %s, NULL, %s, 'folder', NULL, 'gone', true, 2, NULL,"
+            " now(), now(), now())",
+            (str(ws["id"]), str(user["id"]), str(ws["id"]), str(user["id"])))
+    db.commit()
+    body = client.get(url).json()
+    assert [(f["entity_type"], f["name"]) for f in body] == [("project", None), ("folder", "F")]
+    assert body[1]["entity_data"] is None
 
 
 def test_favorites_create_and_destroy(world, db):

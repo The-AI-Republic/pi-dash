@@ -126,3 +126,91 @@ class TestGenerateCsrf:
 
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"key": "magic_" + email}
+
+
+# ---------------------------------------------------------------------------
+# Origin verification (NEWPIDASH-12): ``process_view`` rejects a foreign
+# ``Origin`` before the token check, so a valid token does not help.
+# ---------------------------------------------------------------------------
+
+EVIL = "https://evil.example"
+ORIGIN_FAILED = (
+    b'{"detail":"CSRF Failed: Origin checking failed - https://evil.example'
+    b' does not match any trusted origins."}'
+)
+
+
+def _form_with_origin(client, path, data, origin):
+    headers = {"X-CSRFToken": client.cookies["csrftoken"], "Origin": origin}
+    return client.post(path, data=data, headers=headers, follow_redirects=False)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("path", SIGN_PATHS)
+class TestSignOrigin:
+    def test_cross_origin_with_valid_token_hits_failure_page(self, path, db, seed, rdb):
+        user = seed.user(email=fresh_email())
+        client = csrf_client()
+        token = _seed_token(client, rdb, _generate_for(path), user["email"])
+        before = session_rows(db, user["id"])
+
+        resp = _form_with_origin(client, path, {"email": user["email"], "code": token}, EVIL)
+
+        assert resp.status_code == 200, resp.headers.get("location")
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        assert "templates/csrf_failure.html" in resp.text
+        assert SESSION_COOKIE not in resp.cookies
+        assert session_rows(db, user["id"]) == before
+        # Rejected before the view: the magic token is untouched.
+        assert redis_helper.read_magic(rdb, user["email"]) is not None
+
+    def test_same_origin_with_valid_token_passes_the_gate(self, path, seed, rdb):
+        user = seed.user(email=fresh_email())
+        client = csrf_client()
+        token = _seed_token(client, rdb, _generate_for(path), user["email"])
+
+        resp = _form_with_origin(
+            client, path, {"email": user["email"], "code": token}, env.base_url()
+        )
+
+        # Past the CSRF gate: the view answers its redirect (sign-up of an
+        # existing user redirects with its own error code).
+        assert resp.status_code == 302, resp.text
+        if "sign-in" in path:
+            assert "error_code" not in resp.headers["location"]
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("path", GENERATE_PATHS)
+class TestGenerateOrigin:
+    _login = TestGenerateCsrf._login
+
+    def test_session_cross_origin_with_valid_token_is_403(self, path, seed, rdb):
+        _, client = self._login(seed, rdb)
+
+        email = fresh_email("np12")
+        redis_helper.clear_magic(rdb, email)
+        resp = client.post(
+            path,
+            json={"email": email},
+            headers={"X-CSRFToken": client.cookies["csrftoken"], "Origin": EVIL},
+        )
+
+        assert resp.status_code == 403, resp.text
+        assert resp.headers["content-type"] == "application/json"
+        assert resp.content == ORIGIN_FAILED
+        assert redis_helper.read_magic(rdb, email) is None
+
+    def test_session_same_origin_with_valid_token_succeeds(self, path, seed, rdb):
+        _, client = self._login(seed, rdb)
+
+        email = fresh_email("np12")
+        redis_helper.clear_magic(rdb, email)
+        resp = client.post(
+            path,
+            json={"email": email},
+            headers={"X-CSRFToken": client.cookies["csrftoken"], "Origin": env.base_url()},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"key": "magic_" + email}
