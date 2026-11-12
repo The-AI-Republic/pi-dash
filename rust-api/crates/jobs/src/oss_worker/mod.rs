@@ -423,13 +423,15 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         runner_seams,
     );
+    crate::runner_runs::register_engine_pause_tasks(registry, ctx.pools.primary().clone());
     // D-11 execution tasks (PIDASHCONV-832; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). All
     // four handlers execute here on live seams
     // (`oss_worker::execute_seams::LiveExecuteSeams`), including the run
     // task's model runtime (PIDASHCONV-866 — no forward override). The
     // register call also owns `managed_runner.expire_waiting_runs`
-    // (never published in OSS; the table follows the registry).
+    // (beat-published every `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`;
+    // Django registers it too since PDASHOSS01-224).
     let invoke = model_runtime::invoke::InvokeCtx {
         tools: model_runtime::tools_exec::ToolCtx {
             pool: ctx.pools.primary().clone(),
@@ -461,6 +463,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.pools.primary().clone(),
             ctx.settings.cloud_agent.block_private_urls,
             invoke,
+            ctx.assistant_seam.clone(),
         )),
         std::sync::Arc::new(NoExtraToolsets),
     );
@@ -628,7 +631,7 @@ mod tests {
             crate::tasks_export::ISSUE_EXPORT_TASK,
             crate::tasks_export::ANALYTIC_EXPORT_TASK,
         ]);
-        assert_eq!(expected.len(), 76, "worker-owned count drifted");
+        assert_eq!(expected.len(), 79, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

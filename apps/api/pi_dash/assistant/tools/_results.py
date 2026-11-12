@@ -15,18 +15,13 @@ from typing import Any, Optional
 
 from pi_dash.assistant.models import AssistantThread, AssistantTurn, MessageKind
 from pi_dash.assistant.runtime import events
+from pi_dash.assistant.runtime.instructions import wrap_untrusted
 
-
-def wrap_untrusted(text: Optional[str]) -> str:
-    """Wrap user-generated text so the model treats it as data, not instructions.
-
-    The closing delimiter is neutralized inside the content so it cannot be
-    forged by a malicious issue/comment body.
-    """
-    # Neutralize both delimiters so injected content cannot open a nested frame
-    # or close the wrapper early (zero-width space breaks the tag for the model).
-    safe = (text or "").replace("</untrusted>", "<​/untrusted>").replace("<untrusted>", "<​untrusted>")
-    return f"<untrusted>{safe}</untrusted>"
+# Re-exported so ``_results.wrap_untrusted`` keeps working for the tool modules.
+# The definition moved next to the system-prompt rule that gives the tag its
+# meaning, because MCP tool-server results need the same delimiter and
+# ``runtime`` must not import back up into ``tools``.
+__all__ = ["wrap_untrusted", "truncate", "issue_link", "record_write"]
 
 
 def truncate(text: Optional[str], limit: int) -> tuple[str, bool]:

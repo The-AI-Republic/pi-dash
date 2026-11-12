@@ -6,6 +6,8 @@ admin surface exposes the full job (prompt, ``min_role``, RRULE); unknown
 write keys are ignored, so ``is_builtin`` can never be flipped by API.
 """
 
+import datetime
+
 import pytest
 
 from . import seed_loop as seed_l
@@ -162,6 +164,10 @@ INVALID_RRULE_VECTORS = [
     ("FREQ=DAILY;BYMINUTE=60", "invalid RRULE: minute must be in 0..59"),
     ("FREQ=DAILY;BYHOUR=25", "invalid RRULE: hour must be in 0..23"),
     ("FREQ=WEEKLY;BYSECOND=61", "invalid RRULE: second must be in 0..59"),
+    # A zero BYDAY ordinal is rejected while parsing (dateutil's `weekday`
+    # raises for n == 0; PIDASHCONV-1706). Anchor-independent.
+    ("FREQ=WEEKLY;BYDAY=0MO", "invalid RRULE: invalid 'BYDAY': 0MO"),
+    ("FREQ=MONTHLY;BYDAY=+0MO", "invalid RRULE: invalid 'BYDAY': +0MO"),
     # Awareness must match in either direction (dateutil rrule.py:462-472).
     (
         "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231T000000Z",
@@ -217,6 +223,66 @@ def test_create_embedded_naive_dtstart_allows_naive_until(org):
     )
     assert r.status_code == 201, r.text
     assert r.json()["rrule"] == rrule
+
+
+# PIDASHCONV-1706: dateutil's `__construct_byset` rejects a rule whose
+# listed BYHOUR (HOURLY) / BYMINUTE (MINUTELY) values no INTERVAL step can
+# reach from the anchor. The loop guard anchors on the request time only.
+BYSET_EMPTY = "invalid RRULE: Invalid rrule byxxx generates an empty set."
+
+
+def _byset_unreachable_rule() -> str:
+    # No BYHOUR value an INTERVAL=2 step can reach from the current hour:
+    # the opposite parity. HOURLY (not MINUTELY) so a pass takes the 201
+    # path, which the retry below can tell from a real failure.
+    hour = datetime.datetime.now(datetime.timezone.utc).hour
+    return f"FREQ=HOURLY;INTERVAL=2;BYHOUR={1 if hour % 2 == 0 else 0}"
+
+
+def test_create_rejects_byset_unreachable_from_now(org):
+    # The request-time anchor is read here, not in the server, so an hour
+    # rollover between the read and the request flips the verdict to 201;
+    # a bounded retry covers that single race. Any other outcome fails.
+    for attempt in range(3):
+        slug = f"bh-{org.tag}-{attempt}"
+        r = org.adm(
+            "POST", JOBS, "admin",
+            json=valid_payload(slug, rrule=_byset_unreachable_rule()),
+        )
+        if r.status_code == 201:
+            continue
+        assert r.status_code == 400, (r.status_code, r.text)
+        assert r.json() == {"error": "invalid_rrule", "detail": BYSET_EMPTY}
+        row = org.conn.execute(
+            "SELECT count(*) FROM loop_jobs WHERE slug=%s", (slug,)
+        ).fetchone()
+        assert row[0] == 0
+        return
+    pytest.fail("rule validated on 3 consecutive attempts; clock race or bug")
+
+
+def test_patch_rejects_byset_unreachable_from_now(org):
+    job = seed_l.create_loop_job(
+        org.conn, slug=f"bq-{org.tag}", public_name="BQ",
+        rrule="FREQ=DAILY;BYHOUR=2",
+    )
+    stored = "FREQ=DAILY;BYHOUR=2"
+    for _ in range(3):
+        rule = _byset_unreachable_rule()
+        r = org.adm(
+            "PATCH", detail(job["id"]), "admin", json={"rrule": rule},
+        )
+        if r.status_code == 200:
+            stored = rule  # hour rolled over; the retry re-checks from here
+            continue
+        assert r.status_code == 400, (r.status_code, r.text)
+        assert r.json() == {"error": "invalid_rrule", "detail": BYSET_EMPTY}
+        row = org.conn.execute(
+            "SELECT rrule FROM loop_jobs WHERE id=%s", (job["id"],)
+        ).fetchone()
+        assert row[0] == stored
+        return
+    pytest.fail("rule validated on 3 consecutive attempts; clock race or bug")
 
 
 def test_create_rejects_empty_rrule(org):
@@ -403,3 +469,47 @@ def test_delete_soft_deletes_and_frees_slug(org):
     assert r.status_code == 201, r.text
     assert r.json()["id"] != job["id"]
     assert org.adm("DELETE", detail(job["id"]), "admin").status_code == 404
+
+
+def test_delete_cascades_synchronously_to_targets_and_prefs(org):
+    # Port of Django's ``test_delete_cascades_to_targets_and_prefs``
+    # (``apps/api/pi_dash/tests/contract/loop/test_admin_api.py``): since
+    # NEWFRONT-957 the view stamps the job, its targets and its user
+    # preferences with one timestamp inside the request
+    # (``admin_views.py`` delete) instead of enqueueing
+    # ``soft_delete_related_objects``. No worker runs during contract
+    # tests, so anything still live after the 204 proves a deferred
+    # cascade (PIDASHCONV-1688).
+    job = seed_l.create_loop_job(org.conn, slug=f"dc-{org.tag}", public_name="DC")
+    seed_l.create_target(
+        org.conn, job_id=job["id"], workspace_id=org.workspace["id"],
+        user_id=org.member["id"],
+    )
+    seed_l.set_pref(
+        org.conn, user_id=org.member["id"], job_id=job["id"], enabled=False
+    )
+    assert org.adm("DELETE", detail(job["id"]), "admin").status_code == 204
+    stamped = org.conn.execute(
+        "SELECT deleted_at FROM loop_jobs WHERE id=%s", (job["id"],)
+    ).fetchone()[0]
+    assert stamped is not None
+    live_targets = org.conn.execute(
+        "SELECT count(*) FROM loop_targets WHERE job_id=%s AND deleted_at IS NULL",
+        (job["id"],),
+    ).fetchone()[0]
+    live_prefs = org.conn.execute(
+        "SELECT count(*) FROM loop_user_preferences WHERE job_id=%s AND deleted_at IS NULL",
+        (job["id"],),
+    ).fetchone()[0]
+    assert live_targets == 0
+    assert live_prefs == 0
+    # One timestamp across all three tables: the cascade shares the job's.
+    target_marks = org.conn.execute(
+        "SELECT DISTINCT deleted_at FROM loop_targets WHERE job_id=%s", (job["id"],)
+    ).fetchall()
+    pref_marks = org.conn.execute(
+        "SELECT DISTINCT deleted_at FROM loop_user_preferences WHERE job_id=%s",
+        (job["id"],),
+    ).fetchall()
+    assert target_marks == [(stamped,)]
+    assert pref_marks == [(stamped,)]

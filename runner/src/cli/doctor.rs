@@ -137,6 +137,53 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
         }
     }
 
+    if let Some(cfg) = cfg.as_ref() {
+        // Which credential store holds the daemon and engine credentials
+        // (design §4.3: `pidash doctor` reports it).
+        let store = crate::config::secrets::describe(paths, cfg);
+        checks.push(Check {
+            name: "credentials-store".to_string(),
+            ok: store.ok,
+            detail: store.detail,
+            blocker: false,
+        });
+        if cfg
+            .runners
+            .iter()
+            .any(|r| r.agent.kind == crate::config::schema::AgentKind::Engine)
+        {
+            match crate::engine::locate::resolve(&cfg.engine) {
+                Ok(engine) => checks.push(Check {
+                    name: "engine".to_string(),
+                    ok: true,
+                    detail: engine.binary.display().to_string(),
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: "engine".to_string(),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            let signed_in = cfg
+                .cli
+                .as_ref()
+                .and_then(|c| c.engine_credential.as_ref())
+                .is_some_and(|c| !c.token.is_empty());
+            checks.push(Check {
+                name: "engine-sign-in".to_string(),
+                ok: signed_in,
+                detail: if signed_in {
+                    "engine credential present".to_string()
+                } else {
+                    "the engine is not signed in — run `pidash login --engine`".to_string()
+                },
+                blocker: false,
+            });
+        }
+    }
+
     Ok(Report { checks })
 }
 
@@ -340,6 +387,9 @@ async fn run_agent_checks(
                 blocker: false,
             });
         }
+        // Checked once per daemon in `execute` (the binary and sign-in are
+        // machine-level, not per runner).
+        crate::config::schema::AgentKind::Engine => {}
     }
 }
 
@@ -455,6 +505,8 @@ mod tests {
 
     fn cfg_with(runners: Vec<RunnerConfig>) -> Config {
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "http://127.0.0.1:1".into(),

@@ -45,33 +45,27 @@ use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
-use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy, LOCK_TICKER_PARAMS};
+use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView,
+    AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
 };
-use pidash_services::orchestration::dispatch::{PodRunnerMatcher, PROJECT_CLOCK_POLICY_SQL};
+use pidash_services::orchestration::dispatch::PodRunnerMatcher;
 use pidash_services::orchestration::entries::{
     fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest, NewSchedulerRun,
-    PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
+    PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView,
 };
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 use pidash_types::dispatch::AgentExecutorKind;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{dispatch_agent_run, DispatchDecision};
-use crate::orchestration::live_inputs::{
-    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
-};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
-use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 /// Drain finalized runs' publish pairs in order. The api binary implements
 /// this over its `project_move_handoff` drain; a jobs-context caller passes
@@ -227,6 +221,27 @@ pub async fn enqueue_completion_comment(
     prev_state_id: Option<&Uuid>,
     current_state_id: Option<&Uuid>,
 ) {
+    let Some(job) = completion_comment_job(pool, issue_id, prev_state_id, current_state_id).await
+    else {
+        return;
+    };
+    if let Err(error) = crate::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
+    }
+}
+
+/// The completion-comment dispatch lookup half of
+/// [`enqueue_completion_comment`]: resolve the dispatch (group, mirror,
+/// idempotency guards) and build the provider's `post_completion_comment`
+/// job, or `None` when the leg skips. Best-effort: failures only warn.
+/// Shared with the public [`hooks::TransitionHook`][crate::hooks::TransitionHook],
+/// which sends the job through its queue sink instead of the outbox.
+pub(crate) async fn completion_comment_job(
+    pool: &PgPool,
+    issue_id: &Uuid,
+    prev_state_id: Option<&Uuid>,
+    current_state_id: Option<&Uuid>,
+) -> Option<crate::queue::NewJob> {
     use crate::integrations::github_signals::{
         dispatch_completion_comment, dispatch_job, DispatchOutcome,
     };
@@ -234,16 +249,13 @@ pub async fn enqueue_completion_comment(
         dispatch_completion_comment(pool, issue_id, current_state_id, false, prev_state_id).await;
     let target = match outcome {
         Ok(DispatchOutcome::Dispatch(target)) => target,
-        Ok(DispatchOutcome::Skip(_)) => return,
+        Ok(DispatchOutcome::Skip(_)) => return None,
         Err(error) => {
             tracing::warn!(%error, "completion comment dispatch lookup failed; op stands");
-            return;
+            return None;
         }
     };
-    let job = dispatch_job(&target);
-    if let Err(error) = crate::queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
-    }
+    Some(dispatch_job(&target))
 }
 
 /// The ticker/clock seam methods run pool-direct (autocommit); everything
@@ -256,6 +268,28 @@ struct LiveTransitionSeam<'a, C, H, P> {
 impl<C, H, P> LiveTransitionSeam<'_, C, H, P> {
     fn db(error: sqlx::Error) -> CreationError {
         CreationError::Db(error.to_string())
+    }
+
+    fn db_orm(error: sea_orm::DbErr) -> CreationError {
+        CreationError::Db(orm_error_text(error))
+    }
+}
+
+/// A SeaORM failure as the text the old sqlx read raised: the wrapped sqlx
+/// error when there is one (so Postgres codes still classify), otherwise its
+/// message (cf. `tools_exec::orm_error`).
+fn orm_error_text(error: sea_orm::DbErr) -> String {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner.to_string(),
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut.to_string()
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed.to_string()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -317,73 +351,127 @@ where
         }
         Ok(out.outcome.proceed)
     }
-}
 
-// ---------------------------------------------------------------------------
-// Ticker / clock SQL (shared with `v1_work_items`; the L5 consts, verbatim)
-// ---------------------------------------------------------------------------
-
-/// Translate an L5 clock statement's `:name` placeholders to positional `$n`
-/// in `params` order (the documented handler contract in
-/// `services::orchestration::clock`; never a fork — the text still comes from
-/// the L5 consts). Longer names first so `:id` never corrupts `:issue_id`.
-fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
-    let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
-    ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let mut out = sql.to_owned();
-    for (index, name) in ordered {
-        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, CreationError> {
+        use sea_orm::EntityTrait;
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let issue = pidash_db::entity::issues::Entity::find_by_id(issue_id)
+            .one(&conn)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?
+            .ok_or_else(|| CreationError::Db("issue not found".to_owned()))?;
+        if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+            &conn,
+            &issue,
+            Some(creator_id),
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?
+        {
+            return Ok(Some(code.to_owned()));
+        }
+        let has = self
+            .matcher
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, Some(creator_id), true, true)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(if has {
+            None
+        } else {
+            Some("no_eligible_runner_in_pod".to_owned())
+        })
     }
-    out
 }
 
-fn lock_ticker_by_issue_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::lock_ticker_sql(),
-        LOCK_TICKER_PARAMS,
-    )
+// ---------------------------------------------------------------------------
+// Ticker / clock reads (SeaORM; the L5 consts' shapes, rebuilt)
+// ---------------------------------------------------------------------------
+//
+// Before TICKER-ORCH-1 these read the L5 consts verbatim
+// (`PRIOR_STATE_SELECT_SQL`, `PROJECT_CLOCK_POLICY_SQL`, `lock_ticker_sql()`).
+// The builders below reproduce those statements exactly — same tables,
+// filters, ordering, limit and lock — without editing the shared consts
+// outside this batch's exclusive scope.
+
+/// `PRIOR_STATE_SELECT_SQL` (`SELECT id, state_id FROM issues WHERE id = $1`,
+/// `entries.rs:195`): pk plus `state_id` only, soft-deleted rows included.
+/// Narrow read via `select_only` + `FromQueryResult`.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct PriorStateRow {
+    id: Uuid,
+    state_id: Option<Uuid>,
 }
 
-/// Map one full ticker row (the jobs `map_ticker` shape over the same shared
-/// column list).
-fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
-    Ok(IssueAgentTicker {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        issue_id: row.try_get("issue_id")?,
-        used: row.try_get("used")?,
-        granted: row.try_get("granted")?,
-        waited: row.try_get("waited")?,
-        user_disabled: row.try_get("user_disabled")?,
-        next_run_at: row.try_get("next_run_at")?,
-        last_tick_at: row.try_get("last_tick_at")?,
-        enabled: row.try_get("enabled")?,
-        disarm_reason: row.try_get("disarm_reason")?,
-        pending_entry: row.try_get("pending_entry")?,
-        pending_entry_free: row.try_get("pending_entry_free")?,
-        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
-        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
-        resume_parent_run_id: row.try_get("resume_parent_run_id")?,
-    })
+fn prior_state_select(issue_id: Uuid) -> sea_orm::Select<pidash_db::entity::issues::Entity> {
+    use pidash_db::entity::issues;
+    issues::Entity::find_by_id(issue_id)
+        .select_only()
+        .columns([issues::Column::Id, issues::Column::StateId])
 }
 
-/// Map one `PROJECT_CLOCK_POLICY_SQL` row. The cadence columns are INT4; the
-/// policy widens them to i64 (the jobs `map_policy` precedent).
-fn map_policy(row: &PgRow) -> Result<ProjectClockPolicy, sqlx::Error> {
-    let interval_impl: Option<i32> = row.try_get("agent_default_interval_seconds")?;
-    let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
-    let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
-    Ok(ProjectClockPolicy {
-        agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
-        agent_default_max_ticks: row.try_get("agent_default_max_ticks")?,
-        agent_default_interval_seconds: interval_impl.map(i64::from),
-        agent_review_default_interval_seconds: interval_review.map(i64::from),
-        agent_test_default_interval_seconds: interval_test.map(i64::from),
-    })
+/// `lock_ticker_sql()` (`clock.rs:136`): the issue's ticker row, locked —
+/// `WHERE issue_id = $1 AND deleted_at IS NULL ORDER BY id ASC LIMIT 1
+/// FOR UPDATE` over the full 20-column ticker shape.
+fn lock_ticker_select(
+    issue_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::issue_agent_ticker::Entity> {
+    use pidash_db::entity::issue_agent_ticker;
+    issue_agent_ticker::Entity::find()
+        .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+        .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+        .order_by_asc(issue_agent_ticker::Column::Id)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// `PROJECT_CLOCK_POLICY_SQL`
+/// (`SELECT agent_ticking_enabled, agent_default_max_ticks,
+/// agent_default_interval_seconds, agent_review_default_interval_seconds,
+/// agent_test_default_interval_seconds FROM projects WHERE id = $1`,
+/// `dispatch.rs:183`). `Option` decode keeps the `getattr`-default rows
+/// the old `map_policy` read; the cadence columns widen `i32 → i64` there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct ClockPolicyRow {
+    agent_ticking_enabled: Option<bool>,
+    agent_default_max_ticks: Option<i32>,
+    agent_default_interval_seconds: Option<i32>,
+    agent_review_default_interval_seconds: Option<i32>,
+    agent_test_default_interval_seconds: Option<i32>,
+}
+
+impl From<ClockPolicyRow> for ProjectClockPolicy {
+    fn from(row: ClockPolicyRow) -> Self {
+        Self {
+            agent_ticking_enabled: row.agent_ticking_enabled,
+            agent_default_max_ticks: row.agent_default_max_ticks,
+            agent_default_interval_seconds: row.agent_default_interval_seconds.map(i64::from),
+            agent_review_default_interval_seconds: row
+                .agent_review_default_interval_seconds
+                .map(i64::from),
+            agent_test_default_interval_seconds: row
+                .agent_test_default_interval_seconds
+                .map(i64::from),
+        }
+    }
+}
+
+fn clock_policy_select(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::projects::Entity> {
+    use pidash_db::entity::projects;
+    projects::Entity::find()
+        .filter(projects::Column::Id.eq(project_id))
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+        ])
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +494,35 @@ where
 
     async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
         self.store.state(state_id).await
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        CreationSeam::dedicated_pin(&mut self.store, args).await
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        CreationSeam::insert_system_comment(&mut self.store, comment).await
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        CreationSeam::clear_parent_thread(&mut self.store, run_id).await
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        CreationSeam::pod_once_started_comment(&mut self.store, issue_id, pod_id, actor_id, now)
+            .await
     }
 
     async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -547,12 +664,13 @@ where
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = prior_state_select(issue_id)
+            .into_model::<PriorStateRow>()
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        Ok(row.and_then(|(_, state_id)| state_id))
+            .map_err(Self::db_orm)?;
+        Ok(row.and_then(|row| row.state_id))
     }
 
     async fn queued_follow_up(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -563,14 +681,12 @@ where
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
-            .bind(issue_id)
-            .fetch_optional(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = lock_ticker_select(issue_id)
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        row.map(|row| map_ticker(&row))
-            .transpose()
-            .map_err(Self::db)
+            .map_err(Self::db_orm)?;
+        Ok(row.map(IssueAgentTicker::from))
     }
 
     async fn save_ticker(
@@ -580,9 +696,14 @@ where
     ) -> Result<(), CreationError> {
         // `updated_at` is now-at-write: Python's `save()` stamps
         // `auto_now` at write time (the pre-consolidation bind).
-        apply_clock_write(self.pool, &write, row, chrono::Utc::now())
-            .await
-            .map_err(Self::db)
+        apply_clock_write(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            &write,
+            row,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {
@@ -593,12 +714,14 @@ where
         &mut self,
         project_id: Uuid,
     ) -> Result<ProjectClockPolicy, CreationError> {
-        let row: PgRow = sqlx::query(PROJECT_CLOCK_POLICY_SQL)
-            .bind(project_id)
-            .fetch_one(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = clock_policy_select(project_id)
+            .into_model::<ClockPolicyRow>()
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        map_policy(&row).map_err(Self::db)
+            .map_err(Self::db_orm)?;
+        row.map(ProjectClockPolicy::from)
+            .ok_or_else(|| CreationError::Db(sqlx::Error::RowNotFound.to_string()))
     }
 
     async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {
@@ -678,74 +801,14 @@ where
 // Worker hook: the jobs binding over the transition entry points
 // ---------------------------------------------------------------------------
 
-/// The worker's post-commit drains for the transition core (the api
-/// `TransitionDrains` shape over worker inputs): the terminal-effects
-/// publish drain enqueues the effects task and skips the inline apply
-/// (no live `RunnerRunsSeams` here — the queued task covers the hooks
-/// idempotently, PIDASHCONV-859, the `tools_exec` fire precedent); the
-/// pod drain is the live session drain.
-struct WorkerTransitionDrains {
-    pool: PgPool,
-    redis: Option<redis::Client>,
-    runner: RunnerSettings,
-}
-
-impl PublishEffectsDrain for WorkerTransitionDrains {
-    fn drain(
-        &self,
-        effects: Vec<LifecycleEffect>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            for effect in effects {
-                match effect {
-                    LifecycleEffect::PublishTerminalEffects { run_id } => {
-                        let job = terminal_effects_job(&run_id);
-                        if let Err(error) = crate::queue::enqueue(&pool, &job).await {
-                            tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
-                        }
-                    }
-                    LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
-                        tracing::warn!(
-                            "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
-                             (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
-                        );
-                    }
-                    // Unreachable: `plan_publish_effects` emits exactly these two.
-                    _ => {}
-                }
-            }
-        })
-    }
-}
-
-impl PodDrain for WorkerTransitionDrains {
-    fn drain_pod(&self, pod_id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), ()>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let redis = self.redis.clone();
-        let runner = self.runner.clone();
-        Box::pin(async move {
-            drain_pod_by_id(&pool, redis.as_ref(), &runner, pod_id)
-                .await
-                .map(|_| ())
-                .map_err(|_| ())
-        })
-    }
-}
-
-/// The worker's [`IssueTransitionHook`]: the public transition entry
-/// points bound to worker settings + seams (the api `AppTransitionHook`
-/// shape). The worker installs one over its pools/settings/seams and
-/// hands it to the sync drivers, so sync-created/adopted mirrors run
-/// the same post-save legs as every other issue write (PIDASHCONV-1576).
+/// The worker's [`IssueTransitionHook`]: the public
+/// [`hooks::TransitionHook`][crate::hooks::TransitionHook] over worker
+/// settings + seams and the queue/live drains. The worker installs one
+/// over its pools/settings/seams and hands it to the sync drivers, so
+/// sync-created/adopted mirrors run the same post-save legs as every
+/// other issue write (PIDASHCONV-1576).
 pub struct WorkerTransitionHook {
-    pool: PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
-    redis: Option<redis::Client>,
-    runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    assistant_seam: Arc<dyn AssistantModelSeam>,
+    hook: crate::hooks::TransitionHook,
 }
 
 impl WorkerTransitionHook {
@@ -759,14 +822,29 @@ impl WorkerTransitionHook {
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
-        Self {
+        use crate::hooks::{
+            HookDeps, LivePodDrain, OutboxTaskSink, QueuePublishDrain, QueueTerminalEffectsDrain,
+            TransitionHook,
+        };
+        let publish = Arc::new(QueuePublishDrain::new(&pool));
+        let pods = Arc::new(LivePodDrain::new(&pool, redis.clone(), runner.clone()));
+        let terminal = Arc::new(QueueTerminalEffectsDrain::new(&pool));
+        let deps = HookDeps {
             pool,
             cloud,
             managed,
+            cache: crate::admission::RedisAdmissionCache::from_env(),
             redis,
             runner,
             toolsets,
             assistant_seam,
+            publish,
+            pods,
+            terminal,
+            queue: Arc::new(OutboxTaskSink),
+        };
+        Self {
+            hook: TransitionHook::new(&deps),
         }
     }
 }
@@ -778,16 +856,8 @@ impl IssueTransitionHook for WorkerTransitionHook {
         prev_state_id: Option<Uuid>,
         current_state_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            enqueue_completion_comment(
-                &pool,
-                &issue_id,
-                prev_state_id.as_ref(),
-                current_state_id.as_ref(),
-            )
-            .await;
-        })
+        self.hook
+            .enqueue_completion_comment(issue_id, prev_state_id, current_state_id)
     }
 
     fn fire(
@@ -795,72 +865,27 @@ impl IssueTransitionHook for WorkerTransitionHook {
         actor_id: Uuid,
         request: FireRequest,
     ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let cloud = self.cloud.clone();
-        let managed = self.managed.clone();
-        let redis = self.redis.clone();
-        let runner = self.runner.clone();
-        let toolsets = self.toolsets.clone();
-        let assistant_seam = self.assistant_seam.clone();
-        Box::pin(async move {
-            // Per-fire inputs (the fire_tick live shape): the universe
-            // around this fire's actor, LLM-key presence, and the
-            // installed seam's gate verdicts over it. Each erasure logs
-            // its cause first (PIDASHCONV-1563).
-            let universe = creator_universe(&pool, Some(actor_id), request.issue_id)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "sync transition fire: creator universe lookup failed");
-                })?;
-            let presence = Arc::new(fetch_presence(&pool, &universe).await.map_err(|error| {
-                tracing::warn!(%error, "sync transition fire: presence lookup failed");
-            })?);
-            let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
-            let build_deps = || StoreDeps {
-                cloud: cloud.clone(),
-                managed: managed.clone(),
-                cache: RedisAdmissionCache::from_env(),
-                has_usable_llm_config: gate_fn(Arc::clone(&verdicts)),
-                toolsets: Arc::clone(&toolsets),
-                llm_profile: profile_fn(Arc::clone(&presence)),
-                now_unix_secs: request.now.timestamp(),
-            };
-            let matcher = JobsMatcher::new(pool.clone());
-            let drains = WorkerTransitionDrains {
-                pool: pool.clone(),
-                redis,
-                runner,
-            };
-            fire_transition(
-                &pool,
-                build_deps(),
-                build_deps(),
-                matcher,
-                &cloud,
-                request,
-                &drains,
-                &drains,
-            )
-            .await
-        })
+        self.hook.fire(actor_id, request)
     }
 }
 
-/// The worker's [`TaskEnqueueHook`]: `task.delay(*args, **kwargs)`
-/// through the jobs queue kernel, mirroring the api binary's
-/// `AppTaskEnqueueHook` (`crates/api/src/domain_hooks.rs`), which this
-/// crate cannot name. Worker drivers that drive domain writes (the
-/// cloud-agent tools, PIDASHCONV-1596) register one on the
+/// The worker's [`TaskEnqueueHook`]: the public
+/// [`hooks::EnqueueHook`][crate::hooks::EnqueueHook] over the outbox
+/// sink. Worker drivers that drive domain writes (the cloud-agent
+/// tools, PIDASHCONV-1596) register one on the
 /// [`WriteTxn`][pidash_services::domain::WriteTxn] hook registry next
 /// to the [`WorkerTransitionHook`]. Enqueue failures log and the save
 /// stands.
 pub struct WorkerTaskEnqueueHook {
-    pool: PgPool,
+    hook: crate::hooks::EnqueueHook,
 }
 
 impl WorkerTaskEnqueueHook {
     pub fn new(pool: &PgPool) -> Self {
-        Self { pool: pool.clone() }
+        use crate::hooks::{EnqueueHook, OutboxTaskSink};
+        Self {
+            hook: EnqueueHook::new(pool, Arc::new(OutboxTaskSink)),
+        }
     }
 }
 
@@ -871,18 +896,7 @@ impl TaskEnqueueHook for WorkerTaskEnqueueHook {
         args: Vec<Value>,
         kwargs: Map<String, Value>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        let message = crate::TaskMessage::new(task, args, kwargs);
-        Box::pin(async move {
-            let job = crate::queue::NewJob::new(
-                message.task.clone(),
-                Value::Array(message.args.clone()),
-                Value::Object(message.kwargs.clone()),
-            );
-            if let Err(error) = crate::queue::enqueue(&pool, &job).await {
-                tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; save stands");
-            }
-        })
+        self.hook.enqueue_task(task, args, kwargs)
     }
 }
 
@@ -935,6 +949,8 @@ pub async fn fire_sync_transition(
         // The sync path never stamps `_DISPATCH_IMMEDIATE_ATTR`, so the
         // receiver default (`True`) always applies.
         dispatch_immediate: true,
+        pod_once: false,
+
         // A sync write is never an agent's own move.
         moved_by_run: None,
         now,
@@ -1023,5 +1039,98 @@ pub(crate) mod test_support {
             ));
             Box::pin(async move { Ok(FireOutcome::NoTransition) })
         }
+    }
+}
+
+#[cfg(test)]
+mod ticker_orch_orm_tests {
+    use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    fn sql_of<E>(select: sea_orm::Select<E>) -> String
+    where
+        E: sea_orm::EntityTrait,
+    {
+        select.build(DbBackend::Postgres).to_string()
+    }
+
+    #[test]
+    fn prior_state_select_is_narrow_pk_read() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let sql = sql_of(prior_state_select(id));
+        assert!(sql.contains("SELECT"), "select:\n{sql}");
+        assert!(sql.contains("FROM"), "from:\n{sql}");
+        assert!(sql.contains("\"id\""), "id col:\n{sql}");
+        assert!(sql.contains("\"state_id\""), "state col:\n{sql}");
+        assert!(sql.contains("WHERE"), "where:\n{sql}");
+        assert!(sql.contains("issues"), "table:\n{sql}");
+        assert!(sql.contains("123e4567"), "bind:\n{sql}");
+        // The L5 const scopes no soft-delete and no join.
+        assert!(!sql.contains("deleted_at"), "no deleted_at guard:\n{sql}");
+        assert!(!sql.contains("JOIN"), "no join:\n{sql}");
+    }
+
+    #[test]
+    fn lock_ticker_select_pins_guard_order_limit_and_lock() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let sql = lock_ticker_select(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        for fragment in [
+            "issue_agent_ticker",
+            "issue_id",
+            "deleted_at",
+            "IS NULL",
+            "ORDER BY",
+            "ASC",
+            "LIMIT 1",
+            "FOR UPDATE",
+        ] {
+            assert!(sql.contains(fragment), "missing {fragment} in:\n{sql}");
+        }
+    }
+
+    #[test]
+    fn clock_policy_select_reads_five_columns_by_pk() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let sql = sql_of(clock_policy_select(id));
+        for fragment in [
+            "agent_ticking_enabled",
+            "agent_default_max_ticks",
+            "agent_default_interval_seconds",
+            "agent_review_default_interval_seconds",
+            "agent_test_default_interval_seconds",
+            "FROM",
+            "projects",
+            "WHERE",
+            "123e4567",
+        ] {
+            assert!(sql.contains(fragment), "missing {fragment} in:\n{sql}");
+        }
+        assert!(!sql.contains("JOIN"), "no join:\n{sql}");
+    }
+
+    #[test]
+    fn clock_policy_row_widens_intervals() {
+        let row = ClockPolicyRow {
+            agent_ticking_enabled: Some(true),
+            agent_default_max_ticks: Some(-1),
+            agent_default_interval_seconds: Some(10800),
+            agent_review_default_interval_seconds: Some(3600),
+            agent_test_default_interval_seconds: Some(7200),
+        };
+        let policy: ProjectClockPolicy = row.into();
+        assert_eq!(policy.agent_ticking_enabled, Some(true));
+        assert_eq!(policy.agent_default_max_ticks, Some(-1));
+        assert_eq!(policy.agent_default_interval_seconds, Some(10800));
+        assert_eq!(policy.agent_review_default_interval_seconds, Some(3600));
+        assert_eq!(policy.agent_test_default_interval_seconds, Some(7200));
+    }
+
+    #[test]
+    fn orm_error_unwraps_sqlx_text() {
+        let inner = sqlx::Error::RowNotFound;
+        let err = sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner));
+        assert_eq!(orm_error_text(err), sqlx::Error::RowNotFound.to_string());
     }
 }

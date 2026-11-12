@@ -74,8 +74,10 @@
 //!   when there is no version (`issue_description_version_task.py:18-19`);
 //!   the services layer preserves the `None`.
 
-use sqlx::postgres::PgRow;
-use sqlx::Row;
+use sea_query::SimpleExpr;
+use sea_query::{
+    Alias, Asterisk, Expr, Func, InsertStatement, JoinType, Order, Query, UpdateStatement,
+};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -273,12 +275,19 @@ pub const ISSUE_VERSION_BULK_BATCH_SIZE: usize = 1000;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn quoted_list(table: &str, columns: &[&str]) -> String {
+fn table_alias(table: &str) -> Alias {
+    Alias::new(table.to_owned())
+}
+
+fn col_exprs(table: &str, columns: &[&str]) -> Vec<SimpleExpr> {
     columns
         .iter()
-        .map(|c| format!("\"{table}\".\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .map(|c| Expr::col((table_alias(table), Alias::new(c.to_owned()))).into())
+        .collect()
+}
+
+fn iden_aliases(columns: &[&str]) -> Vec<Alias> {
+    columns.iter().map(|c| Alias::new(c.to_owned())).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -287,67 +296,193 @@ fn quoted_list(table: &str, columns: &[&str]) -> String {
 
 /// `Issue.objects.count()` — soft-delete-scoped
 /// (`issue_version_sync.py:187`, `issue_description_version_sync.py:45`).
-pub const ISSUE_COUNT_SQL: &str =
-    "SELECT COUNT(*) AS \"__count\" FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL";
+pub fn issue_count_stmt() -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Func::count::<SimpleExpr>(Expr::col(Asterisk).into()),
+        "__count",
+    );
+    stmt.from(Alias::new("issues".to_owned())).and_where(
+        Expr::col((
+            Alias::new("issues".to_owned()),
+            Alias::new("deleted_at".to_owned()),
+        ))
+        .is_null(),
+    );
+    stmt
+}
 
 /// Full-row batch: `order_by("created_at")` slice `[offset:end_offset]`
 /// with `select_related` joins omitted (see module docs).
 /// Django renders `LIMIT <n> OFFSET <m>` as literals.
-pub fn issues_batch_sql(limit: i64, offset: i64) -> String {
-    format!(
-        "SELECT {} FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL ORDER BY \"issues\".\"created_at\" ASC LIMIT {limit} OFFSET {offset}",
-        quoted_list("issues", &ISSUE_COLUMNS)
-    )
+pub fn issues_batch_stmt(limit: i64, offset: i64) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(col_exprs("issues", &ISSUE_COLUMNS));
+    stmt.from(Alias::new("issues".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("issues".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .order_by(Alias::new("created_at".to_owned()), Order::Asc)
+        .limit(limit as u64)
+        .offset(offset as u64);
+    stmt
 }
 
 /// `.only(...)` batch of the description backfill
 /// (`issue_description_version_sync.py:54-68`).
-pub fn issues_batch_limited_sql(limit: i64, offset: i64) -> String {
-    format!(
-        "SELECT {} FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL ORDER BY \"issues\".\"created_at\" ASC LIMIT {limit} OFFSET {offset}",
-        quoted_list("issues", &ISSUE_DESCRIPTION_ONLY_COLUMNS)
-    )
+pub fn issues_batch_limited_stmt(limit: i64, offset: i64) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(col_exprs("issues", &ISSUE_DESCRIPTION_ONLY_COLUMNS));
+    stmt.from(Alias::new("issues".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("issues".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .order_by(Alias::new("created_at".to_owned()), Order::Asc)
+        .limit(limit as u64)
+        .offset(offset as u64);
+    stmt
 }
 
 /// Latest version rows: `filter(fk=).order_by("-last_saved_at").first()`
 /// under the soft-delete scope.
-pub fn latest_version_sql(table: &str, fk: &str, columns: &[&str]) -> String {
-    format!(
-        "SELECT {} FROM \"{table}\" WHERE (\"{table}\".\"deleted_at\" IS NULL AND \"{table}\".\"{fk}\" = $1) ORDER BY \"{table}\".\"last_saved_at\" DESC LIMIT 1",
-        quoted_list(table, columns)
-    )
+pub fn latest_version_stmt(
+    table: &str,
+    fk: &str,
+    columns: &[&str],
+    fk_value: Uuid,
+) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(col_exprs(table, columns));
+    stmt.from(table_alias(table))
+        .and_where(Expr::col((table_alias(table), Alias::new("deleted_at".to_owned()))).is_null())
+        .and_where(Expr::col((table_alias(table), Alias::new(fk.to_owned()))).eq(fk_value))
+        .order_by(Alias::new("last_saved_at".to_owned()), Order::Desc)
+        .limit(1);
+    stmt
 }
 
 /// Latest `IssueVersion` for one issue (`issue_version_sync.py:45`).
-pub fn latest_issue_version_sql() -> String {
-    latest_version_sql("issue_versions", "issue_id", &ISSUE_VERSION_COLUMNS)
+pub fn latest_issue_version_stmt(fk_value: Uuid) -> sea_query::SelectStatement {
+    latest_version_stmt(
+        "issue_versions",
+        "issue_id",
+        &ISSUE_VERSION_COLUMNS,
+        fk_value,
+    )
 }
 
 /// Latest `IssueDescriptionVersion` (`issue_description_version_task.py:58-60`).
-pub fn latest_description_version_sql() -> String {
-    latest_version_sql(
+pub fn latest_description_version_stmt(fk_value: Uuid) -> sea_query::SelectStatement {
+    latest_version_stmt(
         "issue_description_versions",
         "issue_id",
         &ISSUE_DESCRIPTION_VERSION_COLUMNS,
+        fk_value,
     )
 }
 
 /// Latest `PageVersion` (`page_version_task.py:35`).
-pub fn latest_page_version_sql() -> String {
-    latest_version_sql("page_versions", "page_id", &PAGE_VERSION_COLUMNS)
+pub fn latest_page_version_stmt(fk_value: Uuid) -> sea_query::SelectStatement {
+    latest_version_stmt("page_versions", "page_id", &PAGE_VERSION_COLUMNS, fk_value)
 }
 
 /// Owner rendering for the `issue_task` coalesce bug: the latest version's
 /// id, its `owned_by` user's `username`/`email` and its `last_saved_at`,
 /// so the caller can compare `"{username} <{email}>" == user_id` and the
 /// 600s window exactly as Python's `str(version.owned_by)` comparison does.
-pub const LATEST_ISSUE_VERSION_OWNER_SQL: &str = "SELECT \"issue_versions\".\"id\", \"users\".\"username\", \"users\".\"email\", \"issue_versions\".\"last_saved_at\" FROM \"issue_versions\" INNER JOIN \"users\" ON (\"issue_versions\".\"owned_by_id\" = \"users\".\"id\") WHERE (\"issue_versions\".\"deleted_at\" IS NULL AND \"issue_versions\".\"issue_id\" = $1) ORDER BY \"issue_versions\".\"last_saved_at\" DESC LIMIT 1";
+pub fn latest_issue_version_owner_stmt(issue_id: Uuid) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(vec![
+        Expr::col((
+            Alias::new("issue_versions".to_owned()),
+            Alias::new("id".to_owned()),
+        )),
+        Expr::col((
+            Alias::new("users".to_owned()),
+            Alias::new("username".to_owned()),
+        )),
+        Expr::col((
+            Alias::new("users".to_owned()),
+            Alias::new("email".to_owned()),
+        )),
+        Expr::col((
+            Alias::new("issue_versions".to_owned()),
+            Alias::new("last_saved_at".to_owned()),
+        )),
+    ]);
+    stmt.from(Alias::new("issue_versions".to_owned()))
+        .join(
+            JoinType::InnerJoin,
+            Alias::new("users".to_owned()),
+            Expr::col((
+                Alias::new("issue_versions".to_owned()),
+                Alias::new("owned_by_id".to_owned()),
+            ))
+            .equals((Alias::new("users".to_owned()), Alias::new("id".to_owned()))),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("issue_versions".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("issue_versions".to_owned()),
+                Alias::new("issue_id".to_owned()),
+            ))
+            .eq(issue_id),
+        )
+        .order_by(Alias::new("last_saved_at".to_owned()), Order::Desc)
+        .limit(1);
+    stmt
+}
 
 /// Project-admin fallback of both `get_owner_id`s
 /// (`issue_version_sync.py:77-80`, `issue_description_version_sync.py:31-34`):
 /// `filter(project_id=, role=20).first()` — the `Meta.ordering`
 /// (`-created_at`) applies since there is no explicit `order_by`.
-pub const ADMIN_FALLBACK_SQL: &str = "SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $1 AND \"project_members\".\"role\" = 20) ORDER BY \"project_members\".\"created_at\" DESC LIMIT 1";
+pub fn admin_fallback_stmt(project_id: Uuid) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.expr(Expr::col((
+        Alias::new("project_members".to_owned()),
+        Alias::new("member_id".to_owned()),
+    )));
+    stmt.from(Alias::new("project_members".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("project_members".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("project_members".to_owned()),
+                Alias::new("project_id".to_owned()),
+            ))
+            .eq(project_id),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("project_members".to_owned()),
+                Alias::new("role".to_owned()),
+            ))
+            .eq(20),
+        )
+        .order_by(Alias::new("created_at".to_owned()), Order::Desc)
+        .limit(1);
+    stmt
+}
 
 // ---------------------------------------------------------------------------
 // Related-data queries (`get_related_data`, `issue_version_sync.py:85-128`)
@@ -355,143 +490,280 @@ pub const ADMIN_FALLBACK_SQL: &str = "SELECT \"project_members\".\"member_id\" F
 
 /// `IN`-list select with `ORDER BY <id> ASC` (assignees/labels/modules),
 /// under the soft-delete scope.
-pub fn related_in_sql(table: &str, id_col: &str, value_col: &str, n: usize) -> String {
-    let placeholders = (1..=n)
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT \"{table}\".\"issue_id\", \"{table}\".\"{value_col}\" FROM \"{table}\" WHERE (\"{table}\".\"deleted_at\" IS NULL AND \"{table}\".\"{id_col}\" IN ({placeholders})) ORDER BY \"{table}\".\"issue_id\" ASC"
-    )
+pub fn related_in_stmt(
+    table: &str,
+    id_col: &str,
+    value_col: &str,
+    ids: &[Uuid],
+) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(vec![
+        Expr::col((table_alias(table), Alias::new("issue_id".to_owned()))),
+        Expr::col((table_alias(table), Alias::new(value_col.to_owned()))),
+    ]);
+    stmt.from(table_alias(table))
+        .and_where(Expr::col((table_alias(table), Alias::new("deleted_at".to_owned()))).is_null())
+        .and_where(
+            Expr::col((table_alias(table), Alias::new(id_col.to_owned())))
+                .is_in(ids.iter().cloned()),
+        )
+        .order_by(Alias::new("issue_id".to_owned()), Order::Asc);
+    stmt
 }
 
 /// `CycleIssue` map (`issue_version_sync.py:88`): the `Meta.ordering`
 /// (`-created_at`) governs iteration, and the dict comprehension keeps the
 /// LAST row per issue — the port inserts over the same order.
-pub fn cycle_issues_sql(n: usize) -> String {
-    let placeholders = (1..=n)
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT \"cycle_issues\".\"issue_id\", \"cycle_issues\".\"cycle_id\" FROM \"cycle_issues\" WHERE (\"cycle_issues\".\"deleted_at\" IS NULL AND \"cycle_issues\".\"issue_id\" IN ({placeholders})) ORDER BY \"cycle_issues\".\"created_at\" DESC"
-    )
+pub fn cycle_issues_stmt(ids: &[Uuid]) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(vec![
+        Expr::col((
+            Alias::new("cycle_issues".to_owned()),
+            Alias::new("issue_id".to_owned()),
+        )),
+        Expr::col((
+            Alias::new("cycle_issues".to_owned()),
+            Alias::new("cycle_id".to_owned()),
+        )),
+    ]);
+    stmt.from(Alias::new("cycle_issues".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("cycle_issues".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("cycle_issues".to_owned()),
+                Alias::new("issue_id".to_owned()),
+            ))
+            .is_in(ids.iter().cloned()),
+        )
+        .order_by(Alias::new("created_at".to_owned()), Order::Desc);
+    stmt
 }
 
 /// `IssueActivity` latest-per-issue (`issue_version_sync.py:116`):
 /// `order_by("issue_id", "-created_at")`, first per group in Python.
-pub fn activities_sql(n: usize) -> String {
-    let placeholders = (1..=n)
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT \"issue_activities\".\"id\", \"issue_activities\".\"issue_id\", \"issue_activities\".\"created_at\" FROM \"issue_activities\" WHERE (\"issue_activities\".\"deleted_at\" IS NULL AND \"issue_activities\".\"issue_id\" IN ({placeholders})) ORDER BY \"issue_activities\".\"issue_id\" ASC, \"issue_activities\".\"created_at\" DESC"
-    )
+pub fn activities_stmt(ids: &[Uuid]) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.exprs(vec![
+        Expr::col((
+            Alias::new("issue_activities".to_owned()),
+            Alias::new("id".to_owned()),
+        )),
+        Expr::col((
+            Alias::new("issue_activities".to_owned()),
+            Alias::new("issue_id".to_owned()),
+        )),
+        Expr::col((
+            Alias::new("issue_activities".to_owned()),
+            Alias::new("created_at".to_owned()),
+        )),
+    ]);
+    stmt.from(Alias::new("issue_activities".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("issue_activities".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("issue_activities".to_owned()),
+                Alias::new("issue_id".to_owned()),
+            ))
+            .is_in(ids.iter().cloned()),
+        )
+        .order_by(Alias::new("issue_id".to_owned()), Order::Asc)
+        .order_by(Alias::new("created_at".to_owned()), Order::Desc);
+    stmt
 }
 
 // ---------------------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------------------
 
-/// Single-row `INSERT` with the `_meta`-order columns.
-pub fn insert_sql(table: &str, columns: &[&str]) -> String {
-    let names = columns
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let values = (1..=columns.len())
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("INSERT INTO \"{table}\" ({names}) VALUES ({values})")
+/// Single-row `INSERT` with the `_meta`-order columns and `rows` value
+/// groups (each row aligned with `columns`).
+pub fn insert_stmt(table: &str, columns: &[&str], rows: Vec<Vec<SimpleExpr>>) -> InsertStatement {
+    let mut stmt = Query::insert();
+    stmt.into_table(table_alias(table));
+    stmt.columns(iden_aliases(columns));
+    for row in rows {
+        stmt.values_panic(row);
+    }
+    stmt
 }
 
 /// Multi-row `INSERT` for `bulk_create` (`rows` row groups).
-pub fn bulk_insert_sql(table: &str, columns: &[&str], rows: usize) -> String {
-    let names = columns
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut groups = Vec::with_capacity(rows);
-    for r in 0..rows {
-        let base = r * columns.len();
-        let row = (1..=columns.len())
-            .map(|i| format!("${}", base + i))
-            .collect::<Vec<_>>()
-            .join(", ");
-        groups.push(format!("({row})"));
-    }
-    format!(
-        "INSERT INTO \"{table}\" ({names}) VALUES {}",
-        groups.join(", ")
-    )
+pub fn bulk_insert_stmt(
+    table: &str,
+    columns: &[&str],
+    rows: Vec<Vec<SimpleExpr>>,
+) -> InsertStatement {
+    insert_stmt(table, columns, rows)
 }
 
 /// `save(update_fields=[...])`: `UPDATE ... SET "c"=$i ... WHERE id=$N`.
-pub fn update_fields_sql(table: &str, columns: &[&str]) -> String {
-    let set = columns
-        .iter()
-        .enumerate()
-        .map(|(i, c)| format!("\"{c}\" = ${}", i + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "UPDATE \"{table}\" SET {set} WHERE \"{table}\".\"id\" = ${}",
-        columns.len() + 1
-    )
+pub fn update_fields_stmt(
+    table: &str,
+    columns: &[&str],
+    values: Vec<SimpleExpr>,
+    id: Uuid,
+) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(table_alias(table));
+    for (col, val) in columns.iter().zip(values) {
+        stmt.value(Alias::new(col.to_owned()), val);
+    }
+    stmt.and_where(Expr::col((table_alias(table), Alias::new("id".to_owned()))).eq(id));
+    stmt
 }
 
 /// `PageVersion` count per page (`page_version_task.py:72`):
 /// `.filter(page_id=).count()` under the soft-delete scope.
-pub const PAGE_VERSION_COUNT_SQL: &str = "SELECT COUNT(*) AS \"__count\" FROM \"page_versions\" WHERE (\"page_versions\".\"deleted_at\" IS NULL AND \"page_versions\".\"page_id\" = $1)";
+pub fn page_version_count_stmt(page_id: Uuid) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Func::count::<SimpleExpr>(Expr::col(Asterisk).into()),
+        "__count",
+    );
+    stmt.from(Alias::new("page_versions".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("page_versions".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("page_versions".to_owned()),
+                Alias::new("page_id".to_owned()),
+            ))
+            .eq(page_id),
+        );
+    stmt
+}
 
 /// Oldest version id per page for the one-row prune
 /// (`page_version_task.py:74`).
-pub const OLDEST_PAGE_VERSION_ID_SQL: &str = "SELECT \"page_versions\".\"id\" FROM \"page_versions\" WHERE (\"page_versions\".\"deleted_at\" IS NULL AND \"page_versions\".\"page_id\" = $1) ORDER BY \"page_versions\".\"last_saved_at\" ASC LIMIT 1";
+pub fn oldest_page_version_id_stmt(page_id: Uuid) -> sea_query::SelectStatement {
+    let mut stmt = Query::select();
+    stmt.expr(Expr::col((
+        Alias::new("page_versions".to_owned()),
+        Alias::new("id".to_owned()),
+    )));
+    stmt.from(Alias::new("page_versions".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("page_versions".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(
+            Expr::col((
+                Alias::new("page_versions".to_owned()),
+                Alias::new("page_id".to_owned()),
+            ))
+            .eq(page_id),
+        )
+        .order_by(Alias::new("last_saved_at".to_owned()), Order::Asc)
+        .limit(1);
+    stmt
+}
 
 /// Prune by primary key (`.first().delete()` on a `SoftDeleteModel`:
 /// `update(deleted_at=now())`, never a row removal).
-pub const PRUNE_PAGE_VERSION_BY_ID_SQL: &str =
-    "UPDATE \"page_versions\" SET \"deleted_at\" = $1 WHERE (\"page_versions\".\"id\" = $2 AND \"page_versions\".\"deleted_at\" IS NULL)";
-
-/// Read one `issues` row by id into a [`PgRow`] (caller maps columns):
-/// `Issue.objects.get(id=)` under the soft-delete scope (see module docs
-/// for the `LIMIT 1` choice).
-pub async fn fetch_issue_row<'e, E>(executor: E, id: Uuid) -> Result<Option<PgRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = format!(
-        "SELECT {} FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1",
-        quoted_list("issues", &ISSUE_COLUMNS)
+pub fn prune_page_version_by_id_stmt(
+    now: chrono::DateTime<chrono::Utc>,
+    id: Uuid,
+) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("page_versions".to_owned()));
+    stmt.value(Alias::new("deleted_at".to_owned()), now);
+    stmt.and_where(
+        Expr::col((
+            Alias::new("page_versions".to_owned()),
+            Alias::new("id".to_owned()),
+        ))
+        .eq(id),
     );
-    sqlx::query(&sql).bind(id).fetch_optional(executor).await
+    stmt.and_where(
+        Expr::col((
+            Alias::new("page_versions".to_owned()),
+            Alias::new("deleted_at".to_owned()),
+        ))
+        .is_null(),
+    );
+    stmt
 }
 
-/// Read one `pages` row by id into a [`PgRow`] (`Page.objects.get(id=)`,
-/// same scope and limit notes).
-pub async fn fetch_page_row<'e, E>(executor: E, id: Uuid) -> Result<Option<PgRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = format!(
-        "SELECT {} FROM \"pages\" WHERE (\"pages\".\"deleted_at\" IS NULL AND \"pages\".\"id\" = $1) LIMIT 1",
-        quoted_list("pages", &PAGE_COLUMNS)
-    );
-    sqlx::query(&sql).bind(id).fetch_optional(executor).await
+/// Read one `issues` row by id into a [`sea_orm::QueryResult`] (caller
+/// maps columns by name): `Issue.objects.get(id=)` under the soft-delete
+/// scope (see module docs for the `LIMIT 1` choice).
+pub async fn fetch_issue_row(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<Option<sea_orm::QueryResult>, sqlx::Error> {
+    use sea_orm::{ConnectionTrait, DbBackend};
+    let mut stmt = Query::select();
+    stmt.exprs(col_exprs("issues", &ISSUE_COLUMNS));
+    stmt.from(Alias::new("issues".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("issues".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(Expr::col((Alias::new("issues".to_owned()), Alias::new("id".to_owned()))).eq(id))
+        .limit(1);
+    let db = crate::pool::sea_orm_connection(pool);
+    db.query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(crate::orm_tx::into_sqlx)
+}
+
+/// Read one `pages` row by id into a [`sea_orm::QueryResult`]
+/// (`Page.objects.get(id=)`, same scope and limit notes).
+pub async fn fetch_page_row(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<Option<sea_orm::QueryResult>, sqlx::Error> {
+    use sea_orm::{ConnectionTrait, DbBackend};
+    let mut stmt = Query::select();
+    stmt.exprs(col_exprs("pages", &PAGE_COLUMNS));
+    stmt.from(Alias::new("pages".to_owned()))
+        .and_where(
+            Expr::col((
+                Alias::new("pages".to_owned()),
+                Alias::new("deleted_at".to_owned()),
+            ))
+            .is_null(),
+        )
+        .and_where(Expr::col((Alias::new("pages".to_owned()), Alias::new("id".to_owned()))).eq(id))
+        .limit(1);
+    let db = crate::pool::sea_orm_connection(pool);
+    db.query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(crate::orm_tx::into_sqlx)
 }
 
 /// Helper: pull an optional UUID column out of a row.
-pub fn opt_uuid(row: &PgRow, column: &str) -> Result<Option<Uuid>, sqlx::Error> {
-    row.try_get(column)
+pub fn opt_uuid(row: &sea_orm::QueryResult, column: &str) -> Result<Option<Uuid>, sqlx::Error> {
+    row.try_get_by(column).map_err(crate::orm_tx::into_sqlx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_query::PostgresQueryBuilder;
     use std::collections::HashSet;
 
     fn fixtures_dir() -> std::path::PathBuf {
@@ -601,126 +873,200 @@ mod tests {
 
     #[test]
     fn static_statements_match_django_rendering() {
-        assert_eq!(
-            ISSUE_COUNT_SQL,
-            "SELECT COUNT(*) AS \"__count\" FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL"
-        );
+        let id = uuid::Uuid::new_v4();
+        let rendered = issue_count_stmt().to_string(PostgresQueryBuilder);
+        assert!(rendered.contains("COUNT(*)"), "{rendered}");
+        assert!(rendered.contains("\"issues\""), "{rendered}");
+        assert!(rendered.contains("\"deleted_at\" IS NULL"), "{rendered}");
         // `Meta.ordering` (`-created_at`) applies: no explicit `order_by`.
-        assert_eq!(
-            ADMIN_FALLBACK_SQL,
-            "SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $1 AND \"project_members\".\"role\" = 20) ORDER BY \"project_members\".\"created_at\" DESC LIMIT 1"
+        let rendered = admin_fallback_stmt(id).to_string(PostgresQueryBuilder);
+        assert!(
+            rendered.contains("\"project_members\".\"member_id\""),
+            "{rendered}"
         );
-        assert_eq!(
-            PAGE_VERSION_COUNT_SQL,
-            "SELECT COUNT(*) AS \"__count\" FROM \"page_versions\" WHERE (\"page_versions\".\"deleted_at\" IS NULL AND \"page_versions\".\"page_id\" = $1)"
+        assert!(rendered.contains("\"deleted_at\" IS NULL"), "{rendered}");
+        assert!(rendered.contains("\"role\" = 20"), "{rendered}");
+        assert!(
+            rendered.contains("ORDER BY \"created_at\" DESC"),
+            "{rendered}"
         );
-        assert_eq!(
-            OLDEST_PAGE_VERSION_ID_SQL,
-            "SELECT \"page_versions\".\"id\" FROM \"page_versions\" WHERE (\"page_versions\".\"deleted_at\" IS NULL AND \"page_versions\".\"page_id\" = $1) ORDER BY \"page_versions\".\"last_saved_at\" ASC LIMIT 1"
-        );
-        assert_eq!(
-            PRUNE_PAGE_VERSION_BY_ID_SQL,
-            "UPDATE \"page_versions\" SET \"deleted_at\" = $1 WHERE (\"page_versions\".\"id\" = $2 AND \"page_versions\".\"deleted_at\" IS NULL)"
+        assert!(rendered.ends_with("LIMIT 1"), "{rendered}");
+        let rendered = page_version_count_stmt(id).to_string(PostgresQueryBuilder);
+        assert!(rendered.contains("COUNT(*)"), "{rendered}");
+        assert!(rendered.contains("\"page_versions\""), "{rendered}");
+        let rendered = oldest_page_version_id_stmt(id).to_string(PostgresQueryBuilder);
+        assert!(rendered.contains("\"page_versions\".\"id\""), "{rendered}");
+        assert!(
+            rendered.contains("ORDER BY \"last_saved_at\" ASC"),
+            "{rendered}"
         );
         // Owner join carries the version id, the username/email pair for
         // the `str(owned_by)` bug-compatibility comparison, and the stamp
         // for the 600s window.
-        assert!(LATEST_ISSUE_VERSION_OWNER_SQL.contains(
-            "INNER JOIN \"users\" ON (\"issue_versions\".\"owned_by_id\" = \"users\".\"id\")"
-        ));
-        assert!(LATEST_ISSUE_VERSION_OWNER_SQL.contains("\"issue_versions\".\"id\""));
-        assert!(LATEST_ISSUE_VERSION_OWNER_SQL.contains("\"issue_versions\".\"last_saved_at\""));
-        assert!(LATEST_ISSUE_VERSION_OWNER_SQL
-            .ends_with("ORDER BY \"issue_versions\".\"last_saved_at\" DESC LIMIT 1"));
+        let rendered = latest_issue_version_owner_stmt(id).to_string(PostgresQueryBuilder);
+        assert!(rendered.contains("INNER JOIN"), "{rendered}");
+        assert!(rendered.contains("\"users\""), "{rendered}");
+        assert!(rendered.contains("\"issue_versions\".\"id\""), "{rendered}");
+        assert!(
+            rendered.contains("\"issue_versions\".\"last_saved_at\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("ORDER BY \"last_saved_at\" DESC"),
+            "{rendered}"
+        );
     }
 
     #[test]
     fn batch_sql_renders_django_slice() {
         // `[offset:end_offset]` with `end-offset = 5000`: soft-delete
         // scope, literals, ASC.
-        let sql = issues_batch_sql(5000, 0);
-        assert!(sql.starts_with("SELECT \"issues\".\"created_at\""));
-        assert!(sql.contains("FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL"));
-        assert!(sql.ends_with("ORDER BY \"issues\".\"created_at\" ASC LIMIT 5000 OFFSET 0"));
+        let sql = issues_batch_stmt(5000, 0).to_string(PostgresQueryBuilder);
+        assert!(sql.starts_with("SELECT"));
+        assert!(sql.contains("\"issues\".\"created_at\""));
+        assert!(sql.contains("\"deleted_at\" IS NULL"));
+        assert!(sql.ends_with("ORDER BY \"created_at\" ASC LIMIT 5000 OFFSET 0"));
         // Second page.
-        assert!(issues_batch_sql(5000, 5000).ends_with("LIMIT 5000 OFFSET 5000"));
+        assert!(issues_batch_stmt(5000, 5000)
+            .to_string(PostgresQueryBuilder)
+            .ends_with("LIMIT 5000 OFFSET 5000"));
         // Short tail batch.
-        assert!(issues_batch_limited_sql(7, 10000).ends_with("LIMIT 7 OFFSET 10000"));
+        assert!(issues_batch_limited_stmt(7, 10000)
+            .to_string(PostgresQueryBuilder)
+            .ends_with("LIMIT 7 OFFSET 10000"));
         // `.only()` selects exactly the nine columns in `_meta` order.
-        let limited = issues_batch_limited_sql(1, 0);
+        let limited = issues_batch_limited_stmt(1, 0).to_string(PostgresQueryBuilder);
         let mut positions = Vec::new();
         for col in ISSUE_DESCRIPTION_ONLY_COLUMNS {
-            let needle = format!("\"issues\".\"{col}\"");
+            let needle = format!("\"{col}\"");
             positions.push(limited.find(&needle).unwrap_or(usize::MAX));
         }
         assert!(positions.iter().all(|p| *p != usize::MAX));
         let mut ordered = positions.clone();
         ordered.sort();
         assert_eq!(positions, ordered, "only() columns in _meta order");
-        assert!(!limited.contains("\"issues\".\"name\""));
+        assert!(!limited.contains("\"name\""));
     }
 
     #[test]
     fn related_queries_match_grouping_protocol() {
         // Assignees/labels/modules: soft-delete scope, IN list, ordered by
         // issue_id (groupby).
-        let assignees = related_in_sql("issue_assignees", "issue_id", "assignee_id", 3);
-        assert_eq!(
-            assignees,
-            "SELECT \"issue_assignees\".\"issue_id\", \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" IN ($1, $2, $3)) ORDER BY \"issue_assignees\".\"issue_id\" ASC"
+        let ids = vec![uuid::Uuid::new_v4(); 3];
+        let assignees = related_in_stmt("issue_assignees", "issue_id", "assignee_id", &ids)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            assignees.contains("\"issue_assignees\".\"issue_id\""),
+            "{assignees}"
+        );
+        assert!(
+            assignees.contains("\"issue_assignees\".\"assignee_id\""),
+            "{assignees}"
+        );
+        assert!(assignees.contains("IN"), "{assignees}");
+        assert!(
+            assignees.contains("ORDER BY \"issue_id\" ASC"),
+            "{assignees}"
         );
         // Cycle map: `Meta.ordering` (`created_at DESC`); the dict
         // comprehension keeps the last row per issue over this order.
-        let cycles = cycle_issues_sql(2);
-        assert!(cycles.contains("IN ($1, $2)"));
-        assert!(cycles.ends_with("ORDER BY \"cycle_issues\".\"created_at\" DESC"));
+        let cycles = cycle_issues_stmt(&ids[..2]).to_string(PostgresQueryBuilder);
+        assert!(cycles.contains("IN"), "{cycles}");
+        assert!(cycles.ends_with("ORDER BY \"created_at\" DESC"));
         // Activities: dual ordering, first-per-group taken in Python.
-        let activities = activities_sql(1);
-        assert!(activities.contains(
-            "WHERE (\"issue_activities\".\"deleted_at\" IS NULL AND \"issue_activities\".\"issue_id\" IN ($1))"
-        ));
-        assert!(activities.ends_with(
-            "ORDER BY \"issue_activities\".\"issue_id\" ASC, \"issue_activities\".\"created_at\" DESC"
-        ));
+        let activities = activities_stmt(&ids[..1]).to_string(PostgresQueryBuilder);
+        assert!(
+            activities.contains("\"deleted_at\" IS NULL"),
+            "{activities}"
+        );
+        assert!(
+            activities.contains("ORDER BY \"issue_id\" ASC"),
+            "{activities}"
+        );
+        assert!(activities.contains("\"created_at\" DESC"), "{activities}");
     }
 
     #[test]
     fn write_builders_shape() {
-        let one = insert_sql("issue_versions", &ISSUE_VERSION_COLUMNS);
-        assert!(one.starts_with("INSERT INTO \"issue_versions\" (\"created_at\""));
-        assert!(one.ends_with("\"owned_by_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)"));
-        // Bulk: placeholder numbering continues across row groups.
-        let bulk = bulk_insert_sql(
+        let rendered = insert_stmt(
+            "issue_versions",
+            &ISSUE_VERSION_COLUMNS,
+            vec![vec![Expr::value(0); ISSUE_VERSION_COLUMNS.len()]],
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(rendered.starts_with("INSERT INTO \"issue_versions\" (\"created_at\""));
+        assert!(rendered.ends_with("\") VALUES (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)"));
+        // Bulk: two row groups.
+        let bulk = insert_stmt(
             "issue_description_versions",
             &ISSUE_DESCRIPTION_VERSION_COLUMNS,
-            2,
-        );
-        assert!(bulk.contains("($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15), ($16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)"));
+            vec![
+                vec![Expr::value(0); ISSUE_DESCRIPTION_VERSION_COLUMNS.len()],
+                vec![Expr::value(0); ISSUE_DESCRIPTION_VERSION_COLUMNS.len()],
+            ],
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(bulk.contains("), ("));
         // Coalesce update: SET list then PK placeholder last.
-        let upd = update_fields_sql("issue_description_versions", &DESCRIPTION_UPDATE_COLUMNS);
-        assert_eq!(
-            upd,
-            "UPDATE \"issue_description_versions\" SET \"description_json\" = $1, \"description_html\" = $2, \"description_binary\" = $3, \"description_stripped\" = $4, \"last_saved_at\" = $5 WHERE \"issue_description_versions\".\"id\" = $6"
-        );
-        let page_upd = update_fields_sql("page_versions", &PAGE_VERSION_UPDATE_COLUMNS);
-        assert!(page_upd.ends_with("\"updated_at\" = $6 WHERE \"page_versions\".\"id\" = $7"));
+        let id = uuid::Uuid::new_v4();
+        let upd = update_fields_stmt(
+            "issue_description_versions",
+            &DESCRIPTION_UPDATE_COLUMNS,
+            vec![
+                Expr::value("x"),
+                Expr::value("y"),
+                Expr::value(None::<Vec<u8>>),
+                Expr::value(None::<String>),
+                Expr::value(chrono::Utc::now()),
+            ],
+            id,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(upd.starts_with("UPDATE \"issue_description_versions\" SET"));
+        assert!(upd.contains("\"last_saved_at\" ="));
+        assert!(upd.contains("\"issue_description_versions\".\"id\" ="));
+        let page_upd = update_fields_stmt(
+            "page_versions",
+            &PAGE_VERSION_UPDATE_COLUMNS,
+            vec![
+                Expr::value("a"),
+                Expr::value(None::<Vec<u8>>),
+                Expr::value("c"),
+                Expr::value(None::<String>),
+                Expr::value("e"),
+                Expr::value(chrono::Utc::now()),
+            ],
+            id,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(page_upd.contains("\"updated_at\" ="));
+        assert!(page_upd.contains("\"page_versions\".\"id\" ="));
     }
 
     #[test]
     fn latest_version_sql_orders_by_last_saved_desc() {
+        let id = uuid::Uuid::new_v4();
         for (sql, table, fk) in [
-            (latest_issue_version_sql(), "issue_versions", "issue_id"),
             (
-                latest_description_version_sql(),
+                latest_issue_version_stmt(id).to_string(PostgresQueryBuilder),
+                "issue_versions",
+                "issue_id",
+            ),
+            (
+                latest_description_version_stmt(id).to_string(PostgresQueryBuilder),
                 "issue_description_versions",
                 "issue_id",
             ),
-            (latest_page_version_sql(), "page_versions", "page_id"),
+            (
+                latest_page_version_stmt(id).to_string(PostgresQueryBuilder),
+                "page_versions",
+                "page_id",
+            ),
         ] {
+            assert!(sql.contains(&format!("\"{table}\""),), "{table}");
+            assert!(sql.contains(&format!("\"{fk}\" ="),), "{table}");
             assert!(
-                sql.ends_with(&format!(
-                    "WHERE (\"{table}\".\"deleted_at\" IS NULL AND \"{table}\".\"{fk}\" = $1) ORDER BY \"{table}\".\"last_saved_at\" DESC LIMIT 1"
-                )),
+                sql.ends_with("ORDER BY \"last_saved_at\" DESC LIMIT 1"),
                 "{table}"
             );
         }

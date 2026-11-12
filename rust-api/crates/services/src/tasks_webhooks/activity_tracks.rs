@@ -143,6 +143,21 @@ pub struct EstimatePointRef {
     pub estimate_type: String,
 }
 
+/// A resolved `Runner` row (`_track_named_target` `:566-567`,
+/// `Runner` model).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunnerRef {
+    pub id: String,
+    pub name: String,
+}
+
+/// A resolved `Pod` row (`_track_named_target` `:566-567`, `Pod` model).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PodRef {
+    pub id: String,
+    pub name: String,
+}
+
 /// The latest-`IssueActivity` projection `track_description` reads
 /// (`:89-94`): only `field` and the stringified `actor_id` matter.
 #[derive(Debug, Clone, PartialEq)]
@@ -734,6 +749,88 @@ pub fn plan_track_closed_to(
     );
     row.new_identifier = Some(state.id.clone());
     Ok(Some(row))
+}
+
+/// Shared `Runner` / `Pod` activity tracker (`_track_named_target`
+/// `:540-585`): `assigned_*_id or assigned_*` on both sides,
+/// UUID-validated to `None` on invalid, skipped when equal,
+/// `Model.objects.filter(pk=...).first()` per non-`None` side.
+/// Empty string for a missing row, identifiers are the validated ids,
+/// epoch is the request epoch (PDASHOSS01-297, NEWPIDASH-172).
+#[allow(clippy::too_many_arguments)]
+fn plan_track_named_target(
+    requested: &Value,
+    current: &Value,
+    frame: &TrackFrame,
+    primary_key: &str,
+    fallback_key: &str,
+    field: &str,
+    comment: &str,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Option<IssueActivityDraft> {
+    let mut current_id = first_id(current, primary_key, fallback_key);
+    let mut requested_id = first_id(requested, primary_key, fallback_key);
+    if current_id.as_deref().is_some_and(|id| !is_valid_uuid(id)) {
+        current_id = None;
+    }
+    if requested_id.as_deref().is_some_and(|id| !is_valid_uuid(id)) {
+        requested_id = None;
+    }
+    if current_id == requested_id {
+        return None;
+    }
+    let old_name = current_id.as_deref().and_then(resolve).unwrap_or_default();
+    let new_name = requested_id
+        .as_deref()
+        .and_then(resolve)
+        .unwrap_or_default();
+    let mut row = draft(frame, field, comment, Some(old_name), Some(new_name));
+    row.old_identifier = current_id.clone();
+    row.new_identifier = requested_id.clone();
+    // Identifiers are the validated ids (may be None); names are the
+    // resolved snapshot names (empty when the row is gone) — mirrors
+    // `getattr(row, "name", "") if row else ""`.
+    Some(row)
+}
+
+/// `track_assigned_runner` (`:606-621`): `assigned_runner_id or
+/// assigned_runner` with runner names and the dedicated-runner comment.
+pub fn plan_track_assigned_runner(
+    requested: &Value,
+    current: &Value,
+    frame: &TrackFrame,
+    resolve: &dyn Fn(&str) -> Option<RunnerRef>,
+) -> Option<IssueActivityDraft> {
+    plan_track_named_target(
+        requested,
+        current,
+        frame,
+        "assigned_runner_id",
+        "assigned_runner",
+        "assigned_runner",
+        "updated the dedicated runner to",
+        &|id| resolve(id).map(|r| r.name),
+    )
+}
+
+/// `track_assigned_pod` (`:588-603`): `assigned_pod_id or assigned_pod`
+/// with pod names and the execution-pod comment.
+pub fn plan_track_assigned_pod(
+    requested: &Value,
+    current: &Value,
+    frame: &TrackFrame,
+    resolve: &dyn Fn(&str) -> Option<PodRef>,
+) -> Option<IssueActivityDraft> {
+    plan_track_named_target(
+        requested,
+        current,
+        frame,
+        "assigned_pod_id",
+        "assigned_pod",
+        "assigned_pod",
+        "updated the execution pod to",
+        &|id| resolve(id).map(|p| p.name),
+    )
 }
 
 #[cfg(test)]
@@ -1338,5 +1435,132 @@ mod tests {
                 pk: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb".to_owned(),
             })
         );
+    }
+
+    // PDASHOSS01-297 · _track_named_target.
+    #[test]
+    fn track_assigned_runner_row_skips_equal_and_invalid() {
+        let f = frame();
+        const RUNNER_OLD: &str = "10101010-1010-4101-8101-101010101010";
+        const RUNNER_NEW: &str = "20202020-2020-4202-8202-202020202020";
+        let resolve = |id: &str| match id {
+            x if x == RUNNER_OLD => Some(RunnerRef {
+                id: RUNNER_OLD.to_owned(),
+                name: "probe runner A".to_owned(),
+            }),
+            x if x == RUNNER_NEW => Some(RunnerRef {
+                id: RUNNER_NEW.to_owned(),
+                name: "probe runner B".to_owned(),
+            }),
+            _ => None,
+        };
+        let row = plan_track_assigned_runner(
+            &json!({"assigned_runner_id": RUNNER_NEW}),
+            &json!({"assigned_runner_id": RUNNER_OLD}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(row.field, "assigned_runner");
+        assert_eq!(row.comment, "updated the dedicated runner to");
+        assert_eq!(row.old_value.as_deref(), Some("probe runner A"));
+        assert_eq!(row.new_value.as_deref(), Some("probe runner B"));
+        assert_eq!(row.old_identifier.as_deref(), Some(RUNNER_OLD));
+        assert_eq!(row.new_identifier.as_deref(), Some(RUNNER_NEW));
+        assert_eq!(row.epoch, 1750000000.5);
+        // Fallback spelling works.
+        let row = plan_track_assigned_runner(
+            &json!({"assigned_runner": RUNNER_NEW}),
+            &json!({"assigned_runner": RUNNER_OLD}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(row.new_value.as_deref(), Some("probe runner B"));
+        // Clearing: old name present, new empty, new_id None.
+        let row = plan_track_assigned_runner(
+            &json!({"assigned_runner_id": null}),
+            &json!({"assigned_runner_id": RUNNER_OLD}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(row.old_value.as_deref(), Some("probe runner A"));
+        assert_eq!(row.new_value.as_deref(), Some(""));
+        assert_eq!(row.new_identifier, None);
+        // Equal ids → no row.
+        assert_eq!(
+            plan_track_assigned_runner(
+                &json!({"assigned_runner_id": RUNNER_OLD}),
+                &json!({"assigned_runner_id": RUNNER_OLD}),
+                &f,
+                &resolve
+            ),
+            None
+        );
+        // Invalid UUID coerces to None: valid → invalid yields old
+        // empty and new_id None (row still appended, mirroring
+        // _track_named_target coercion).
+        let row = plan_track_assigned_runner(
+            &json!({"assigned_runner_id": "garbage"}),
+            &json!({"assigned_runner_id": RUNNER_OLD}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(row.old_value.as_deref(), Some("probe runner A"));
+        assert_eq!(row.new_value.as_deref(), Some(""));
+        assert_eq!(row.new_identifier, None);
+        // Invalid on both sides coerces equal → no row.
+        assert_eq!(
+            plan_track_assigned_runner(
+                &json!({"assigned_runner_id": "garbage"}),
+                &json!({"assigned_runner_id": "junk"}),
+                &f,
+                &resolve
+            ),
+            None
+        );
+        // Missing row → empty name (deleted runner).
+        let row = plan_track_assigned_runner(
+            &json!({"assigned_runner_id": "30303030-3030-4303-8303-303030303030"}),
+            &json!({"assigned_runner_id": RUNNER_OLD}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(row.old_value.as_deref(), Some("probe runner A"));
+        assert_eq!(row.new_value.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn track_assigned_pod_row() {
+        let f = frame();
+        const POD_OLD: &str = "40404040-4040-4404-8404-404040404040";
+        const POD_NEW: &str = "50505050-5050-4505-8505-505050505050";
+        let resolve = |id: &str| match id {
+            x if x == POD_OLD => Some(PodRef {
+                id: POD_OLD.to_owned(),
+                name: "pod-a".to_owned(),
+            }),
+            x if x == POD_NEW => Some(PodRef {
+                id: POD_NEW.to_owned(),
+                name: "pod-b".to_owned(),
+            }),
+            _ => None,
+        };
+        let row = plan_track_assigned_pod(
+            &json!({"assigned_pod_id": POD_NEW}),
+            &json!({"assigned_pod_id": POD_OLD}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(row.field, "assigned_pod");
+        assert_eq!(row.comment, "updated the execution pod to");
+        assert_eq!(row.old_value.as_deref(), Some("pod-a"));
+        assert_eq!(row.new_value.as_deref(), Some("pod-b"));
+        assert_eq!(row.old_identifier.as_deref(), Some(POD_OLD));
+        assert_eq!(row.new_identifier.as_deref(), Some(POD_NEW));
     }
 }

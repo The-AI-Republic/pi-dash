@@ -41,6 +41,11 @@ pub struct Model {
     pub deleted_at: Option<DateTimeWithTimeZone>,
     pub git_work_branch: String,
     pub assigned_pod_id: Option<Uuid>,
+    // Dedicated runner (PDASHOSS01-297, design §6.1): one runner inside
+    // `assigned_pod_id` this issue is dedicated to. NULL means pod
+    // assignment. Reads the Django-owned column (db 0173); the Rust
+    // server adds no migration of its own (design §17).
+    pub assigned_runner_id: Option<Uuid>,
     #[sea_orm(column_type = "Text")]
     pub workpad: String,
     pub created_via: Option<String>,

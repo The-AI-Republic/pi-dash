@@ -5,6 +5,9 @@
 //! `list_labels`, `list_project_members` — with their caps, ordering,
 //! scope checks, row shapes, and input schemas. Fixture id F-A6-10
 //! (`rust-api/fixtures/assistant/tools-tasks.json`, `tools.projects`).
+//! PDASHOSS01-350 adds `list_project_runners` (design §14.6): the
+//! project's visible runners with the optional `assignable_for`
+//! eligibility read.
 //!
 //! Shape notes:
 //!
@@ -23,6 +26,8 @@ pub const LIST_STATES_TOOL: &str = "list_states";
 pub const LIST_LABELS_TOOL: &str = "list_labels";
 /// Tool names as registered on the shared agent (`projects.py:47-48`).
 pub const LIST_PROJECT_MEMBERS_TOOL: &str = "list_project_members";
+/// Tool name for the dedicated-runner listing (PDASHOSS01-350).
+pub const LIST_PROJECT_RUNNERS_TOOL: &str = "list_project_runners";
 
 /// Project-list cap (`projects.py:20`: `order_by("name")[:50]`).
 pub const PROJECT_LIST_LIMIT: usize = 50;
@@ -66,6 +71,29 @@ pub fn member_row(user_id: &str, display_name: &str, role: i64) -> Value {
 pub fn keep_member_row(has_member: bool) -> bool {
     has_member
 }
+
+/// `list_project_runners` input schema (PDASHOSS01-350): `project_id`
+/// plus the optional `assignable_for` (issue id or `"new"`).
+pub fn list_project_runners_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project_id": { "type": "string" },
+            "assignable_for": { "type": ["string", "null"] },
+        },
+        "required": ["project_id"],
+        "additionalProperties": false,
+    })
+}
+
+/// Visible runners of a project, most-recent-first (the web list order),
+/// for `list_project_runners` name resolution and the eligibility read.
+/// `$1` is the project id, `$2` the acting user id (private = owner-only,
+/// `Visibility.PRIVATE = 0`).
+pub const RUNNERS_VISIBLE_SQL: &str = "SELECT runner.id, runner.name, runner.updated_at \
+     FROM runner INNER JOIN pod ON pod.id = runner.pod_id \
+     WHERE pod.project_id = $1 AND runner.owner_id = $2 AND runner.visibility = 0 \
+     AND runner.deleted_at IS NULL ORDER BY runner.updated_at DESC";
 
 /// Input schemas for the four tools (parameter lists per the fixture:
 /// `list_projects` takes none; the other three take `project_id`).

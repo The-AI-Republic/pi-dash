@@ -4,6 +4,7 @@
 
 # Python imports
 import json
+import uuid
 from datetime import datetime
 from django.core.serializers.json import DjangoJSONEncoder
 
@@ -14,6 +15,7 @@ from django.db.models import (
     OuterRef,
     Q,
     Value,
+    Subquery,
     UUIDField,
     Count,
     Case,
@@ -46,6 +48,7 @@ from pi_dash.db.models import (
     UserRecentVisit,
 )
 from pi_dash.utils.error_codes import ERROR_CODES
+from pi_dash.utils.page_tree import parent_error
 
 # Local imports
 from ..base import BaseAPIView, BaseViewSet
@@ -78,14 +81,45 @@ class PageViewSet(BaseViewSet):
     permission_classes = [ProjectPagePermission]
     search_fields = ["name"]
 
+    def guest_sees_own_pages_only(self):
+        """A guest of a project without ``guest_view_all_features`` sees only
+        the pages they own."""
+        return (
+            ProjectMember.objects.filter(
+                workspace__slug=self.kwargs.get("slug"),
+                project_id=self.kwargs.get("project_id"),
+                member=self.request.user,
+                role=ROLE.GUEST.value,
+                is_active=True,
+            ).exists()
+            and not Project.objects.filter(pk=self.kwargs.get("project_id"), guest_view_all_features=True).exists()
+        )
+
     def get_queryset(self):
+        return self.filter_queryset(self.visible_pages())
+
+    def visible_pages(self):
+        """Every page the user can see in the project, at any depth, before
+        ``?search=``. ``list`` narrows it to top-level pages or one page's
+        children."""
         subquery = UserFavorite.objects.filter(
             user=self.request.user,
             entity_type="page",
             entity_identifier=OuterRef("pk"),
             workspace__slug=self.kwargs.get("slug"),
         )
-        return self.filter_queryset(
+        # Children the user can see. An archived page counts its (archived)
+        # children; a live page counts only its live ones.
+        visible_children = Page.objects.filter(parent_id=OuterRef("pk")).filter(
+            Exists(ProjectPage.objects.filter(page_id=OuterRef("pk"), project_id=self.kwargs.get("project_id"))),
+            Q(archived_at__isnull=True) | Q(parent__archived_at__isnull=False),
+        )
+        if self.guest_sees_own_pages_only():
+            visible_children = visible_children.filter(owned_by=self.request.user)
+        else:
+            visible_children = visible_children.filter(Q(owned_by=self.request.user) | Q(access=Page.PUBLIC_ACCESS))
+        sub_pages_count = visible_children.order_by().values("parent_id").annotate(count=Count("id")).values("count")
+        return (
             super()
             .get_queryset()
             .filter(workspace__slug=self.kwargs.get("slug"))
@@ -94,7 +128,6 @@ class PageViewSet(BaseViewSet):
                 projects__project_projectmember__is_active=True,
                 projects__archived_at__isnull=True,
             )
-            .filter(parent__isnull=True)
             .filter(Q(owned_by=self.request.user) | Q(access=0))
             .prefetch_related("projects")
             .select_related("workspace")
@@ -121,6 +154,7 @@ class PageViewSet(BaseViewSet):
                     ArrayAgg("projects__id", distinct=True, filter=~Q(projects__id=True)),
                     Value([], output_field=ArrayField(UUIDField())),
                 ),
+                sub_pages_count=Coalesce(Subquery(sub_pages_count), 0),
             )
             .filter(project=True)
             .distinct()
@@ -139,6 +173,10 @@ class PageViewSet(BaseViewSet):
         )
 
         if serializer.is_valid():
+            parent = serializer.validated_data.get("parent")
+            message = parent_error(self.visible_pages(), parent.id if parent else None)
+            if message:
+                return Response({"error": message}, status=status.HTTP_400_BAD_REQUEST)
             serializer.save()
             # capture the page transaction
             page_transaction.delay(
@@ -163,15 +201,6 @@ class PageViewSet(BaseViewSet):
             if page.is_locked:
                 return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
 
-            parent = request.data.get("parent", None)
-            if parent:
-                _ = Page.objects.get(
-                    pk=parent,
-                    workspace__slug=slug,
-                    projects__id=project_id,
-                    project_pages__deleted_at__isnull=True,
-                )
-
             # Only update access if the page owner is the requesting  user
             if page.access != request.data.get("access", page.access) and page.owned_by_id != request.user.id:
                 return Response(
@@ -182,6 +211,10 @@ class PageViewSet(BaseViewSet):
             serializer = PageDetailSerializer(page, data=request.data, partial=True)
             page_description = page.description_html
             if serializer.is_valid():
+                if serializer.validated_data.get("parent") is not None:
+                    message = parent_error(self.visible_pages(), serializer.validated_data["parent"].id, page=page)
+                    if message:
+                        return Response({"error": message}, status=status.HTTP_400_BAD_REQUEST)
                 serializer.save()
                 # capture the page transaction
                 if request.data.get("description_html"):
@@ -290,6 +323,17 @@ class PageViewSet(BaseViewSet):
 
     def list(self, request, slug, project_id):
         queryset = self.get_queryset()
+        # Top-level pages by default; `?parent=<page id>` lists that page's
+        # children, and a search spans every depth.
+        parent = request.query_params.get("parent")
+        if parent:
+            try:
+                uuid.UUID(parent)
+            except ValueError:
+                return Response({"error": "Invalid parent page id"}, status=status.HTTP_400_BAD_REQUEST)
+            queryset = queryset.filter(parent_id=parent)
+        elif not request.query_params.get("search"):
+            queryset = queryset.filter(parent__isnull=True)
         project = Project.objects.get(pk=project_id)
         if (
             ProjectMember.objects.filter(

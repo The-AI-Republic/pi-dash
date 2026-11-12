@@ -10,6 +10,19 @@ the URL ``runner_id`` or the ``X-Runner-Id`` header, not by a different
 secret per runner. The legacy per-runner refresh/access-token path remains
 accepted for older installs.
 
+``runner_gone`` (PDASHOSS01-306): once a caller has proven who it is —
+a MachineToken that exists, is unrevoked, sits on an unrevoked dev
+machine and whose user is still a workspace member, or a legacy JWT whose
+signature and expiry verify — a runner id that no longer exists answers
+the distinct code ``runner_gone`` instead of the generic
+``runner_not_found``. Runner ids are server-generated UUIDs, so a verified
+machine asking for a missing one means the runner was deleted. The daemon
+counts these answers and purges the runner locally after enough
+confirmations. Every failure *before* that point keeps its own code, so a
+server running against an empty or wrong database fails the token lookup
+and can never send ``runner_gone``. Revoked runners still answer
+``runner_revoked``.
+
 Auth classes:
 
 - :class:`RunnerAccessTokenAuthentication` — accepts the shared
@@ -32,7 +45,7 @@ from uuid import UUID
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
-from pi_dash.runner.models import MachineToken, Runner, RunnerForceRefresh
+from pi_dash.runner.models import MACHINE_TOKEN_IDLE_TTL, MachineToken, Runner, RunnerForceRefresh
 from pi_dash.runner.services.permissions import is_workspace_member
 from pi_dash.runner.services.tokens import (
     AccessTokenError,
@@ -41,6 +54,18 @@ from pi_dash.runner.services.tokens import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Auth failure code for "a verified caller asked for a runner that was
+#: deleted". The daemon matches it exactly; see the module docstring.
+RUNNER_GONE = "runner_gone"
+
+
+def _is_uuid(value) -> bool:
+    try:
+        UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def _bearer(request) -> Optional[str]:
@@ -51,6 +76,49 @@ def _bearer(request) -> Optional[str]:
     if len(parts) != 2 or parts[0].decode().lower() != "bearer":
         return None
     return parts[1].decode()
+
+
+def touch_machine_token(token: MachineToken) -> None:
+    """Record a use of ``token`` and renew its 60-day idle expiry.
+
+    Best-effort: a failed bump never fails the request it rides on.
+    """
+    now = timezone.now()
+    expires_at = now + MACHINE_TOKEN_IDLE_TTL
+    try:
+        MachineToken.objects.filter(pk=token.pk).update(last_used_at=now, expires_at=expires_at)
+    except Exception:  # pragma: no cover - best-effort
+        logger.debug("failed to bump machine token last_used_at", exc_info=True)
+        return
+    token.last_used_at = now
+    token.expires_at = expires_at
+
+
+def resolve_machine_token(raw: str, *, touch: bool = True) -> MachineToken:
+    """Verify a raw ``mt_`` daemon credential and return its row.
+
+    The one place every MachineToken-authenticated path checks a token:
+    unknown, revoked, expired (60 days without use, design §4.3), a revoked
+    or merged machine, and lapsed workspace membership are all refused with
+    ``AuthenticationFailed`` carrying a stable code. With ``touch`` the use
+    is recorded and the idle expiry renewed.
+    """
+    try:
+        token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=hash_token(raw))
+    except MachineToken.DoesNotExist:
+        raise exceptions.AuthenticationFailed("machine_token_invalid")
+    if token.revoked_at is not None:
+        raise exceptions.AuthenticationFailed("machine_token_revoked")
+    if token.is_expired():
+        raise exceptions.AuthenticationFailed("machine_token_expired")
+    if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
+        raise exceptions.AuthenticationFailed("dev_machine_revoked")
+    if not is_workspace_member(token.user, token.workspace_id):
+        token.revoke()
+        raise exceptions.AuthenticationFailed("membership_revoked")
+    if touch:
+        touch_machine_token(token)
+    return token
 
 
 class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
@@ -88,10 +156,14 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed(exc.code)
 
         runner_id = payload.get("sub")
+        if not _is_uuid(runner_id):
+            raise exceptions.AuthenticationFailed("runner_not_found")
         try:
             runner = Runner.objects.select_related("workspace", "pod", "dev_machine").get(id=runner_id)
         except Runner.DoesNotExist:
-            raise exceptions.AuthenticationFailed("runner_not_found")
+            # The token's signature verified, so ``sub`` is an id this
+            # server minted: the runner was deleted (PDASHOSS01-306).
+            raise exceptions.AuthenticationFailed(RUNNER_GONE)
 
         # Per-request live revocation check. design.md §5.4 mandates this:
         # Runner.revoke() does not bump rtg, so without this an access
@@ -118,26 +190,20 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         return (runner.owner, None)
 
     def _authenticate_machine_token(self, request, raw: str) -> Tuple[object, None]:
-        token_hash = hash_token(raw)
-        try:
-            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=token_hash)
-        except MachineToken.DoesNotExist:
-            raise exceptions.AuthenticationFailed("machine_token_invalid")
-        if token.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("machine_token_revoked")
-        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("dev_machine_revoked")
-        if not is_workspace_member(token.user, token.workspace_id):
-            token.revoke()
-            raise exceptions.AuthenticationFailed("membership_revoked")
+        token = resolve_machine_token(raw, touch=False)
 
         runner_id = self._request_runner_id(request)
         if runner_id is None:
             raise exceptions.AuthenticationFailed("runner_id_required")
+        if not _is_uuid(runner_id):
+            raise exceptions.AuthenticationFailed("runner_not_found")
         try:
             runner = Runner.objects.select_related("workspace", "pod", "dev_machine").get(id=runner_id)
         except Runner.DoesNotExist:
-            raise exceptions.AuthenticationFailed("runner_not_found")
+            # Token, dev machine and membership all checked out above, so
+            # this is a verified machine asking for a runner id that no
+            # longer exists: it was deleted (PDASHOSS01-306).
+            raise exceptions.AuthenticationFailed(RUNNER_GONE)
         if runner.revoked_at is not None:
             raise exceptions.AuthenticationFailed("runner_revoked")
         if runner.dev_machine_id is not None and runner.dev_machine.revoked_at is not None:
@@ -150,7 +216,7 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         elif runner.dev_machine_id is not None or runner.host_label != token.host_label:
             raise exceptions.AuthenticationFailed("runner_not_bound_to_machine_token")
 
-        MachineToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
+        touch_machine_token(token)
         request.auth_runner = runner
         request.auth_machine_token = token
         request.auth_token_payload = {
@@ -215,24 +281,7 @@ class MachineTokenAuthentication(authentication.BaseAuthentication):
         raw = _bearer(request)
         if not raw or not raw.startswith("mt_"):
             return None
-        token_hash = hash_token(raw)
-        try:
-            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=token_hash)
-        except MachineToken.DoesNotExist:
-            raise exceptions.AuthenticationFailed("machine_token_invalid")
-        if token.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("machine_token_revoked")
-        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("dev_machine_revoked")
-        if not is_workspace_member(token.user, token.workspace_id):
-            token.revoke()
-            raise exceptions.AuthenticationFailed("membership_revoked")
-        # Best-effort last_used_at; ignore failures so per-request DB
-        # contention doesn't break the request.
-        try:
-            MachineToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
-        except Exception:  # pragma: no cover - best-effort
-            logger.debug("failed to bump last_used_at", exc_info=True)
+        token = resolve_machine_token(raw)
         request.auth_machine_token = token
         return (token.user, None)
 

@@ -231,6 +231,24 @@ def test_rust_analytic_export_segmented_matches_capture(seed, db_conn, smtp_sink
     rust_queue.wait_for_settled(celery_id, what="rust segmented settled")
 
 
+def test_rust_analytic_export_longline_quoted_printable(seed, db_conn, smtp_sink):
+    """Rust wide segmented CSV goes quoted-printable like Django (PIDASHCONV-1691)."""
+    world = cases.seed_export_world(seed, cases.unique_tag("qp"))
+    cases.seed_label_fanout(seed, world)
+    email = f"qp-{world['slug']}@example.com"
+    smtp_sink.clear()
+    celery_id = _publish_analytic(
+        email=email,
+        data={"x_axis": "priority", "y_axis": "issue_count", "segment": "labels__id"},
+        slug=world["slug"],
+    )
+    (delivered,) = smtp_sink.wait_for_count(1, what="rust long-line mail")
+    assert delivered["subject"] == "Your Export is ready"
+    assert delivered["rcpt_tos"] == [email]
+    cases.assert_quoted_printable_csv_mail(delivered["raw"], world["slug"])
+    rust_queue.wait_for_settled(celery_id, what="rust long-line settled")
+
+
 def test_rust_analytic_export_estimate(seed, db_conn, smtp_sink):
     """Rust estimate plots mail the summed points."""
     world = cases.seed_export_world(seed, cases.unique_tag("est"))

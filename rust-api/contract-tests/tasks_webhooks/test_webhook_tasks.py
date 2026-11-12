@@ -252,6 +252,70 @@ def test_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
     assert len(_log_diff_rows(db_conn, before)) == 1
 
 
+#: PIDASHCONV-1673: end-to-end bound for a streamed 64 MiB chunked body.
+#: Calibration on the shared runner (debug worker): the old client, which
+#: re-decoded the whole buffered body after every socket read, took
+#: 142 s here; the incremental decoder finishes the delivery in ~9 s
+#: (~2 s of sink pacing + worker/DB overhead), as does Django's
+#: ``requests`` (~6 s). Either side slower than this bound is a
+#: quadratic-decode regression.
+STREAM_DELIVERY_BOUND_SECONDS = 60.0
+
+
+def test_webhook_send_chunked_streaming_completes_within_bound(
+    db_conn, broker_url, chunked_stream_sink
+):
+    """Streamed chunked body: linear decode, log 200 with the full body.
+
+    The sink answers ``Transfer-Encoding: chunked`` and streams 8k
+    paced 8 KiB chunks before the terminal chunk, so socket reads stay
+    small. ``requests`` decodes incrementally (Django source:
+    ``webhook_task.py:329``), so the real 200 is logged with the whole
+    64 MiB body and the task is not requeued.
+    """
+    hook = _seed_workspace_with_hook(
+        db_conn, chunked_stream_sink, base_url=chunked_stream_sink.url
+    )
+    chunked_stream_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = broker_probe.queue_depth()
+    started = time.monotonic()
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": hook["workspace_slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-chunked-stream"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    deliveries = chunked_stream_sink.wait_for_count(1, what="streamed webhook POST")
+    assert len(deliveries) == 1
+    rows = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="streamed webhook_logs row",
+        timeout=STREAM_DELIVERY_BOUND_SECONDS,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < STREAM_DELIVERY_BOUND_SECONDS, (
+        f"streamed delivery took {elapsed:.1f}s "
+        f"(bound {STREAM_DELIVERY_BOUND_SECONDS:.0f}s)"
+    )
+    assert len(rows) == 1
+    assert str(rows[0]["response_status"]) == "200"
+    assert rows[0]["retry_count"] == 0
+    body = rows[0]["response_body"]
+    assert len(body) == chunked_stream_sink.total_bytes
+    assert set(body) == {"x"}
+    broker_probe.wait_for_queue_drain(baseline=baseline, what="streamed send acked")
+    time.sleep(1)
+    assert len(chunked_stream_sink.snapshot()) == 1, "event was redelivered"
+    assert len(_log_diff_rows(db_conn, before)) == 1
+
+
 def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink):
     """First-attempt failure: 500 from the sink → log row with retry_count 0."""
     hook = _seed_workspace_with_hook(db_conn, webhook_sink)
@@ -1426,6 +1490,69 @@ def test_crawl_link_skips_soft_deleted_link(db_conn, broker_url):
     assert after == before
 
 
+def test_crawl_link_resolves_idna_hostname(db_conn, broker_url):
+    """Crawl, Django side: a non-ASCII hostname resolves via IDNA (PIDASHCONV-1672).
+
+    ``socket.getaddrinfo`` IDNA-encodes a ``str`` host, so the unicode
+    URL and its punycode twin crawl the same page: both titles are
+    non-empty and equal. The replay twin
+    (``test_rust_crawl_link_resolves_idna_hostname``) pins the Rust
+    guard; pre-fix Rust fails DNS ("Hostname could not be resolved")
+    and stores a null title for the unicode URL.
+
+    This is the suite's only external-network test: distinguishing
+    "resolved" from "denied" needs a successful fetch (every guard or
+    transport failure collapses to the same fallback metadata), and
+    every locally servable address is guard-denied. Target is the
+    official Munich city portal (stable 2-hop chain to www.muenchen.de,
+    verified 2026-10-30).
+    """
+    from _harness.db import insert_row
+
+    chain = seed_helpers.issue_chain(db_conn, "contractcrawlidna")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    urls = ["https://münchen.de/", "https://xn--mnchen-3ya.de/"]
+    links = [
+        insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": f"IDNA probe {i}",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        for i, url in enumerate(urls)
+    ]
+    for link, url in zip(links, urls):
+        celery_wire.publish(
+            f"{M}.work_item_link_task.crawl_work_item_link_title",
+            args=[str(link["id"]), url],
+        )
+
+    def _crawled(link_id):
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link_id))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = [
+        wait_for(
+            lambda lid=str(link["id"]): _crawled(lid),
+            what=f"IDNA issue_links metadata for {url}",
+        )
+        for link, url in zip(links, urls)
+    ]
+    for row, url in zip(crawled, urls):
+        assert row["metadata"]["url"] == url
+    titles = [row["metadata"]["title"] for row in crawled]
+    assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
+    assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
+
+
 def _expected_payload(hook, probe_id):
     """The delivery envelope the send task signs and POSTs (PIDASHCONV-1105).
 
@@ -1779,3 +1906,102 @@ def test_issue_activity_triage_state_resolves_to_null(db_conn, broker_url):
     assert activity_block["new_identifier"] == str(todo_state["id"])
     # state_change preference + field=state sends one email log row.
     assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
+def test_issue_activity_deleted_writes_row(db_conn, broker_url):
+    """Issue deleted: one ``deleted the issue`` row (NEWPIDASH-134).
+
+    The app destroy (``base.py:741-753``) enqueues with
+    ``current_instance={}`` (a dict); ``delete_issue_activity``
+    (``issue_activities_task.py:642-663``) ignores it and writes the
+    row. This pins the Django oracle shape the Rust twin must match.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "deletedactivity")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.deleted",
+            "requested_data": json.dumps({"issue_id": str(issue["id"])}),
+            "current_instance": {},
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="deleted issue_activities row",
+    )
+    assert row["comment"] == "deleted the issue"
+    assert row["verb"] == "deleted"
+    assert row["field"] == "issue"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+
+def test_issue_activity_assignee_subscribes_and_writes_row(db_conn, broker_url):
+    """Added assignee: one activity row + one subscriber row (NEWPIDASH-133).
+
+    ``update_issue_activity`` maps ``assignee_ids`` to ``track_assignees``
+    (``issue_activities_task.py:357-408``): the added assignee gets an
+    ``"added assignee "`` activity row and an ``IssueSubscriber`` row
+    bulk-created with ``ignore_conflicts``. The Rust port must write
+    both (the subscriber insert carries the model-default id and
+    ``auto_now*`` stamps); pre-fix it omits them, Postgres rejects the
+    insert, and neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "assignee")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    assignee = seed_helpers.user(db_conn, "assignee-assignee")
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "issue_subscribers"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"assignee_ids": [str(assignee["id"])]}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="assignee issue_activities row",
+    )
+    assert row["field"] == "assignees"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "added assignee "
+    assert row["old_value"] == ""
+    assert row["new_value"] == assignee["display_name"]
+    assert row["new_identifier"] == str(assignee["id"])
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+    (sub,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_subscribers", before) or None,
+        what="assignee issue_subscribers row",
+    )
+    assert sub["subscriber_id"] == str(assignee["id"])
+    assert sub["issue_id"] == str(issue["id"])
+    assert sub["project_id"] == str(project["id"])
+    assert sub["workspace_id"] == str(chain["workspace"]["id"])
+    assert sub["created_by_id"] == str(assignee["id"])
+    assert sub["updated_by_id"] == str(assignee["id"])
+    assert sub["deleted_at"] is None
+    assert sub["id"] is not None
+    assert sub["created_at"] is not None
+    assert sub["updated_at"] is not None

@@ -5,7 +5,6 @@
  */
 
 import { observer } from "mobx-react";
-import { useTranslation } from "@pi-dash/i18n";
 // ui
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { ContextMenu, CustomMenu } from "@pi-dash/ui";
@@ -19,8 +18,6 @@ export interface Props {
 
 export const WorkspaceDraftIssueQuickActions = observer(function WorkspaceDraftIssueQuickActions(props: Props) {
   const { parentRef, MENU_ITEMS } = props;
-
-  const { t } = useTranslation();
 
   return (
     <>
@@ -50,7 +47,7 @@ export const WorkspaceDraftIssueQuickActions = observer(function WorkspaceDraftI
           >
             {item.icon && <item.icon className={cn("h-3 w-3", item.iconClassName)} />}
             <div>
-              <h5>{t(item.title || "")}</h5>
+              <h5>{item.title}</h5>
               {item.description && (
                 <p
                   className={cn("whitespace-pre-line text-tertiary", {

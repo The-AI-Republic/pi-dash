@@ -313,6 +313,13 @@ def diff_jobs(django: dict, rust: dict) -> dict:
         name = task["name"]
         own = owner.get(name)
         if own is None:
+            gap = "W0"
+            for prefix, wire_gap in WIRE_GAPS:
+                if name.startswith(prefix):
+                    gap = wire_gap
+                    break
+            if name == "runner.pause_engines_with_expired_credentials":
+                gap = "W-runner"
             task_rows.append(
                 {
                     "task": name,
@@ -320,7 +327,7 @@ def diff_jobs(django: dict, rust: dict) -> dict:
                     "owner": "-",
                     "disposition": "MISSING",
                     "detail": "absent-from-rust-table",
-                    "gap": "W0",
+                    "gap": gap,
                 }
             )
             continue

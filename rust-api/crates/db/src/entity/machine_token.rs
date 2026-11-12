@@ -15,6 +15,7 @@ pub struct Model {
     pub created_at: DateTimeWithTimeZone,
     pub last_used_at: Option<DateTimeWithTimeZone>,
     pub revoked_at: Option<DateTimeWithTimeZone>,
+    pub expires_at: Option<DateTimeWithTimeZone>,
     pub user_id: Uuid,
     pub workspace_id: Uuid,
     pub dev_machine_id: Option<Uuid>,
