@@ -23,7 +23,7 @@ concurrency:
 jobs:
   tasks-cleanup-rust-replay:
     name: tasks_cleanup oracle vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:
@@ -185,7 +185,10 @@ jobs:
         working-directory: rust-api/contract-tests
         # Same plugin dodge as the Django oracle job: the API install puts
         # pytest-django in this interpreter; the replay never touches Django.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_cleanup/test_rust_replay.py -v
+        # NEWPIDASH-30: the two live beat tests need the Rust worker (+
+        # scheduler loop) this job boots, so they run here instead of in
+        # the Django-only oracle job (which deselects them).
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_cleanup/test_rust_replay.py tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry -v
 
       - name: Upload worker log on failure
         if: failure()

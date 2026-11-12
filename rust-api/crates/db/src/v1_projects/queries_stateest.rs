@@ -12,13 +12,13 @@
 //! Fixture FX-Q-STATEEST
 //! (`rust-api/fixtures/v1_projects/queries/state_estimate.{sql,rows.json}`).
 //!
-//! Dynamic statements are sea-query builders; fixed reads are string
-//! constants executed with runtime `sqlx::query` (no `query!` macros:
-//! there is no build-time database, same as the merged `license/queries`
-//! and `app_integrations/queries_git` precedents). Every executor is
-//! generic over `sqlx::Executor`. Row structs are the D-19 models
+//! Statements are sea-query builders executed through SeaORM
+//! (`DbBackend::Postgres.build` + `query_all`/`query_one` on a
+//! [`sea_orm::ConnectionTrait`]). Row structs are the D-19 models
 //! (`super::models::{state, estimate, estimate_point}`, PIDASHCONV-352,
-//! Done) — this module ports queries only, never models.
+//! Done) — this module ports queries only, never models. Fetches decode
+//! via the `*_from_result` helpers. The `map_estimate_*_row`
+//! [`sqlx::postgres::PgRow`] decoders stay for the pre-SeaORM callers.
 //!
 //! Tenant context is explicit on every path: each builder and fetch takes
 //! the request's `(workspace_slug, project_id, ...)` triple as arguments.
@@ -64,7 +64,8 @@
 //!   (`.first()` + 409, `estimate.py:56-62`), not a DB constraint —
 //!   concurrent POSTs can create two rows.
 
-use sea_query::{Alias, Condition, Expr, JoinType, Query, SelectStatement};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, QueryResult};
+use sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement};
 use sqlx::postgres::PgRow;
 use sqlx::Row;
 
@@ -139,116 +140,44 @@ fn join_member_visibility(sel: &mut SelectStatement, table: &str) {
 /// only scopes the base model through its manager, and the joined tables
 /// ride along unscoped (verified against live Django SQL — states in a
 /// soft-deleted workspace/project stay visible).
-/// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = member (user) id`.
-fn state_scope_condition() -> Condition {
-    state_scope_condition_with(true)
-}
-
-/// [`state_scope_condition`] with the `project_members` soft-delete guard
-/// switchable: the v1 views scope it (`member_deleted_scope = true`,
-/// byte-identical SQL to before), while the MCP `list_states` queryset
-/// (`pi_dash_cloud/mcp/tools.py:777-789`) carries no such guard across
-/// its traversal (BUG-944-1, live-pinned by PIDASHCONV-944: only the
-/// base model's manager applies, so a soft-deleted membership row still
-/// authorizes the MCP read). The flag only drops that one predicate;
-/// every other clause, and the bind order, is shared.
-fn state_scope_condition_with(member_deleted_scope: bool) -> Condition {
+/// `member_deleted_scope` selects the v1 scope (`true`) or the MCP
+/// `list_states` scope (`false`, BUG-944-1: only the base model's manager
+/// applies across the MCP traversal, so a soft-deleted membership row
+/// still authorizes the MCP read).
+fn state_scope_condition_stmt(
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+    member_deleted_scope: bool,
+) -> Condition {
     let states = Alias::new(state::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let projects = Alias::new(PROJECT_TABLE.to_owned());
     let vis = Alias::new(VIS_TABLE.to_owned());
     let mut cond = Condition::all()
-        .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
-        .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")));
-    // `project__project_projectmember__member=user,
-    // project__project_projectmember__is_active=True` (the project_id
-    // correlation is the `ON` clause in `join_member_visibility`;
-    // `project_members` rows also carry the soft-delete scope on the v1
-    // path only — see the fn docs).
+        .add(Expr::col((workspaces, Alias::new("slug"))).eq(workspace_slug))
+        .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(project_id));
     cond = cond
-        .add(Expr::col((vis.clone(), Alias::new("member_id"))).eq(Expr::cust("$3")))
+        .add(Expr::col((vis.clone(), Alias::new("member_id"))).eq(member_id))
         .add(Expr::col((vis.clone(), Alias::new("is_active"))).eq(true));
     if member_deleted_scope {
         cond = cond.add(Expr::col((vis, Alias::new("deleted_at"))).is_null());
     }
-    cond
-        // View filter (`state.py:55,178`): the `is_triage` boolean column.
-        .add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
-        // Default-manager scope (`StateManager`, `db/models/state.py:82-83`).
+    cond.add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
         .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
         .add(Expr::col((states, Alias::new("deleted_at"))).is_null())
-        // `project__archived_at__isnull=True` (`state.py:56,179`).
         .add(Expr::col((projects, Alias::new("archived_at"))).is_null())
 }
 
 /// `State.objects.filter(...)...distinct()` for the list and detail views
 /// (`views/state.py:47-60,170-183`). `SELECT DISTINCT` mirrors the explicit
 /// `.distinct()` (`state.py:59,182`).
-/// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = member (user) id`.
-pub fn state_list_sql() -> String {
-    state_list_sql_with(true)
-}
-
-/// [`state_list_sql`] with the `project_members` soft-delete guard
-/// switchable (flagged condition below): `true` is the v1
-/// scope, byte-identical SQL; `false` is the MCP `list_states` scope
-/// (`pi_dash_cloud/mcp/tools.py:777-789`, BUG-944-1). Same binds.
-pub fn state_list_sql_with(member_deleted_scope: bool) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.distinct();
-    sel.from(Alias::new(state::TABLE.to_owned()));
-    select_table_columns(&mut sel, state::TABLE, state::COLUMNS);
-    join_workspace(&mut sel, state::TABLE);
-    join_project(&mut sel, state::TABLE);
-    join_member_visibility(&mut sel, state::TABLE);
-    sel.cond_where(state_scope_condition_with(member_deleted_scope));
-    sel.to_string(PostgresQueryBuilder)
-}
-
-/// Visible states for one project and acting user
-/// (`views/state.py:149-159`, paginated by the handlers layer).
-pub async fn fetch_state_list<'e, E>(
-    ex: E,
-    workspace_slug: &str,
-    project_id: uuid::Uuid,
-    member_id: uuid::Uuid,
-) -> Result<Vec<state::State>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    fetch_state_list_with(ex, workspace_slug, project_id, member_id, true).await
-}
-
-/// [`fetch_state_list`] over [`state_list_sql_with`]: `true` is the v1
-/// scope; `false` is the MCP `list_states` scope (BUG-944-1). Private:
-/// the MCP-facing read is the services layer's `fetch_state_columns`
-/// (raw rows + sequence order), which builds on [`state_list_sql_with`].
-async fn fetch_state_list_with<'e, E>(
-    ex: E,
+fn state_list_stmt(
     workspace_slug: &str,
     project_id: uuid::Uuid,
     member_id: uuid::Uuid,
     member_deleted_scope: bool,
-) -> Result<Vec<state::State>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&state_list_sql_with(member_deleted_scope))
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(member_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_state_row).collect()
-}
-
-/// The detail scope is the list scope plus the pk
-/// (`self.get_queryset().get(pk=state_id)`, `views/state.py:206-211`).
-/// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = member (user) id`,
-/// `$4 = state id`.
-pub fn state_detail_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+) -> SelectStatement {
     let mut sel = Query::select();
     sel.distinct();
     sel.from(Alias::new(state::TABLE.to_owned()));
@@ -256,55 +185,151 @@ pub fn state_detail_sql() -> String {
     join_workspace(&mut sel, state::TABLE);
     join_project(&mut sel, state::TABLE);
     join_member_visibility(&mut sel, state::TABLE);
-    sel.cond_where(state_scope_condition().add(
-        Expr::col((Alias::new(state::TABLE.to_owned()), Alias::new("id"))).eq(Expr::cust("$4")),
+    sel.cond_where(state_scope_condition_stmt(
+        workspace_slug,
+        project_id,
+        member_id,
+        member_deleted_scope,
     ));
-    sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
-/// One visible state by id, or `None` (the view's 404 branch).
-pub async fn fetch_state_detail<'e, E>(
-    ex: E,
+/// Visible states for one project and acting user
+/// (`views/state.py:149-159`, paginated by the handlers layer).
+pub async fn fetch_state_list(
+    conn: &impl ConnectionTrait,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+) -> Result<Vec<state::State>, DbErr> {
+    fetch_state_list_with(conn, workspace_slug, project_id, member_id, true).await
+}
+
+/// [`state_list_stmt`] with the MCP `sequence` ordering
+/// (`pi_dash_cloud/mcp/tools.py:777-789`, the MCP `.order_by`), for the
+/// services layer's `fetch_state_columns`.
+fn state_list_mcp_stmt(
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+) -> SelectStatement {
+    let mut stmt = state_list_stmt(workspace_slug, project_id, member_id, false);
+    stmt.order_by(
+        (Alias::new(state::TABLE.to_owned()), Alias::new("sequence")),
+        Order::Asc,
+    );
+    stmt
+}
+
+/// Visible states for the MCP `list_states` scope
+/// (`pi_dash_cloud/mcp/tools.py:777-789`, BUG-944-1: no
+/// `project_members.deleted_at` guard), ordered by `sequence` ascending
+/// (the MCP `.order_by`), for the services layer's `fetch_state_columns`.
+pub async fn fetch_state_list_mcp(
+    conn: &impl ConnectionTrait,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+) -> Result<Vec<state::State>, DbErr> {
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&state_list_mcp_stmt(
+            workspace_slug,
+            project_id,
+            member_id,
+        )))
+        .await?;
+    rows.iter().map(state_from_result).collect()
+}
+
+/// [`fetch_state_list`] with the `project_members` soft-delete guard
+/// switchable: `true` is the v1 scope; `false` is the MCP `list_states`
+/// scope (BUG-944-1).
+async fn fetch_state_list_with(
+    conn: &impl ConnectionTrait,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+    member_deleted_scope: bool,
+) -> Result<Vec<state::State>, DbErr> {
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&state_list_stmt(
+            workspace_slug,
+            project_id,
+            member_id,
+            member_deleted_scope,
+        )))
+        .await?;
+    rows.iter().map(state_from_result).collect()
+}
+
+/// The detail scope is the list scope plus the pk
+/// (`self.get_queryset().get(pk=state_id)`, `views/state.py:206-211`).
+fn state_detail_stmt(
     workspace_slug: &str,
     project_id: uuid::Uuid,
     member_id: uuid::Uuid,
     state_id: uuid::Uuid,
-) -> Result<Option<state::State>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&state_detail_sql())
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(member_id)
-        .bind(state_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| map_state_row(&r)).transpose()
+) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.distinct();
+    sel.from(Alias::new(state::TABLE.to_owned()));
+    select_table_columns(&mut sel, state::TABLE, state::COLUMNS);
+    join_workspace(&mut sel, state::TABLE);
+    join_project(&mut sel, state::TABLE);
+    join_member_visibility(&mut sel, state::TABLE);
+    sel.cond_where(
+        state_scope_condition_stmt(workspace_slug, project_id, member_id, true)
+            .add(Expr::col((Alias::new(state::TABLE.to_owned()), Alias::new("id"))).eq(state_id)),
+    );
+    sel.limit(1);
+    sel
 }
 
-/// Map one `states` row (column names, order-independent).
-pub fn map_state_row(row: &PgRow) -> Result<state::State, sqlx::Error> {
+/// One visible state by id, or `None` (the view's 404 branch).
+pub async fn fetch_state_detail(
+    conn: &impl ConnectionTrait,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+    state_id: uuid::Uuid,
+) -> Result<Option<state::State>, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&state_detail_stmt(
+            workspace_slug,
+            project_id,
+            member_id,
+            state_id,
+        )))
+        .await?;
+    row.as_ref().map(state_from_result).transpose()
+}
+
+/// Decode one `states` row from a SeaORM [`QueryResult`] (name-based).
+/// `timestamptz` arrives as `DateTime<FixedOffset>`; convert to UTC
+/// before building the model.
+fn state_from_result(row: &QueryResult) -> Result<state::State, DbErr> {
+    let created_at: chrono::DateTime<chrono::FixedOffset> = row.try_get_by("created_at")?;
+    let updated_at: chrono::DateTime<chrono::FixedOffset> = row.try_get_by("updated_at")?;
+    let deleted_at: Option<chrono::DateTime<chrono::FixedOffset>> = row.try_get_by("deleted_at")?;
     Ok(state::State {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        project_id: row.try_get("project_id")?,
-        workspace_id: row.try_get("workspace_id")?,
-        name: row.try_get("name")?,
-        description: row.try_get("description")?,
-        color: row.try_get("color")?,
-        slug: row.try_get("slug")?,
-        sequence: row.try_get("sequence")?,
-        group: row.try_get("group")?,
-        is_triage: row.try_get("is_triage")?,
-        default: row.try_get("default")?,
-        external_source: row.try_get("external_source")?,
-        external_id: row.try_get("external_id")?,
+        id: row.try_get_by("id")?,
+        created_at: created_at.with_timezone(&chrono::Utc),
+        updated_at: updated_at.with_timezone(&chrono::Utc),
+        created_by_id: row.try_get_by("created_by_id")?,
+        updated_by_id: row.try_get_by("updated_by_id")?,
+        deleted_at: deleted_at.map(|d| d.with_timezone(&chrono::Utc)),
+        project_id: row.try_get_by("project_id")?,
+        workspace_id: row.try_get_by("workspace_id")?,
+        name: row.try_get_by("name")?,
+        description: row.try_get_by("description")?,
+        color: row.try_get_by("color")?,
+        slug: row.try_get_by("slug")?,
+        sequence: row.try_get_by("sequence")?,
+        group: row.try_get_by("group")?,
+        is_triage: row.try_get_by("is_triage")?,
+        default: row.try_get_by("default")?,
+        external_source: row.try_get_by("external_source")?,
+        external_id: row.try_get_by("external_id")?,
     })
 }
 
@@ -321,9 +346,11 @@ pub fn map_state_row(row: &PgRow) -> Result<state::State, sqlx::Error> {
 /// guard is skipped — states of an archived project can still be deleted.
 /// The `workspaces` join carries no deleted predicate (same scoping rule
 /// as the list/detail scopes above).
-/// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = state id`.
-pub fn state_direct_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn state_direct_stmt(
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    state_id: uuid::Uuid,
+) -> SelectStatement {
     let states = Alias::new(state::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let mut sel = Query::select();
@@ -332,34 +359,32 @@ pub fn state_direct_sql() -> String {
     join_workspace(&mut sel, state::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
-            .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
-            .add(Expr::col((states.clone(), Alias::new("id"))).eq(Expr::cust("$3")))
+            .add(Expr::col((workspaces, Alias::new("slug"))).eq(workspace_slug))
+            .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(project_id))
+            .add(Expr::col((states.clone(), Alias::new("id"))).eq(state_id))
             .add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
             .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
             .add(Expr::col((states, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// One state row for the delete path, or `None`.
-pub async fn fetch_state_direct<'e, E>(
-    ex: E,
+pub async fn fetch_state_direct(
+    conn: &impl ConnectionTrait,
     workspace_slug: &str,
     project_id: uuid::Uuid,
     state_id: uuid::Uuid,
-) -> Result<Option<state::State>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&state_direct_sql())
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(state_id)
-        .fetch_optional(ex)
+) -> Result<Option<state::State>, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&state_direct_stmt(
+            workspace_slug,
+            project_id,
+            state_id,
+        )))
         .await?;
-    row.map(|r| map_state_row(&r)).transpose()
+    row.as_ref().map(state_from_result).transpose()
 }
 
 /// `State.objects.get(workspace__slug=..., project_id=..., pk=...)` — the
@@ -369,9 +394,11 @@ where
 /// paths hide it. The default-manager scope (triage-group + soft-deleted
 /// rows excluded) still applies; the `archived_at` guard is skipped like
 /// the delete get.
-/// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = state id`.
-pub fn state_direct_for_patch_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn state_direct_for_patch_stmt(
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    state_id: uuid::Uuid,
+) -> SelectStatement {
     let states = Alias::new(state::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let mut sel = Query::select();
@@ -380,33 +407,31 @@ pub fn state_direct_for_patch_sql() -> String {
     join_workspace(&mut sel, state::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
-            .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
-            .add(Expr::col((states.clone(), Alias::new("id"))).eq(Expr::cust("$3")))
+            .add(Expr::col((workspaces, Alias::new("slug"))).eq(workspace_slug))
+            .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(project_id))
+            .add(Expr::col((states.clone(), Alias::new("id"))).eq(state_id))
             .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
             .add(Expr::col((states, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// One state row for the patch path, or `None`.
-pub async fn fetch_state_direct_for_patch<'e, E>(
-    ex: E,
+pub async fn fetch_state_direct_for_patch(
+    conn: &impl ConnectionTrait,
     workspace_slug: &str,
     project_id: uuid::Uuid,
     state_id: uuid::Uuid,
-) -> Result<Option<state::State>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&state_direct_for_patch_sql())
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(state_id)
-        .fetch_optional(ex)
+) -> Result<Option<state::State>, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&state_direct_for_patch_stmt(
+            workspace_slug,
+            project_id,
+            state_id,
+        )))
         .await?;
-    row.map(|r| map_state_row(&r)).transpose()
+    row.as_ref().map(state_from_result).transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -419,9 +444,7 @@ where
 /// no archived-project guard. The soft-delete manager applies to both
 /// tables. Call sites take `.first()` (get/patch/delete L84/L108/L130),
 /// which is `LIMIT 1` in the fetch below.
-/// Binds `$1 = workspace slug`, `$2 = project id`.
-pub fn estimate_for_project_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn estimate_for_project_stmt(workspace_slug: &str, project_id: uuid::Uuid) -> SelectStatement {
     let estimates = Alias::new(estimate::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let mut sel = Query::select();
@@ -430,31 +453,28 @@ pub fn estimate_for_project_sql() -> String {
     join_workspace(&mut sel, estimate::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$1")))
-            .add(Expr::col((estimates.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
+            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(workspace_slug))
+            .add(Expr::col((estimates.clone(), Alias::new("project_id"))).eq(project_id))
             .add(Expr::col((estimates, Alias::new("deleted_at"))).is_null())
             .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// The project's estimate, or `None` (the views' 404 `Estimate not found`
 /// branch, `views/estimate.py:84-86,108-110,130-132`).
-pub async fn fetch_estimate_for_project<'e, E>(
-    ex: E,
+pub async fn fetch_estimate_for_project(
+    conn: &impl ConnectionTrait,
     workspace_slug: &str,
     project_id: uuid::Uuid,
-) -> Result<Option<estimate::Estimate>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&estimate_for_project_sql())
-        .bind(workspace_slug)
-        .bind(project_id)
-        .fetch_optional(ex)
+) -> Result<Option<estimate::Estimate>, DbErr> {
+    let row = conn
+        .query_one(
+            DbBackend::Postgres.build(&estimate_for_project_stmt(workspace_slug, project_id)),
+        )
         .await?;
-    row.map(|r| map_estimate_row(&r)).transpose()
+    row.as_ref().map(estimate_from_result).transpose()
 }
 
 /// Map one `estimates` row (column names, order-independent). The `type`
@@ -476,11 +496,31 @@ pub fn map_estimate_row(row: &PgRow) -> Result<estimate::Estimate, sqlx::Error> 
     })
 }
 
+/// Decode one `estimates` row from a SeaORM [`QueryResult`] (name-based).
+fn estimate_from_result(row: &QueryResult) -> Result<estimate::Estimate, DbErr> {
+    let created_at: chrono::DateTime<chrono::FixedOffset> = row.try_get_by("created_at")?;
+    let updated_at: chrono::DateTime<chrono::FixedOffset> = row.try_get_by("updated_at")?;
+    let deleted_at: Option<chrono::DateTime<chrono::FixedOffset>> = row.try_get_by("deleted_at")?;
+    Ok(estimate::Estimate {
+        id: row.try_get_by("id")?,
+        created_at: created_at.with_timezone(&chrono::Utc),
+        updated_at: updated_at.with_timezone(&chrono::Utc),
+        created_by_id: row.try_get_by("created_by_id")?,
+        updated_by_id: row.try_get_by("updated_by_id")?,
+        deleted_at: deleted_at.map(|d| d.with_timezone(&chrono::Utc)),
+        project_id: row.try_get_by("project_id")?,
+        workspace_id: row.try_get_by("workspace_id")?,
+        name: row.try_get_by("name")?,
+        description: row.try_get_by("description")?,
+        estimate_type: row.try_get_by("type")?,
+        last_used: row.try_get_by("last_used")?,
+    })
+}
+
 /// `Project.objects.filter(id=project_id, workspace__slug=slug).first()`
 /// (`views/estimate.py:48`): the create path checks the parent project
-/// before the queryset. Binds `$1 = project id`, `$2 = workspace slug`.
-pub fn project_exists_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+/// before the queryset.
+fn project_exists_stmt(project_id: uuid::Uuid, workspace_slug: &str) -> SelectStatement {
     let projects = Alias::new(PROJECT_TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let mut sel = Query::select();
@@ -489,60 +529,52 @@ pub fn project_exists_sql() -> String {
     join_workspace(&mut sel, PROJECT_TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((projects.clone(), Alias::new("id"))).eq(Expr::cust("$1")))
-            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$2")))
+            .add(Expr::col((projects.clone(), Alias::new("id"))).eq(project_id))
+            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(workspace_slug))
             .add(Expr::col((projects, Alias::new("deleted_at"))).is_null())
             .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Whether the parent project row exists (the create path's 404
 /// `Project not found` branch, `views/estimate.py:48-50`).
-pub async fn fetch_project_exists<'e, E>(
-    ex: E,
+pub async fn fetch_project_exists(
+    conn: &impl ConnectionTrait,
     project_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&project_exists_sql())
-        .bind(project_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+) -> Result<bool, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&project_exists_stmt(project_id, workspace_slug)))
         .await?;
     Ok(row.is_some())
 }
 
 /// `Workspace.objects.filter(slug=slug).first()`
 /// (`views/estimate.py:52`): the create path's second pre-check.
-/// Binds `$1 = workspace slug`.
-pub fn workspace_exists_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn workspace_exists_stmt(workspace_slug: &str) -> SelectStatement {
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let mut sel = Query::select();
     sel.from(Alias::new(WORKSPACE_TABLE.to_owned()));
     sel.column((workspaces.clone(), Alias::new("id")));
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$1")))
+            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(workspace_slug))
             .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Whether the workspace row exists (the create path's 404
 /// `Workspace not found` branch, `views/estimate.py:52-54`).
-pub async fn fetch_workspace_exists<'e, E>(ex: E, workspace_slug: &str) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&workspace_exists_sql())
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+pub async fn fetch_workspace_exists(
+    conn: &impl ConnectionTrait,
+    workspace_slug: &str,
+) -> Result<bool, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&workspace_exists_stmt(workspace_slug)))
         .await?;
     Ok(row.is_some())
 }
@@ -554,14 +586,17 @@ where
 /// Shared `WHERE` for the point list and detail scopes
 /// (`views/estimate.py:145-148,242-245`): parent estimate, workspace slug,
 /// project id, plus the soft-delete scope on both tables.
-/// Binds `$1 = estimate id`, `$2 = workspace slug`, `$3 = project id`.
-fn estimate_point_scope_condition() -> Condition {
+fn estimate_point_scope_condition_stmt(
+    estimate_id: uuid::Uuid,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+) -> Condition {
     let points = Alias::new(estimate_point::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     Condition::all()
-        .add(Expr::col((points.clone(), Alias::new("estimate_id"))).eq(Expr::cust("$1")))
-        .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$2")))
-        .add(Expr::col((points.clone(), Alias::new("project_id"))).eq(Expr::cust("$3")))
+        .add(Expr::col((points.clone(), Alias::new("estimate_id"))).eq(estimate_id))
+        .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(workspace_slug))
+        .add(Expr::col((points.clone(), Alias::new("project_id"))).eq(project_id))
         .add(Expr::col((points, Alias::new("deleted_at"))).is_null())
         .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null())
 }
@@ -570,81 +605,85 @@ fn estimate_point_scope_condition() -> Condition {
 /// project_id=...)` (`views/estimate.py:144-149`). The
 /// `.select_related("estimate", "workspace", "project")` (L149) is a fetch
 /// optimization only; see the module docs.
-/// Binds `$1 = estimate id`, `$2 = workspace slug`, `$3 = project id`.
-pub fn estimate_point_list_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn estimate_point_list_stmt(
+    estimate_id: uuid::Uuid,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
     sel.from(Alias::new(estimate_point::TABLE.to_owned()));
     select_table_columns(&mut sel, estimate_point::TABLE, estimate_point::COLUMNS);
     join_workspace(&mut sel, estimate_point::TABLE);
-    sel.cond_where(estimate_point_scope_condition());
-    sel.to_string(PostgresQueryBuilder)
+    sel.cond_where(estimate_point_scope_condition_stmt(
+        estimate_id,
+        workspace_slug,
+        project_id,
+    ));
+    sel
 }
 
 /// Every point of one estimate in scope (the list view serializes the whole
 /// queryset, `views/estimate.py:176-178`).
-pub async fn fetch_estimate_point_list<'e, E>(
-    ex: E,
+pub async fn fetch_estimate_point_list(
+    conn: &impl ConnectionTrait,
     estimate_id: uuid::Uuid,
     workspace_slug: &str,
     project_id: uuid::Uuid,
-) -> Result<Vec<estimate_point::EstimatePoint>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&estimate_point_list_sql())
-        .bind(estimate_id)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .fetch_all(ex)
+) -> Result<Vec<estimate_point::EstimatePoint>, DbErr> {
+    let rows = conn
+        .query_all(DbBackend::Postgres.build(&estimate_point_list_stmt(
+            estimate_id,
+            workspace_slug,
+            project_id,
+        )))
         .await?;
-    rows.iter().map(map_estimate_point_row).collect()
+    rows.iter().map(estimate_point_from_result).collect()
 }
 
 /// The detail scope plus the point id
 /// (`self.get_queryset().filter(id=estimate_point_id).first()`,
 /// `views/estimate.py:265,287`).
-/// Binds `$1 = estimate id`, `$2 = workspace slug`, `$3 = project id`,
-/// `$4 = point id`.
-pub fn estimate_point_detail_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn estimate_point_detail_stmt(
+    estimate_id: uuid::Uuid,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    point_id: uuid::Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
     sel.from(Alias::new(estimate_point::TABLE.to_owned()));
     select_table_columns(&mut sel, estimate_point::TABLE, estimate_point::COLUMNS);
     join_workspace(&mut sel, estimate_point::TABLE);
     sel.cond_where(
-        estimate_point_scope_condition().add(
+        estimate_point_scope_condition_stmt(estimate_id, workspace_slug, project_id).add(
             Expr::col((
                 Alias::new(estimate_point::TABLE.to_owned()),
                 Alias::new("id"),
             ))
-            .eq(Expr::cust("$4")),
+            .eq(point_id),
         ),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// One point by id in scope, or `None` (the views' 404
 /// `Estimate point not found` branch, `views/estimate.py:265-267,287-289`).
-pub async fn fetch_estimate_point_detail<'e, E>(
-    ex: E,
+pub async fn fetch_estimate_point_detail(
+    conn: &impl ConnectionTrait,
     estimate_id: uuid::Uuid,
     workspace_slug: &str,
     project_id: uuid::Uuid,
     point_id: uuid::Uuid,
-) -> Result<Option<estimate_point::EstimatePoint>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&estimate_point_detail_sql())
-        .bind(estimate_id)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(point_id)
-        .fetch_optional(ex)
+) -> Result<Option<estimate_point::EstimatePoint>, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&estimate_point_detail_stmt(
+            estimate_id,
+            workspace_slug,
+            project_id,
+            point_id,
+        )))
         .await?;
-    row.map(|r| map_estimate_point_row(&r)).transpose()
+    row.as_ref().map(estimate_point_from_result).transpose()
 }
 
 /// Map one `estimate_points` row (column names, order-independent). `key`
@@ -668,13 +707,37 @@ pub fn map_estimate_point_row(row: &PgRow) -> Result<estimate_point::EstimatePoi
     })
 }
 
+/// Decode one `estimate_points` row from a SeaORM [`QueryResult`]
+/// (name-based).
+fn estimate_point_from_result(row: &QueryResult) -> Result<estimate_point::EstimatePoint, DbErr> {
+    let created_at: chrono::DateTime<chrono::FixedOffset> = row.try_get_by("created_at")?;
+    let updated_at: chrono::DateTime<chrono::FixedOffset> = row.try_get_by("updated_at")?;
+    let deleted_at: Option<chrono::DateTime<chrono::FixedOffset>> = row.try_get_by("deleted_at")?;
+    Ok(estimate_point::EstimatePoint {
+        id: row.try_get_by("id")?,
+        created_at: created_at.with_timezone(&chrono::Utc),
+        updated_at: updated_at.with_timezone(&chrono::Utc),
+        created_by_id: row.try_get_by("created_by_id")?,
+        updated_by_id: row.try_get_by("updated_by_id")?,
+        deleted_at: deleted_at.map(|d| d.with_timezone(&chrono::Utc)),
+        project_id: row.try_get_by("project_id")?,
+        workspace_id: row.try_get_by("workspace_id")?,
+        estimate_id: row.try_get_by("estimate_id")?,
+        key: row.try_get_by("key")?,
+        description: row.try_get_by("description")?,
+        value: row.try_get_by("value")?,
+    })
+}
+
 /// `Estimate.objects.filter(id=estimate_id, workspace__slug=slug,
 /// project_id=project_id).first()` (`views/estimate.py:169-173,197-201`):
 /// the point list/get entry points verify the parent estimate row first and
 /// 404 `Estimate not found` even when points exist.
-/// Binds `$1 = estimate id`, `$2 = workspace slug`, `$3 = project id`.
-pub fn parent_estimate_exists_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+fn parent_estimate_exists_stmt(
+    estimate_id: uuid::Uuid,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+) -> SelectStatement {
     let estimates = Alias::new(estimate::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let mut sel = Query::select();
@@ -683,32 +746,30 @@ pub fn parent_estimate_exists_sql() -> String {
     join_workspace(&mut sel, estimate::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((estimates.clone(), Alias::new("id"))).eq(Expr::cust("$1")))
-            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$2")))
-            .add(Expr::col((estimates.clone(), Alias::new("project_id"))).eq(Expr::cust("$3")))
+            .add(Expr::col((estimates.clone(), Alias::new("id"))).eq(estimate_id))
+            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(workspace_slug))
+            .add(Expr::col((estimates.clone(), Alias::new("project_id"))).eq(project_id))
             .add(Expr::col((estimates, Alias::new("deleted_at"))).is_null())
             .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Whether the parent estimate row exists in scope (the point views'
 /// first 404 branch, `views/estimate.py:174-175,202-203`).
-pub async fn fetch_parent_estimate_exists<'e, E>(
-    ex: E,
+pub async fn fetch_parent_estimate_exists(
+    conn: &impl ConnectionTrait,
     estimate_id: uuid::Uuid,
     workspace_slug: &str,
     project_id: uuid::Uuid,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&parent_estimate_exists_sql())
-        .bind(estimate_id)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .fetch_optional(ex)
+) -> Result<bool, DbErr> {
+    let row = conn
+        .query_one(DbBackend::Postgres.build(&parent_estimate_exists_stmt(
+            estimate_id,
+            workspace_slug,
+            project_id,
+        )))
         .await?;
     Ok(row.is_some())
 }
@@ -716,11 +777,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orm_tx::TxConn;
+    use sea_query::PostgresQueryBuilder;
+
+    fn render(sel: &SelectStatement) -> String {
+        sel.to_string(PostgresQueryBuilder)
+    }
+
+    fn test_pid() -> uuid::Uuid {
+        uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("test pid")
+    }
+
+    fn test_uid() -> uuid::Uuid {
+        uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("test uid")
+    }
 
     #[test]
     fn state_list_is_distinct_with_member_visibility() {
         // FX-Q-STATEEST S1 (`views/state.py:47-60`).
-        let sql = state_list_sql();
+        let sql = render(&state_list_stmt("acme", test_pid(), test_uid(), true));
         assert!(sql.contains("SELECT DISTINCT"), "{sql}");
         assert!(sql.contains(r#"FROM "states""#), "{sql}");
         assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
@@ -730,10 +805,15 @@ mod tests {
             sql.contains(r#""project_members"."project_id" = "states"."project_id""#),
             "{sql}"
         );
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
-        assert!(sql.contains(r#""states"."project_id" = ($2)"#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
         assert!(
-            sql.contains(r#""project_members"."member_id" = ($3)"#),
+            sql.contains(r#""states"."project_id" = '11111111-1111-1111-1111-111111111111'"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""project_members"."member_id" = '22222222-2222-2222-2222-222222222222'"#
+            ),
             "{sql}"
         );
         assert!(
@@ -757,11 +837,12 @@ mod tests {
 
     #[test]
     fn state_list_with_flag_preserves_v1_and_drops_member_guard_for_mcp() {
-        // PIDASHCONV-1661: `true` is byte-identical to the v1 scope;
-        // `false` drops only the membership deleted guard (the MCP
-        // `list_states` traversal scope, BUG-944-1).
-        assert_eq!(state_list_sql(), state_list_sql_with(true));
-        let mcp = state_list_sql_with(false);
+        // PIDASHCONV-1661: `true` is the v1 scope; `false` drops only the
+        // membership deleted guard (the MCP `list_states` traversal scope,
+        // BUG-944-1).
+        let v1 = render(&state_list_stmt("acme", test_pid(), test_uid(), true));
+        let mcp = render(&state_list_stmt("acme", test_pid(), test_uid(), false));
+        assert_eq!(v1.matches(r#""deleted_at" IS NULL"#).count(), 2, "{v1}");
         assert_eq!(mcp.matches(r#""deleted_at" IS NULL"#).count(), 1, "{mcp}");
         assert!(mcp.contains(r#""states"."deleted_at" IS NULL"#), "{mcp}");
         assert!(!mcp.contains(r#""project_members"."deleted_at""#), "{mcp}");
@@ -770,9 +851,9 @@ mod tests {
         for needle in [
             "SELECT DISTINCT",
             r#"INNER JOIN "project_members""#,
-            r#""workspaces"."slug" = ($1)"#,
-            r#""states"."project_id" = ($2)"#,
-            r#""project_members"."member_id" = ($3)"#,
+            r#""workspaces"."slug" = 'acme'"#,
+            r#""states"."project_id" = '11111111-1111-1111-1111-111111111111'"#,
+            r#""project_members"."member_id" = '22222222-2222-2222-2222-222222222222'"#,
             r#""project_members"."is_active" = TRUE"#,
             r#""states"."is_triage" = FALSE"#,
             r#""states"."group" <> 'triage'"#,
@@ -780,14 +861,29 @@ mod tests {
         ] {
             assert!(mcp.contains(needle), "{needle}: {mcp}");
         }
+        // The MCP fetch orders by sequence ascending.
+        let ordered = render(&state_list_mcp_stmt("acme", test_pid(), test_uid()));
+        assert!(
+            ordered.contains(r#"ORDER BY "states"."sequence" ASC"#),
+            "{ordered}"
+        );
+        assert!(
+            !ordered.contains(r#""project_members"."deleted_at""#),
+            "{ordered}"
+        );
     }
 
     #[test]
     fn state_detail_adds_pk_to_list_scope() {
         // FX-Q-STATEEST S1 detail (`views/state.py:170-183,206-211`).
-        let sql = state_detail_sql();
+        let state_id =
+            uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("test state");
+        let sql = render(&state_detail_stmt("acme", test_pid(), test_uid(), state_id));
         assert!(sql.contains("SELECT DISTINCT"), "{sql}");
-        assert!(sql.contains(r#""states"."id" = ($4)"#), "{sql}");
+        assert!(
+            sql.contains(r#""states"."id" = '33333333-3333-3333-3333-333333333333'"#),
+            "{sql}"
+        );
         assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
         assert!(sql.contains("LIMIT 1"), "{sql}");
     }
@@ -799,11 +895,16 @@ mod tests {
         // join and no archived check. The `workspaces` join carries no
         // deleted predicate (same scoping rule as S1; the old count of 2
         // hid direct gets in soft-deleted workspaces that Python serves).
-        let sql = state_direct_sql();
+        let state_id =
+            uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("test state");
+        let sql = render(&state_direct_stmt("acme", test_pid(), state_id));
         assert!(!sql.contains("DISTINCT"), "{sql}");
         assert!(!sql.contains(r#"JOIN "projects""#), "{sql}");
         assert!(!sql.contains("archived_at"), "{sql}");
-        assert!(sql.contains(r#""states"."id" = ($3)"#), "{sql}");
+        assert!(
+            sql.contains(r#""states"."id" = '33333333-3333-3333-3333-333333333333'"#),
+            "{sql}"
+        );
         assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
         assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 1, "{sql}");
@@ -815,14 +916,19 @@ mod tests {
         // FX-Q-STATEEST S2b patch get (`views/state.py:278`): the
         // default-manager scope (triage-group + soft-deleted excluded) with
         // NO `is_triage` filter and NO archived check.
-        let sql = state_direct_for_patch_sql();
+        let state_id =
+            uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("test state");
+        let sql = render(&state_direct_for_patch_stmt("acme", test_pid(), state_id));
         assert!(!sql.contains("DISTINCT"), "{sql}");
         assert!(!sql.contains(r#"JOIN "projects""#), "{sql}");
         assert!(!sql.contains("archived_at"), "{sql}");
         // No `is_triage` filter predicate (the column is still projected
         // for the row struct).
         assert!(!sql.contains(r#""is_triage" = FALSE"#), "{sql}");
-        assert!(sql.contains(r#""states"."id" = ($3)"#), "{sql}");
+        assert!(
+            sql.contains(r#""states"."id" = '33333333-3333-3333-3333-333333333333'"#),
+            "{sql}"
+        );
         assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
         assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 1, "{sql}");
         assert!(sql.contains("LIMIT 1"), "{sql}");
@@ -832,13 +938,16 @@ mod tests {
     fn estimate_scope_has_no_membership_or_archived_filter() {
         // FX-Q-STATEEST E1 (`views/estimate.py:35-36`): membership is a
         // permission-layer concern (PIDASHCONV-367), not a queryset filter.
-        let sql = estimate_for_project_sql();
+        let sql = render(&estimate_for_project_stmt("acme", test_pid()));
         assert!(!sql.contains("DISTINCT"), "{sql}");
         assert!(!sql.contains("project_members"), "{sql}");
         assert!(!sql.contains("archived_at"), "{sql}");
         assert!(sql.contains(r#"FROM "estimates""#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
-        assert!(sql.contains(r#""estimates"."project_id" = ($2)"#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(
+            sql.contains(r#""estimates"."project_id" = '11111111-1111-1111-1111-111111111111'"#),
+            "{sql}"
+        );
         assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 2, "{sql}");
         assert!(sql.contains("LIMIT 1"), "{sql}");
     }
@@ -846,29 +955,47 @@ mod tests {
     #[test]
     fn estimate_point_scopes_cover_list_and_detail() {
         // FX-Q-STATEEST E2/E3 (`views/estimate.py:144-149,241-246`).
-        let list = estimate_point_list_sql();
+        let est = uuid::Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("test est");
+        let list = render(&estimate_point_list_stmt(est, "acme", test_pid()));
         assert!(list.contains(r#"FROM "estimate_points""#), "{list}");
         assert!(
-            list.contains(r#""estimate_points"."estimate_id" = ($1)"#),
+            list.contains(
+                r#""estimate_points"."estimate_id" = '44444444-4444-4444-4444-444444444444'"#
+            ),
             "{list}"
         );
-        assert!(list.contains(r#""workspaces"."slug" = ($2)"#), "{list}");
+        assert!(list.contains(r#""workspaces"."slug" = 'acme'"#), "{list}");
         assert!(
-            list.contains(r#""estimate_points"."project_id" = ($3)"#),
+            list.contains(
+                r#""estimate_points"."project_id" = '11111111-1111-1111-1111-111111111111'"#
+            ),
             "{list}"
         );
         assert!(!list.contains("LIMIT"), "{list}");
-        let detail = estimate_point_detail_sql();
+        let point_id =
+            uuid::Uuid::parse_str("55555555-5555-5555-5555-555555555555").expect("test point");
+        let detail = render(&estimate_point_detail_stmt(
+            est,
+            "acme",
+            test_pid(),
+            point_id,
+        ));
         assert!(
-            detail.contains(r#""estimate_points"."id" = ($4)"#),
+            detail.contains(r#""estimate_points"."id" = '55555555-5555-5555-5555-555555555555'"#),
             "{detail}"
         );
         assert!(detail.contains("LIMIT 1"), "{detail}");
-        let parent = parent_estimate_exists_sql();
-        assert!(parent.contains(r#""estimates"."id" = ($1)"#), "{parent}");
-        assert!(parent.contains(r#""workspaces"."slug" = ($2)"#), "{parent}");
+        let parent = render(&parent_estimate_exists_stmt(est, "acme", test_pid()));
         assert!(
-            parent.contains(r#""estimates"."project_id" = ($3)"#),
+            parent.contains(r#""estimates"."id" = '44444444-4444-4444-4444-444444444444'"#),
+            "{parent}"
+        );
+        assert!(
+            parent.contains(r#""workspaces"."slug" = 'acme'"#),
+            "{parent}"
+        );
+        assert!(
+            parent.contains(r#""estimates"."project_id" = '11111111-1111-1111-1111-111111111111'"#),
             "{parent}"
         );
         assert!(parent.contains("LIMIT 1"), "{parent}");
@@ -877,12 +1004,15 @@ mod tests {
     #[test]
     fn parent_precheck_shapes() {
         // `views/estimate.py:48,52`: project-then-workspace existence.
-        let proj = project_exists_sql();
-        assert!(proj.contains(r#""projects"."id" = ($1)"#), "{proj}");
-        assert!(proj.contains(r#""workspaces"."slug" = ($2)"#), "{proj}");
-        let ws = workspace_exists_sql();
+        let proj = render(&project_exists_stmt(test_pid(), "acme"));
+        assert!(
+            proj.contains(r#""projects"."id" = '11111111-1111-1111-1111-111111111111'"#),
+            "{proj}"
+        );
+        assert!(proj.contains(r#""workspaces"."slug" = 'acme'"#), "{proj}");
+        let ws = render(&workspace_exists_stmt("acme"));
         assert!(ws.contains(r#"FROM "workspaces""#), "{ws}");
-        assert!(ws.contains(r#""workspaces"."slug" = ($1)"#), "{ws}");
+        assert!(ws.contains(r#""workspaces"."slug" = 'acme'"#), "{ws}");
         assert!(!ws.contains("projects"), "{ws}");
     }
 
@@ -1134,7 +1264,7 @@ mod tests {
         )
         .await;
 
-        let got = fetch_state_list(&mut *tx, "acme", proja, user)
+        let got = fetch_state_list(&TxConn::new(&mut tx), "acme", proja, user)
             .await
             .expect("list");
         assert_eq!(
@@ -1143,17 +1273,19 @@ mod tests {
         );
         assert_eq!(got[0].name, "in-progress");
         // Inactive membership sees nothing; strangers see nothing.
-        assert!(fetch_state_list(&mut *tx, "acme", proja, idle)
+        assert!(fetch_state_list(&TxConn::new(&mut tx), "acme", proja, idle)
             .await
             .expect("idle list")
             .is_empty());
-        assert!(fetch_state_list(&mut *tx, "acme", proja, stranger)
-            .await
-            .expect("stranger list")
-            .is_empty());
+        assert!(
+            fetch_state_list(&TxConn::new(&mut tx), "acme", proja, stranger)
+                .await
+                .expect("stranger list")
+                .is_empty()
+        );
         // Detail finds the visible row and misses everything else.
         assert_eq!(
-            fetch_state_detail(&mut *tx, "acme", proja, user, live_uuid(40))
+            fetch_state_detail(&TxConn::new(&mut tx), "acme", proja, user, live_uuid(40))
                 .await
                 .expect("detail")
                 .map(|s| s.name),
@@ -1161,14 +1293,20 @@ mod tests {
         );
         for hidden in [41u8, 42, 43] {
             assert_eq!(
-                fetch_state_detail(&mut *tx, "acme", proja, user, live_uuid(hidden))
-                    .await
-                    .expect("hidden detail"),
+                fetch_state_detail(
+                    &TxConn::new(&mut tx),
+                    "acme",
+                    proja,
+                    user,
+                    live_uuid(hidden)
+                )
+                .await
+                .expect("hidden detail"),
                 None
             );
         }
         assert_eq!(
-            fetch_state_detail(&mut *tx, "acme", arch, user, live_uuid(44))
+            fetch_state_detail(&TxConn::new(&mut tx), "acme", arch, user, live_uuid(44))
                 .await
                 .expect("archived detail"),
             None
@@ -1215,7 +1353,7 @@ mod tests {
         // Archived-project state: reachable for patch/delete (S2), hidden
         // from list/detail (S1).
         assert_eq!(
-            fetch_state_direct(&mut *tx, "acme", arch, live_uuid(50))
+            fetch_state_direct(&TxConn::new(&mut tx), "acme", arch, live_uuid(50))
                 .await
                 .expect("direct")
                 .map(|s| s.name),
@@ -1223,14 +1361,14 @@ mod tests {
         );
         // Triage row stays excluded even on the direct path.
         assert_eq!(
-            fetch_state_direct(&mut *tx, "acme", proja, live_uuid(51))
+            fetch_state_direct(&TxConn::new(&mut tx), "acme", proja, live_uuid(51))
                 .await
                 .expect("triage direct"),
             None
         );
         // Unknown id reads as absent.
         assert_eq!(
-            fetch_state_direct(&mut *tx, "acme", proja, live_uuid(59))
+            fetch_state_direct(&TxConn::new(&mut tx), "acme", proja, live_uuid(59))
                 .await
                 .expect("miss"),
             None
@@ -1267,7 +1405,7 @@ mod tests {
 
         // PATCH direct get serves it …
         assert_eq!(
-            fetch_state_direct_for_patch(&mut *tx, "acme", proja, live_uuid(52))
+            fetch_state_direct_for_patch(&TxConn::new(&mut tx), "acme", proja, live_uuid(52))
                 .await
                 .expect("patch direct")
                 .map(|s| s.name),
@@ -1275,7 +1413,7 @@ mod tests {
         );
         // … while the DELETE direct get 404s it …
         assert_eq!(
-            fetch_state_direct(&mut *tx, "acme", proja, live_uuid(52))
+            fetch_state_direct(&TxConn::new(&mut tx), "acme", proja, live_uuid(52))
                 .await
                 .expect("delete direct"),
             None
@@ -1283,9 +1421,101 @@ mod tests {
         // … and the list scope hides it too.
         let user = live_uuid(20);
         seed_membership(&mut tx, live_uuid(30), proja, ws, user, true).await;
-        assert!(fetch_state_list(&mut *tx, "acme", proja, user)
+        assert!(fetch_state_list(&TxConn::new(&mut tx), "acme", proja, user)
             .await
             .expect("list")
+            .is_empty());
+        tx.rollback().await.expect("rollback");
+    }
+
+    /// MCP `list_states` (`fetch_state_list_mcp`): same scope as the v1
+    /// list except the `project_members.deleted_at` guard is off
+    /// (BUG-944-1), ordered by `sequence` ascending.
+    #[tokio::test]
+    async fn live_state_list_mcp_scope_and_order() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ws = live_uuid(1);
+        let proja = live_uuid(10);
+        let user = live_uuid(20);
+        seed_workspace(&mut tx, ws, "acme").await;
+        seed_project(&mut tx, proja, ws, false).await;
+        seed_membership(&mut tx, live_uuid(30), proja, ws, user, true).await;
+        // Seed higher-sequence first so the ORDER BY is observable.
+        seed_state(
+            &mut tx,
+            live_uuid(40),
+            proja,
+            ws,
+            "z-last",
+            "backlog",
+            false,
+            false,
+        )
+        .await;
+        seed_state(
+            &mut tx,
+            live_uuid(41),
+            proja,
+            ws,
+            "a-first",
+            "backlog",
+            false,
+            false,
+        )
+        .await;
+        // Triage group: hidden by the default manager.
+        seed_state(
+            &mut tx,
+            live_uuid(42),
+            proja,
+            ws,
+            "triage",
+            "triage",
+            false,
+            false,
+        )
+        .await;
+        sqlx::query("UPDATE states SET sequence = 90000 WHERE id = $1")
+            .bind(live_uuid(40))
+            .execute(&mut *tx)
+            .await
+            .expect("set late sequence");
+        sqlx::query("UPDATE states SET sequence = 10000 WHERE id = $1")
+            .bind(live_uuid(41))
+            .execute(&mut *tx)
+            .await
+            .expect("set early sequence");
+
+        let got = fetch_state_list_mcp(&TxConn::new(&mut tx), "acme", proja, user)
+            .await
+            .expect("mcp list");
+        assert_eq!(
+            got.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![live_uuid(41), live_uuid(40)]
+        );
+        assert_eq!(got[0].name, "a-first");
+
+        // BUG-944-1: a soft-deleted membership still authorizes the MCP
+        // read …
+        sqlx::query("UPDATE project_members SET deleted_at = now() WHERE member_id = $1")
+            .bind(user)
+            .execute(&mut *tx)
+            .await
+            .expect("soft-delete member");
+        let after = fetch_state_list_mcp(&TxConn::new(&mut tx), "acme", proja, user)
+            .await
+            .expect("mcp after soft-delete");
+        assert_eq!(
+            after.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![live_uuid(41), live_uuid(40)]
+        );
+        // … while the v1 scope now hides everything.
+        assert!(fetch_state_list(&TxConn::new(&mut tx), "acme", proja, user)
+            .await
+            .expect("v1 after soft-delete")
             .is_empty());
         tx.rollback().await.expect("rollback");
     }
@@ -1305,34 +1535,34 @@ mod tests {
         seed_project(&mut tx, other, wsa, false).await;
         seed_estimate(&mut tx, live_uuid(60), proja, wsa).await;
 
-        let got = fetch_estimate_for_project(&mut *tx, "acme", proja)
+        let got = fetch_estimate_for_project(&TxConn::new(&mut tx), "acme", proja)
             .await
             .expect("estimate");
         assert_eq!(got.map(|e| e.id), Some(live_uuid(60)));
         // Wrong project / wrong slug read as absent.
         assert_eq!(
-            fetch_estimate_for_project(&mut *tx, "acme", other)
+            fetch_estimate_for_project(&TxConn::new(&mut tx), "acme", other)
                 .await
                 .expect("miss"),
             None
         );
         assert_eq!(
-            fetch_estimate_for_project(&mut *tx, "other", proja)
+            fetch_estimate_for_project(&TxConn::new(&mut tx), "other", proja)
                 .await
                 .expect("miss"),
             None
         );
         // Create-path pre-checks (`estimate.py:48-54`).
-        assert!(fetch_project_exists(&mut *tx, proja, "acme")
+        assert!(fetch_project_exists(&TxConn::new(&mut tx), proja, "acme")
             .await
             .expect("project exists"));
-        assert!(!fetch_project_exists(&mut *tx, proja, "other")
+        assert!(!fetch_project_exists(&TxConn::new(&mut tx), proja, "other")
             .await
             .expect("project miss"));
-        assert!(fetch_workspace_exists(&mut *tx, "acme")
+        assert!(fetch_workspace_exists(&TxConn::new(&mut tx), "acme")
             .await
             .expect("workspace exists"));
-        assert!(!fetch_workspace_exists(&mut *tx, "nope")
+        assert!(!fetch_workspace_exists(&TxConn::new(&mut tx), "nope")
             .await
             .expect("workspace miss"));
         tx.rollback().await.expect("rollback");
@@ -1358,7 +1588,7 @@ mod tests {
         // Soft-deleted point stays out of the list.
         seed_point(&mut tx, live_uuid(72), est, proja, ws, 3, "3", true).await;
 
-        let mut got = fetch_estimate_point_list(&mut *tx, est, "acme", proja)
+        let mut got = fetch_estimate_point_list(&TxConn::new(&mut tx), est, "acme", proja)
             .await
             .expect("list");
         got.sort_by_key(|a| a.id);
@@ -1367,24 +1597,28 @@ mod tests {
             vec![live_uuid(70), live_uuid(71)]
         );
         // Wrong estimate / project read as empty.
-        assert!(fetch_estimate_point_list(&mut *tx, ghost, "acme", proja)
-            .await
-            .expect("miss")
-            .is_empty());
-        assert!(fetch_estimate_point_list(&mut *tx, est, "acme", other)
-            .await
-            .expect("miss")
-            .is_empty());
+        assert!(
+            fetch_estimate_point_list(&TxConn::new(&mut tx), ghost, "acme", proja)
+                .await
+                .expect("miss")
+                .is_empty()
+        );
+        assert!(
+            fetch_estimate_point_list(&TxConn::new(&mut tx), est, "acme", other)
+                .await
+                .expect("miss")
+                .is_empty()
+        );
         // Detail by id; missing point reads as absent.
         assert_eq!(
-            fetch_estimate_point_detail(&mut *tx, est, "acme", proja, live_uuid(70))
+            fetch_estimate_point_detail(&TxConn::new(&mut tx), est, "acme", proja, live_uuid(70))
                 .await
                 .expect("detail")
                 .map(|p| p.value),
             Some("1".to_string())
         );
         assert_eq!(
-            fetch_estimate_point_detail(&mut *tx, est, "acme", proja, live_uuid(79))
+            fetch_estimate_point_detail(&TxConn::new(&mut tx), est, "acme", proja, live_uuid(79))
                 .await
                 .expect("miss"),
             None
@@ -1392,11 +1626,13 @@ mod tests {
         // Parent check passes for the live estimate and fails for the
         // ghost — the views 404 `Estimate not found` first
         // (`estimate.py:174-175,202-203`) even when points exist.
-        assert!(fetch_parent_estimate_exists(&mut *tx, est, "acme", proja)
-            .await
-            .expect("parent exists"));
         assert!(
-            !fetch_parent_estimate_exists(&mut *tx, ghost, "acme", proja)
+            fetch_parent_estimate_exists(&TxConn::new(&mut tx), est, "acme", proja)
+                .await
+                .expect("parent exists")
+        );
+        assert!(
+            !fetch_parent_estimate_exists(&TxConn::new(&mut tx), ghost, "acme", proja)
                 .await
                 .expect("parent miss")
         );

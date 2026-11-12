@@ -4,7 +4,7 @@
 //! from the modules the split issues shipped: the agent loop
 //! ([`super::agent`], 863 phase 6), the `ModelMessage` codec
 //! ([`super::history`], 1110), provider streaming ([`super::streaming`],
-//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 17 local
+//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 18 local
 //! tools ([`super::tools_local`], 1113), plus the D-11 model runtime in the
 //! jobs crate (`Lane`, `ProviderTable`, `WireTool`) and the ported decision
 //! surfaces in `pidash_services` (BYOK gates, key cache, MCP planning,
@@ -42,6 +42,10 @@ use chrono::{DateTime, Utc};
 use pidash_db::assistant::event_queries as events;
 use pidash_db::assistant::models::ThreadKind;
 use pidash_db::config::Settings;
+use pidash_db::entity::{
+    assistant_event, assistant_message, assistant_thread, assistant_turn,
+    assistant_user_llm_config, users, workspace_members, workspaces,
+};
 use pidash_jobs::assistant::run_turn as rt;
 use pidash_jobs::assistant::run_turn::{
     AgentError, ModelError, SeamError, SkippedServer, StreamItem, ToolsetHandle, TurnContext,
@@ -56,8 +60,13 @@ use pidash_services::assistant::llm::{self as llm_service, KeyCache};
 use pidash_services::assistant::mcp as mcp_service;
 use pidash_services::assistant::ssrf;
 use pidash_services::assistant::tools_results::wrap_untrusted;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::agent::{
@@ -75,43 +84,44 @@ use super::tools_local_store::{PgToolStore, RedisClient, ToolEnv};
 // Queries the seam owns (every other shape is already ported)
 // --------------------------------------------------------------------------- //
 
-/// Column indexes of [`rt::load_context_sql`]'s select list (`t.*`, `th.*`,
-/// `w.id/slug/name`, `m.id/display_content`).
-const CTX_COL_TURN_ID: usize = 0;
-const CTX_COL_TURN_USER_MESSAGE_ID: usize = 2;
-const CTX_COL_TURN_STATUS: usize = 3;
-const CTX_COL_THREAD_ID: usize = 12;
-const CTX_COL_THREAD_WORKSPACE_ID: usize = 13;
-const CTX_COL_THREAD_USER_ID: usize = 14;
-const CTX_COL_THREAD_KIND: usize = 16;
-const CTX_COL_WORKSPACE_SLUG: usize = 22;
-const CTX_COL_WORKSPACE_NAME: usize = 23;
-const CTX_COL_USER_MESSAGE_CONTENT: usize = 25;
+/// The `_load_context` join select, decoded by name (`select_only` with
+/// aliased joined columns, so no output name can collide). `assistant_turn`
+/// columns keep their plain names; the queried PK is `id`.
+#[derive(Debug, FromQueryResult)]
+struct LoadContextRow {
+    id: Uuid,
+    user_message_id: Option<Uuid>,
+    status: String,
+    thread_id: Uuid,
+    thread_workspace_id: Uuid,
+    thread_user_id: Uuid,
+    thread_kind: String,
+    workspace_slug: String,
+    workspace_name: String,
+    user_message_content: Option<String>,
+}
 
-/// `user.display_name or user.email or ""` (`tasks.py:88`); the unauthored
-/// fallback is the empty string (`or ""`).
-const USER_DISPLAY_SQL: &str =
-    "SELECT COALESCE(NULLIF(display_name, ''), email, '') FROM users WHERE id = $1";
-
-/// `core.permissions.workspace_role` (`permissions.py:37-45`): the first
-/// active membership role for the workspace; `or 0` at the call site
-/// (`tasks.py:85`). The `deleted_at IS NULL` conjunct is the default
-/// soft-delete-scoped manager, and `.first()` applies
-/// `Meta.ordering = ("-created_at",)` (`workspace.py:227`) — newest
-/// first, so a superseded row never wins.
-const WORKSPACE_ROLE_SQL: &str = "SELECT role FROM workspace_members \
-     WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL \
-     ORDER BY created_at DESC LIMIT 1";
-
-/// `UserLLMConfig.objects.filter(user=user).first()` (`llm.py:67-68`).
-const LLM_CONFIG_SQL: &str = "SELECT provider_kind, base_url, model_name, api_key_encrypted \
-     FROM assistant_user_llm_config WHERE user_id = $1 \
-     ORDER BY created_at ASC LIMIT 1";
+/// `UserLLMConfig` first row (`llm.py:67-68`), narrowed columns.
+#[derive(Debug, FromQueryResult)]
+struct LlmConfigRow {
+    provider_kind: String,
+    base_url: String,
+    model_name: String,
+    api_key_encrypted: Option<Vec<u8>>,
+}
 
 /// Read back one message row for the `message_completed` envelope
 /// (`events.message_envelope(message)`, `tasks.py:150-153`).
-const MESSAGE_ROW_SQL: &str =
-    "SELECT seq, payload, created_at FROM assistant_message WHERE id = $1";
+#[derive(Debug, FromQueryResult)]
+struct MessageRow {
+    seq: i64,
+    payload: Value,
+    created_at: DateTime<Utc>,
+}
+
+fn sea_err(error: DbErr) -> SeamError {
+    db_error(pidash_db::orm_tx::into_sqlx(error))
+}
 
 /// The turn's last `assistant` row (`_mark_cut_off`, `tasks.py:518-520`):
 /// highest `seq` first, for the payload flag and the re-sent envelope.
@@ -126,15 +136,16 @@ pub use pidash_services::domain::assistant::MESSAGE_PAYLOAD_SAVE_SQL as MARK_CUT
 
 /// [`LAST_ASSISTANT_ROW_SQL`] row: id, seq, payload, display_content,
 /// status, created_at, completed_at.
-type LastAssistantRow = (
-    Uuid,
-    i64,
-    Value,
-    String,
-    String,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-);
+#[derive(Debug, FromQueryResult)]
+struct LastAssistantRow {
+    id: Uuid,
+    seq: i64,
+    payload: Value,
+    display_content: String,
+    status: String,
+    created_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+}
 
 /// Lift a ported decision-surface skip (`mcp.SkippedServer`, services) into
 /// the seam's boundary type (`rt::SkippedServer`, jobs); same two fields.
@@ -326,7 +337,7 @@ impl McpLeg {
     }
 }
 
-/// One turn's tool boundary: the 17 local function tools (1113's schemas
+/// One turn's tool boundary: the 18 local function tools (1113's schemas
 /// and executors) followed by the user's enabled MCP toolsets (1112's
 /// resilient sessions), in the registration order the captures pin
 /// (`tool_local`/`tool_mcp`: local functions in `@assistant.tool` import
@@ -662,28 +673,27 @@ pub async fn append_event(
 ) -> Result<(), SeamError> {
     let kind = events::truncate_kind(kind);
     let mut tx = pool.begin().await.map_err(db_error)?;
-    let locked: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
-            .bind(thread_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_error)?;
+    let locked = assistant_thread::Entity::find_by_id(thread_id)
+        .lock_exclusive()
+        .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+        .await
+        .map_err(|e| db_error(pidash_db::orm_tx::into_sqlx(e)))?;
     if locked.is_none() {
         return Err(SeamError(
             "AssistantThread matching query does not exist.".to_owned(),
         ));
     }
-    let max: Option<i64> = sqlx::query_scalar(&format!(
-        "SELECT MAX(m) FROM ({}) AS seqs",
-        events::next_event_seq_sql()
-    ))
-    .bind(thread_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(db_error)?;
-    let seq = max.unwrap_or(0) + 1;
+    let max: Option<Option<i64>> = assistant_event::Entity::find()
+        .select_only()
+        .column_as(assistant_event::Column::Seq.max(), "m")
+        .filter(assistant_event::Column::ThreadId.eq(thread_id))
+        .into_tuple()
+        .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+        .await
+        .map_err(|e| db_error(pidash_db::orm_tx::into_sqlx(e)))?;
+    let seq = max.flatten().unwrap_or(0) + 1;
     pidash_services::domain::assistant::append_event(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::assistant::NewEvent {
             thread_id,
             turn_id,
@@ -717,13 +727,14 @@ pub async fn publish_event(
     let Some(redis) = redis else {
         return;
     };
-    let event_id: Option<i64> = match sqlx::query_scalar(
-        "SELECT id FROM assistant_event WHERE thread_id = $1 AND seq = $2",
-    )
-    .bind(thread_id)
-    .bind(seq)
-    .fetch_optional(pool)
-    .await
+    let event_id: Option<i64> = match assistant_event::Entity::find()
+        .select_only()
+        .column(assistant_event::Column::Id)
+        .filter(assistant_event::Column::ThreadId.eq(thread_id))
+        .filter(assistant_event::Column::Seq.eq(seq))
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
     {
         Ok(id) => id,
         Err(error) => {
@@ -773,28 +784,27 @@ pub async fn create_message(
 ) -> Result<(Uuid, i64), SeamError> {
     let message_id = Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(db_error)?;
-    let locked: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
-            .bind(thread_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_error)?;
+    let locked = assistant_thread::Entity::find_by_id(thread_id)
+        .lock_exclusive()
+        .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+        .await
+        .map_err(|e| db_error(pidash_db::orm_tx::into_sqlx(e)))?;
     if locked.is_none() {
         return Err(SeamError(
             "AssistantThread matching query does not exist.".to_owned(),
         ));
     }
-    let max: Option<i64> = sqlx::query_scalar(&format!(
-        "SELECT MAX(m) FROM ({}) AS seqs",
-        events::next_message_seq_sql()
-    ))
-    .bind(thread_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(db_error)?;
-    let seq = max.unwrap_or(0) + 1;
+    let max: Option<Option<i64>> = assistant_message::Entity::find()
+        .select_only()
+        .column_as(assistant_message::Column::Seq.max(), "m")
+        .filter(assistant_message::Column::ThreadId.eq(thread_id))
+        .into_tuple()
+        .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+        .await
+        .map_err(|e| db_error(pidash_db::orm_tx::into_sqlx(e)))?;
+    let seq = max.flatten().unwrap_or(0) + 1;
     pidash_services::domain::assistant::create_message_row(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::assistant::NewMessage {
             id: message_id,
             thread_id,
@@ -1110,47 +1120,90 @@ impl TurnSeam for LiveTurnSeam {
     /// `_load_context` (`tasks.py:73-96`): the turn with its thread,
     /// workspace and user message; `None` unless QUEUED/RUNNING.
     async fn load_context(&self, turn_id: Uuid) -> Result<Option<TurnContext>, SeamError> {
-        let row = sqlx::query(&rt::load_context_sql())
-            .bind(turn_id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = assistant_turn::Entity::find()
+            .select_only()
+            .columns([
+                assistant_turn::Column::Id,
+                assistant_turn::Column::UserMessageId,
+                assistant_turn::Column::Status,
+            ])
+            .column_as(assistant_thread::Column::Id, "thread_id")
+            .column_as(assistant_thread::Column::WorkspaceId, "thread_workspace_id")
+            .column_as(assistant_thread::Column::UserId, "thread_user_id")
+            .column_as(assistant_thread::Column::Kind, "thread_kind")
+            .column_as(workspaces::Column::Slug, "workspace_slug")
+            .column_as(workspaces::Column::Name, "workspace_name")
+            .column_as(
+                assistant_message::Column::DisplayContent,
+                "user_message_content",
+            )
+            .join(
+                JoinType::InnerJoin,
+                assistant_turn::Relation::AssistantThread.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                assistant_thread::Relation::Workspaces.def(),
+            )
+            .join(
+                JoinType::LeftJoin,
+                assistant_turn::Relation::AssistantMessage.def(),
+            )
+            .filter(assistant_turn::Column::Id.eq(turn_id))
+            .order_by_asc(assistant_turn::Column::CreatedAt)
+            .into_model::<LoadContextRow>()
+            .one(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         let Some(row) = row else {
             return Ok(None);
         };
-        let status: String = row.try_get(CTX_COL_TURN_STATUS).map_err(db_error)?;
+        let status = row.status.clone();
         if !rt::context_eligible(&status) {
             return Ok(None);
         }
-        let turn_id: Uuid = row.try_get(CTX_COL_TURN_ID).map_err(db_error)?;
-        let thread_id: Uuid = row.try_get(CTX_COL_THREAD_ID).map_err(db_error)?;
-        let workspace_id: Uuid = row.try_get(CTX_COL_THREAD_WORKSPACE_ID).map_err(db_error)?;
-        let user_id: Uuid = row.try_get(CTX_COL_THREAD_USER_ID).map_err(db_error)?;
-        let thread_kind: String = row.try_get(CTX_COL_THREAD_KIND).map_err(db_error)?;
-        let workspace_slug: String = row.try_get(CTX_COL_WORKSPACE_SLUG).map_err(db_error)?;
-        let workspace_name: String = row.try_get(CTX_COL_WORKSPACE_NAME).map_err(db_error)?;
-        let user_message_id: Option<Uuid> = row
-            .try_get(CTX_COL_TURN_USER_MESSAGE_ID)
-            .map_err(db_error)?;
+        let turn_id = row.id;
+        let thread_id = row.thread_id;
+        let workspace_id = row.thread_workspace_id;
+        let user_id = row.thread_user_id;
+        let thread_kind = row.thread_kind;
+        let workspace_slug = row.workspace_slug;
+        let workspace_name = row.workspace_name;
+        let user_message_id = row.user_message_id;
         // `turn.user_message.display_content if turn.user_message_id else ""`.
         let user_text: String = if user_message_id.is_some() {
-            row.try_get::<Option<String>, _>(CTX_COL_USER_MESSAGE_CONTENT)
-                .map_err(db_error)?
-                .unwrap_or_default()
+            row.user_message_content.unwrap_or_default()
         } else {
             String::new()
         };
-        let user_display: Option<String> = sqlx::query_scalar(USER_DISPLAY_SQL)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
+        let user: Option<(String, Option<String>)> = users::Entity::find()
+            .select_only()
+            .columns([users::Column::DisplayName, users::Column::Email])
+            .filter(users::Column::Id.eq(user_id))
+            .into_tuple()
+            .one(&db)
             .await
-            .map_err(db_error)?;
-        let role: Option<i16> = sqlx::query_scalar(WORKSPACE_ROLE_SQL)
-            .bind(workspace_id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
+            .map_err(sea_err)?;
+        let user_display: Option<String> = user.map(|(display_name, email)| {
+            if display_name.is_empty() {
+                email.unwrap_or_default()
+            } else {
+                display_name
+            }
+        });
+        let role: Option<i16> = workspace_members::Entity::find()
+            .select_only()
+            .column(workspace_members::Column::Role)
+            .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_members::Column::CreatedAt)
+            .into_tuple()
+            .one(&db)
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         // A missing owner row is corruption, not an empty context:
         // `thread.user` raises `User.DoesNotExist` out of `_load_context`
         // (`tasks.py:83`), which parks the turn for the sweep — the
@@ -1177,12 +1230,22 @@ impl TurnSeam for LiveTurnSeam {
     /// `_mark_running` (`tasks.py:99-107`): atomic claim plus the
     /// `turn_started` event.
     async fn mark_running(&self, ctx: &TurnContext) -> Result<bool, SeamError> {
-        let updated = sqlx::query(&rt::mark_running_update())
-            .bind(ctx.turn_id)
-            .execute(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let updated = assistant_turn::Entity::update_many()
+            .col_expr(
+                assistant_turn::Column::Status,
+                Expr::value(rt::TURN_RUNNING),
+            )
+            .col_expr(
+                assistant_turn::Column::StartedAt,
+                Expr::value(Utc::now().with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+            )
+            .filter(assistant_turn::Column::Id.eq(ctx.turn_id))
+            .filter(assistant_turn::Column::Status.eq(rt::TURN_QUEUED))
+            .exec(&db)
             .await
-            .map_err(db_error)?;
-        if updated.rows_affected() == 0 {
+            .map_err(sea_err)?;
+        if updated.rows_affected == 0 {
             return Ok(false);
         }
         let payload = serde_json::json!({ "turn_id": ctx.turn_id.to_string() });
@@ -1223,12 +1286,31 @@ impl TurnSeam for LiveTurnSeam {
     /// execution-time SSRF re-check, the cached decrypt and the lane
     /// selection; the resolved lane is kept for `open_stream`.
     async fn resolve_model(&self, ctx: &TurnContext) -> Result<String, ModelError> {
-        let row: Option<(String, String, String, Option<Vec<u8>>)> = sqlx::query_as(LLM_CONFIG_SQL)
-            .bind(ctx.user_id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = assistant_user_llm_config::Entity::find()
+            .select_only()
+            .columns([
+                assistant_user_llm_config::Column::ProviderKind,
+                assistant_user_llm_config::Column::BaseUrl,
+                assistant_user_llm_config::Column::ModelName,
+                assistant_user_llm_config::Column::ApiKeyEncrypted,
+            ])
+            .filter(assistant_user_llm_config::Column::UserId.eq(ctx.user_id))
+            .order_by_asc(assistant_user_llm_config::Column::CreatedAt)
+            .into_model::<LlmConfigRow>()
+            .one(&db)
             .await
             .map_err(internal_model_error)?;
-        let (provider_kind, base_url, model_name, token) = row.unwrap_or_default();
+        let (provider_kind, base_url, model_name, token) = row
+            .map(|row| {
+                (
+                    row.provider_kind,
+                    row.base_url,
+                    row.model_name,
+                    row.api_key_encrypted,
+                )
+            })
+            .unwrap_or_default();
         let token = token.unwrap_or_default();
         let has_api_key = !token.is_empty();
         let base_url_blocked = !base_url.is_empty()
@@ -1471,18 +1553,27 @@ impl TurnSeam for LiveTurnSeam {
             self.settings.assistant.history_max_turns,
             self.settings.assistant.loop_history_max_turns,
         );
-        let blobs: Vec<Value> = match sqlx::query_scalar(&events::load_history_sql())
-            .bind(ctx.thread_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let status = events::HISTORY_STATUS.as_str();
+        let blobs: Vec<Value> = match assistant_turn::Entity::find()
+            .select_only()
+            .column(assistant_turn::Column::ModelMessages)
+            .filter(assistant_turn::Column::ThreadId.eq(ctx.thread_id))
+            .filter(assistant_turn::Column::ModelMessages.is_not_null())
+            .filter(assistant_turn::Column::Status.eq(status))
+            .order_by_desc(assistant_turn::Column::CreatedAt)
+            .order_by_desc(assistant_turn::Column::Id)
+            .limit(limit as u64)
+            .into_tuple::<Option<Value>>()
+            .all(&db)
             .await
         {
-            Ok(blobs) => blobs,
+            Ok(rows) => rows.into_iter().flatten().collect(),
             Err(error) => {
                 // `drive_turn` returns on this error before `open_stream`, so
                 // no stream exists to reclaim the record.
                 self.reclaim_turn(ctx.turn_id);
-                return Err(db_error(error));
+                return Err(sea_err(error));
             }
         };
         let mut blobs = blobs;
@@ -1737,7 +1828,11 @@ impl TurnSeam for LiveTurnSeam {
     ) -> Result<(), SeamError> {
         let now = Utc::now();
         pidash_services::domain::assistant::finalize_message(
-            &self.pool, message_id, text, status, now,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            message_id,
+            text,
+            status,
+            now,
         )
         .await
         .map_err(db_error)?;
@@ -1745,12 +1840,20 @@ impl TurnSeam for LiveTurnSeam {
         // the row is gone (`tasks.py:147`), before the completed check —
         // so the re-read below is the vanish check on both arms, not just
         // the envelope read.
-        let row: Option<(i64, Value, DateTime<Utc>)> = sqlx::query_as(MESSAGE_ROW_SQL)
-            .bind(message_id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = assistant_message::Entity::find()
+            .select_only()
+            .columns([
+                assistant_message::Column::Seq,
+                assistant_message::Column::Payload,
+                assistant_message::Column::CreatedAt,
+            ])
+            .filter(assistant_message::Column::Id.eq(message_id))
+            .into_model::<MessageRow>()
+            .one(&db)
             .await
-            .map_err(db_error)?;
-        let Some((seq, payload, created_at)) = row else {
+            .map_err(sea_err)?;
+        let Some(row) = row else {
             return Err(SeamError(
                 "Save with update_fields did not affect any rows.".to_owned(),
             ));
@@ -1763,9 +1866,9 @@ impl TurnSeam for LiveTurnSeam {
             message_id,
             text,
             status,
-            seq,
-            &payload,
-            created_at,
+            row.seq,
+            &row.payload,
+            row.created_at,
             Some(now),
             now,
         )
@@ -1814,29 +1917,47 @@ impl TurnSeam for LiveTurnSeam {
     /// as cut off — `payload.truncated` on the row, then the envelope
     /// re-sent as a second `message_completed` for clients to merge.
     async fn mark_cut_off(&self, ctx: &TurnContext) -> Result<(), SeamError> {
-        let row: Option<LastAssistantRow> = sqlx::query_as(LAST_ASSISTANT_ROW_SQL)
-            .bind(ctx.turn_id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = assistant_message::Entity::find()
+            .select_only()
+            .columns([
+                assistant_message::Column::Id,
+                assistant_message::Column::Seq,
+                assistant_message::Column::Payload,
+                assistant_message::Column::DisplayContent,
+                assistant_message::Column::Status,
+                assistant_message::Column::CreatedAt,
+                assistant_message::Column::CompletedAt,
+            ])
+            .filter(assistant_message::Column::TurnId.eq(ctx.turn_id))
+            .filter(assistant_message::Column::Kind.eq("assistant"))
+            .order_by_desc(assistant_message::Column::Seq)
+            .into_model::<LastAssistantRow>()
+            .one(&db)
             .await
-            .map_err(db_error)?;
-        let Some((message_id, seq, payload, text, status, created_at, completed_at)) = row else {
+            .map_err(sea_err)?;
+        let Some(row) = row else {
             return Ok(());
         };
-        let mut flagged = payload.as_object().cloned().unwrap_or_default();
+        let mut flagged = row.payload.as_object().cloned().unwrap_or_default();
         flagged.insert("truncated".to_owned(), Value::Bool(true));
         let merged = Value::Object(flagged);
-        pidash_services::domain::assistant::save_message_payload(&self.pool, message_id, &merged)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::save_message_payload(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            row.id,
+            &merged,
+        )
+        .await
+        .map_err(db_error)?;
         self.emit_message_completed(
             ctx,
-            message_id,
-            &text,
-            &status,
-            seq,
+            row.id,
+            &row.display_content,
+            &row.status,
+            row.seq,
             &merged,
-            created_at,
-            completed_at,
+            row.created_at,
+            row.completed_at,
             Utc::now(),
         )
         .await
@@ -1852,13 +1973,13 @@ impl TurnSeam for LiveTurnSeam {
         truncated: bool,
     ) -> Result<(), SeamError> {
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        sqlx::query(&rt::lock_turn_select())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        assistant_turn::Entity::find_by_id(ctx.turn_id)
+            .lock_exclusive()
+            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         let won = pidash_services::domain::assistant::complete_turn(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             &model_messages,
             &usage,
@@ -1873,12 +1994,16 @@ impl TurnSeam for LiveTurnSeam {
             // exactly one terminal event either way.
             return Ok(());
         }
-        sqlx::query(&rt::clear_active_turn_update())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        assistant_thread::Entity::update_many()
+            .col_expr(
+                assistant_thread::Column::ActiveTurnId,
+                Expr::value(None::<Uuid>),
+            )
+            .filter(assistant_thread::Column::Id.eq(ctx.thread_id))
+            .filter(assistant_thread::Column::ActiveTurnId.eq(Some(ctx.turn_id)))
+            .exec(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         tx.commit().await.map_err(db_error)?;
         let mut payload = serde_json::json!({
             "turn_id": ctx.turn_id.to_string(),
@@ -1896,9 +2021,12 @@ impl TurnSeam for LiveTurnSeam {
             Utc::now(),
         )
         .await?;
-        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 
@@ -1921,13 +2049,13 @@ impl TurnSeam for LiveTurnSeam {
         let row_detail = rt::truncate_detail(detail);
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        sqlx::query(&rt::lock_turn_select())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        assistant_turn::Entity::find_by_id(ctx.turn_id)
+            .lock_exclusive()
+            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         let won = pidash_services::domain::assistant::fail_turn(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             row_code,
             row_detail,
@@ -1941,18 +2069,22 @@ impl TurnSeam for LiveTurnSeam {
             return Ok(());
         }
         pidash_services::domain::assistant::finalize_open_messages(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             rt::MSG_FAILED,
         )
         .await
         .map_err(db_error)?;
-        sqlx::query(&rt::clear_active_turn_update())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        assistant_thread::Entity::update_many()
+            .col_expr(
+                assistant_thread::Column::ActiveTurnId,
+                Expr::value(None::<Uuid>),
+            )
+            .filter(assistant_thread::Column::Id.eq(ctx.thread_id))
+            .filter(assistant_thread::Column::ActiveTurnId.eq(Some(ctx.turn_id)))
+            .exec(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         tx.commit().await.map_err(db_error)?;
         // `events.create_message(..., display_content=detail or code,
         // status=FAILED)` (`tasks.py:191-193`): own transaction, thread
@@ -1985,45 +2117,60 @@ impl TurnSeam for LiveTurnSeam {
             now,
         )
         .await?;
-        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 
     /// `_cancel_turn` (`tasks.py:204-213`).
     async fn cancel_turn(&self, ctx: &TurnContext) -> Result<(), SeamError> {
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        sqlx::query(&rt::lock_turn_select())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        assistant_turn::Entity::find_by_id(ctx.turn_id)
+            .lock_exclusive()
+            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?;
-        let won = sqlx::query(&rt::cancel_turn_update())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+            .map_err(sea_err)?;
+        let won = assistant_turn::Entity::update_many()
+            .col_expr(
+                assistant_turn::Column::Status,
+                Expr::value(rt::TURN_CANCELLED),
+            )
+            .col_expr(
+                assistant_turn::Column::CompletedAt,
+                Expr::value(Utc::now().with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+            )
+            .filter(assistant_turn::Column::Id.eq(ctx.turn_id))
+            .filter(assistant_turn::Column::Status.eq(rt::TURN_RUNNING))
+            .exec(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?
-            .rows_affected();
-        if won == 0 {
+            .map_err(sea_err)?;
+        if won.rows_affected == 0 {
             // Another terminal writer already owned the row (see
             // `complete_turn`): roll back and emit nothing, so a lost race
             // never writes a second terminal event.
             return Ok(());
         }
         pidash_services::domain::assistant::finalize_open_messages(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             rt::MSG_CANCELLED,
         )
         .await
         .map_err(db_error)?;
-        sqlx::query(&rt::clear_active_turn_update())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        assistant_thread::Entity::update_many()
+            .col_expr(
+                assistant_thread::Column::ActiveTurnId,
+                Expr::value(None::<Uuid>),
+            )
+            .filter(assistant_thread::Column::Id.eq(ctx.thread_id))
+            .filter(assistant_thread::Column::ActiveTurnId.eq(Some(ctx.turn_id)))
+            .exec(&pidash_db::orm_tx::TxConn::new(&mut tx))
             .await
-            .map_err(db_error)?;
+            .map_err(sea_err)?;
         tx.commit().await.map_err(db_error)?;
         let payload = serde_json::json!({ "turn_id": ctx.turn_id.to_string() });
         self.append_event(
@@ -2035,9 +2182,12 @@ impl TurnSeam for LiveTurnSeam {
             Utc::now(),
         )
         .await?;
-        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 
@@ -2135,7 +2285,7 @@ mod tests {
             .iter()
             .map(|schema| schema.name.to_owned())
             .collect();
-        assert_eq!(local.len(), 17, "the 17 local tools");
+        assert_eq!(local.len(), 18, "the 18 local tools");
         assert_eq!(
             &expected[..local.len()],
             local.as_slice(),

@@ -31,11 +31,13 @@ export const LOST_RUNNER_RULE_ORDER: readonly LostRunnerRule[] = [
 export const LOST_RUNNER_RULE_OPTIONS: Record<LostRunnerRule, LostRunnerRuleOption> = {
   [DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG]: {
     label: "Fail the run and move the issue to Backlog",
-    description: "Queued runs on the lost runner fail, and their issues move to Backlog.",
+    description:
+      "The queued run fails, the assignment is cleared, and the issue moves to Backlog with a comment naming the runner. A person must choose a new runner or the pod.",
   },
   [DEDICATED_RUNNER_LOST_FALL_BACK]: {
     label: "Fall back to the pod",
-    description: "Queued runs continue on any runner in the pod instead.",
+    description:
+      "The issue falls back to its own pod, then the project's default pod, then bounces to Backlog when neither has a runner that can serve it. The system comment names the runner and the pod used.",
   },
 };
 

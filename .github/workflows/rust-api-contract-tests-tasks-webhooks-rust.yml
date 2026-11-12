@@ -23,7 +23,7 @@ concurrency:
 jobs:
   tasks-webhooks-rust-replay:
     name: tasks_webhooks oracle vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:

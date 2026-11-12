@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
-import type { AgentExecutorOption, PodList, RunnerList, WorkspaceMemberList } from "@pidash/api-client";
-import { agentReasonMessage } from "../lib/agentReasons.js";
+import type { PodList, RunnerList, WorkspaceMemberList } from "@pidash/api-client";
 import {
+  EXECUTION_TARGET_LABEL,
   buildExecutionTargets,
   executionSelectionId,
-  executionTargetLabel,
   executionTargetPatch,
-  formatAvailabilityReason,
   formatRunnerSeenAgo,
   parseExecutionSelectionId,
   podOptionLabel,
@@ -39,64 +37,13 @@ const POD_A = {
 
 const POD_B = { ...POD_A, id: "423e4567-e89b-12d3-a456-426614174003", name: "ACME-Tier", is_default: false };
 
-function option(kind: string, available: boolean, reason_code: string): AgentExecutorOption {
-  return { kind, available, reason_code };
-}
-
-describe("formatAvailabilityReason", () => {
-  it("renders every known code as a sentence", () => {
-    expect(formatAvailabilityReason("")).toBe("");
-    expect(formatAvailabilityReason("cloud_agent_unavailable")).toContain("Cloud Agent");
-    expect(formatAvailabilityReason("llm_config_missing")).toContain("model");
-    // The code serves both agent rows, so its sentence must not claim the
-    // refusal belongs to one of them.
-    expect(formatAvailabilityReason("llm_config_missing")).not.toMatch(/built-in|Cloud Agent/);
-    expect(formatAvailabilityReason("no_local_runner")).toContain("runner");
-    expect(formatAvailabilityReason("managed_runner_disabled")).toContain("switched off");
-    expect(formatAvailabilityReason("desktop_not_connected")).toContain("not connected");
-    expect(formatAvailabilityReason("gateway_scopes_missing")).toContain("gateway");
-    expect(formatAvailabilityReason("byok_not_supported_on_desktop")).toContain("provider key");
-    expect(formatAvailabilityReason("no_managed_runner_for_project")).toContain("enrolled");
-  });
-
-  it("surfaces unknown codes as-is", () => {
-    expect(formatAvailabilityReason("tomorrow_problem")).toBe("tomorrow_problem");
-  });
-
-  it("uses the same sentences as the status notice", () => {
-    expect(formatAvailabilityReason("gateway_unavailable")).toBe(agentReasonMessage("gateway_unavailable"));
-    expect(formatAvailabilityReason("desktop_session_required")).toBe(agentReasonMessage("desktop_session_required"));
-  });
-});
-
 describe("buildExecutionTargets", () => {
-  it("lists offered agent rows first, then pods in server order", () => {
-    expect(
-      buildExecutionTargets([POD_A, POD_B] as PodList, [
-        option("cloud_agent", true, ""),
-        option("local_runner", false, "no_local_runner"),
-        option("managed_runner", false, "desktop_not_connected"),
-      ])
-    ).toEqual([
-      { kind: "agent", executor: "cloud_agent", label: "Pi Dash Cloud Agent", available: true, reason: "" },
-      {
-        kind: "agent",
-        executor: "managed_runner",
-        label: "Pi Dash Agent (desktop)",
-        available: false,
-        reason: "This computer is not connected to the server yet. Sign in again through the desktop app to link it.",
-      },
+  it("offers no executor rows, only pods in server order", () => {
+    expect(buildExecutionTargets([POD_A, POD_B] as PodList)).toEqual([
       { kind: "pod", podId: POD_A.id, label: "ACME-Backend", isDefault: true },
       { kind: "pod", podId: POD_B.id, label: "ACME-Tier", isDefault: false },
     ]);
-  });
-
-  it("renders no row for an agent the config does not offer", () => {
-    expect(buildExecutionTargets([POD_A] as PodList, [option("managed_runner", true, "")])).toEqual([
-      { kind: "agent", executor: "managed_runner", label: "Pi Dash Agent (desktop)", available: true, reason: "" },
-      { kind: "pod", podId: POD_A.id, label: "ACME-Backend", isDefault: true },
-    ]);
-    expect(buildExecutionTargets([] as PodList, [])).toEqual([]);
+    expect(buildExecutionTargets([] as PodList)).toEqual([]);
   });
 });
 
@@ -108,11 +55,9 @@ describe("selectDefaultPod", () => {
   });
 });
 
-describe("executionTargetLabel", () => {
-  it("reads Runs on once a cloud agent is offered, else Pod", () => {
-    expect(executionTargetLabel([option("cloud_agent", false, "llm_config_missing")])).toBe("Runs on");
-    expect(executionTargetLabel([option("managed_runner", true, "")])).toBe("Pod");
-    expect(executionTargetLabel([])).toBe("Pod");
+describe("EXECUTION_TARGET_LABEL", () => {
+  it("names the property the same on every surface", () => {
+    expect(EXECUTION_TARGET_LABEL).toBe("Runs on");
   });
 });
 
@@ -132,29 +77,14 @@ describe("executionTargetPatch", () => {
       agent_executor: "local_runner",
     });
   });
-
-  it("pins the executor and clears the pod on an agent pick", () => {
-    expect(executionTargetPatch({ type: "agent", executor: "cloud_agent" })).toEqual({
-      assigned_pod_id: null,
-      assigned_runner_id: null,
-      agent_executor: "cloud_agent",
-    });
-    expect(executionTargetPatch({ type: "agent", executor: "managed_runner" })).toEqual({
-      assigned_pod_id: null,
-      assigned_runner_id: null,
-      agent_executor: "managed_runner",
-    });
-  });
 });
 
 describe("execution selection ids", () => {
   it("round-trips selections through option ids", () => {
     expect(executionSelectionId(null)).toBe(null);
     expect(executionSelectionId({ type: "pod", podId: POD_A.id })).toBe(`pod:${POD_A.id}`);
-    expect(executionSelectionId({ type: "agent", executor: "cloud_agent" })).toBe("agent:cloud_agent");
     expect(executionSelectionId({ type: "runner", runnerId: "runner-1", podId: POD_A.id })).toBe("runner:runner-1");
     expect(parseExecutionSelectionId(`pod:${POD_A.id}`)).toEqual({ type: "pod", podId: POD_A.id });
-    expect(parseExecutionSelectionId("agent:managed_runner")).toEqual({ type: "agent", executor: "managed_runner" });
     expect(parseExecutionSelectionId("runner:runner-1", [{ id: "runner-1", pod: POD_A.id }])).toEqual({
       type: "runner",
       runnerId: "runner-1",
@@ -210,11 +140,9 @@ describe("runnerReasonMessage", () => {
   it("renders every eligibility code as a sentence", () => {
     expect(runnerReasonMessage("")).toBe("");
     expect(runnerReasonMessage("runner_revoked")).toContain("revoked");
-    expect(runnerReasonMessage("runner_desktop_bundled")).toContain("Desktop");
     expect(runnerReasonMessage("runner_owner_not_on_issue")).toContain("assignee");
     expect(runnerReasonMessage("runner_wrong_project")).toContain("another project");
     expect(runnerReasonMessage("runner_pod_mismatch")).toContain("pod");
-    expect(runnerReasonMessage("executor_not_local")).toContain("local runner");
     expect(runnerReasonMessage("active_run_in_progress")).toContain("in progress");
     expect(runnerReasonMessage("runner_not_found")).toContain("no longer available");
   });
@@ -345,7 +273,6 @@ describe("buildExecutionTargets with runners", () => {
   it("nests each pod's runners under its squad row", () => {
     const targets = buildExecutionTargets(
       [POD_A, POD_B] as PodList,
-      [],
       [online, offline] as unknown as RunnerList,
       (ownerId) => (ownerId === "owner-1" ? "Ana" : null)
     );
@@ -356,6 +283,7 @@ describe("buildExecutionTargets with runners", () => {
         runnerId: online.id,
         podId: POD_A.id,
         label: "gpu-box",
+        machineName: "ana-desktop",
         statusLine: "online · idle",
         ownerName: "Ana",
         assignable: true,
@@ -366,6 +294,7 @@ describe("buildExecutionTargets with runners", () => {
         runnerId: offline.id,
         podId: POD_A.id,
         label: "mac-mini",
+        machineName: "ana-desktop",
         statusLine: "offline",
         ownerName: "",
         assignable: false,
@@ -375,39 +304,55 @@ describe("buildExecutionTargets with runners", () => {
     ]);
   });
 
+  it("lists engines as Built-in engine · <machine> (§23.6)", () => {
+    const engine = runner({
+      id: "a23e4567-e89b-12d3-a456-426614174009",
+      name: "builtin-mbp-acme-ACME",
+      provisioning: "desktop_bundled",
+      pod: POD_A.id,
+      dev_machine_detail: { id: "m-1", label: "Work laptop", host_label: "rich-mbp" },
+    });
+    const own = runner({ id: "b23e4567-e89b-12d3-a456-426614174010", name: "gpu-box", pod: POD_A.id });
+    const targets = buildExecutionTargets([POD_A] as PodList, [engine, own] as unknown as RunnerList);
+    expect(targets.map((target) => target.kind)).toEqual(["pod", "runner", "runner"]);
+    expect(targets[1]).toMatchObject({ kind: "runner", runnerId: engine.id, label: "Built-in engine · Work laptop" });
+    expect(targets[2]).toMatchObject({ kind: "runner", runnerId: own.id, label: "gpu-box" });
+  });
+
   it("keeps runners without eligibility answers pickable", () => {
-    const targets = buildExecutionTargets([POD_A] as PodList, [], [
-      runner({ id: "823e4567-e89b-12d3-a456-426614174007", pod: POD_A.id }),
-    ] as unknown as RunnerList);
+    const targets = buildExecutionTargets(
+      [POD_A] as PodList,
+      [runner({ id: "823e4567-e89b-12d3-a456-426614174007", pod: POD_A.id })] as unknown as RunnerList
+    );
     expect(targets[1]).toMatchObject({ kind: "runner", assignable: true, reason: "" });
   });
 
   it("disables an unassignable runner without a code and no reason", () => {
-    const targets = buildExecutionTargets([POD_A] as PodList, [], [
-      runner({ id: "923e4567-e89b-12d3-a456-426614174008", pod: POD_A.id, assignable: false }),
-    ] as unknown as RunnerList);
+    const targets = buildExecutionTargets(
+      [POD_A] as PodList,
+      [
+        runner({ id: "923e4567-e89b-12d3-a456-426614174008", pod: POD_A.id, assignable: false }),
+      ] as unknown as RunnerList
+    );
     expect(targets[1]).toMatchObject({ kind: "runner", assignable: false, reason: "" });
   });
 });
 
 describe("selectTriggerText", () => {
-  const targets = buildExecutionTargets([POD_A] as PodList, [], [
-    runner({ id: "runner-1", name: "gpu-box", pod: POD_A.id }),
-  ] as unknown as RunnerList);
+  const targets = buildExecutionTargets(
+    [POD_A] as PodList,
+    [runner({ id: "runner-1", name: "gpu-box", pod: POD_A.id })] as unknown as RunnerList
+  );
 
-  it("names pods, runners and agents", () => {
+  it("names pods and runners", () => {
     expect(selectTriggerText({ type: "pod", podId: POD_A.id }, targets, true, "Select")).toBe("ACME-Backend");
     expect(selectTriggerText({ type: "runner", runnerId: "runner-1", podId: POD_A.id }, targets, true, "Select")).toBe(
       "gpu-box"
-    );
-    expect(selectTriggerText({ type: "agent", executor: "cloud_agent" }, targets, true, "Select")).toBe(
-      "Pi Dash Cloud Agent"
     );
   });
 
   it("falls back to the prompt and the unknown labels", () => {
     expect(selectTriggerText(null, targets, true, "Select")).toBe("Select");
-    expect(selectTriggerText({ type: "agent", executor: "local_runner" }, targets, true, "Select")).toBe("Select");
     expect(selectTriggerText({ type: "pod", podId: POD_A.id }, targets, false, "Select")).toBe("Select");
     expect(selectTriggerText({ type: "pod", podId: "missing" }, targets, true, "Select")).toBe("Unknown pod");
     expect(selectTriggerText({ type: "runner", runnerId: "missing", podId: POD_A.id }, targets, true, "Select")).toBe(
@@ -417,9 +362,10 @@ describe("selectTriggerText", () => {
 });
 
 describe("selectTriggerPodName", () => {
-  const targets = buildExecutionTargets([POD_A] as PodList, [], [
-    runner({ id: "runner-1", name: "gpu-box", pod: POD_A.id }),
-  ] as unknown as RunnerList);
+  const targets = buildExecutionTargets(
+    [POD_A] as PodList,
+    [runner({ id: "runner-1", name: "gpu-box", pod: POD_A.id })] as unknown as RunnerList
+  );
 
   it("names the pod behind a runner selection", () => {
     expect(selectTriggerPodName({ type: "runner", runnerId: "runner-1", podId: POD_A.id }, targets)).toBe(
@@ -430,7 +376,6 @@ describe("selectTriggerPodName", () => {
   it("reads null without a runner or without its pod", () => {
     expect(selectTriggerPodName(null, targets)).toBe(null);
     expect(selectTriggerPodName({ type: "pod", podId: POD_A.id }, targets)).toBe(null);
-    expect(selectTriggerPodName({ type: "agent", executor: "cloud_agent" }, targets)).toBe(null);
     expect(selectTriggerPodName({ type: "runner", runnerId: "missing", podId: POD_A.id }, targets)).toBe(null);
     const stray = [
       {
@@ -438,6 +383,7 @@ describe("selectTriggerPodName", () => {
         runnerId: "runner-9",
         podId: POD_B.id,
         label: "stray",
+        machineName: "",
         statusLine: "online · idle",
         ownerName: "",
         assignable: true,

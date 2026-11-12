@@ -1,4 +1,4 @@
-//! Local tool executors: the 17 `assistant/tools/*.py` tools as
+//! Local tool executors: the 18 `assistant/tools/*.py` tools as
 //! `ToolStore` operations (PIDASHCONV-1113).
 //!
 //! Each executor mirrors its Python tool line for line: scope checks
@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use super::tool_args;
 use super::tool_schemas;
-use super::tools_local_store::{IssueRow, PrFetch, ToolEnv, ToolStore};
+use super::tools_local_store::{IssueRow, PrFetch, StoreError, ToolEnv, ToolStore};
 use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::assistant::tools_issues::ToolError;
 use pidash_services::assistant::tools_scoping::ToolScopeError;
@@ -353,6 +353,15 @@ pub async fn execute_local_tool<S: ToolStore>(
             )
             .await
         }
+        "list_project_runners" => {
+            execute_list_project_runners(
+                store,
+                deps,
+                env,
+                &tool_args::ListProjectRunnersArgs::parse(args).expect("validated"),
+            )
+            .await
+        }
         "create_comment" => {
             execute_create_comment(
                 store,
@@ -474,6 +483,8 @@ fn row_brief(row: &IssueRow) -> Value {
     let id = row.id.to_string();
     let project_id = row.project_id.to_string();
     let parent_id = row.parent_id.map(|id| id.to_string());
+    let assigned_pod_id = row.assigned_pod_id.map(|id| id.to_string());
+    let assigned_runner_id = row.assigned_runner_id.map(|id| id.to_string());
     brief_row(&BriefRow {
         id: &id,
         project_id: &project_id,
@@ -484,6 +495,8 @@ fn row_brief(row: &IssueRow) -> Value {
         state_name: row.state_name.as_deref(),
         state_group: row.state_group.as_deref(),
         priority: &row.priority,
+        assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
     })
 }
 
@@ -883,11 +896,16 @@ pub async fn execute_get_issue<S: ToolStore>(
         issue.description_stripped.as_deref().unwrap_or(""),
         DESC_CAP,
     );
+    // Execution target + waiting state (PDASHOSS01-350).
+    let actor = executor_actor(store, deps).await?;
+    let execution = store.execution_detail(&issue.id, &actor).await?;
     Ok(detail_shape(
         row_brief(&issue),
         &description,
         description_truncated,
         rows,
+        &execution.runner_detail,
+        &execution.dispatch_wait,
     ))
 }
 
@@ -977,6 +995,22 @@ pub async fn execute_list_project_members<S: ToolStore>(
     ))
 }
 
+/// `list_project_runners` (`projects.py` after PDASHOSS01-350): the
+/// project's visible runners, optionally with the assignability read.
+pub async fn execute_list_project_runners<S: ToolStore>(
+    store: &S,
+    deps: &AssistantDeps,
+    _env: &ToolEnv,
+    args: &tool_args::ListProjectRunnersArgs,
+) -> Result<Value, ToolFailure> {
+    let project = executor_get_project(store, deps, &args.project_id).await?;
+    let actor = executor_actor(store, deps).await?;
+    let rows = store
+        .list_project_runners(&project.id, &actor, args.assignable_for.as_deref())
+        .await?;
+    Ok(Value::Array(rows))
+}
+
 /// `get_run_status` (`runs.py:18-34`).
 pub async fn execute_get_run_status<S: ToolStore>(
     store: &S,
@@ -996,7 +1030,15 @@ pub async fn execute_get_run_status<S: ToolStore>(
             let created_at = run
                 .created_at
                 .map(crate::runner_enroll::enroll::render_isoformat);
-            run_row(&run.id.to_string(), &run.status, created_at.as_deref())
+            run_row(
+                &run.id.to_string(),
+                &run.status,
+                created_at.as_deref(),
+                run.pinned_runner_id.map(|id| id.to_string()).as_deref(),
+                run.pinned_runner_name.as_deref(),
+                &run.pin_kind,
+                &run.dispatch_wait,
+            )
         })
         .collect();
     Ok(run_status_result(&issue.id.to_string(), rows))
@@ -1052,6 +1094,117 @@ async fn executor_resolve_parent<S: ToolStore>(
     Ok(parent)
 }
 
+/// Resolve the execution-target refs (`issues.py` after
+/// PDASHOSS01-350): UUID passthrough within the project, names matched
+/// among the visible runners / project pods. Returns `(pod_id,
+/// runner_id)`, both resolved at the executor; the shared-service
+/// validation (E1-E8) runs next and owns eligibility.
+async fn executor_resolve_execution_target<S: ToolStore>(
+    store: &S,
+    project_id: &Uuid,
+    actor_id: &Uuid,
+    runner_ref: Option<&str>,
+    pod_ref: Option<&str>,
+) -> Result<(Option<Uuid>, Option<Uuid>), ToolFailure> {
+    use pidash_services::assistant::tools_issues::{
+        classify_execution_ref, match_pod_name, match_runner_name, ExecutionRef,
+    };
+    let runner_id = match runner_ref {
+        Some(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Err(ToolFailure::retry("assigned_runner must not be empty"));
+            }
+            match classify_execution_ref(raw) {
+                ExecutionRef::Id => {
+                    let id = parse_uuid_token(raw).expect("classified as UUID");
+                    match store.runner_by_id_in_project(project_id, &id).await? {
+                        Some((found, _)) => Some(found),
+                        None => {
+                            return Err(ToolFailure::retry(
+                                "assigned_runner not found in this project",
+                            ));
+                        }
+                    }
+                }
+                ExecutionRef::Name => {
+                    let rows = store
+                        .list_runners_for_resolution(project_id, actor_id)
+                        .await?;
+                    let index = match_runner_name(&rows, raw).map_err(ToolFailure::from)?;
+                    Some(rows[index].0)
+                }
+            }
+        }
+        None => None,
+    };
+    // The runner's pod, for the pod-follows-runner default (§7.2).
+    let runner_pod = match runner_id {
+        Some(id) => store
+            .runner_by_id_in_project(project_id, &id)
+            .await?
+            .map(|(_, pod)| pod),
+        None => None,
+    };
+    let pod_id = match pod_ref {
+        Some(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Err(ToolFailure::retry("assigned_pod must not be empty"));
+            }
+            match classify_execution_ref(raw) {
+                ExecutionRef::Id => {
+                    let id = parse_uuid_token(raw).expect("classified as UUID");
+                    match store.pod_by_id_in_project(project_id, &id).await? {
+                        Some(found) => Some(found),
+                        None => {
+                            return Err(ToolFailure::retry(
+                                "assigned_pod not found in this project",
+                            ));
+                        }
+                    }
+                }
+                ExecutionRef::Name => {
+                    let rows = store.list_pods_for_resolution(project_id).await?;
+                    let index = match_pod_name(&rows, raw).map_err(ToolFailure::from)?;
+                    Some(rows[index].0)
+                }
+            }
+        }
+        None => runner_pod,
+    };
+    Ok((pod_id, runner_id))
+}
+
+/// The shared E-code validation over the tool's resolved target: an
+/// `E-code` refusal surfaces as the tool-channel message (detail +
+/// machine code, byte-exact with Django).
+async fn executor_validate_execution_target<S: ToolStore>(
+    store: &S,
+    project_id: &Uuid,
+    issue_id: Option<Uuid>,
+    pod_id: Option<Uuid>,
+    runner_present: bool,
+    runner_id: Option<Uuid>,
+    actor_id: &Uuid,
+) -> Result<(), ToolFailure> {
+    use pidash_services::domain::issue_assignment::ExecutionTargetWrite;
+    store
+        .validate_execution_target_write(&ExecutionTargetWrite {
+            project_id: Some(*project_id),
+            issue_id,
+            pod_id,
+            runner_present,
+            runner_id,
+            user_id: Some(*actor_id),
+        })
+        .await
+        .map_err(|error| match error {
+            StoreError::Transition(message) => ToolFailure::retry(message),
+            error => ToolFailure::from(error),
+        })
+}
+
 /// `create_issue` (`issues.py:228-284`).
 pub async fn execute_create_issue<S: ToolStore>(
     store: &S,
@@ -1079,6 +1232,28 @@ pub async fn execute_create_issue<S: ToolStore>(
         }
         _ => None,
     };
+    // The dedicated target (PDASHOSS01-350): resolve, validate through
+    // the shared service, create, then apply (the API create order).
+    let (target_pod, target_runner) = executor_resolve_execution_target(
+        store,
+        &project.id,
+        &actor,
+        args.assigned_runner.as_deref(),
+        args.assigned_pod.as_deref(),
+    )
+    .await?;
+    if target_runner.is_some() {
+        executor_validate_execution_target(
+            store,
+            &project.id,
+            None,
+            target_pod,
+            true,
+            target_runner,
+            &actor,
+        )
+        .await?;
+    }
     let row = store
         .create_issue_row(
             &NewIssueInput {
@@ -1092,10 +1267,21 @@ pub async fn execute_create_issue<S: ToolStore>(
                 parent_id: parent.as_ref().map(|parent| parent.id),
                 created_by: actor,
                 created_via: deps.created_via().to_owned(),
+                assigned_pod_id: target_pod,
+                assigned_runner_id: target_runner,
             },
             &env.now,
         )
         .await?;
+    if target_runner.is_some() {
+        store
+            .apply_execution_target_post_commit(&row.id, target_runner, &actor)
+            .await
+            .map_err(|error| match error {
+                StoreError::Transition(message) => ToolFailure::retry(message),
+                error => ToolFailure::from(error),
+            })?;
+    }
     // The `Issue.save` post-save fire (`signals.py:74-108`): the
     // receiver sees prior state None and the saved state, arms the
     // clock and may dispatch an entry run. A stateless save (no
@@ -1197,11 +1383,15 @@ pub async fn execute_update_issue<S: ToolStore>(
             executor_resolve_parent(store, deps, &issue.project_id, raw, Some(&issue.id)).await?,
         ),
     };
+    let pod_touched = args.assigned_pod != tool_args::ParentArg::Unset;
+    let runner_touched = args.assigned_runner != tool_args::ParentArg::Unset;
     if args.name.is_none()
         && args.description_md.is_none()
         && priority.is_none()
         && to_state.is_none()
         && !parent_touched
+        && !pod_touched
+        && !runner_touched
     {
         // `issues.py:320-327` — note the em dash (U+2014), byte-exact.
         return Err(ToolFailure::retry(
@@ -1239,6 +1429,57 @@ pub async fn execute_update_issue<S: ToolStore>(
         changed.push("parent");
         patch.parent_touched = true;
         patch.parent_id = new_parent.as_ref().map(|parent| parent.id);
+    }
+    // The execution target (PDASHOSS01-350): resolve the refs, guard a
+    // pod change under an active run, validate through the shared
+    // service, and ride the fused save (pod write; runner via the
+    // in-transaction apply). A pod-only change clears the dedicated
+    // runner (§13.1) in the same transaction.
+    if pod_touched || runner_touched {
+        let runner_ref = match &args.assigned_runner {
+            tool_args::ParentArg::Value(raw) => Some(raw.as_str()),
+            _ => None,
+        };
+        let pod_ref = match &args.assigned_pod {
+            tool_args::ParentArg::Value(raw) => Some(raw.as_str()),
+            _ => None,
+        };
+        let (target_pod, target_runner) = executor_resolve_execution_target(
+            store,
+            &issue.project_id,
+            &actor,
+            runner_ref,
+            pod_ref,
+        )
+        .await?;
+        if pod_touched
+            && target_pod != issue.assigned_pod_id
+            && store.has_blocking_run(&issue.id).await?
+        {
+            return Err(ToolFailure::retry(
+                "cannot reassign pod while the issue has an active run",
+            ));
+        }
+        executor_validate_execution_target(
+            store,
+            &issue.project_id,
+            Some(issue.id),
+            if pod_touched { target_pod } else { None },
+            runner_touched,
+            target_runner,
+            &actor,
+        )
+        .await?;
+        if pod_touched {
+            changed.push("pod");
+            patch.pod_touched = true;
+            patch.pod_id = target_pod;
+        }
+        if runner_touched {
+            changed.push("runner");
+            patch.apply_runner = true;
+            patch.new_runner_id = target_runner;
+        }
     }
     // The resolved target view travels into the fused save: the store
     // locks, saves, and — when the target differs from the locked
@@ -1807,7 +2048,8 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_runs::{
         already_in_state_result, dispatch_success_result, dispatch_summary, invalid_state_error,
-        is_ticking_state, no_delegation_state_result, non_ticking_state_error, PHASES,
+        is_ticking_state, no_delegation_state_result, non_ticking_state_error, validate_pin,
+        PHASES,
     };
     // `_scoping.get_issue` → `scoped_issues` → `user_for` is the first
     // statement (`runs.py:41`, `_scoping.py:67-85`): a missing user fails
@@ -1815,6 +2057,12 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
     let actor = executor_actor(store, deps).await?;
     let issue = executor_get_issue(store, deps, &args.issue_id).await?;
     executor_require_project_write(store, deps, &issue.project_id).await?;
+    // `pin` (`runs.py` after PDASHOSS01-350): only `"pod_once"` may be
+    // passed; refusals (dedicated + pod_once codes) ride the outcome
+    // reason back unchanged.
+    let pod_once = validate_pin(args.pin.as_deref())
+        .map_err(|error| ToolFailure::retry(error.message().to_owned()))?
+        .is_some();
     let states = store.project_states(deps, &issue.project_id).await?;
     let target = match args.target_state_id.as_deref() {
         Some(raw) if !raw.is_empty() => {
@@ -1872,6 +2120,7 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
             // stamps no crum user on the entry ticker (PIDASHCONV-1589).
             None,
             &env.now,
+            pod_once,
         )
         .await?;
     let run_id = outcome.created_run_id.map(|id| id.to_string());
@@ -2086,6 +2335,18 @@ mod tests {
         /// `to_state` views received by `drive_create_transition`, in
         /// call order (pins the saved-row target view).
         transition_to: Mutex<Vec<(Uuid, String, String)>>,
+        /// Fake project runners/pods for execution-target resolution
+        /// (PDASHOSS01-350): `(project_id, id, name, pod_id)` for
+        /// runners; `(project_id, id, name)` for pods.
+        fake_runners: Vec<(Uuid, Uuid, String, Uuid)>,
+        fake_pods: Vec<(Uuid, Uuid, String)>,
+        /// When set, `validate_execution_target_write` answers this
+        /// refusal (pins E-code passthrough).
+        validate_refusal: Option<String>,
+        /// `pod_once` flags received by `drive_transition`, in order.
+        drive_pod_once: Mutex<Vec<bool>>,
+        /// `apply_execution_target_post_commit` calls, in order.
+        applied_targets: Mutex<Vec<(Uuid, Option<Uuid>)>>,
         binding_configs: HashMap<(String, String, String), Value>,
         sync_creds: HashMap<(String, String), Value>,
         decrypt_map: HashMap<String, String>,
@@ -2136,6 +2397,8 @@ mod tests {
             priority: priority.to_owned(),
             description_stripped: stripped.map(str::to_owned),
             created_by_id: created_by,
+            assigned_pod_id: None,
+            assigned_runner_id: None,
             updated_at: dt(updated_day, 12),
         }
     }
@@ -2297,6 +2560,10 @@ mod tests {
                     id: uid(501),
                     status: "queued".to_owned(),
                     created_at: Some(dt(12, 9)),
+                    pinned_runner_id: None,
+                    pinned_runner_name: None,
+                    pin_kind: "locality".to_owned(),
+                    dispatch_wait: Value::Null,
                 }],
             );
             // PROJ-2 blocked_by PROJ-1 (forward-stored) plus a
@@ -2359,6 +2626,11 @@ mod tests {
                 record_writes: Mutex::new(Vec::new()),
                 transition_from: Mutex::new(Vec::new()),
                 transition_to: Mutex::new(Vec::new()),
+                fake_runners: Vec::new(),
+                fake_pods: Vec::new(),
+                validate_refusal: None,
+                drive_pod_once: Mutex::new(Vec::new()),
+                applied_targets: Mutex::new(Vec::new()),
                 binding_configs: HashMap::new(),
                 sync_creds: HashMap::new(),
                 decrypt_map: HashMap::new(),
@@ -2838,6 +3110,8 @@ mod tests {
                     Some(input.description_html.clone())
                 },
                 created_by_id: Some(input.created_by),
+                assigned_pod_id: input.assigned_pod_id,
+                assigned_runner_id: input.assigned_runner_id,
                 updated_at: *now,
             };
             *self.last_created.lock().unwrap() = Some(row.clone());
@@ -2902,6 +3176,26 @@ mod tests {
             if patch.parent_touched {
                 row.parent_id = patch.parent_id;
             }
+            if patch.pod_touched {
+                row.assigned_pod_id = patch.pod_id;
+            }
+            // The fused apply (PDASHOSS01-350): re-stamps runner + pod
+            // through the shared service; pod-only clears a dedicated
+            // runner. The fake mirrors the outcome on the stored row.
+            if patch.apply_runner {
+                row.assigned_runner_id = patch.new_runner_id;
+                if patch.new_runner_id.is_some() {
+                    row.assigned_pod_id = Some(
+                        self.fake_runners
+                            .iter()
+                            .find(|(_, runner_id, _, _)| Some(*runner_id) == patch.new_runner_id)
+                            .map(|(_, _, _, pod_id)| *pod_id)
+                            .unwrap_or(row.assigned_pod_id.unwrap_or(uid(0))),
+                    );
+                }
+            } else if patch.pod_touched && row.assigned_runner_id.is_some() {
+                row.assigned_runner_id = None;
+            }
             row.updated_at = *now;
             // The fused drive (`to_state is not None and from_state !=
             // to_state`, `issues.py:373`): recorded exactly as the live
@@ -2917,6 +3211,7 @@ mod tests {
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn drive_transition(
             &self,
             issue_id: &Uuid,
@@ -2925,13 +3220,126 @@ mod tests {
             _actor_id: &Uuid,
             _created_by: Option<Uuid>,
             _now: &DateTime<chrono::Utc>,
+            pod_once: bool,
         ) -> Result<TransitionOutcome, StoreError> {
             self.transitions.lock().unwrap().push(*issue_id);
+            self.drive_pod_once.lock().unwrap().push(pod_once);
             self.transition_from
                 .lock()
                 .unwrap()
                 .push(from_state.map(|state| (state.id, state.name, state.group)));
             Ok(self.transition_outcome.clone())
+        }
+
+        async fn list_runners_for_resolution(
+            &self,
+            project_id: &Uuid,
+            _actor_id: &Uuid,
+        ) -> Result<Vec<(Uuid, String)>, StoreError> {
+            Ok(self
+                .fake_runners
+                .iter()
+                .filter(|(project, _, _, _)| project == project_id)
+                .map(|(_, id, name, _)| (*id, name.clone()))
+                .collect())
+        }
+
+        async fn list_pods_for_resolution(
+            &self,
+            project_id: &Uuid,
+        ) -> Result<Vec<(Uuid, String)>, StoreError> {
+            Ok(self
+                .fake_pods
+                .iter()
+                .filter(|(project, _, _)| project == project_id)
+                .map(|(_, id, name)| (*id, name.clone()))
+                .collect())
+        }
+
+        async fn runner_by_id_in_project(
+            &self,
+            project_id: &Uuid,
+            runner_id: &Uuid,
+        ) -> Result<Option<(Uuid, Uuid)>, StoreError> {
+            Ok(self
+                .fake_runners
+                .iter()
+                .find(|(project, id, _, _)| project == project_id && id == runner_id)
+                .map(|(_, id, _, pod)| (*id, *pod)))
+        }
+
+        async fn pod_by_id_in_project(
+            &self,
+            project_id: &Uuid,
+            pod_id: &Uuid,
+        ) -> Result<Option<Uuid>, StoreError> {
+            Ok(self
+                .fake_pods
+                .iter()
+                .find(|(project, id, _)| project == project_id && id == pod_id)
+                .map(|(_, id, _)| *id))
+        }
+
+        async fn validate_execution_target_write(
+            &self,
+            _write: &pidash_services::domain::issue_assignment::ExecutionTargetWrite,
+        ) -> Result<(), StoreError> {
+            match &self.validate_refusal {
+                Some(message) => Err(StoreError::Transition(message.clone())),
+                None => Ok(()),
+            }
+        }
+
+        async fn apply_execution_target_post_commit(
+            &self,
+            issue_id: &Uuid,
+            new_runner_id: Option<Uuid>,
+            _actor_id: &Uuid,
+        ) -> Result<(), StoreError> {
+            self.applied_targets
+                .lock()
+                .unwrap()
+                .push((*issue_id, new_runner_id));
+            Ok(())
+        }
+
+        async fn has_blocking_run(&self, _issue_id: &Uuid) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        async fn execution_detail(
+            &self,
+            _issue_id: &Uuid,
+            _actor_id: &Uuid,
+        ) -> Result<ExecutionDetail, StoreError> {
+            Ok(ExecutionDetail {
+                runner_detail: Value::Null,
+                dispatch_wait: Value::Null,
+            })
+        }
+
+        async fn list_project_runners(
+            &self,
+            project_id: &Uuid,
+            _actor_id: &Uuid,
+            _assignable_for: Option<&str>,
+        ) -> Result<Vec<Value>, StoreError> {
+            Ok(self
+                .fake_runners
+                .iter()
+                .filter(|(project, _, _, _)| project == project_id)
+                .map(|(_, id, name, pod)| {
+                    json!({
+                        "id": id.to_string(),
+                        "name": name,
+                        "pod_id": pod.to_string(),
+                        "assignable": true,
+                        "not_assignable_code": "",
+                        "is_busy": false,
+                        "queue_depth": 0,
+                    })
+                })
+                .collect())
         }
 
         async fn drive_create_transition(
@@ -3063,6 +3471,8 @@ mod tests {
             "state": state.map(|(name, _)| name),
             "state_group": state.map(|(_, group)| group),
             "priority": priority,
+            "assigned_pod_id": Value::Null,
+            "assigned_runner_id": Value::Null,
         })
     }
 
@@ -3397,6 +3807,8 @@ mod tests {
                 "state": "Backlog",
                 "state_group": "backlog",
                 "priority": "high",
+                "assigned_pod_id": Value::Null,
+                "assigned_runner_id": Value::Null,
                 "description": "<untrusted>first body</untrusted>",
                 "description_truncated": false,
                 // Newest-first read, reversed to chronological
@@ -3416,6 +3828,8 @@ mod tests {
                         "created_at": "2026-03-12T08:00:00+00:00",
                     },
                 ],
+                "assigned_runner_detail": Value::Null,
+                "dispatch_wait": Value::Null,
             })
         );
     }
@@ -3534,6 +3948,10 @@ mod tests {
                         "id": uid(501).to_string(),
                         "status": "queued",
                         "created_at": "2026-03-12T09:00:00+00:00",
+                        "pinned_runner": Value::Null,
+                        "pinned_runner_name": Value::Null,
+                        "pin_kind": "locality",
+                        "dispatch_wait": Value::Null,
                     },
                 ],
             })
@@ -4762,7 +5180,7 @@ mod tests {
         let result = call(&store, "frobnicate", json!({})).await;
         assert_eq!(
             retry_message(&result),
-            "Unknown tool name: 'frobnicate'. Available tools: 'create_comment', 'create_issue', 'dispatch_coding_run', 'get_issue', 'get_pull_request_status', 'get_run_status', 'list_issue_relations', 'list_issues', 'list_labels', 'list_my_issues', 'list_project_members', 'list_projects', 'list_states', 'relate_issues', 'search_issues', 'unrelate_issues', 'update_issue'"
+            "Unknown tool name: 'frobnicate'. Available tools: 'create_comment', 'create_issue', 'dispatch_coding_run', 'get_issue', 'get_pull_request_status', 'get_run_status', 'list_issue_relations', 'list_issues', 'list_labels', 'list_my_issues', 'list_project_members', 'list_project_runners', 'list_projects', 'list_states', 'relate_issues', 'search_issues', 'unrelate_issues', 'update_issue'"
         );
     }
 
@@ -5178,6 +5596,280 @@ mod tests {
             .await
             .expect_err("unknown issue must miss");
         assert_eq!(error.message(), "Issue matching query does not exist.");
+    }
+
+    // ------------------------------------------------------------------
+    // Dedicated runner (PDASHOSS01-350): mirrors of
+    // `tests/contract/assistant/test_dedicated_runner_tools.py`.
+    // ------------------------------------------------------------------
+
+    /// Seed a pod + runner in project 101 (`PROJ`).
+    fn seed_gpu_pod_runner(store: &mut FixtureStore) {
+        store
+            .fake_pods
+            .push((uid(101), uid(801), "PROJ_gpu".to_owned()));
+        store
+            .fake_runners
+            .push((uid(101), uid(901), "gpu-box".to_owned(), uid(801)));
+    }
+
+    #[tokio::test]
+    async fn create_issue_dedicates_to_runner_by_name() {
+        let mut store = FixtureStore::standard();
+        seed_gpu_pod_runner(&mut store);
+        let out = ok_value(
+            call(
+                &store,
+                "create_issue",
+                json!({
+                    "project_id": uid(101).to_string(),
+                    "name": "Needs GPU",
+                    "assigned_runner": "gpu-box",
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["created"], json!(true));
+        assert_eq!(out["assigned_runner_id"], json!(uid(901).to_string()));
+        // The pod follows the runner (design §7.2).
+        assert_eq!(out["assigned_pod_id"], json!(uid(801).to_string()));
+        let created = store.created_issues.lock().unwrap();
+        assert_eq!(created[0].assigned_runner_id, Some(uid(901)));
+        assert_eq!(created[0].assigned_pod_id, Some(uid(801)));
+    }
+
+    #[tokio::test]
+    async fn create_issue_with_pod_only() {
+        let mut store = FixtureStore::standard();
+        // The bare `<name>` suffix resolves (`PROJ_gpu` → `gpu`).
+        seed_gpu_pod_runner(&mut store);
+        let out = ok_value(
+            call(
+                &store,
+                "create_issue",
+                json!({
+                    "project_id": uid(101).to_string(),
+                    "name": "Pod work",
+                    "assigned_pod": "gpu",
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["created"], json!(true));
+        assert_eq!(out["assigned_pod_id"], json!(uid(801).to_string()));
+        assert_eq!(out["assigned_runner_id"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn update_issue_sets_and_clears_runner() {
+        let mut store = FixtureStore::standard();
+        seed_gpu_pod_runner(&mut store);
+        let out = ok_value(
+            call(
+                &store,
+                "update_issue",
+                json!({
+                    "issue_id": uid(301).to_string(),
+                    "assigned_runner": "gpu-box",
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["updated"], json!(true));
+        assert_eq!(out["assigned_runner_id"], json!(uid(901).to_string()));
+        assert_eq!(out["assigned_pod_id"], json!(uid(801).to_string()));
+        assert_eq!(out["changed"], json!(["runner"]));
+
+        let cleared = ok_value(
+            call(
+                &store,
+                "update_issue",
+                json!({"issue_id": uid(301).to_string(), "assigned_runner": null}),
+            )
+            .await,
+        );
+        assert_eq!(cleared["updated"], json!(true));
+        assert_eq!(cleared["assigned_runner_id"], Value::Null);
+        assert_eq!(cleared["changed"], json!(["runner"]));
+    }
+
+    #[tokio::test]
+    async fn update_issue_pod_only_clears_dedicated_runner() {
+        // The seeded issue already carries the dedicated runner; a
+        // pod-only update clears it (§13.1).
+        let mut store = FixtureStore::standard();
+        seed_gpu_pod_runner(&mut store);
+        store.issues[0].assigned_runner_id = Some(uid(901));
+        store.issues[0].assigned_pod_id = Some(uid(801));
+        let out = ok_value(
+            call(
+                &store,
+                "update_issue",
+                json!({
+                    "issue_id": uid(301).to_string(),
+                    "assigned_pod": "PROJ_gpu",
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["updated"], json!(true));
+        assert_eq!(out["assigned_runner_id"], Value::Null);
+        assert_eq!(out["changed"], json!(["pod"]));
+    }
+
+    #[tokio::test]
+    async fn update_issue_ecode_passes_through() {
+        // E7: the shared service refuses; the code rides the retry
+        // message to the model unchanged.
+        let mut store = FixtureStore::standard();
+        seed_gpu_pod_runner(&mut store);
+        store.validate_refusal =
+            Some("the runner's owner is not on this issue [runner_owner_not_on_issue]".to_owned());
+        let result = call(
+            &store,
+            "update_issue",
+            json!({
+                "issue_id": uid(301).to_string(),
+                "assigned_runner": uid(901).to_string(),
+            }),
+        )
+        .await;
+        let message = retry_message(&result);
+        assert!(
+            message.contains("runner_owner_not_on_issue"),
+            "got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_issue_runner_not_found_passes_through() {
+        // E1: the UUID resolves only within the project.
+        let store = FixtureStore::standard();
+        let result = call(
+            &store,
+            "update_issue",
+            json!({
+                "issue_id": uid(301).to_string(),
+                "assigned_runner": uid(999).to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "assigned_runner not found in this project"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_coding_run_rejects_unknown_pin() {
+        let store = FixtureStore::standard();
+        let result = call(
+            &store,
+            "dispatch_coding_run",
+            json!({"issue_id": uid(301).to_string(), "pin": "bogus"}),
+        )
+        .await;
+        assert!(
+            retry_message(&result).contains("pin"),
+            "got: {}",
+            retry_message(&result)
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_coding_run_threads_pod_once() {
+        let store = FixtureStore::standard();
+        let out = ok_value(
+            call(
+                &store,
+                "dispatch_coding_run",
+                json!({"issue_id": uid(301).to_string(), "pin": "pod_once"}),
+            )
+            .await,
+        );
+        assert_eq!(out["dispatched"], json!(true));
+        assert_eq!(*store.drive_pod_once.lock().unwrap(), vec![true]);
+
+        let out = ok_value(
+            call(
+                &store,
+                "dispatch_coding_run",
+                json!({"issue_id": uid(301).to_string()}),
+            )
+            .await,
+        );
+        assert_eq!(out["dispatched"], json!(true));
+        assert_eq!(*store.drive_pod_once.lock().unwrap(), vec![true, false]);
+    }
+
+    #[tokio::test]
+    async fn get_run_status_carries_pin_fields() {
+        // The dedicated run's pin fields ride the row (the seeded run
+        // is unpinned, so the nulls are the unpinned shape).
+        let store = FixtureStore::standard();
+        let out = ok_value(
+            call(
+                &store,
+                "get_run_status",
+                json!({"issue_id": uid(302).to_string()}),
+            )
+            .await,
+        );
+        let row = &out["runs"][0];
+        assert_eq!(row["pinned_runner"], Value::Null);
+        assert_eq!(row["pinned_runner_name"], Value::Null);
+        assert_eq!(row["pin_kind"], json!("locality"));
+        assert_eq!(row["dispatch_wait"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn list_project_runners_shows_eligibility() {
+        let mut store = FixtureStore::standard();
+        seed_gpu_pod_runner(&mut store);
+        let out = ok_value(
+            call(
+                &store,
+                "list_project_runners",
+                json!({
+                    "project_id": uid(101).to_string(),
+                    "assignable_for": uid(301).to_string(),
+                }),
+            )
+            .await,
+        );
+        let rows = out.as_array().expect("rows");
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == json!(uid(901).to_string()))
+            .expect("seeded runner listed");
+        assert_eq!(row["name"], json!("gpu-box"));
+        assert_eq!(row["assignable"], json!(true));
+        assert_eq!(row["not_assignable_code"], json!(""));
+        assert_eq!(row["is_busy"], json!(false));
+        assert_eq!(row["queue_depth"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn get_issue_returns_assignment_ids() {
+        // The brief carries the stamped assignment ids.
+        let mut store = FixtureStore::standard();
+        seed_gpu_pod_runner(&mut store);
+        store.issues[0].assigned_runner_id = Some(uid(901));
+        store.issues[0].assigned_pod_id = Some(uid(801));
+        let out = ok_value(
+            call(
+                &store,
+                "get_issue",
+                json!({"issue_id": uid(301).to_string()}),
+            )
+            .await,
+        );
+        assert_eq!(out["assigned_runner_id"], json!(uid(901).to_string()));
+        assert_eq!(out["assigned_pod_id"], json!(uid(801).to_string()));
+        // The execution detail rides the shape (the fake stamps nulls;
+        // the live store fills runner detail + dispatch_wait).
+        assert!(out.get("assigned_runner_detail").is_some());
+        assert!(out.get("dispatch_wait").is_some());
     }
 
     #[tokio::test]

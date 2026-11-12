@@ -17,9 +17,11 @@ import {
   activityRows,
   appendEvent,
   applyDeltaOnce,
+  isRealtimeEvent,
   isTerminalEvent,
   lastSequence,
   refreshesHistory,
+  runnerBusyMessage,
   type ActivityRow,
 } from "./events.js";
 import { chatTransportForRunner, subscribeChatTransport, type ChatSubscriptionHandlers } from "./transport.js";
@@ -174,6 +176,12 @@ export function useChatStream(
             return;
           }
           if (event.kind === "chat_approval_request") return;
+          // A busy runner turned the message down; say why rather than
+          // leaving the banner empty. Only for live frames: the stream
+          // replays the session's history from the start, and an old
+          // refusal must not reappear after the run ended.
+          const busyMessage = runnerBusyMessage(event);
+          if (busyMessage !== null && isRealtimeEvent(event, subscribedAtRef.current)) setError(busyMessage);
           if (isTerminalEvent(event.kind)) callbacksRef.current.onApprovalCleared();
           if (refreshesHistory(event.kind)) callbacksRef.current.onHistoryRefresh();
         },

@@ -12,6 +12,7 @@ import { useTranslation } from "@pi-dash/i18n";
 import { RunnerService } from "@pi-dash/services";
 import type { IRunner } from "@pi-dash/types";
 import { useLocalChatContacts } from "@/components/runners/local-chat-contacts";
+import { useThisComputer } from "@/components/runners/this-computer";
 
 const service = new RunnerService();
 
@@ -52,10 +53,14 @@ export const RunnersSideNav = observer(function RunnersSideNav(props: RunnersSid
     { refreshInterval: 5_000 }
   );
 
-  const runnerList = runners ?? [];
-  // Non-cloud contacts (the desktop build's locally-served built-in agent).
-  // Empty in the shared cloud web app — see the seam module.
+  // Non-cloud contacts (the desktop build's "This computer" engine). Empty in
+  // the shared cloud web app — see the seam module.
   const localContacts = useLocalChatContacts();
+  // On the desktop, this computer's own engine runners are the local contact
+  // above; listing them again under "Runners" would show the same engine
+  // twice (design §12.1). Other computers' engines stay listed.
+  const { localEngineRunnerIds } = useThisComputer();
+  const runnerList = (runners ?? []).filter((runner) => !localEngineRunnerIds.has(runner.id));
 
   return (
     <aside className="w-[280px] shrink-0 border-r border-subtle bg-surface-1">

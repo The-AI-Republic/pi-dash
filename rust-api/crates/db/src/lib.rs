@@ -57,6 +57,7 @@ pub mod r#loop;
 pub mod migrations;
 pub mod ops;
 pub mod orchestration;
+pub mod orm_tx;
 pub mod pool;
 pub mod prompting;
 pub mod redis;

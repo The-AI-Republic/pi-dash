@@ -15,6 +15,7 @@ import { User } from "lucide-react";
 import * as React from "react";
 
 import { useMe } from "../../core/session/hooks.js";
+import { PropertyChip } from "./PropertyChip.js";
 import { selectMemberOptions, type MemberOption } from "./members.js";
 import { usePickerProjectMembers, usePickerWorkspaceMembers } from "./reference.js";
 
@@ -27,6 +28,10 @@ interface MemberPickerBase {
   variant?: ButtonVariant;
   /** Default trigger shows avatars without names. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "Assignees: Ada, Bo" when set. */
+  label?: string | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
@@ -76,6 +81,8 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
     disabled = false,
     variant = "secondary",
     iconOnly = false,
+    chip = false,
+    label,
     trigger,
     placeholder,
     tabIndex,
@@ -84,6 +91,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
     onOpenChange,
   } = props;
   const multiple = props.multiple ?? false;
+  const accessible = label ?? (multiple ? "Assignees" : "Assignee");
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
 
@@ -128,6 +136,29 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
       // A set-but-unknown value renders the prompt until the first open
       // loads the directory; every single picker shares this fallback.
       const text = name ?? prompt;
+      if (chip) {
+        const filled = name !== null;
+        return (
+          <PropertyChip
+            label={filled ? `${accessible}: ${text}` : accessible}
+            icon={
+              current === undefined ? (
+                <User size={16} strokeWidth={1.5} aria-hidden="true" />
+              ) : (
+                <Avatar
+                  name={displayNameOf(current)}
+                  {...(current.avatarUrl === null ? {} : { src: current.avatarUrl })}
+                  size="small"
+                />
+              )
+            }
+            text={text}
+            placeholder={!filled}
+            {...(filled ? { title: text } : {})}
+            {...(tabIndex === undefined ? {} : { tabIndex })}
+          />
+        );
+      }
       if (iconOnly) {
         return (
           <IconButton label={name ?? prompt} variant={variant}>
@@ -190,6 +221,34 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
           ) : null}
         </span>
       );
+    if (chip) {
+      // Picked members show as bare avatars without a border, as on the
+      // old form; the names ride the accessible name and the tooltip.
+      if (props.value.length > 0 && known.length === props.value.length) {
+        const summary = names.join(", ");
+        return (
+          <PropertyChip
+            label={`${accessible}: ${summary}`}
+            icon={stack}
+            borderless
+            title={summary}
+            {...(tabIndex === undefined ? {} : { tabIndex })}
+          />
+        );
+      }
+      const filled = props.value.length > 0;
+      return (
+        <PropertyChip
+          label={filled ? `${accessible}: ${text}` : accessible}
+          icon={filled ? stack : <User size={16} strokeWidth={1.5} aria-hidden="true" />}
+          text={filled ? text : prompt}
+          placeholder={!filled}
+          borderless={filled}
+          {...(filled ? { title: text } : {})}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        />
+      );
+    }
     if (iconOnly) {
       return (
         <IconButton label={text} variant={variant}>

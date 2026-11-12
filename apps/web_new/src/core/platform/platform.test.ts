@@ -183,7 +183,7 @@ describe("external open address guard", () => {
       __TAURI__: { core: { invoke, Channel: class {} } },
     });
     await desktopPlatform.openExternal("https://app.example.test/");
-    expect(invoke).toHaveBeenCalledWith("plugin:opener|open_url", { url: "https://app.example.test/" });
+    expect(invoke).toHaveBeenCalledWith("open_in_browser", { url: "https://app.example.test/" });
   });
 
   it("uses the browser fallback when the native open rejects", async () => {

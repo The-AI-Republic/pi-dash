@@ -192,7 +192,7 @@ pub enum ScheduleError {
     BadCron { spec: String },
 }
 
-/// The 24 literal entries of `app.conf.beat_schedule` in
+/// The 27 literal entries of `app.conf.beat_schedule` in
 /// `apps/api/pi_dash/celery.py`, in file order.
 ///
 /// Note the two `delete_old_s3_link` entries (`01:30` and `03:45`): both
@@ -270,6 +270,13 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
             task: "runner.mark_offline_runners",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
+        // Pause the engine of machines whose credential ran out
+        // (`crontab(minute='*/5')`, #2910).
+        BeatEntry {
+            name: "runner-pause-engines-with-expired-credentials",
+            task: "runner.pause_engines_with_expired_credentials",
+            cadence: Cadence::Crontab(Crontab::parse("*/5", "*", "*", "*", "*").expect("valid")),
+        },
         // Recover runs stranded on a runner that stopped heartbeating;
         // without these a stranded run blocks its issue indefinitely
         // (`70d684af`).
@@ -281,6 +288,19 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
         BeatEntry {
             name: "runner-fail-runs-on-offline-runners",
             task: "runner.fail_runs_on_offline_runners",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        // Dedicated-runner bounds (§11.3, §12.1, PDASHOSS01-297):
+        // fail dedicated runs still unavailable after 12h, and sweep
+        // stranded dedicated pins (`crontab(minute='*/1')`).
+        BeatEntry {
+            name: "runner-fail-dedicated-runs",
+            task: "runner.fail_dedicated_runs",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        BeatEntry {
+            name: "runner-sweep-stranded-dedicated-runs",
+            task: "runner.sweep_stranded_dedicated_runs",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
         BeatEntry {
@@ -495,9 +515,9 @@ mod tests {
     }
 
     #[test]
-    fn literal_schedule_has_all_24_entries() {
+    fn literal_schedule_has_all_27_entries() {
         let schedule = literal_schedule();
-        assert_eq!(schedule.len(), 24);
+        assert_eq!(schedule.len(), 27);
         let names: Vec<_> = schedule.iter().map(|e| e.name).collect();
         for expected in [
             "check-every-five-minutes-to-send-email-notifications",
@@ -514,8 +534,11 @@ mod tests {
             "check-every-day-to-delete-exporter-history",
             "runner-expire-stale-approvals",
             "runner-mark-offline-runners",
+            "runner-pause-engines-with-expired-credentials",
             "runner-release-pins-on-offline-runners",
             "runner-fail-runs-on-offline-runners",
+            "runner-fail-dedicated-runs",
+            "runner-sweep-stranded-dedicated-runs",
             "runner-reconcile-stalled-runs",
             "runner-sweep-agent-chat-state",
             "assistant-sweep-stale-turns",
@@ -543,7 +566,7 @@ mod tests {
             std::env::remove_var(var);
         }
         let schedule = beat_schedule();
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 31);
         let find = |name: &str| schedule.iter().find(|e| e.name == name).expect(name);
         assert_eq!(
             find("cloud-agent-scan-queued-runs").cadence,

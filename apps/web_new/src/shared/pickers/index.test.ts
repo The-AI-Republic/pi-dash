@@ -4,19 +4,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AGENT_OPTION_PREFIX,
-  AGENT_ROW_LABELS,
   buildExecutionTargets,
-  CLOUD_EXECUTOR,
   EstimatePicker,
   executionSelectionId,
-  executionTargetLabel,
+  EXECUTION_TARGET_LABEL,
   executionTargetPatch,
-  formatAvailabilityReason,
   IntakeStatePicker,
-  isAgentRowKind,
   LOCAL_EXECUTOR,
-  MANAGED_EXECUTOR,
   NO_ESTIMATE_ID,
   parseExecutionSelectionId,
   pickerEstimatesQueryOptions,
@@ -52,7 +46,6 @@ describe("pickers barrel", () => {
     expect(NO_ESTIMATE_ID).toBe("none");
     expect(selectEstimateOptions).toBeDefined();
     expect(selectIntakeFallback).toBeDefined();
-    expect(AGENT_OPTION_PREFIX).toBe("agent:");
     expect(POD_OPTION_PREFIX).toBe("pod:");
     expect(RUNNER_OPTION_PREFIX).toBe("runner:");
     expect(podOptionLabel).toBeDefined();
@@ -60,16 +53,11 @@ describe("pickers barrel", () => {
     expect(runnerStatusLine).toBeDefined();
     expect(runnerWaitNote).toBeDefined();
     expect(selectRunnerOwnerName).toBeDefined();
-    expect(AGENT_ROW_LABELS).toBeDefined();
-    expect(CLOUD_EXECUTOR).toBe("cloud_agent");
-    expect(MANAGED_EXECUTOR).toBe("managed_runner");
     expect(LOCAL_EXECUTOR).toBe("local_runner");
     expect(buildExecutionTargets).toBeDefined();
     expect(executionSelectionId).toBeDefined();
-    expect(executionTargetLabel).toBeDefined();
+    expect(EXECUTION_TARGET_LABEL).toBe("Runs on");
     expect(executionTargetPatch).toBeDefined();
-    expect(formatAvailabilityReason).toBeDefined();
-    expect(isAgentRowKind).toBeDefined();
     expect(parseExecutionSelectionId).toBeDefined();
     expect(selectDefaultPod).toBeDefined();
     expect(pickerEstimatesQueryOptions).toBeDefined();

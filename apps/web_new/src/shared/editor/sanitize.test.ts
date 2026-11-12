@@ -274,6 +274,21 @@ describe("renderableHtml", () => {
       'src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/35e8b958-6ee5-43ce-ae56-fb0e776f421e/"'
     );
   });
+
+  it("resolves a plain image's rooted asset source through the API origin", () => {
+    const html = renderableHtml(
+      '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/" alt="shot"></p>',
+      (src) => descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain('src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"');
+  });
+
+  it("leaves a plain image's non-asset source alone", () => {
+    const html = renderableHtml('<p><img src="/media/a.png" alt="shot"></p>', (src) =>
+      descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain('src="/media/a.png"');
+  });
 });
 
 describe("descriptionAssetSrc", () => {
@@ -306,9 +321,51 @@ describe("descriptionAssetSrc", () => {
       descriptionAssetSrc("asset-1", { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test/" })
     ).toBe("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
   });
+
+  it("joins a rooted asset source to the API origin when one is given", () => {
+    expect(
+      descriptionAssetSrc("/api/assets/v2/workspaces/acme/projects/p-1/asset-1/", {
+        workspaceSlug: "acme",
+        projectId: "p-1",
+        apiBaseUrl: "https://api.test",
+      })
+    ).toBe("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
+  });
+
+  it("leaves a rooted asset source alone without an API origin", () => {
+    expect(
+      descriptionAssetSrc("/api/assets/v2/workspaces/acme/projects/p-1/asset-1/", {
+        workspaceSlug: "acme",
+        projectId: "p-1",
+      })
+    ).toBe("/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
+  });
+
+  it("leaves a rooted non-asset source alone even with an API origin", () => {
+    expect(
+      descriptionAssetSrc("/media/a.png", { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    ).toBe("/media/a.png");
+  });
 });
 
 describe("prepareEditorHtml", () => {
+  it("paints a plain image's rooted asset source through the resolver", () => {
+    const html = prepareEditorHtml(
+      '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/" alt="shot"></p>',
+      (src) => descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain('src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"');
+  });
+
+  it("leaves a plain image's non-asset source alone in the editor", () => {
+    const stored = '<p><img src="/media/a.png" alt="shot"></p>';
+    expect(
+      prepareEditorHtml(stored, (src) =>
+        descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+      )
+    ).toContain('src="/media/a.png"');
+  });
+
   it("paints the resolved source and keeps the stored id", () => {
     const html = prepareEditorHtml(
       '<p><image-component src="asset-1" width="200"></image-component></p>',

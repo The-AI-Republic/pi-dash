@@ -264,3 +264,42 @@ describe("CyclePicker", () => {
     expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
   });
 });
+
+describe("CyclePicker chip", () => {
+  it("shows the property name while empty", () => {
+    const { queryClient } = harness(CYCLES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          chip
+          label="Cycle"
+          placeholder="Cycle"
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Cycle" })).toHaveTextContent("Cycle");
+  });
+
+  it("names the picked cycle once the list answers", async () => {
+    const { queryClient } = harness(CYCLES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={CURRENT}
+          onChange={() => undefined}
+          chip
+          label="Cycle"
+          placeholder="Cycle"
+          preload
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "Cycle: Current" })).toHaveTextContent("Current");
+  });
+});

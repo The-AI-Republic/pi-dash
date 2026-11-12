@@ -577,6 +577,7 @@ pub fn load_context_sql() -> String {
             "m",
             Expr::col(("t", "user_message_id")).equals(("m", "id")),
         )
+        // raw-sql: sqlx $1 placeholder for the out-of-scope turn/live.rs caller; sea-query String mode cannot render a $1 bind without Expr::cust.
         .and_where(Expr::cust("t.\"id\" = $1"))
         .order_by(("t", "created_at"), Order::Asc)
         .to_string(PostgresQueryBuilder)

@@ -14,7 +14,7 @@
 //! [`RunCreationStore`](super::validation::RunCreationStore) precedent,
 //! the reads/writes live behind [`RevokeStore`]: one async method per
 //! Django ORM call, with the SQL text in the adjacent `*_SQL` consts
-//! (plus [`active_runs_lock_sql`]). Each write leg has one
+//! (plus `active_runs_lock_sql`). Each write leg has one
 //! executor-generic performer — S2 in
 //! [`domain::tokens`](crate::domain::tokens), the rest below — which
 //! every pool implementation calls, so the executing layers issue
@@ -92,14 +92,23 @@
 //! Ported bugs: none found in this unit on read-through.
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity::{agent_run, runner};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use uuid::Uuid;
 
 use pidash_db::runner_enroll::columns::revoke_reasons::{
     KNOWN_REVOKE_REASONS, REVOKE_REASON_MAX_LEN,
 };
 
-use crate::runner_runs::finalization::{finalize_update_sql, FinalizeValues};
+use crate::runner_runs::finalization::{
+    plan_terminal_event, FinalizeValues, TerminalEventPlan, ERROR_DETAILS_COLUMN,
+};
+use crate::runner_runs::SetValue;
 use crate::runner_sessions::guards;
+use pidash_types::runner_runs::AgentRunStatus;
 
 // ---------------------------------------------------------------------------
 // Reasons (`models.py:575-590`)
@@ -163,46 +172,10 @@ pub fn check_revoke_reason(reason: &str) -> (String, Vec<String>) {
 // SQL (`models.py:597-651`, probe-verified on Django 4.2.30)
 // ---------------------------------------------------------------------------
 
-/// S1 — mark the runner revoked (`:599-603`).
-///
-/// `QuerySet.update`, so `updated_at` is UNCHANGED (no such column here).
-/// `$1` = now, `$2` = stored reason, `$3` = runner. `status` is the
-/// `RUNNER_STATUS_REVOKED` literal (fixed enum, rendered literally like
-/// the D-14 drain consts).
-pub const MARK_RUNNER_REVOKED_SQL: &str = "UPDATE \"runner\" SET \"status\" = 'revoked', \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner\".\"id\" = $3";
-
 // NOTE: the S2 revoke const lived here; the statement moved to
 // `crate::domain::tokens::revoke_runner_sessions_for_runner`
 // (PIDASHCONV-1520), whose test carries the pin (including the
 // Q-sorted WHERE order).
-
-/// S3 — lock + list non-terminal runs (`:622-626`).
-///
-/// `$1` = runner. The `IN` list renders
-/// [`NON_TERMINAL_STATUSES`](guards::NON_TERMINAL_STATUSES) in
-/// source-tuple order (called, not copied — the D-14
-/// `next_for_runner_sql` precedent); the `ORDER BY` is the `AgentRun`
-/// default ordering. Rows come back `(run_id, pod_id)` in listed order.
-pub fn active_runs_lock_sql() -> String {
-    let statuses = guards::NON_TERMINAL_STATUSES
-        .iter()
-        .map(|status| format!("'{}'", status.value()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ({statuses})) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"
-    )
-}
-
-/// S4a — queued-run pod ids for the unpin (`:644-648`).
-///
-/// `$1` = runner. `'queued'` is the `AgentRunStatus::Queued` literal.
-pub const PINNED_QUEUED_PODS_SQL: &str = "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" DESC";
-
-/// S4b — unpin QUEUED follow-ups (`:650`), only when S4a is non-empty.
-///
-/// `$1` = runner.
-pub const UNPIN_QUEUED_RUNS_SQL: &str = "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued')";
 
 /// Per-run finalize target (`:631-640`): `AgentRunStatus.CANCELLED`.
 pub const FINALIZE_TO_STATUS: &str = "cancelled";
@@ -223,76 +196,313 @@ pub const FINALIZE_ERROR_CODE: &str = "runner_revoked";
 // replace; the savepoint/race/cloud-event flow stays with the driver.
 // ---------------------------------------------------------------------------
 
-/// S1 performer: mark the runner revoked ([`MARK_RUNNER_REVOKED_SQL`]).
-///
-/// Params: `$1` now, `$2` stored reason, `$3` runner.
-pub async fn stamp_runner_revoked<'e, E>(
-    ex: E,
+/// S1 performer (`models.py:599-603`): `QuerySet.update(status=REVOKED,
+/// revoked_at, revoked_reason)`, so `updated_at` is untouched.
+pub async fn stamp_runner_revoked(
+    db: &impl ConnectionTrait,
     runner_id: Uuid,
     now: DateTime<Utc>,
     stored_reason: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(MARK_RUNNER_REVOKED_SQL)
-        .bind(now)
-        .bind(stored_reason)
-        .bind(runner_id)
-        .execute(ex)
+) -> Result<(), DbErr> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::Status, Expr::value("revoked"))
+        .col_expr(runner::Column::RevokedAt, Expr::value(now))
+        .col_expr(runner::Column::RevokedReason, Expr::value(stored_reason))
+        .filter(runner::Column::Id.eq(runner_id))
+        .exec(db)
         .await
-        .map(|_| ())
+        .map(drop)
 }
 
-/// S4b performer: unpin QUEUED follow-ups ([`UNPIN_QUEUED_RUNS_SQL`]).
-///
-/// Param: `$1` runner. The driver calls this only when S4a is
-/// non-empty.
-pub async fn unpin_queued_runs_for_runner<'e, E>(ex: E, runner_id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(UNPIN_QUEUED_RUNS_SQL)
-        .bind(runner_id)
-        .execute(ex)
+/// S3 (`models.py:622-626`): `(run_id, pod_id)` of the runner's runs in a
+/// non-terminal status, newest first, `FOR UPDATE`.
+pub async fn lock_active_runs(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<(Uuid, Option<Uuid>)>, DbErr> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::Id, agent_run::Column::PodId])
+        .filter(agent_run::Column::RunnerId.eq(runner_id))
+        .filter(
+            agent_run::Column::Status.is_in(
+                guards::NON_TERMINAL_STATUSES
+                    .iter()
+                    .map(|status| status.value()),
+            ),
+        )
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
         .await
-        .map(|_| ())
 }
 
-/// Revoke-finalize `UPDATE` performer: render
-/// [`finalize_update_sql`] from the planned `values` and bind the
-/// revoke extras in clause order.
+/// S4a (`models.py:644-648`): pod ids of the QUEUED runs pinned to the
+/// runner, newest first.
+pub async fn pinned_queued_pod_ids(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<Option<Uuid>>, DbErr> {
+    pinned_queued(runner_id)
+        .select_only()
+        .column(agent_run::Column::PodId)
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// S4b (`models.py:650`): unpin the QUEUED follow-ups. The driver calls
+/// this only when S4a is non-empty. H-13: dedicated pins are owned by
+/// the issue, never unpinned — the lost-runner handling (§13.1) fails
+/// their queued runs and clears the assignment instead, so the update
+/// excludes `pin_kind = dedicated`.
+pub async fn unpin_queued_runs_for_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<(), DbErr> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(None::<Uuid>))
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+fn pinned_queued(runner_id: Uuid) -> sea_orm::Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.eq("queued"))
+        // H-13 locality only (§12.1): dedicated pins are the
+        // lost-runner handling's, never this sweep's drain set.
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
+}
+
+/// Revoke-finalize `UPDATE` performer: the planned `values` as one
+/// SeaORM `UPDATE` on the locked primary key ([`finalize_update`]).
 ///
 /// `values` is the revoke plan (`status`, `ended_at`, both markers,
 /// `cancel_reason`, then the folded `error_details` patch carrying
 /// `error` / `error_code`); the caller pins that column order before
-/// the finalize lock, and the binds below follow it. `ended_at` binds
-/// the caller's own clock
-/// (each driver stamps its own `now`, never hoisted across legs).
-/// `run_id` binds last (the locked primary key).
-pub async fn execute_revoke_finalize_update<'e, E>(
-    ex: E,
+/// the finalize lock. `ended_at` is the caller's own clock (each
+/// driver stamps its own `now`, never hoisted across legs).
+pub async fn execute_revoke_finalize_update(
+    db: &impl ConnectionTrait,
     values: &FinalizeValues,
     run_id: Uuid,
-    stored_reason: &str,
     ended_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(&finalize_update_sql(values))
-        .bind(FINALIZE_TO_STATUS)
-        .bind(ended_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(stored_reason)
-        .bind(crate::runner_runs::finalization::error_details_patch(
-            values,
-        ))
-        .bind(run_id)
-        .execute(ex)
+) -> Result<(), DbErr> {
+    finalize_update(db, values, run_id, ended_at)
         .await
-        .map(|_| ())
+        .map(drop)
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM finalize kernel (twin of `runner_runs::finalization`)
+// ---------------------------------------------------------------------------
+//
+// The `finalize_agent_run` statements as SeaORM / sea-query builders:
+// the first-writer-wins lock, the `UPDATE` with the `error_details`
+// merge, and the idempotent cloud terminal event. Same predicates,
+// order, lock and binds as the text twins in
+// `crate::runner_runs::finalization`; names and signatures match the
+// SeaORM kernel that lands with pi-dash#2953, so the session / revoke
+// drivers swap to `finalization::*` mechanically once it merges.
+
+/// The finalize lock statement
+/// ([`finalization::lock_run_for_finalize_sql`](crate::runner_runs::finalization::lock_run_for_finalize_sql)):
+/// the non-terminal row by id, plus the expected runner / status when
+/// given, `ORDER BY created_at DESC LIMIT 1 FOR UPDATE`.
+pub fn lock_run_for_finalize_select(
+    run_id: Uuid,
+    expected_runner_id: Option<Uuid>,
+    expected_status: Option<AgentRunStatus>,
+) -> sea_orm::Select<agent_run::Entity> {
+    use agent_run::{Column, Entity};
+    let mut select = Entity::find().filter(Column::Id.eq(run_id)).filter(
+        Column::Status.is_not_in(
+            pidash_types::runner_runs::TERMINAL_RUN_STATUSES
+                .iter()
+                .map(AgentRunStatus::value),
+        ),
+    );
+    if let Some(runner_id) = expected_runner_id {
+        select = select.filter(Column::RunnerId.eq(runner_id));
+    }
+    if let Some(status) = expected_status {
+        select = select.filter(Column::Status.eq(status.value()));
+    }
+    select
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// Run the finalize lock: the locked full row, or `None` when the run
+/// is terminal already or misses an expected filter
+/// (first-writer-wins).
+pub async fn lock_run_for_finalize(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+    expected_runner_id: Option<Uuid>,
+    expected_status: Option<AgentRunStatus>,
+) -> Result<Option<agent_run::Model>, DbErr> {
+    lock_run_for_finalize_select(run_id, expected_runner_id, expected_status)
+        .one(db)
+        .await
+}
+
+/// `merge_error_details` over the row being updated
+/// ([`finalization::error_details_merge_sql`](crate::runner_runs::finalization::error_details_merge_sql)):
+/// the stored bag (`{}` when not an object), minus every key the patch
+/// names, `||` the patch with its nulls stripped.
+pub fn error_details_merge_expr(patch: &serde_json::Value) -> sea_orm::sea_query::SimpleExpr {
+    use agent_run::Column;
+    use sea_orm::sea_query::{Alias, BinOper, Func, SimpleExpr};
+    let stored = Expr::col((agent_run::Entity, Column::ErrorDetails));
+    let mut bag: SimpleExpr = Expr::case(
+        SimpleExpr::from(Func::cust(Alias::new("jsonb_typeof")).arg(stored.clone())).eq("object"),
+        stored,
+    )
+    .finally(Expr::val(serde_json::Value::Object(Default::default())).cast_as(Alias::new("jsonb")))
+    .into();
+    if let Some(map) = patch.as_object() {
+        for key in map.keys() {
+            bag = bag.binary(BinOper::Sub, Expr::val(key.clone()));
+        }
+    }
+    bag.binary(
+        sea_orm::sea_query::extension::postgres::PgBinOper::Concatenate,
+        SimpleExpr::from(
+            Func::cust(Alias::new("jsonb_strip_nulls"))
+                .arg(Expr::val(patch.clone()).cast_as(Alias::new("jsonb"))),
+        ),
+    )
+}
+
+/// The finalize `UPDATE` statement
+/// ([`finalization::finalize_update_sql`](crate::runner_runs::finalization::finalize_update_sql)):
+/// `SET` in clause order on the locked primary key. `Now` clauses take
+/// `now`, `Null` clauses write SQL `NULL`, the `error_details` patch
+/// merges into the stored bag.
+pub fn finalize_update_statement(
+    values: &FinalizeValues,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<sea_orm::UpdateMany<agent_run::Entity>, DbErr> {
+    use agent_run::{Column, Entity};
+    use sea_orm::sea_query::{Keyword, SimpleExpr};
+    let mut update = Entity::update_many();
+    for clause in &values.clauses {
+        let column: Column = clause
+            .column
+            .parse()
+            .map_err(|_| DbErr::Custom(format!("unknown agent_run column {}", clause.column)))?;
+        let expr: SimpleExpr = match (&clause.value, clause.column) {
+            (SetValue::Json(patch), ERROR_DETAILS_COLUMN) => error_details_merge_expr(patch),
+            (SetValue::Null, _) => SimpleExpr::Keyword(Keyword::Null),
+            (SetValue::Now, _) => Expr::val(now).into(),
+            (SetValue::Text(text), _) => Expr::val(text.clone()).into(),
+            (SetValue::Json(json), _) => Expr::val(json.clone()).into(),
+        };
+        update = update.col_expr(column, expr);
+    }
+    Ok(update.filter(Column::Id.eq(run_id)))
+}
+
+/// Run the finalize `UPDATE`; returns the rows written.
+pub async fn finalize_update(
+    db: &impl ConnectionTrait,
+    values: &FinalizeValues,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, DbErr> {
+    Ok(finalize_update_statement(values, run_id, now)?
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// The terminal event's `kind`.
+pub const TERMINAL_EVENT_KIND: &str = "terminal";
+
+/// Terminal-event existence
+/// ([`finalization::terminal_event_exists_sql`](crate::runner_runs::finalization::terminal_event_exists_sql)).
+pub async fn terminal_event_exists(db: &impl ConnectionTrait, run_id: Uuid) -> Result<bool, DbErr> {
+    use pidash_db::entity::agent_run_event::{Column, Entity};
+    Ok(Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::AgentRunId.eq(run_id))
+        .filter(Column::Kind.eq(TERMINAL_EVENT_KIND))
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .is_some())
+}
+
+/// Terminal-event max sequence
+/// ([`finalization::terminal_event_max_seq_sql`](crate::runner_runs::finalization::terminal_event_max_seq_sql)):
+/// the highest `seq` for the run, or `None` without events.
+pub async fn terminal_event_max_seq(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<i32>, DbErr> {
+    use pidash_db::entity::agent_run_event::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Seq)
+        .filter(Column::AgentRunId.eq(run_id))
+        .order_by_desc(Column::Seq)
+        .into_tuple::<i32>()
+        .one(db)
+        .await
+}
+
+/// Terminal-event `INSERT`
+/// ([`finalization::insert_terminal_event`](crate::runner_runs::finalization::insert_terminal_event))
+/// on SeaORM: the planned row, `kind = terminal`, `created_at = now`;
+/// the id is the database default.
+pub async fn insert_terminal_event_orm(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+    plan: TerminalEventPlan,
+    now: DateTime<Utc>,
+) -> Result<(), DbErr> {
+    use pidash_db::entity::agent_run_event::{ActiveModel, Entity};
+    use sea_orm::{NotSet, Set};
+    Entity::insert(ActiveModel {
+        id: NotSet,
+        seq: Set(plan.seq),
+        kind: Set(TERMINAL_EVENT_KIND.to_owned()),
+        payload: Set(plan.payload),
+        created_at: Set(now.into()),
+        agent_run_id: Set(run_id),
+    })
+    .exec_without_returning(db)
+    .await
+    .map(drop)
+}
+
+/// `finalize_agent_run:73-84` for a cloud run: append the terminal
+/// event unless one exists (exists check, max-seq read, insert: the
+/// same three statements, in order).
+pub async fn append_terminal_event_once(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+    new_status: AgentRunStatus,
+    error_code: &str,
+    now: DateTime<Utc>,
+) -> Result<(), DbErr> {
+    if terminal_event_exists(db, run_id).await? {
+        return Ok(());
+    }
+    let max_seq = terminal_event_max_seq(db, run_id).await?;
+    let plan = plan_terminal_event(max_seq, new_status, error_code);
+    insert_terminal_event_orm(db, run_id, plan, now).await
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +597,21 @@ pub trait RevokeStore {
     /// when S4a is non-empty.
     async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), RevokeError>;
 
+    /// §13.1 dedicated-issue set for the revoked runner: issues
+    /// assigned to it plus the work items of its QUEUED
+    /// dedicated-pinned runs.
+    async fn dedicated_issue_ids(&mut self, runner_id: Uuid) -> Result<Vec<Uuid>, RevokeError>;
+
+    /// §13.1 lost-runner handling for one issue, in the revoke
+    /// transaction: fail its queued dedicated runs, clear the
+    /// assignment, and report the bounce/recreate for the caller's
+    /// post-commit drain. System-attributed (Django `actor=None`).
+    async fn apply_lost_runner(
+        &mut self,
+        issue_id: Uuid,
+        reason: &str,
+    ) -> Result<crate::domain::issue_assignment::LostRunnerOutcome, RevokeError>;
+
     /// Collect one project-move handoff for the post-commit drain
     /// (`:653-674`, one closure over all runs — the executor fires one
     /// call per collected id, in collection order). The executor runs
@@ -404,6 +629,28 @@ pub trait RevokeStore {
     /// (`:681-685`, always). The executor calls D-14
     /// `schedule_stream_cleanup_for_runner` after commit.
     fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid);
+
+    /// Collect the §13.1 ticking-issue bounce (reason
+    /// `dedicated-runner-revoked`). The executor fires
+    /// `_bounce_issue_no_eligible_runner` after commit.
+    fn bounce_dedicated_after_commit(
+        &mut self,
+        issue_id: Uuid,
+        runner_name: Option<&str>,
+        reason: &str,
+        triggered_by: &str,
+    );
+
+    /// Collect the §13.1 `fall_back` step-2 recreate (cancelled run
+    /// re-dispatched in the default pod). The executor re-dispatches
+    /// via the continuation driver after commit.
+    fn recreate_dedicated_after_commit(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        trigger: &str,
+        creator: Option<Uuid>,
+    );
 }
 
 /// The handoff-failure log line (`models.py:666-671`).
@@ -478,6 +725,48 @@ pub async fn revoke_runner<S: RevokeStore>(
     if !pinned_pod_ids.is_empty() {
         store.unpin_queued_runs(runner_id).await?;
     }
+    // §13.1: per issue dedicated to this runner — whether or not it
+    // has a queued dedicated run — apply the project's lost-runner
+    // handling, which clears the assignment. Bounce/recreate ride
+    // the post-commit drain (Django's `_bounce_issue_no_eligible_runner`
+    // and the default-pod recreate). "The revoking transaction
+    // itself" (§13.1): all of this is in-tx.
+    let mut dedicated_bounce_effects: Vec<(Uuid, Option<String>, String, String)> = Vec::new();
+    let mut dedicated_recreate_effects: Vec<(Uuid, Uuid, String, Option<Uuid>)> = Vec::new();
+    let mut dedicated_drain_pods: Vec<Uuid> = Vec::new();
+    for issue_id in store.dedicated_issue_ids(runner_id).await? {
+        let outcome = store.apply_lost_runner(issue_id, reason).await?;
+        if outcome.bounce {
+            let reason_name = outcome
+                .runner_name
+                .unwrap_or_else(|| "the dedicated runner".to_owned());
+            dedicated_bounce_effects.push((
+                issue_id,
+                Some(reason_name),
+                outcome
+                    .bounce_reason
+                    .unwrap_or_else(|| "no-eligible-runner".to_owned()),
+                outcome
+                    .bounce_triggered_by
+                    .unwrap_or_else(|| reason.to_owned()),
+            ));
+        }
+        if let Some(pod_id) = outcome.fell_back_pod {
+            if !dedicated_drain_pods.contains(&pod_id) {
+                dedicated_drain_pods.push(pod_id);
+            }
+        }
+        if let Some(pod_id) = outcome.recreate_in_pod {
+            dedicated_recreate_effects.push((
+                issue_id,
+                pod_id,
+                outcome
+                    .recreate_trigger
+                    .unwrap_or_else(|| "tick".to_owned()),
+                outcome.recreate_creator,
+            ));
+        }
+    }
     // `affected_pod_ids`: S3 pods then S4a pods, non-null, first-seen
     // order (the set-order quirk — see the module docs).
     let mut drained_pod_ids: Vec<Uuid> = Vec::new();
@@ -493,11 +782,27 @@ pub async fn revoke_runner<S: RevokeStore>(
             drained_pod_ids.push(*pod_id);
         }
     }
+    for pod_id in &dedicated_drain_pods {
+        if !drained_pod_ids.contains(pod_id) {
+            drained_pod_ids.push(*pod_id);
+        }
+    }
     for run_id in &cancelled_run_ids {
         store.complete_handoff_after_commit(*run_id);
     }
     for pod_id in &drained_pod_ids {
         store.drain_pod_after_commit(*pod_id);
+    }
+    for (issue_id, runner_name, reason_name, triggered_by) in &dedicated_bounce_effects {
+        store.bounce_dedicated_after_commit(
+            *issue_id,
+            runner_name.as_deref(),
+            reason_name,
+            triggered_by,
+        );
+    }
+    for (issue_id, pod_id, trigger, creator) in &dedicated_recreate_effects {
+        store.recreate_dedicated_after_commit(*issue_id, *pod_id, trigger, *creator);
     }
     store.schedule_stream_cleanup_after_commit(runner_id);
     Ok(RevokeOutcome {
@@ -522,10 +827,6 @@ mod tests {
         serde_json::from_str(text).expect("flows.golden.json parses")
     }
 
-    fn f5_sql() -> &'static str {
-        include_str!("../../../../fixtures/runner_enroll/queries/revoke_cascade.sql")
-    }
-
     fn frozen_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 4, 7, 0, 0).unwrap()
     }
@@ -539,7 +840,10 @@ mod tests {
             assert_eq!(stored, *reason, "reason {reason}");
             assert!(warnings.is_empty(), "reason {reason}");
         }
-        assert_eq!(KNOWN_REVOKE_REASONS.len(), 7);
+        assert_eq!(KNOWN_REVOKE_REASONS.len(), 8);
+        // `dev_machine_merged` (#2910) is known but outside the daemon's
+        // local-cleanup canonical set.
+        assert!(KNOWN_REVOKE_REASONS.contains(&"dev_machine_merged"));
     }
 
     #[test]
@@ -613,60 +917,8 @@ mod tests {
 
     // -- SQL text -----------------------------------------------------------
 
-    #[test]
-    fn s1_marks_revoked_without_touching_updated_at() {
-        assert_eq!(
-            MARK_RUNNER_REVOKED_SQL,
-            "UPDATE \"runner\" SET \"status\" = 'revoked', \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner\".\"id\" = $3"
-        );
-        assert!(
-            !MARK_RUNNER_REVOKED_SQL.contains("updated_at"),
-            "QuerySet.update leaves updated_at alone (F5 S1 note)"
-        );
-        let sql = f5_sql();
-        assert!(sql.contains("UPDATE \"runner\""), "F5 names the S1 table");
-        assert!(sql.contains("updated_at UNCHANGED"), "F5 pins the note");
-    }
-
     // (The S2 pin moved with the statement to
     // `crate::domain::tokens`.)
-
-    #[test]
-    fn s3_renders_non_terminal_statuses_from_guards() {
-        let values: Vec<&str> = guards::NON_TERMINAL_STATUSES
-            .iter()
-            .map(|status| status.value())
-            .collect();
-        assert_eq!(
-            values,
-            vec![
-                "queued",
-                "assigned",
-                "waiting_for_worktree",
-                "running",
-                "cancel_requested",
-                "awaiting_approval",
-                "awaiting_reauth",
-                "paused_awaiting_input",
-            ]
-        );
-        assert_eq!(
-            active_runs_lock_sql(),
-            "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"
-        );
-    }
-
-    #[test]
-    fn s4_select_and_conditional_update() {
-        assert_eq!(
-            PINNED_QUEUED_PODS_SQL,
-            "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" DESC"
-        );
-        assert_eq!(
-            UNPIN_QUEUED_RUNS_SQL,
-            "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued')"
-        );
-    }
 
     #[test]
     fn finalize_literals_match_source() {
@@ -674,16 +926,6 @@ mod tests {
         assert_eq!(FINALIZE_TO_STATUS, AgentRunStatus::Cancelled.value());
         assert_eq!(FINALIZE_ERROR, "runner revoked");
         assert_eq!(FINALIZE_ERROR_CODE, "runner_revoked");
-    }
-
-    #[test]
-    fn embedded_status_literals_match_their_owners() {
-        use pidash_db::runner_enroll::columns::enums::RUNNER_STATUS_REVOKED;
-        use pidash_types::runner_runs::AgentRunStatus;
-        assert!(MARK_RUNNER_REVOKED_SQL.contains(&format!("'{RUNNER_STATUS_REVOKED}'")));
-        assert_eq!(RUNNER_STATUS_REVOKED, "revoked");
-        assert!(PINNED_QUEUED_PODS_SQL.contains(&format!("'{}'", AgentRunStatus::Queued.value())));
-        assert!(UNPIN_QUEUED_RUNS_SQL.contains(&format!("'{}'", AgentRunStatus::Queued.value())));
     }
 
     #[test]
@@ -791,6 +1033,39 @@ mod tests {
         fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
             self.calls.push(Call::Cleanup(runner_id));
         }
+
+        async fn dedicated_issue_ids(
+            &mut self,
+            _runner_id: Uuid,
+        ) -> Result<Vec<Uuid>, RevokeError> {
+            Ok(Vec::new())
+        }
+
+        async fn apply_lost_runner(
+            &mut self,
+            _issue_id: Uuid,
+            _reason: &str,
+        ) -> Result<crate::domain::issue_assignment::LostRunnerOutcome, RevokeError> {
+            Ok(crate::domain::issue_assignment::LostRunnerOutcome::default())
+        }
+
+        fn bounce_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _runner_name: Option<&str>,
+            _reason: &str,
+            _triggered_by: &str,
+        ) {
+        }
+
+        fn recreate_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _pod_id: Uuid,
+            _trigger: &str,
+            _creator: Option<Uuid>,
+        ) {
+        }
     }
 
     fn uuid(n: u8) -> Uuid {
@@ -889,5 +1164,139 @@ mod tests {
         assert_eq!(outcome.stored_reason, "user_revoke");
         assert!(outcome.cancelled_run_ids.is_empty());
         assert!(outcome.drained_pod_ids.is_empty());
+    }
+
+    /// S1–S4 performers + finalize kernel against temp copies on one
+    /// transaction (`TxConn`): the cascade reads and writes land.
+    #[tokio::test]
+    async fn live_revoke_performers_on_temp_tables() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["runner", "agent_run"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        sqlx::query(
+            "CREATE TEMP TABLE agent_run_event (LIKE public.agent_run_event INCLUDING DEFAULTS INCLUDING IDENTITY) ON COMMIT DROP",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp table");
+        let (runner_id, pod_id, queued, running, pinned, terminal) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (owner, ws, creator) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let now = chrono::Utc::now();
+        sqlx::query(&format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{owner}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual')"
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("seed runner");
+        for (id, status, pinned_runner, assigned_at) in [
+            (queued, "queued", Some(runner_id), "now()"),
+            (running, "running", None, "now()"),
+            (pinned, "queued", Some(runner_id), "now()"),
+            (terminal, "completed", None, "NULL"),
+        ] {
+            let pinned_sql = pinned_runner.map_or("NULL".to_owned(), |p| format!("'{p}'"));
+            let runner_sql = if pinned_runner.is_some() {
+                let r = format!("'{runner_id}'");
+                r
+            } else if id == running {
+                format!("'{runner_id}'")
+            } else {
+                "NULL".to_owned()
+            };
+            sqlx::query(&format!(
+                "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, runner_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, pinned_runner_id) \
+                 VALUES ('{id}', '{status}', '', '{{}}', '{{}}', '', now(), {assigned_at}, '{ws}', {runner_sql}, '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', {pinned_sql})"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("seed agent_run");
+        }
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            // S1.
+            stamp_runner_revoked(&conn, runner_id, now, "manual_revoke")
+                .await
+                .expect("S1");
+            // S3 sees the two non-terminal runner runs (plus queued pinned
+            // runs are runner runs only when runner_id matches; the pinned
+            // unpinned-run with NULL runner is excluded).
+            let locked = lock_active_runs(&conn, runner_id).await.expect("S3");
+            let mut locked_ids: Vec<Uuid> = locked.iter().map(|(id, _)| *id).collect();
+            locked_ids.sort_unstable();
+            let mut want = vec![queued, running, pinned];
+            want.sort_unstable();
+            assert_eq!(locked_ids, want);
+            // S4a: queued runs pinned to the runner (queued + pinned).
+            let pinned_ids = pinned_queued_pod_ids(&conn, runner_id).await.expect("S4a");
+            assert_eq!(pinned_ids.len(), 2);
+            // Finalize lock: the queued run locks; the terminal run misses.
+            let run = lock_run_for_finalize(&conn, queued, None, None)
+                .await
+                .expect("lock")
+                .expect("row");
+            assert_eq!(run.status, "queued");
+            assert!(lock_run_for_finalize(&conn, terminal, None, None)
+                .await
+                .expect("lock")
+                .is_none());
+            // Finalize update writes status + ended_at.
+            let values = FinalizeValues {
+                clauses: vec![
+                    crate::runner_runs::SetClause {
+                        column: "status",
+                        value: crate::runner_runs::SetValue::Text("cancelled".to_owned()),
+                    },
+                    crate::runner_runs::SetClause {
+                        column: "ended_at",
+                        value: crate::runner_runs::SetValue::Now,
+                    },
+                ],
+            };
+            let rows = finalize_update(&conn, &values, queued, now)
+                .await
+                .expect("finalize");
+            assert_eq!(rows, 1);
+            // Terminal event is idempotent: insert once, exists + max seq.
+            assert!(!terminal_event_exists(&conn, queued).await.expect("exists"));
+            assert_eq!(
+                terminal_event_max_seq(&conn, queued).await.expect("max"),
+                None
+            );
+            let plan = plan_terminal_event(None, AgentRunStatus::Cancelled, "runner_revoked");
+            insert_terminal_event_orm(&conn, queued, plan, now)
+                .await
+                .expect("insert terminal");
+            assert!(terminal_event_exists(&conn, queued).await.expect("exists"));
+            assert_eq!(
+                terminal_event_max_seq(&conn, queued).await.expect("max"),
+                Some(1)
+            );
+            // S4b unpins every queued run pinned to the runner.
+            unpin_queued_runs_for_runner(&conn, runner_id)
+                .await
+                .expect("S4b");
+            assert!(pinned_queued_pod_ids(&conn, runner_id)
+                .await
+                .expect("S4a after")
+                .is_empty());
+        }
+        tx.rollback().await.expect("rollback");
     }
 }

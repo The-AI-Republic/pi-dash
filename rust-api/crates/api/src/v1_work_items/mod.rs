@@ -52,6 +52,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod auth_reads;
 pub mod handlers_actions;
 pub mod handlers_activity;
 pub mod handlers_core;
@@ -60,6 +61,7 @@ pub mod handlers_move_search;
 pub mod handlers_pr_links;
 pub mod handlers_relations;
 pub mod handlers_social;
+pub mod issue_reads;
 pub mod perms;
 pub mod routes;
 

@@ -33,6 +33,15 @@ import { specTags, specTitle } from "../helpers/tags";
 
 let serial = 0;
 
+/**
+ * The remove action's label. The rebuild names it "Remove this computer"
+ * (built-in engine design §11): it revokes both credentials and every
+ * runner, the built-in engine included. The old app keeps "Delete".
+ */
+function removeLabel(driver: ParityDriver): string {
+  return driver.target === "web_new" ? "Remove this computer" : "Delete";
+}
+
 function tag(prefix: string): string {
   serial += 1;
   return `dm183 ${prefix} ${Date.now()} ${serial}`;
@@ -117,26 +126,26 @@ test(
         const activeRow = await driver.devMachinesRowByName(activeLabel);
         expect(activeRow?.status).toBe("Active");
         expect(activeRow?.runners).toBe("1 active / 1 total");
-        expect(activeRow?.actions).toEqual(["Rotate", "Revoke", "Delete"]);
+        expect(activeRow?.actions).toEqual(["Rotate", "Revoke", removeLabel(driver)]);
         expect(activeRow?.lastHeartbeat).not.toBe("Never");
         expect(activeRow?.subline.startsWith("id ")).toBe(true);
 
         const offlineRow = await driver.devMachinesRowByName(offlineLabel);
         expect(offlineRow?.status).toBe("Offline");
         expect(offlineRow?.runners).toBe("0 active / 1 total");
-        expect(offlineRow?.actions).toEqual(["Rotate", "Revoke", "Delete"]);
+        expect(offlineRow?.actions).toEqual(["Rotate", "Revoke", removeLabel(driver)]);
         expect(offlineRow?.subline).toBe(offlineHost);
 
         const registeredRow = await driver.devMachinesRowByName(registeredLabel);
         expect(registeredRow?.status).toBe("Registered");
         expect(registeredRow?.runners).toBe("0 active / 0 total");
-        expect(registeredRow?.actions).toEqual(["Rotate", "Revoke", "Delete"]);
+        expect(registeredRow?.actions).toEqual(["Rotate", "Revoke", removeLabel(driver)]);
         expect(registeredRow?.lastSeen).toBe("Never");
         expect(registeredRow?.lastHeartbeat).toBe("Never");
 
         const revokedRow = await driver.devMachinesRowByName(revokedLabel);
         expect(revokedRow?.status).toBe("Revoked");
-        expect(revokedRow?.actions).toEqual(["Delete"]);
+        expect(revokedRow?.actions).toEqual([removeLabel(driver)]);
       });
 
       await test.step("the server list carries the same machines and counts", async () => {
@@ -373,7 +382,7 @@ test(
         await expect
           .poll(() => driver.devMachinesRowByName(label).then((row) => row?.status ?? null), { timeout: 15_000 })
           .toBe("Revoked");
-        expect((await driver.devMachinesRowByName(label))?.actions).toEqual(["Delete"]);
+        expect((await driver.devMachinesRowByName(label))?.actions).toEqual([removeLabel(driver)]);
       });
 
       await test.step("the machine, its tokens, runners and sessions are revoked", async () => {
@@ -493,12 +502,20 @@ test(
         await driver.devMachinesDeleteSpyStart();
         await driver.devMachinesOpenDelete(label);
         const modal = await driver.devMachinesModal();
-        expect(modal?.title).toContain("Delete");
-        expect(modal?.body).toContain("invalidated");
-        expect(modal?.body).toContain("torn down");
-        expect(modal?.body).toContain("disappears");
-        expect(modal?.body).toContain("does not uninstall");
-        expect(modal?.confirmLabel).toBe("Delete");
+        if (driver.target === "web_new") {
+          // The rebuild's copy names both credentials and the engine.
+          expect(modal?.title).toContain("Remove this computer");
+          expect(modal?.body).toContain("revokes both");
+          expect(modal?.body).toContain("built-in engine");
+          expect(modal?.body).toContain("Nothing is uninstalled");
+        } else {
+          expect(modal?.title).toContain("Delete");
+          expect(modal?.body).toContain("invalidated");
+          expect(modal?.body).toContain("torn down");
+          expect(modal?.body).toContain("disappears");
+          expect(modal?.body).toContain("does not uninstall");
+        }
+        expect(modal?.confirmLabel).toBe(removeLabel(driver));
       });
 
       await test.step("confirming removes the row with local teardown cascading", async () => {
