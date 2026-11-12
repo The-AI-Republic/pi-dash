@@ -9,15 +9,15 @@ These two interfaces replace the old file-swapping mechanisms (`desktop-overlay/
 ```ts
 export interface Platform {
   kind: "web" | "desktop";
-  fetch: typeof fetch; // desktop: Rust HTTP via invoke (desktop_http.rs)
-  stream(url: string, init?: StreamInit): EventStream; // SSE; desktop: desktop_api_stream
+  fetch: typeof fetch;                         // desktop: Rust HTTP via invoke (desktop_http.rs)
+  stream(url: string, init?: StreamInit): EventStream;  // SSE; desktop: desktop_api_stream
   openExternal(url: string): Promise<void>;
-  storage: KeyValueStore; // query cache persistence, UI prefs
+  storage: KeyValueStore;                      // query cache persistence, UI prefs
   onFocusChange(cb: (focused: boolean) => void): Unsubscribe;
-  window?: TitleBarApi; // drag region, traffic-light inset, fullscreen
-  menu?: MenuApi; // native menu → command registry
-  deepLinks?: DeepLinkApi; // pidash:// scheme
-  agentRuntime?: AgentRuntimeApi; // bundled runner / managed runner controls
+  window?: TitleBarApi;                        // drag region, traffic-light inset, fullscreen
+  menu?: MenuApi;                              // native menu → command registry
+  deepLinks?: DeepLinkApi;                     // pidash:// scheme
+  agentRuntime?: AgentRuntimeApi;              // bundled runner / managed runner controls
   updates?: UpdaterApi;
 }
 ```
@@ -39,16 +39,16 @@ export interface Platform {
 ```ts
 export interface Edition {
   id: "oss" | string;
-  routes?: RouteExtension[]; // extra route subtrees
+  routes?: RouteExtension[];          // extra route subtrees
   sidebar?: SidebarItem[];
   settingsSections?: SettingsSection[];
-  auth?: AuthProviderExtension[]; // extra sign-in methods
-  api?: ApiMiddleware[]; // e.g. token refresh
+  auth?: AuthProviderExtension[];     // extra sign-in methods
+  api?: ApiMiddleware[];              // e.g. token refresh
   flags: Record<string, boolean>;
-  slots?: Partial<SlotComponents>; // named UI slots, e.g. "issue.detail.sidebar.after"
+  slots?: Partial<SlotComponents>;    // named UI slots, e.g. "issue.detail.sidebar.after"
 }
 ```
 
 - OSS ships `oss.ts`. The cloud build in `private-pi-dash` provides its own module through a Vite alias for `@pidash/edition` only: one swap point with a typed contract.
-- Slots are a short, explicit list. Adding a slot is a design decision: note it in the PR and on the _Decisions_ page.
+- Slots are a short, explicit list. Adding a slot is a design decision: note it in the PR and on the *Decisions* page.
 - Cloud-edition parity rows come from `private-pi-dash/ee-overlay/apps/web` (home, docs, downloads, pricing, login, apps, profile tabs, billing).

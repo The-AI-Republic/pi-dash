@@ -10,7 +10,7 @@
 
 1. **No imports.** The new code imports nothing from the old frontend (components, utilities, types, styles). CI enforces this.
 2. **No copying.** No code, CSS, UI text, icons or assets are copied, and old files are not translated line by line into the new stack.
-3. **Reading is allowed.** Agents may read the old code and run the old app to learn _behavior_: what a screen does, validation rules, permissions, and which backend API calls it makes.
+3. **Reading is allowed.** Agents may read the old code and run the old app to learn *behavior*: what a screen does, validation rules, permissions, and which backend API calls it makes.
 4. **Spec step.** What is learned is written in prose in a per-area spec (behavior only, no code). New code is written from the spec and our own design documents.
 5. **Similarity check.** CI compares the new code with the old code token by token and fails any PR with a duplicated block of 50 tokens or more.
 6. **Records.** Specs, PRs, reviews and CI results are kept in git and in the issue tracker.

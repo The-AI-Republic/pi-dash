@@ -8,33 +8,33 @@ Parity is not judged by eye. It is defined by an **inventory** and proven by a *
 
 ## Areas
 
-| Area                                                                                                                                                                      | Old routes / source                                                                                     | Phase |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ----- |
-| Auth, sign-up, invitations, onboarding, create workspace                                                                                                                  | `accounts`, `auth`, `sign-up`, `invitations`, `workspace-invitations`, `onboarding`, `create-workspace` | 1     |
-| Workspace shell, home, projects list, command palette / Power K, search                                                                                                   | `(projects)/page`, `projects/(list)`, `power-k`, `command-palette`                                      | 1     |
-| Issues: list, board, spreadsheet, calendar, gantt; detail, peek, filters, display options, bulk edit, sub-issues, relations, links, attachments, reactions, subscriptions | `projects/…/issues`, `browse/[workItem]`                                                                | 1     |
-| Comments, activity, mentions                                                                                                                                              | issue detail                                                                                            | 1     |
-| Drafts                                                                                                                                                                    | `drafts`                                                                                                | 1     |
-| Runners, runs, approvals, runner chat, AI dev machines                                                                                                                    | `runners/*`, `ai-dev-machines`, project `runners`                                                       | 2     |
-| Schedulers, prompts, assistant                                                                                                                                            | `schedulers`, `prompts`, `assistant/*`, project `schedulers`                                            | 2     |
-| Notifications                                                                                                                                                             | `notifications`                                                                                         | 2     |
-| Desktop: agent runtime, bare sign-in, updater, deep links                                                                                                                 | `desktop-overlay/`, `apps/web/ce/components/desktop`                                                    | 2     |
-| Views (project and workspace)                                                                                                                                             | `views`, `workspace-views`                                                                              | 3     |
-| Archives                                                                                                                                                                  | `archives/*`                                                                                            | 3     |
-| Intake                                                                                                                                                                    | `intake`                                                                                                | 3     |
-| Cycles, active cycles                                                                                                                                                     | `cycles`, `active-cycles`                                                                               | 3     |
-| Modules                                                                                                                                                                   | `modules`                                                                                               | 3     |
-| Pages (collaborative documents)                                                                                                                                           | `pages`                                                                                                 | 3     |
-| Estimates                                                                                                                                                                 | project settings `estimates`                                                                            | 3     |
-| Analytics                                                                                                                                                                 | `analytics/[tabId]`                                                                                     | 3     |
-| Stickies                                                                                                                                                                  | `stickies`                                                                                              | 3     |
-| Exports (CSV, PDF)                                                                                                                                                        | `exporter`, settings `exports`                                                                          | 3     |
-| Project settings                                                                                                                                                          | `settings/projects/[projectId]/*`                                                                       | 3     |
-| Workspace settings (incl. billing, API tokens, webhooks, integrations)                                                                                                    | `settings/(workspace)/*`                                                                                | 3     |
-| Profile, account, appearance, notification preferences                                                                                                                    | `profile/[userId]`, `settings/account`, `settings/profile/*`                                            | 3     |
-| Cloud edition: home, docs, downloads, pricing, login, apps, profile tabs                                                                                                  | `ee-overlay/apps/web/app/**`                                                                            | 3     |
-| Instance admin (god-mode), as route subtree `/god-mode/*`                                                                                                                 | `apps/admin/**`, `ee-overlay/apps/admin/**`                                                             | 3     |
-| Public boards (space), as route subtree `/spaces/*`                                                                                                                       | `apps/space/**`                                                                                         | 3     |
+| Area | Old routes / source | Phase |
+|---|---|---|
+| Auth, sign-up, invitations, onboarding, create workspace | `accounts`, `auth`, `sign-up`, `invitations`, `workspace-invitations`, `onboarding`, `create-workspace` | 1 |
+| Workspace shell, home, projects list, command palette / Power K, search | `(projects)/page`, `projects/(list)`, `power-k`, `command-palette` | 1 |
+| Issues: list, board, spreadsheet, calendar, gantt; detail, peek, filters, display options, bulk edit, sub-issues, relations, links, attachments, reactions, subscriptions | `projects/…/issues`, `browse/[workItem]` | 1 |
+| Comments, activity, mentions | issue detail | 1 |
+| Drafts | `drafts` | 1 |
+| Runners, runs, approvals, runner chat, AI dev machines | `runners/*`, `ai-dev-machines`, project `runners` | 2 |
+| Schedulers, prompts, assistant | `schedulers`, `prompts`, `assistant/*`, project `schedulers` | 2 |
+| Notifications | `notifications` | 2 |
+| Desktop: agent runtime, bare sign-in, updater, deep links | `desktop-overlay/`, `apps/web/ce/components/desktop` | 2 |
+| Views (project and workspace) | `views`, `workspace-views` | 3 |
+| Archives | `archives/*` | 3 |
+| Intake | `intake` | 3 |
+| Cycles, active cycles | `cycles`, `active-cycles` | 3 |
+| Modules | `modules` | 3 |
+| Pages (collaborative documents) | `pages` | 3 |
+| Estimates | project settings `estimates` | 3 |
+| Analytics | `analytics/[tabId]` | 3 |
+| Stickies | `stickies` | 3 |
+| Exports (CSV, PDF) | `exporter`, settings `exports` | 3 |
+| Project settings | `settings/projects/[projectId]/*` | 3 |
+| Workspace settings (incl. billing, API tokens, webhooks, integrations) | `settings/(workspace)/*` | 3 |
+| Profile, account, appearance, notification preferences | `profile/[userId]`, `settings/account`, `settings/profile/*` | 3 |
+| Cloud edition: home, docs, downloads, pricing, login, apps, profile tabs | `ee-overlay/apps/web/app/**` | 3 |
+| Instance admin (god-mode), as route subtree `/god-mode/*` | `apps/admin/**`, `ee-overlay/apps/admin/**` | 3 |
+| Public boards (space), as route subtree `/spaces/*` | `apps/space/**` | 3 |
 
 `apps/admin` and `apps/space` are in scope (NEWFRONT-4). They become route subtrees of `apps/web_new` (`/god-mode/*`, `/spaces/*`) with their own layouts, lazy-loaded, web build only.
 
@@ -42,17 +42,17 @@ Parity is not judged by eye. It is defined by an **inventory** and proven by a *
 
 File: `.ai_design/new_frontend_implementation/parity/inventory/<area>.md`. One row per capability:
 
-| Field           | Example                                                           |
-| --------------- | ----------------------------------------------------------------- |
-| ID              | `ISS-042` (area prefix + number; never reused)                    |
-| Capability      | Bulk-change state of selected issues in list layout               |
-| Who             | member+, not guest                                                |
-| Edition         | oss / cloud / desktop / all                                       |
-| Old entry point | `projects/…/issues` list, selection bar                           |
-| API             | `POST /api/workspaces/{ws}/projects/{pid}/bulk-operation-issues/` |
-| Acceptance      | all selected issues move; activity entry per issue; list regroups |
-| Parity test     | `parity/issues/bulk-state.spec.ts`                                |
-| Status          | not started / oracle green / new green                            |
+| Field | Example |
+|---|---|
+| ID | `ISS-042` (area prefix + number; never reused) |
+| Capability | Bulk-change state of selected issues in list layout |
+| Who | member+, not guest |
+| Edition | oss / cloud / desktop / all |
+| Old entry point | `projects/…/issues` list, selection bar |
+| API | `POST /api/workspaces/{ws}/projects/{pid}/bulk-operation-issues/` |
+| Acceptance | all selected issues move; activity entry per issue; list regroups |
+| Parity test | `parity/issues/bulk-state.spec.ts` |
+| Status | not started / oracle green / new green |
 
 Build rows from the code **and** the running app. Give these their own rows; they are easy to miss:
 
@@ -85,17 +85,17 @@ Parity is the floor, not the ceiling. When a decision adds a capability the old 
 - Status `new (D<n>)` naming the decision, and a short "New features" note in the inventory file.
 - No oracle scenario (there is nothing to observe in the old app). Its scenarios run on `apps/web_new` only.
 
-Otherwise it is a normal row: it needs a slice, green scenarios, and it counts toward the area gate. Never add a `new` row without a decision on _Decisions and open questions_.
+Otherwise it is a normal row: it needs a slice, green scenarios, and it counts toward the area gate. Never add a `new` row without a decision on *Decisions and open questions*.
 
 Current new features: nested pages (D17, rows PAGE-084…090).
 
 ## Gates
 
-| Gate                                                      | Condition                                                                          |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| An area's implementation may start                        | its inventory is human-reviewed and its oracle scenarios are green on `apps/web`   |
-| An area's routes move to `apps/web_new` (Caddy / desktop) | 100% of the area's rows green on `apps/web_new`                                    |
-| Desktop switches to `apps/web_new`                        | all Phase 1–2 areas and all desktop rows green                                     |
-| `apps/web`, `apps/admin`, `apps/space` are removed        | 100% of all rows green for both editions and desktop, plus a human acceptance pass |
+| Gate | Condition |
+|---|---|
+| An area's implementation may start | its inventory is human-reviewed and its oracle scenarios are green on `apps/web` |
+| An area's routes move to `apps/web_new` (Caddy / desktop) | 100% of the area's rows green on `apps/web_new` |
+| Desktop switches to `apps/web_new` | all Phase 1–2 areas and all desktop rows green |
+| `apps/web`, `apps/admin`, `apps/space` are removed | 100% of all rows green for both editions and desktop, plus a human acceptance pass |
 
 An issue is Done only when every inventory row it names is green on `apps/web_new`.

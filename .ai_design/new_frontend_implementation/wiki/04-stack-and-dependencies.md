@@ -4,26 +4,26 @@
 
 ## Stack
 
-| Concern          | Choice                                              | Notes                                                                            |
-| ---------------- | --------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Build            | Vite                                                | static output; also bundled by Tauri                                             |
-| UI runtime       | React 19 + React Compiler                           | no manual `useMemo`/`useCallback` unless profiling shows a need                  |
-| Routing          | TanStack Router (file routes)                       | typed paths and validated search params                                          |
-| Server data      | TanStack Query                                      | the only way components get server data                                          |
-| Client state     | Zustand                                             | UI state only, one small store per feature                                       |
-| Styling          | Tailwind 4 + CSS variable tokens                    | tokens in `@pidash/kit`                                                          |
-| UI primitives    | Base UI                                             | the only headless primitive library                                              |
-| Positioning      | Floating UI (through Base UI)                       | no Popper, no tippy                                                              |
-| Lists and boards | TanStack Virtual                                    |                                                                                  |
-| Tables           | TanStack Table (headless)                           | only where a real table is needed                                                |
-| Drag and drop    | Atlassian pragmatic-drag-and-drop                   | lazy, per board                                                                  |
-| Forms            | react-hook-form + zod (`zod/mini` on runtime paths) |                                                                                  |
-| Dates            | date-fns                                            |                                                                                  |
-| Icons            | lucide-react, per-icon imports                      | no icon fonts                                                                    |
-| Rich text        | Tiptap                                              | lazy; see _UI kit and editor_                                                    |
-| Collaboration    | Yjs + `apps/live` (Hocuspocus)                      | lazy; pages only                                                                 |
-| Charts           | Recharts 3                                          | lazy only; wrap in our own components in `shared/charts`, colors from kit tokens |
-| Tests            | Vitest, Testing Library, Playwright                 |                                                                                  |
+| Concern | Choice | Notes |
+|---|---|---|
+| Build | Vite | static output; also bundled by Tauri |
+| UI runtime | React 19 + React Compiler | no manual `useMemo`/`useCallback` unless profiling shows a need |
+| Routing | TanStack Router (file routes) | typed paths and validated search params |
+| Server data | TanStack Query | the only way components get server data |
+| Client state | Zustand | UI state only, one small store per feature |
+| Styling | Tailwind 4 + CSS variable tokens | tokens in `@pidash/kit` |
+| UI primitives | Base UI | the only headless primitive library |
+| Positioning | Floating UI (through Base UI) | no Popper, no tippy |
+| Lists and boards | TanStack Virtual | |
+| Tables | TanStack Table (headless) | only where a real table is needed |
+| Drag and drop | Atlassian pragmatic-drag-and-drop | lazy, per board |
+| Forms | react-hook-form + zod (`zod/mini` on runtime paths) | |
+| Dates | date-fns | |
+| Icons | lucide-react, per-icon imports | no icon fonts |
+| Rich text | Tiptap | lazy; see *UI kit and editor* |
+| Collaboration | Yjs + `apps/live` (Hocuspocus) | lazy; pages only |
+| Charts | Recharts 3 | lazy only; wrap in our own components in `shared/charts`, colors from kit tokens |
+| Tests | Vitest, Testing Library, Playwright | |
 
 ## Rules
 

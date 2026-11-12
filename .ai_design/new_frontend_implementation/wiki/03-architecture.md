@@ -35,7 +35,7 @@ core/       api setup, query client, session, platform, edition, i18n, theme, te
 3. Only `core/api` performs network I/O. Components never call `fetch`.
 4. Only `core/platform` touches Tauri (`window.__TAURI__`, `invoke`).
 5. `@pidash/kit` has no Pi Dash domain knowledge: no API types, no queries.
-6. Nothing in the new trees imports the old frontend (see _Reference, not source_).
+6. Nothing in the new trees imports the old frontend (see *Reference, not source*).
 
 ## Directory layout
 
@@ -78,18 +78,18 @@ apps/web_new/e2e/parity/  parity scenarios and drivers
 
 ## What each old piece becomes
 
-| Old                                                          | New                                                             |
-| ------------------------------------------------------------ | --------------------------------------------------------------- |
-| React 18, React Router 7 framework mode                      | React 19 + Compiler, TanStack Router                            |
-| MobX root store (~30 stores built at startup)                | TanStack Query cache + URL search params + small Zustand stores |
-| SWR as a fetch trigger                                       | route loaders + `useQuery`                                      |
-| two axios `APIService` classes                               | one `fetch` client in `@pidash/api-client`                      |
-| `@pi-dash/ui` + `@pi-dash/propel`                            | `@pidash/kit`                                                   |
-| Base UI + Headless UI + Radix + Blueprint                    | Base UI only                                                    |
-| Popper + Floating UI + tippy                                 | Floating UI only (via Base UI)                                  |
-| Tiptap loaded widely                                         | Tiptap lazy-loaded for editing only                             |
-| lodash-es                                                    | native JS                                                       |
-| `ce/` alias, `ee-overlay/`, `desktop-overlay/` file swapping | `core/edition` and `core/platform` interfaces                   |
+| Old | New |
+|---|---|
+| React 18, React Router 7 framework mode | React 19 + Compiler, TanStack Router |
+| MobX root store (~30 stores built at startup) | TanStack Query cache + URL search params + small Zustand stores |
+| SWR as a fetch trigger | route loaders + `useQuery` |
+| two axios `APIService` classes | one `fetch` client in `@pidash/api-client` |
+| `@pi-dash/ui` + `@pi-dash/propel` | `@pidash/kit` |
+| Base UI + Headless UI + Radix + Blueprint | Base UI only |
+| Popper + Floating UI + tippy | Floating UI only (via Base UI) |
+| Tiptap loaded widely | Tiptap lazy-loaded for editing only |
+| lodash-es | native JS |
+| `ce/` alias, `ee-overlay/`, `desktop-overlay/` file swapping | `core/edition` and `core/platform` interfaces |
 
 ## One interaction, end to end
 

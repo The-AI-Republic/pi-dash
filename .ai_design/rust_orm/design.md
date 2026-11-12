@@ -20,15 +20,15 @@ The Rust port has no equivalent layer. `rust-api` uses sqlx 0.8 with hand-writte
 and sea-query 0.32 for dynamic statements. Write logic lives inside each handler, and
 every new caller copies it. Measured on `rust-dev` at `f7459d74c`:
 
-| Write                                       | Independent implementations            | Notes                                                                                                                                    |
-| ------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Issue create (`Issue.save()` create branch) | 8+                                     | app and v1 handlers, drafts, three intake paths, agent tool, git/GitHub sync, seed and demo data                                         |
-| "Next sequence id" rule alone               | 6                                      | `dispatch/tools.rs`, `assistant/tools_issues.rs`, `dummy_data.rs`, `models_user.rs`, `app_views_search/models.rs`, `handlers_project.rs` |
-| Issue comment insert                        | 7                                      | app, v1, space, runner lifecycle, agent tool, ticker bounce comment, git sync                                                            |
-| Issue move between projects                 | 2 near-identical `PoolMoveStore` impls | `app_issues/handlers_versions_move.rs`, `v1_work_items/handlers_move_search.rs`                                                          |
-| User signup                                 | 8 call sites                           | only 4 insert `user_notification_preferences`; GitHub, Google and Gitea OAuth signups do not                                             |
-| Workspace / project / member creation       | 3 / 4 / 10+                            | each re-calls the post-save effects by hand                                                                                              |
-| Activity / webhook task-name constants      | ~15 copies                             | one per services module plus api copies                                                                                                  |
+| Write | Independent implementations | Notes |
+|---|---|---|
+| Issue create (`Issue.save()` create branch) | 8+ | app and v1 handlers, drafts, three intake paths, agent tool, git/GitHub sync, seed and demo data |
+| "Next sequence id" rule alone | 6 | `dispatch/tools.rs`, `assistant/tools_issues.rs`, `dummy_data.rs`, `models_user.rs`, `app_views_search/models.rs`, `handlers_project.rs` |
+| Issue comment insert | 7 | app, v1, space, runner lifecycle, agent tool, ticker bounce comment, git sync |
+| Issue move between projects | 2 near-identical `PoolMoveStore` impls | `app_issues/handlers_versions_move.rs`, `v1_work_items/handlers_move_search.rs` |
+| User signup | 8 call sites | only 4 insert `user_notification_preferences`; GitHub, Google and Gitea OAuth signups do not |
+| Workspace / project / member creation | 3 / 4 / 10+ | each re-calls the post-save effects by hand |
+| Activity / webhook task-name constants | ~15 copies | one per services module plus api copies |
 
 Two consequences follow:
 
@@ -91,12 +91,12 @@ pub async fn create(ctx: &WriteCtx, txn: &mut WriteTxn, input: CreateIssue)
 
 **D4. Where each Django behaviour lives.**
 
-| Django mechanism                                                | Rust home                                                        | Examples                                                                                                             |
-| --------------------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `Model.save()` override, row-local and in-transaction           | `ActiveModelBehavior::before_save`                               | issue `sequence_id` + `issue_sequences` row, `sort_order`, default state, `completed_at`, `description_stripped`     |
-| `post_save` receiver that only writes rows                      | `ActiveModelBehavior::after_save` (same transaction)             | `user_notification_preferences` for non-bot users, built-in scheduler seeding on workspace create                    |
-| Effects that need request context or must run after commit      | the domain service, queued on `WriteTxn`'s after-commit list     | issue/model activity and webhook jobs, notifications, orchestration state transition, completion comment, pod drains |
-| `QuerySet.update()` / bulk writes (no signals in Django either) | service functions that use `update_many` or sea-query explicitly | bulk dates, archive sweeps                                                                                           |
+| Django mechanism | Rust home | Examples |
+|---|---|---|
+| `Model.save()` override, row-local and in-transaction | `ActiveModelBehavior::before_save` | issue `sequence_id` + `issue_sequences` row, `sort_order`, default state, `completed_at`, `description_stripped` |
+| `post_save` receiver that only writes rows | `ActiveModelBehavior::after_save` (same transaction) | `user_notification_preferences` for non-bot users, built-in scheduler seeding on workspace create |
+| Effects that need request context or must run after commit | the domain service, queued on `WriteTxn`'s after-commit list | issue/model activity and webhook jobs, notifications, orchestration state transition, completion comment, pod drains |
+| `QuerySet.update()` / bulk writes (no signals in Django either) | service functions that use `update_many` or sea-query explicitly | bulk dates, archive sweeps |
 
 SeaORM runs the hooks only through `ActiveModelTrait::insert`, `update` and `save`
 (verified in 1.1.20 `entity/active_model.rs`). `Entity::insert(..).exec`,
@@ -115,7 +115,7 @@ domain write runs on the SeaORM `DatabaseTransaction`:
 - entity calls directly;
 - existing sea-query builders through `txn.execute(DbBackend::Postgres.build(&stmt))`;
 - the remaining raw SQL (advisory locks such as `pg_advisory_xact_lock`, `SELECT … FOR
-UPDATE`, existing SQL constants) through `Statement::from_sql_and_values`.
+  UPDATE`, existing SQL constants) through `Statement::from_sql_and_values`.
 
 Shared helpers that take `&mut PgConnection` today gain a `ConnectionTrait` variant when
 a service needs them. Reads stay on sqlx.
@@ -165,16 +165,16 @@ fragments.
 
 ## 4. Covered tables (stage-8 scope)
 
-| Aggregate            | Tables                                                                                      | Operations                                                                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `domain::issues`     | `issues`, `issue_sequences`, `issue_assignees` (fallback assignee), `issues.workpad` column | create, update (full and partial), state change, archive/unarchive, workpad set, move between projects                               |
-| `domain::comments`   | `issue_comments`, `descriptions`                                                            | create, update (with Description sync), soft delete                                                                                  |
-| `domain::relations`  | `issue_relations`                                                                           | get-or-create, soft delete                                                                                                           |
-| `domain::identity`   | `users`, `profiles`, `accounts`, `user_notification_preferences`                            | create user (signup, admin, OAuth, federation-style provisioning), update profile and user fields, account upsert and token rotation |
-| `domain::workspaces` | `workspaces`, `workspace_members`                                                           | create (with built-in schedulers), rename, add/update/deactivate member                                                              |
-| `domain::projects`   | `projects`, `project_members`, `states`                                                     | create (default states, admin member, model activity), add/update/deactivate member, create state                                    |
-| `domain::tokens`     | `api_tokens`, `machine_token`, `runner_session`                                             | issue API key, touch last-used, revoke                                                                                               |
-| `domain::assistant`  | `assistant_user_llm_config`, `assistant_message`                                            | config CRUD and verify stamp, message create and finalize                                                                            |
+| Aggregate | Tables | Operations |
+|---|---|---|
+| `domain::issues` | `issues`, `issue_sequences`, `issue_assignees` (fallback assignee), `issues.workpad` column | create, update (full and partial), state change, archive/unarchive, workpad set, move between projects |
+| `domain::comments` | `issue_comments`, `descriptions` | create, update (with Description sync), soft delete |
+| `domain::relations` | `issue_relations` | get-or-create, soft delete |
+| `domain::identity` | `users`, `profiles`, `accounts`, `user_notification_preferences` | create user (signup, admin, OAuth, federation-style provisioning), update profile and user fields, account upsert and token rotation |
+| `domain::workspaces` | `workspaces`, `workspace_members` | create (with built-in schedulers), rename, add/update/deactivate member |
+| `domain::projects` | `projects`, `project_members`, `states` | create (default states, admin member, model activity), add/update/deactivate member, create state |
+| `domain::tokens` | `api_tokens`, `machine_token`, `runner_session` | issue API key, touch last-used, revoke |
+| `domain::assistant` | `assistant_user_llm_config`, `assistant_message` | config CRUD and verify stamp, message create and finalize |
 
 Seed and demo-data writers (`workspace_seed.rs`, `dummy_data.rs`) migrate last. They
 may keep bulk inserts, but they must reach the same rows as the services.
@@ -213,13 +213,13 @@ the write itself.
 
 ## 7. Risks
 
-| Risk                                                                                                                              | Mitigation                                                                                                               |
-| --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Django defaults are Python code, not DB defaults (`sequence_id`, `sort_order`, `created_by` from middleware, soft-delete filters) | Hooks reproduce them with Python file:line citations; contract suites on both binaries are the gate                      |
-| Consolidation silently changes one caller's behaviour                                                                             | §D6 classification; each migration PR runs every contract suite whose routes it touches, on the OSS and overlay binaries |
-| Transaction split between sqlx and SeaORM code                                                                                    | §D5: the whole domain write runs on the SeaORM transaction; review rejects mixed-transaction code                        |
-| Generated entities drift after a Django sync                                                                                      | parity test fails; regeneration is part of the re-sync issue                                                             |
-| Compile time                                                                                                                      | SeaORM 1.1 shares sqlx/sea-query with the workspace; entities only for §4 tables                                         |
+| Risk | Mitigation |
+|---|---|
+| Django defaults are Python code, not DB defaults (`sequence_id`, `sort_order`, `created_by` from middleware, soft-delete filters) | Hooks reproduce them with Python file:line citations; contract suites on both binaries are the gate |
+| Consolidation silently changes one caller's behaviour | §D6 classification; each migration PR runs every contract suite whose routes it touches, on the OSS and overlay binaries |
+| Transaction split between sqlx and SeaORM code | §D5: the whole domain write runs on the SeaORM transaction; review rejects mixed-transaction code |
+| Generated entities drift after a Django sync | parity test fails; regeneration is part of the re-sync issue |
+| Compile time | SeaORM 1.1 shares sqlx/sea-query with the workspace; entities only for §4 tables |
 
 ## 8. Units (filed as stage-8 issues under PIDASHCONV-1)
 
@@ -227,16 +227,16 @@ Consolidated from 15 to 8 issues on 2026-10-26. Each surviving issue lists its
 absorbed units as numbered parts. The cancelled issues (PIDASHCONV-1522, 1523,
 1524, 1526, 1531, 1532, 1533) point at the issue that now holds their scope.
 
-| Unit                 | Issue           | Repo    | Summary                                                                                                                                                                                                     | Blocked by                                     |
-| -------------------- | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| ORM-01               | PIDASHCONV-1519 | OSS     | SeaORM dependency, `DatabaseConnection` on `AppState`/worker ctx, entities for §4 tables, parity test                                                                                                       | —                                              |
-| ORM-02 (+08)         | PIDASHCONV-1520 | OSS     | `domain` framework: `WriteCtx`, `WriteTxn`, `DomainError`, `run()`, one activity/webhook enqueue module, public issue transition; plus `domain::tokens` and `domain::assistant` with their writers migrated | ORM-01                                         |
-| ORM-03 (+04, 05, 06) | PIDASHCONV-1521 | OSS     | `domain::issues` (create/update/state/archive/workpad, `move_to_project` with one `MoveStore`), `domain::comments`, `domain::relations`; migrate every issue, move, comment and relation writer             | ORM-02                                         |
-| ORM-07               | PIDASHCONV-1525 | OSS     | `domain::identity`, `domain::workspaces`, `domain::projects`; migrate signups, admin, ops, invites, project/state create                                                                                    | ORM-02                                         |
-| ORM-09               | PIDASHCONV-1527 | OSS     | write guard (ratchet) + allowlist + workflow                                                                                                                                                                | —                                              |
-| ORM-10               | PIDASHCONV-1528 | OSS     | Rust bug: GitHub/Google/Gitea OAuth signups skip `user_notification_preferences`                                                                                                                            | —                                              |
-| ORM-11               | PIDASHCONV-1529 | overlay | overlay write guard (ratchet)                                                                                                                                                                               | —                                              |
-| ORM-12 (+13, 14, 15) | PIDASHCONV-1530 | overlay | move every overlay write to OSS-owned tables onto `domain`, then the gate (§9): both allowlists empty, Porting guide updated                                                                                | ORM-02, ORM-03, ORM-07, ORM-09, ORM-10, ORM-11 |
+| Unit | Issue | Repo | Summary | Blocked by |
+|---|---|---|---|---|
+| ORM-01 | PIDASHCONV-1519 | OSS | SeaORM dependency, `DatabaseConnection` on `AppState`/worker ctx, entities for §4 tables, parity test | — |
+| ORM-02 (+08) | PIDASHCONV-1520 | OSS | `domain` framework: `WriteCtx`, `WriteTxn`, `DomainError`, `run()`, one activity/webhook enqueue module, public issue transition; plus `domain::tokens` and `domain::assistant` with their writers migrated | ORM-01 |
+| ORM-03 (+04, 05, 06) | PIDASHCONV-1521 | OSS | `domain::issues` (create/update/state/archive/workpad, `move_to_project` with one `MoveStore`), `domain::comments`, `domain::relations`; migrate every issue, move, comment and relation writer | ORM-02 |
+| ORM-07 | PIDASHCONV-1525 | OSS | `domain::identity`, `domain::workspaces`, `domain::projects`; migrate signups, admin, ops, invites, project/state create | ORM-02 |
+| ORM-09 | PIDASHCONV-1527 | OSS | write guard (ratchet) + allowlist + workflow | — |
+| ORM-10 | PIDASHCONV-1528 | OSS | Rust bug: GitHub/Google/Gitea OAuth signups skip `user_notification_preferences` | — |
+| ORM-11 | PIDASHCONV-1529 | overlay | overlay write guard (ratchet) | — |
+| ORM-12 (+13, 14, 15) | PIDASHCONV-1530 | overlay | move every overlay write to OSS-owned tables onto `domain`, then the gate (§9): both allowlists empty, Porting guide updated | ORM-02, ORM-03, ORM-07, ORM-09, ORM-10, ORM-11 |
 
 Each OSS domain issue makes the SQL constants it replaces `pub(crate)` or
 private in its own PR (§D8). The overlay pins its OSS commit, so this cannot

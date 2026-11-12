@@ -48,12 +48,12 @@ Every implementation issue follows these steps:
 2. **Spec:** update `parity/specs/<area>.md` with the behavior in your own words, citing inventory IDs. No code in specs, except API paths and field names.
 3. **Write** the new code from the spec, the wiki pages and the kit. Do not have old files open while writing new ones.
 
-API shapes: if you learn an endpoint's shape from old code, write it as a contract in `@pidash/api-client` (see _Data layer_), not as ported code.
+API shapes: if you learn an endpoint's shape from old code, write it as a contract in `@pidash/api-client` (see *Data layer*), not as ported code.
 
 ## Enforcement (CI; never weaken, skip or work around)
 
 - **Import ban lint:** any import from the old frontend fails.
-- **Similarity check:** a token-based duplicate detector compares the new trees with the old frontend. A duplicated block of ≥ 50 tokens fails the build. The threshold is set during Phase 0; see _Decisions and open questions_.
+- **Similarity check:** a token-based duplicate detector compares the new trees with the old frontend. A duplicated block of ≥ 50 tokens fails the build. The threshold is set during Phase 0; see *Decisions and open questions*.
 - **License header check:** every new file carries the new header; no new file carries the old `SPDX-License-Identifier: AGPL-3.0-only` header.
 - **Review:** the reviewer compares the diff with the old files the spec cites and rejects anything that looks translated rather than written.
 
