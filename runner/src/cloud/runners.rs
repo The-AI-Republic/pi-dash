@@ -22,6 +22,7 @@ pub enum RunnerCrudError {
 #[derive(Debug, Deserialize)]
 struct ErrorBody {
     error: Option<String>,
+    detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +115,40 @@ pub async fn delete_runner(
     Ok(())
 }
 
+/// Revoke a runner without deleting its row or history. The daemon keeps
+/// the task folder when it removes the engine's local block afterwards.
+pub async fn revoke_runner(cloud_url: &str, machine_token: &str, runner_id: &Uuid) -> Result<()> {
+    let url = format!(
+        "{}/api/v1/runner/runners/{runner_id}/",
+        cloud_url.trim_end_matches('/')
+    );
+    let resp = http_client()?
+        .post(&url)
+        .bearer_auth(machine_token)
+        .header("X-Runner-Id", runner_id.to_string())
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    // A retry after a completed revoke can no longer authenticate as the
+    // runner. Other authentication failures still need a sign-in.
+    if status == reqwest::StatusCode::UNAUTHORIZED
+        && serde_json::from_str::<ErrorBody>(&body).is_ok_and(|error| {
+            matches!(
+                error.error.or(error.detail).as_deref(),
+                Some("runner_revoked" | "runner_gone")
+            )
+        })
+    {
+        return Ok(());
+    }
+    anyhow::bail!("revoke-runner failed: HTTP {status}: {body}");
+}
+
 /// Probe the cloud's `/api/v1/runner/health/` endpoint with a short
 /// timeout. Used by `pidash runner remove` to decide whether to take
 /// the cascade path (B1) or the local-only path (B2) when the user
@@ -165,6 +200,29 @@ fn http_client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn revoke_retains_the_cloud_row_and_only_accepts_confirmed_retries() {
+        for (status, body, success) in [
+            (204, "", true),
+            (401, r#"{"detail":"runner_revoked"}"#, true),
+            (401, r#"{"detail":"machine_token_expired"}"#, false),
+            (500, r#"{"error":"unavailable"}"#, false),
+        ] {
+            let handler: crate::engine::test_server::Handler = std::sync::Arc::new(move |req| {
+                assert_eq!(req.method, "POST");
+                assert_eq!(req.bearer(), Some("mt_machine"));
+                (status, body.to_string())
+            });
+            let server = crate::engine::test_server::start(handler).await;
+            assert_eq!(
+                revoke_runner(&server.url, "mt_machine", &Uuid::new_v4())
+                    .await
+                    .is_ok(),
+                success
+            );
+        }
+    }
 
     #[test]
     fn classify_409_runner_name_taken_maps_to_name_taken() {

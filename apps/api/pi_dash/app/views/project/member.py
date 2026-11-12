@@ -206,19 +206,20 @@ class ProjectMemberViewSet(BaseViewSet):
     def partial_update(self, request, slug, project_id, pk):
         project_member = ProjectMember.objects.get(pk=pk, workspace__slug=slug, project_id=project_id, is_active=True)
 
-        # Fetch the workspace role of the project member
-        workspace_role = WorkspaceMember.objects.get(
+        # Fetch the workspace role of the project member (the target of this write)
+        target_workspace_role = WorkspaceMember.objects.get(
             workspace__slug=slug, member=project_member.member, is_active=True
         ).role
-        is_target_workspace_admin = workspace_role == ROLE.ADMIN.value
+        is_target_workspace_admin = target_workspace_role == ROLE.ADMIN.value
 
-        # Fetch the workspace role of the requesting user: only this can bypass the guards below
-        is_requester_workspace_admin = (
-            WorkspaceMember.objects.get(workspace__slug=slug, member=request.user, is_active=True).role
-            == ROLE.ADMIN.value
-        )
+        # The requester's own workspace standing drives the bypass below; it is
+        # never derived from the target (NEWFRONT-1037, PDASHOSS01-328).
+        requester_workspace_role = WorkspaceMember.objects.get(
+            workspace__slug=slug, member=request.user, is_active=True
+        ).role
+        is_requester_workspace_admin = requester_workspace_role == ROLE.ADMIN.value
 
-        # Check if the user is not editing their own role if they are not an admin
+        # Check if the user is not editing their own role if they are not a workspace admin
         if request.user.id == project_member.member_id and not is_requester_workspace_admin:
             return Response(
                 {"error": "You cannot update your own role"},
@@ -233,7 +234,8 @@ class ProjectMemberViewSet(BaseViewSet):
         )
 
         if "role" in request.data:
-            # Nobody else can modify the role of a workspace admin
+            # Nobody may change another workspace admin's project role, whatever
+            # their own standing (NEWFRONT-1037, PDASHOSS01-328).
             if is_target_workspace_admin and request.user.id != project_member.member_id:
                 return Response(
                     {"error": "You cannot update the role of a workspace admin"},
@@ -264,7 +266,7 @@ class ProjectMemberViewSet(BaseViewSet):
                 )
 
             # Cannot assign a role higher than the target's workspace role
-            if workspace_role in [5] and new_role in [15, 20]:
+            if target_workspace_role in [5] and new_role in [15, 20]:
                 return Response(
                     {"error": "You cannot add a user with role higher than the workspace role"},
                     status=status.HTTP_400_BAD_REQUEST,

@@ -1,0 +1,95 @@
+[package]
+name = "pidash-jobs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
+pidash-compat = { path = "../compat" }
+pidash-db = { path = "../db" }
+# Version-task flows call the D-09 decision layer (api-crate precedent).
+pidash-services = { path = "../services" }
+# Expiry-task S3 deletes (PIDASHCONV-858): the one shared SigV4 signer
+# (offline builders; the handler executes with the reqwest pin below).
+# Same locked hmac/sha2/thiserror as the workspace (no lock churn).
+# Export uploads sign through the shared SigV4 crate (PIDASHCONV-1106),
+# never a local signer (same pin as pidash-api/db: no new downloads).
+pidash-storage = { path = "../storage" }
+# OVL-16 (PIDASHCONV-1660): `hooks::HookDeps::operation_deps` takes the
+# SeaORM connection the domain writes run on. Identical spec to
+# pidash-services (locked sea-orm 1.1.20 — no lock churn).
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+rrule = { version = "0.14", features = ["exrule", "by-easter"] }
+thiserror = "2"
+rand = "0.9"
+tokio = { version = "1.53.1", features = ["time", "sync", "macros", "rt-multi-thread", "net", "io-util"] }
+tracing = "0.1.44"
+# D-07 tasks_mail (PIDASHCONV-216): template render (Django `{{ var }}`
+# interpolation only) + plain-text regexes + the smtplib-faithful SMTP
+# conversation (implicit TLS + STARTTLS). minijinja is the one new download;
+# every other pin below was already in the lockfile via pidash-api/db.
+minijinja = "2"
+# Live mail seams (PIDASHCONV-865): the send task's Redis lock + base_api
+# GET run over the same async client + TLS features as pidash-db (no new
+# lockfile packages; the sync trait methods bridge via block_in_place).
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
+regex = "1"
+base64 = "0.22"
+# tasks_mail header encoding (PIDASHCONV-1286): per-label IDNA for
+# address domains (same locked idna 1.x as pidash-services/api, no new
+# downloads).
+idna = "1"
+hmac = "0.12.1"
+md-5 = "0.10.6"
+# `ring`, not the default `aws-lc-rs`: ring is already vendored (reqwest),
+# so no C-build chain enters the lockfile for the SMTP TLS paths.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.5"
+webpki-roots = "1.0.9"
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
+# D-08 sinks: PostHog `/batch/` POST (same TLS stack as pidash-api: rustls
+# with bundled roots, no system TLS dependency in CI) + BSON document
+# build for the mongo log path (shares the locked bson via mongodb);
+# D-08 link crawler live HTTPS adapter adds `blocking` (redirects off; the
+# pure redirect loop in pidash-services owns hop validation).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+bson = "2"
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
+crc32fast = { version = "1" }
+# D-08 webhook send (PIDASHCONV-1105): gzip/deflate Content-Encoding decode
+# (requests always sends `Accept-Encoding: gzip, deflate`; urllib3 decodes).
+# Same `flate2 = "1"` pin pidash-auth builds on: no new downloads.
+flate2 = "1"
+# D-05 git sync (PIDASHCONV-147): the nh3 sanitizer in `_safe_render`
+# (`utils/content_validator.py`) is Python bindings for ammonia, so the same
+# engine with the transcribed allowlist renders byte-identical output.
+ammonia = "4"
+# D-05 git sync (PIDASHCONV-147): GitHub App installation-token mint
+# (`utils/github_app_auth.py`, RS256 app JWT).
+jsonwebtoken = "9"
+sha2 = "0.10"
+# Sibling D-10 (tasks_ticker/fire_tick) pins rand 0.8 while dummy_data
+# (PIDASHCONV-191) needs rand 0.9 APIs (`random_range`, `from_os_rng`):
+# keep both via an alias rather than dropping either side.
+rand08 = { package = "rand", version = "0.8" }
+# OSS worker composition (PIDASHCONV-918, moved from pidash-api-bin):
+# the agent loop's concurrent tool-call polling (`FuturesUnordered`).
+# The moved runner seams and `OriginRedis` share the `redis` pin above
+# (PIDASHCONV-865: same version + TLS features, no second entry).
+# Same locked futures-util 0.3.x the binary builds on (no new
+# downloads). uuid gains v7 above for the agent loop's `uuid7()`
+# run/conversation ids. The `std` feature is only for
+# `FutureExt::catch_unwind` (PIDASHCONV-1327); it pulls alloc +
+# futures-core/std + futures-task/std + slab/std, all already locked.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+sqlparser = "0.63.0"
+# The moved model-runtime tests assert HTTP types via axum's re-export
+# (same locked axum 0.8.x as the workspace, no new downloads).
+axum = "0.8"

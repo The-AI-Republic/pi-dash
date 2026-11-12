@@ -1,0 +1,303 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "PIDASHCONV-789 signing goldens",
+  "_method": "botocore 1.34.162 generate_presigned_url('get_object') / generate_presigned_post under freezegun 2026-10-05T02:56:16Z; key dummy789key, secret dummy789secret, object ws-id/hexhex-f.pdf, disposition \"attachment; filename*=UTF-8''f.pdf\", expires 3600; POST fields/conditions replicate the S3Storage wrapper, whose file_size_limit is min(size, FILE_SIZE_LIMIT) = 10 here (content-length-range 1..10).",
+  "_source": "apps/api/pi_dash/settings/storage.py:66-113 (generate_presigned_url/generate_presigned_post wrappers) + botocore/signers.py, botocore/data/s3/*/endpoint-rule-set-1.json, botocore/data/partitions.json, botocore/handlers.py:validate_bucket_name",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_inputs": {
+    "frozen_instant": "2026-10-05T02:56:16Z",
+    "access_key_id": "dummy789key",
+    "secret_access_key": "dummy789secret",
+    "object_name": "ws-id/hexhex-f.pdf",
+    "disposition": "attachment; filename*=UTF-8''f.pdf",
+    "expires_in": 3600,
+    "post_file_size": 10,
+    "post_file_type": "application/pdf"
+  },
+  "get": [
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=26625815afe901b3d1f9742116ee5a92eaff269ee897c8e6c6147ac775a289a7"
+    },
+    {
+      "region": "eu-west-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Feu-west-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=cb488da4442144a330e4cc817ff85a0b8714af53e28092381f13b7165d488a7a"
+    },
+    {
+      "region": "cn-north-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.cn-north-1.amazonaws.com.cn/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fcn-north-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=e977f1ac6b3a548025659d2325f135d02da61469e8b892cd4e274425ea5fd535"
+    },
+    {
+      "region": "us-gov-west-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.us-gov-west-1.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-gov-west-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ac65db50af1316528f102a6cbe4649529d0d4741ca3319157f8bf3f8faa84f78"
+    },
+    {
+      "region": "us-iso-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.us-iso-east-1.c2s.ic.gov/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-iso-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=7f458263a598d7fc23a5343cc5a34eaf54677fae58cc4d9d24a3c845d7859e98"
+    },
+    {
+      "region": "us-isob-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.us-isob-east-1.sc2s.sgov.gov/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-isob-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=929ce3a6470b11e4f8d76aa7a349ab9591439d13e087dba5bb120be6e42289cd"
+    },
+    {
+      "region": "us-isof-south-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.us-isof-south-1.csp.hci.ic.gov/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-isof-south-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=3d9c97748071bc61a44942e952fe689c28b8e02791f729f313e0164598c0db84"
+    },
+    {
+      "region": "eu-isoe-west-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.eu-isoe-west-1.cloud.adc-e.uk/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Feu-isoe-west-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=b8bfaf2858653cfd3954e4eaeb82b6cb764f2922a39bb1febb72344de7ef9ccc"
+    },
+    {
+      "region": "xx-foo-1",
+      "bucket": "dummy789bucket",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fxx-foo-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ed1760d8bed46dfb72ca8378aeb60a796c730f331861d96be324553e8a69bcd0"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "with.dots",
+      "endpoint": null,
+      "url": "https://s3.amazonaws.com/with.dots/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=760385d8e9a9297161c644c2179b1b07fe8b09b69b785eff776ab9b9fc6fdc14"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "with_underscores",
+      "endpoint": null,
+      "url": "https://s3.amazonaws.com/with_underscores/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=dbd4bbfaf7aae248380a30b46d88f43e5001f825912a2ba53d9fb4e475babb1d"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "UPPER",
+      "endpoint": null,
+      "url": "https://s3.amazonaws.com/UPPER/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=a0dc6d9c9e246d42715feb4940cf0af3c31e0774db739f8a65df4fa34247ed28"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "abc",
+      "endpoint": null,
+      "url": "https://abc.s3.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=0382b40a336411fe8c45080697459506fe5b8d0294e4220a1e4a654668d3c251"
+    },
+    {
+      "region": "cn-north-1",
+      "bucket": "with.dots",
+      "endpoint": null,
+      "url": "https://s3.cn-north-1.amazonaws.com.cn/with.dots/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fcn-north-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=f3515de40b93aaa19105a4956d33968d7248de3d5c63f0005c9ebfa50244c6f8"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://custom:9000/base/path",
+      "url": "http://custom:9000/base/path/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=1cb54db333b96c0f9cd999cef4a748a559f83443856f7858b3094e714be9232f"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://CUSTOM:9000",
+      "url": "http://CUSTOM:9000/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ad2d5c920e5c117fcac7e086fd6c8bde851fe5bd533508e0de13b0262e57e58b"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://custom:80",
+      "url": "http://custom:80/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=13cb5b02536f86b4a2e4f0a022ed679ea0e9a217b1756ec1c32a59995a06e463"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "HTTP://custom:9000",
+      "url": "http://custom:9000/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ad2d5c920e5c117fcac7e086fd6c8bde851fe5bd533508e0de13b0262e57e58b"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://custom:9000/x#frag",
+      "url": "http://custom:9000/x/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=e9617c873c85fb6be6eb838d889176c1a2682fa81f8ee8275b619748992bbf74"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://user@[::1]:9000",
+      "url": "http://user@[::1]:9000/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=63c5f39d773a7cf2ecc32256f4463b762c29470f5e6c406af9bca360198af3d6"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://[::1]:9000/b",
+      "url": "http://[::1]:9000/b/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ea34482cafb361eec3b9c216f108a9eabe8a9e367ae2ee841925bffad73031ba"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://custom:/",
+      "url": "http://custom:/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=13cb5b02536f86b4a2e4f0a022ed679ea0e9a217b1756ec1c32a59995a06e463"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://custom:00080",
+      "url": "http://custom:00080/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=13cb5b02536f86b4a2e4f0a022ed679ea0e9a217b1756ec1c32a59995a06e463"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://custom./",
+      "url": "http://custom./dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=81d5ffcadf9170db09bcb8fad130da7f82757180902c119c5f865111e1ab2609"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://h/b ase",
+      "url": "http://h/b%20ase/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=60f7ec9076812687a53f70026c27754d96d2bbdfcea532cf30378cdff6753790"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://h/a/../b",
+      "url": "http://h/b/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=925e8b25b1cbc6b57c8906ff43cb7d39db39a2dd3d9908080f1c319d5bb26e59"
+    },
+    {
+      "region": "cn-north-1",
+      "bucket": "dummy789bucket",
+      "endpoint": "https://CUSTOM:443/x",
+      "url": "https://CUSTOM:443/x/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fcn-north-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=4f16f1d9dbdd3c808f00abaffbbea0ce22c089a8562699b100fea38f6fa20b31"
+    },
+    {
+      "region": "",
+      "bucket": "dummy789bucket",
+      "endpoint": "http://h:9000",
+      "url": "http://h:9000/dummy789bucket/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2F%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=29305db8f0b2c95ad3b88b834cfbef4b1173dffa754f34c64a28402c2927e4de"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "a\n",
+      "endpoint": null,
+      "url": "https://s3.amazonaws.com/a%0A/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=f328d6b0cb3abe22063595bc6115708c3e9b77615e893c2b7317db8f24829290"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "ab\n",
+      "endpoint": null,
+      "url": "https://ab.s3.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=b1843bd2609263fa2e2580a5d3e5d5833ccd964b8f9c6d73070978b9e86676ac"
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "abc\n",
+      "endpoint": null,
+      "url": "https://abc.s3.amazonaws.com/ws-id/hexhex-f.pdf?response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27f.pdf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=dummy789key%2F20261005%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261005T025616Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=0382b40a336411fe8c45080697459506fe5b8d0294e4220a1e4a654668d3c251"
+    }
+  ],
+  "post": [
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "key": "ws-id/hexhex-f.pdf",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.amazonaws.com/",
+      "fields": {
+        "Content-Type": "application/pdf",
+        "key": "ws-id/hexhex-f.pdf",
+        "x-amz-algorithm": "AWS4-HMAC-SHA256",
+        "x-amz-credential": "dummy789key/20261005/us-east-1/s3/aws4_request",
+        "x-amz-date": "20261005T025616Z",
+        "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDVUMDM6NTY6MTZaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAiZHVtbXk3ODlidWNrZXQifSwgWyJjb250ZW50LWxlbmd0aC1yYW5nZSIsIDEsIDEwXSwgeyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vcGRmIn0sIHsia2V5IjogIndzLWlkL2hleGhleC1mLnBkZiJ9LCB7ImJ1Y2tldCI6ICJkdW1teTc4OWJ1Y2tldCJ9LCB7ImtleSI6ICJ3cy1pZC9oZXhoZXgtZi5wZGYifSwgeyJ4LWFtei1hbGdvcml0aG0iOiAiQVdTNC1ITUFDLVNIQTI1NiJ9LCB7IngtYW16LWNyZWRlbnRpYWwiOiAiZHVtbXk3ODlrZXkvMjAyNjEwMDUvdXMtZWFzdC0xL3MzL2F3czRfcmVxdWVzdCJ9LCB7IngtYW16LWRhdGUiOiAiMjAyNjEwMDVUMDI1NjE2WiJ9XX0=",
+        "x-amz-signature": "981b56c720efb8812e064204fd8da141b98ea8c97cf47add4c04cdeb2348f44e"
+      }
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "with.dots",
+      "key": "ws-id/hexhex-f.pdf",
+      "endpoint": null,
+      "url": "https://s3.amazonaws.com/with.dots",
+      "fields": {
+        "Content-Type": "application/pdf",
+        "key": "ws-id/hexhex-f.pdf",
+        "x-amz-algorithm": "AWS4-HMAC-SHA256",
+        "x-amz-credential": "dummy789key/20261005/us-east-1/s3/aws4_request",
+        "x-amz-date": "20261005T025616Z",
+        "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDVUMDM6NTY6MTZaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAid2l0aC5kb3RzIn0sIFsiY29udGVudC1sZW5ndGgtcmFuZ2UiLCAxLCAxMF0sIHsiQ29udGVudC1UeXBlIjogImFwcGxpY2F0aW9uL3BkZiJ9LCB7ImtleSI6ICJ3cy1pZC9oZXhoZXgtZi5wZGYifSwgeyJidWNrZXQiOiAid2l0aC5kb3RzIn0sIHsia2V5IjogIndzLWlkL2hleGhleC1mLnBkZiJ9LCB7IngtYW16LWFsZ29yaXRobSI6ICJBV1M0LUhNQUMtU0hBMjU2In0sIHsieC1hbXotY3JlZGVudGlhbCI6ICJkdW1teTc4OWtleS8yMDI2MTAwNS91cy1lYXN0LTEvczMvYXdzNF9yZXF1ZXN0In0sIHsieC1hbXotZGF0ZSI6ICIyMDI2MTAwNVQwMjU2MTZaIn1dfQ==",
+        "x-amz-signature": "4f9ccd1eb502ac5b94c1400c39a916d45ed3ec85485dba08720cc6a2d78ce361"
+      }
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "key": "ws-id/hexhex-x${filename}",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.amazonaws.com/",
+      "fields": {
+        "Content-Type": "application/pdf",
+        "key": "ws-id/hexhex-x${filename}",
+        "x-amz-algorithm": "AWS4-HMAC-SHA256",
+        "x-amz-credential": "dummy789key/20261005/us-east-1/s3/aws4_request",
+        "x-amz-date": "20261005T025616Z",
+        "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDVUMDM6NTY6MTZaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAiZHVtbXk3ODlidWNrZXQifSwgWyJjb250ZW50LWxlbmd0aC1yYW5nZSIsIDEsIDEwXSwgeyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vcGRmIn0sIHsia2V5IjogIndzLWlkL2hleGhleC14JHtmaWxlbmFtZX0ifSwgeyJidWNrZXQiOiAiZHVtbXk3ODlidWNrZXQifSwgWyJzdGFydHMtd2l0aCIsICIka2V5IiwgIndzLWlkL2hleGhleC14Il0sIHsieC1hbXotYWxnb3JpdGhtIjogIkFXUzQtSE1BQy1TSEEyNTYifSwgeyJ4LWFtei1jcmVkZW50aWFsIjogImR1bW15Nzg5a2V5LzIwMjYxMDA1L3VzLWVhc3QtMS9zMy9hd3M0X3JlcXVlc3QifSwgeyJ4LWFtei1kYXRlIjogIjIwMjYxMDA1VDAyNTYxNloifV19",
+        "x-amz-signature": "b232accb16bbd5a70809dc4c78aab178452879fbb8d9fae2238c9f5259048096"
+      }
+    },
+    {
+      "region": "cn-north-1",
+      "bucket": "dummy789bucket",
+      "key": "ws-id/hexhex-f.pdf",
+      "endpoint": null,
+      "url": "https://dummy789bucket.s3.cn-north-1.amazonaws.com.cn/",
+      "fields": {
+        "Content-Type": "application/pdf",
+        "key": "ws-id/hexhex-f.pdf",
+        "x-amz-algorithm": "AWS4-HMAC-SHA256",
+        "x-amz-credential": "dummy789key/20261005/cn-north-1/s3/aws4_request",
+        "x-amz-date": "20261005T025616Z",
+        "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDVUMDM6NTY6MTZaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAiZHVtbXk3ODlidWNrZXQifSwgWyJjb250ZW50LWxlbmd0aC1yYW5nZSIsIDEsIDEwXSwgeyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vcGRmIn0sIHsia2V5IjogIndzLWlkL2hleGhleC1mLnBkZiJ9LCB7ImJ1Y2tldCI6ICJkdW1teTc4OWJ1Y2tldCJ9LCB7ImtleSI6ICJ3cy1pZC9oZXhoZXgtZi5wZGYifSwgeyJ4LWFtei1hbGdvcml0aG0iOiAiQVdTNC1ITUFDLVNIQTI1NiJ9LCB7IngtYW16LWNyZWRlbnRpYWwiOiAiZHVtbXk3ODlrZXkvMjAyNjEwMDUvY24tbm9ydGgtMS9zMy9hd3M0X3JlcXVlc3QifSwgeyJ4LWFtei1kYXRlIjogIjIwMjYxMDA1VDAyNTYxNloifV19",
+        "x-amz-signature": "45698f05b224a89868463d1cdaa40f4cc1da62da0c8ec9c33b9238c393f7c663"
+      }
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "dummy789bucket",
+      "key": "ws-id/hexhex-f.pdf",
+      "endpoint": "http://custom:9000/base",
+      "url": "http://custom:9000/base/dummy789bucket",
+      "fields": {
+        "Content-Type": "application/pdf",
+        "key": "ws-id/hexhex-f.pdf",
+        "x-amz-algorithm": "AWS4-HMAC-SHA256",
+        "x-amz-credential": "dummy789key/20261005/us-east-1/s3/aws4_request",
+        "x-amz-date": "20261005T025616Z",
+        "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDVUMDM6NTY6MTZaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAiZHVtbXk3ODlidWNrZXQifSwgWyJjb250ZW50LWxlbmd0aC1yYW5nZSIsIDEsIDEwXSwgeyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vcGRmIn0sIHsia2V5IjogIndzLWlkL2hleGhleC1mLnBkZiJ9LCB7ImJ1Y2tldCI6ICJkdW1teTc4OWJ1Y2tldCJ9LCB7ImtleSI6ICJ3cy1pZC9oZXhoZXgtZi5wZGYifSwgeyJ4LWFtei1hbGdvcml0aG0iOiAiQVdTNC1ITUFDLVNIQTI1NiJ9LCB7IngtYW16LWNyZWRlbnRpYWwiOiAiZHVtbXk3ODlrZXkvMjAyNjEwMDUvdXMtZWFzdC0xL3MzL2F3czRfcmVxdWVzdCJ9LCB7IngtYW16LWRhdGUiOiAiMjAyNjEwMDVUMDI1NjE2WiJ9XX0=",
+        "x-amz-signature": "981b56c720efb8812e064204fd8da141b98ea8c97cf47add4c04cdeb2348f44e"
+      }
+    },
+    {
+      "region": "us-east-1",
+      "bucket": "a\n",
+      "key": "ws-id/hexhex-f.pdf",
+      "endpoint": null,
+      "url": "https://s3.amazonaws.com/a%0A",
+      "fields": {
+        "Content-Type": "application/pdf",
+        "key": "ws-id/hexhex-f.pdf",
+        "x-amz-algorithm": "AWS4-HMAC-SHA256",
+        "x-amz-credential": "dummy789key/20261005/us-east-1/s3/aws4_request",
+        "x-amz-date": "20261005T025616Z",
+        "policy": "eyJleHBpcmF0aW9uIjogIjIwMjYtMTAtMDVUMDM6NTY6MTZaIiwgImNvbmRpdGlvbnMiOiBbeyJidWNrZXQiOiAiYVxuIn0sIFsiY29udGVudC1sZW5ndGgtcmFuZ2UiLCAxLCAxMF0sIHsiQ29udGVudC1UeXBlIjogImFwcGxpY2F0aW9uL3BkZiJ9LCB7ImtleSI6ICJ3cy1pZC9oZXhoZXgtZi5wZGYifSwgeyJidWNrZXQiOiAiYVxuIn0sIHsia2V5IjogIndzLWlkL2hleGhleC1mLnBkZiJ9LCB7IngtYW16LWFsZ29yaXRobSI6ICJBV1M0LUhNQUMtU0hBMjU2In0sIHsieC1hbXotY3JlZGVudGlhbCI6ICJkdW1teTc4OWtleS8yMDI2MTAwNS91cy1lYXN0LTEvczMvYXdzNF9yZXF1ZXN0In0sIHsieC1hbXotZGF0ZSI6ICIyMDI2MTAwNVQwMjU2MTZaIn1dfQ==",
+        "x-amz-signature": "633a1efa19c121ae61fbb5d928f0138a508d35cf5d2bfd270e3d95bcee3b4909"
+      }
+    }
+  ]
+}
