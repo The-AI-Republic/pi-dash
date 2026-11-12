@@ -21,7 +21,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 /// The golden route map as static data: `(path, methods)` pairs, paths
-/// sorted, methods sorted lowercase. 135 entries, 209 operations.
+/// sorted, methods sorted lowercase. 136 entries, 210 operations.
 pub const ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/assets/user-assets/", &["post"]),
     ("/api/v1/assets/user-assets/{asset_id}/", &["delete", "patch"]),
@@ -72,6 +72,7 @@ pub const ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/runner/runs/{run_id}/stream/upgrade/", &["post"]),
     ("/api/v1/runners/{runner_id}/", &["delete"]),
     ("/api/v1/users/me/", &["get"]),
+    ("/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/", &["post"]),
     ("/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/", &["post"]),
     ("/api/v1/workspaces/{slug}/assets/", &["post"]),
     ("/api/v1/workspaces/{slug}/assets/{asset_id}/", &["get", "patch"]),

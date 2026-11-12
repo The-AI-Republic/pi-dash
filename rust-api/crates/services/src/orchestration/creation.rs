@@ -614,7 +614,7 @@ pub mod orm {
     }
 
     /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
-    pub const RUN_VIEW: [run::Column; 19] = [
+    pub const RUN_VIEW: [run::Column; 20] = [
         run::Column::Id,
         run::Column::WorkspaceId,
         run::Column::CreatedById,
@@ -634,6 +634,7 @@ pub mod orm {
         run::Column::Prompt,
         run::Column::PromptManifest,
         run::Column::EndedAt,
+        run::Column::StartedAt,
     ];
 
     const _: () = assert!(RUN_VIEW.len() == RUN_VIEW_COLUMNS.len());
@@ -2010,7 +2011,7 @@ pub fn parent_failed_on_its_runner(parent: &RunView) -> bool {
     if parent.status != AgentRunStatus::Failed {
         return false;
     }
-    if RUNNER_INFRA_ERROR_CODES.contains(&parent.error_code.as_str()) {
+    if RUNNER_INFRA_ERROR_CODES.contains(&parent.error_code()) {
         return true;
     }
     parent.started_at.is_none()
@@ -2033,7 +2034,7 @@ pub fn pinned_runner_for_parent(
              (error_code={:?}, started={})",
             pinned,
             parent.id,
-            parent.error_code,
+            parent.error_code(),
             if parent.started_at.is_some() {
                 "True"
             } else {
@@ -4172,15 +4173,20 @@ mod tests {
             id: uid(0x60),
             pod_id: uid(0x50),
             status: "online".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock),
             paused_at: None,
+            provisioning: "personal".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
+            engine_paused: false,
         };
-        let parent = |status: AgentRunStatus, error_code: &str, started: bool| RunView {
-            runner_id: Some(uid(0x60)),
-            status,
-            error_code: error_code.to_owned(),
-            started_at: started.then_some(clock),
-            ..run_view(uid(0x70))
+        let parent = |status: AgentRunStatus, error_code: &str, started: bool| {
+            let mut v = run_view(uid(0x70));
+            v.runner_id = Some(uid(0x60));
+            v.status = status;
+            v.error_details = serde_json::json!({"code": error_code});
+            v.started_at = started.then_some(clock);
+            v
         };
         let pin = |parent: &RunView| {
             pinned_runner_for_parent(parent, Some(&runner), Some(uid(0x50)), clock)

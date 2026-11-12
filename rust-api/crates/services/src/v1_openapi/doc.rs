@@ -247,8 +247,7 @@ fn component_schemas() -> Value {
 /// print(json.dumps(fx['operations'], indent=2, ensure_ascii=False))"`,
 /// replace this literal, and review the diff (never blanket-update — the
 /// tests pin this const to the fixture parsed-equal).
-const OPERATIONS_JSON: &str = r##"
-{
+const OPERATIONS_JSON: &str = r##"{
   "/api/v1/assets/user-assets/": {
     "post": {
       "operationId": "create_user_asset_upload",
@@ -1483,6 +1482,53 @@ const OPERATIONS_JSON: &str = r##"
             }
           },
           "description": "Current user profile"
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": {
+    "post": {
+      "operationId": "release_agent_run_pin",
+      "tags": [
+        "Work Items"
+      ],
+      "summary": "Release a queued run's runner pin",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "run_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Workspace slug",
+          "required": true,
+          "examples": {
+            "ExampleWorkspace": {
+              "value": "my-workspace",
+              "summary": "Example workspace",
+              "description": "A typical workspace slug"
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Pin released"
+        },
+        "404": {
+          "description": "Run not found"
+        },
+        "409": {
+          "description": "Run is not a pinned, queued local run"
         }
       }
     }
@@ -10292,7 +10338,9 @@ const OPERATIONS_JSON: &str = r##"
                     "updated_at": "2024-01-10T15:45:00Z",
                     "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
                     "description_stripped": "Release checklistTag the release first.",
-                    "description_markdown": "# Release checklist\n\nTag the release **first**."
+                    "description_markdown": "# Release checklist
+
+Tag the release **first**."
                   },
                   "summary": "Page detail"
                 }
@@ -10444,7 +10492,9 @@ const OPERATIONS_JSON: &str = r##"
                     "updated_at": "2024-01-10T15:45:00Z",
                     "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
                     "description_stripped": "Release checklistTag the release first.",
-                    "description_markdown": "# Release checklist\n\nTag the release **first**."
+                    "description_markdown": "# Release checklist
+
+Tag the release **first**."
                   },
                   "summary": "Page detail"
                 }
@@ -10545,7 +10595,9 @@ const OPERATIONS_JSON: &str = r##"
                     "updated_at": "2024-01-10T15:45:00Z",
                     "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
                     "description_stripped": "Release checklistTag the release first.",
-                    "description_markdown": "# Release checklist\n\nTag the release **first**."
+                    "description_markdown": "# Release checklist
+
+Tag the release **first**."
                   },
                   "summary": "Page detail"
                 }
@@ -17203,8 +17255,7 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   }
-}
-"##;
+}"##;
 
 /// Parse the embedded essentials. The literal is pinned parsed-equal to the
 /// fixture by `essentials_match_fixture`, so this cannot fail.

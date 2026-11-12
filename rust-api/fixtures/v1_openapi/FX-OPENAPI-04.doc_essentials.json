@@ -19,8 +19,8 @@
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 135,
-    "json_paths": 135
+    "yaml_paths": 136,
+    "json_paths": 136
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -1160,6 +1160,51 @@
               }
             },
             "description": "Current user profile"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": {
+      "post": {
+        "operationId": "release_agent_run_pin",
+        "tags": ["Work Items"],
+        "summary": "Release a queued run's runner pin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workspace slug",
+            "required": true,
+            "examples": {
+              "ExampleWorkspace": {
+                "value": "my-workspace",
+                "summary": "Example workspace",
+                "description": "A typical workspace slug"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pin released"
+          },
+          "404": {
+            "description": "Run not found"
+          },
+          "409": {
+            "description": "Run is not a pinned, queued local run"
           }
         }
       }

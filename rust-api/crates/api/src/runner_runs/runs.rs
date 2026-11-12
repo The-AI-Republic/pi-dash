@@ -732,18 +732,21 @@ pub(crate) async fn clear_run_pin(
         return Ok(None);
     };
     if let Some(parent_id) = locked.parent_run_id {
+        // raw-sql: PDASHOSS01-272 pin release mirrors Django's clear_run_pin (parent thread_id + pin clear); SeaORM builder cannot express the conditional <> '' guard and FOR UPDATE lock pairing here without a shared helper.
         let thread_id: String = sqlx::query_scalar(PARENT_THREAD_ID_SQL)
             .bind(parent_id)
             .fetch_optional(&mut *conn)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
         if !thread_id.is_empty() {
+            // raw-sql: see above — conditional thread_id clear mirrors Django save(update_fields).
             sqlx::query(CLEAR_PARENT_THREAD_ID_SQL)
                 .bind(parent_id)
                 .execute(&mut *conn)
                 .await?;
         }
     }
+    // raw-sql: see above — pin clear is the PDASHOSS01-272 shared helper.
     sqlx::query(CLEAR_RUN_PIN_SQL)
         .bind(locked.id)
         .execute(&mut *conn)

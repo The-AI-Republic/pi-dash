@@ -283,6 +283,7 @@ struct RunRow {
     prompt: String,
     prompt_manifest: Option<Value>,
     ended_at: Option<Moment>,
+    started_at: Option<Moment>,
 }
 
 fn run_view_from_row(row: RunRow) -> Result<RunView, CreationError> {
@@ -308,6 +309,7 @@ fn run_view_from_row(row: RunRow) -> Result<RunView, CreationError> {
         prompt: row.prompt,
         prompt_manifest: row.prompt_manifest,
         ended_at: row.ended_at.map(|m| m.with_timezone(&Utc)),
+        started_at: row.started_at.map(|m| m.with_timezone(&Utc)),
     })
 }
 
@@ -334,6 +336,7 @@ fn run_view_from_model(m: agent_run::Model) -> Result<RunView, CreationError> {
         prompt: m.prompt,
         prompt_manifest: m.prompt_manifest,
         ended_at: m.ended_at.map(|m| m.with_timezone(&Utc)),
+        started_at: m.started_at.map(|m| m.with_timezone(&Utc)),
     })
 }
 
@@ -448,6 +451,7 @@ fn run_columns_select(q: sea_orm::Select<agent_run::Entity>) -> sea_orm::Select<
         agent_run::Column::Prompt,
         agent_run::Column::PromptManifest,
         agent_run::Column::EndedAt,
+        agent_run::Column::StartedAt,
     ])
 }
 
