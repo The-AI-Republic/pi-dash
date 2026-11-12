@@ -107,7 +107,7 @@ pub fn check_targets(
         // runs.
         if !raw_targets && target.id == source.id {
             return Err(CoreError::Request(format!(
-                "Issue {} cannot relate to itself",
+                "{} cannot be related to itself",
                 source.identifier()
             )));
         }

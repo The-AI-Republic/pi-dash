@@ -862,6 +862,7 @@ async fn relate_op(
     .await
     .map_err(|error| match error {
         crate::operations::core::CoreError::Request(message) => Error::BadError(message),
+        crate::operations::core::CoreError::Missing(_) => Error::ServerError,
         crate::operations::core::CoreError::Db(_domain_error) => Error::ServerError,
         crate::operations::core::CoreError::Sqlx(_sqlx_error) => Error::ServerError,
     })?;
@@ -984,6 +985,7 @@ async fn unrelate_op(
     .await
     .map_err(|error| match error {
         crate::operations::core::CoreError::Request(message) => Error::BadError(message),
+        crate::operations::core::CoreError::Missing(_) => Error::ServerError,
         crate::operations::core::CoreError::Db(_domain_error) => Error::ServerError,
         crate::operations::core::CoreError::Sqlx(_sqlx_error) => Error::ServerError,
     })?;
@@ -1582,7 +1584,7 @@ mod tests {
             false,
         ) {
             Err(CoreError::Request(message)) => {
-                assert_eq!(message, "Issue CT-1 cannot relate to itself")
+                assert_eq!(message, "CT-1 cannot be related to itself")
             }
             other => panic!("unexpected: {other:?}"),
         }
