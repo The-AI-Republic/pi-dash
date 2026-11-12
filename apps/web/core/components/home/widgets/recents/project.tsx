@@ -5,6 +5,7 @@
  */
 
 import { useRouter } from "next/navigation";
+import { useTranslation } from "@pi-dash/i18n";
 // pi dash types
 import { Logo } from "@pi-dash/propel/emoji-icon-picker";
 import type { TActivityEntityData, TProjectEntityData } from "@pi-dash/types";
@@ -23,6 +24,8 @@ export function RecentProject(props: BlockProps) {
   const { activity, ref, workspaceSlug } = props;
   // router
   const router = useRouter();
+  // i18n
+  const { t } = useTranslation();
   // derived values
   const projectDetails: TProjectEntityData = activity.entity_data as TProjectEntityData;
 
@@ -63,7 +66,7 @@ export function RecentProject(props: BlockProps) {
                 }
                 buttonClassName={projectDetails?.project_members?.length > 0 ? "hover:bg-transparent px-0" : ""}
                 showTooltip={projectDetails?.project_members?.length === 0}
-                placeholder="Assignees"
+                placeholder={t("Assignees")}
                 optionsClassName="z-10"
                 tooltipContent=""
               />

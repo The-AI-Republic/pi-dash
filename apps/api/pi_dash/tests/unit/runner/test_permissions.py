@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from pi_dash.db.models import User, Workspace, WorkspaceMember
+from pi_dash.db.models import User, WorkspaceMember
 from pi_dash.runner.services.permissions import (
     ROLE_ADMIN,
     ROLE_MEMBER,

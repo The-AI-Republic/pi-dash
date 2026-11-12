@@ -1,0 +1,927 @@
+{
+  "bugs": [],
+  "data": {
+    "breakdown": {
+      "autonomy_entry": {
+        "body": "PERSONAL autonomy",
+        "customizable": "overridable",
+        "default_body": {
+          "_head": "## Autonomy / escalation model\n\nMaintain an explicit autonomy assessment in the workpad throughout the run.\n\nFields:\n\n- ",
+          "_len": 1470,
+          "_sha256": "31939ae58a1ddacf9c828cf5d87bfded193899eff9331d045ac81b14626ef99e"
+        },
+        "editable_at_personal": true,
+        "editable_at_workspace": true,
+        "key": "autonomy",
+        "needs_attention": false,
+        "source": "user:19a3bb94-30b3-4e62-8116-edea68ffe7eb",
+        "title": "Autonomy & escalation model",
+        "version": 1
+      },
+      "intro_entry": {
+        "body": {
+          "_head": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human intera",
+          "_len": 1276,
+          "_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9"
+        },
+        "customizable": "locked",
+        "default_body": {
+          "_head": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human intera",
+          "_len": 1276,
+          "_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9"
+        },
+        "editable_at_personal": false,
+        "editable_at_workspace": false,
+        "key": "intro",
+        "needs_attention": false,
+        "source": "default",
+        "title": "Introduction & issue context",
+        "version": 0
+      },
+      "kind": "coding-task",
+      "section_count": 16,
+      "sources": ["default", "user:19a3bb94-30b3-4e62-8116-edea68ffe7eb"],
+      "trace": "views.py:102-146 (_section_breakdown: single index load, source-matched needs_attention, tier capability flags)"
+    },
+    "endpoints": {
+      "compiled_unknown_kind": {
+        "body": {
+          "error": "unknown kind 'nope'",
+          "kinds": ["coding-task", "review", "test", "scheduler"]
+        },
+        "status": 400
+      },
+      "compiled_user_scope": {
+        "body": {
+          "automatic_template_body": {
+            "_len": 92111,
+            "_sha256": "98dcc5a0821dbf7c28fad6953e5f85bcd022ad36b9f2179e033ef7ce1e6fc403"
+          },
+          "kind": "coding-task",
+          "scope": "user",
+          "template_body": {
+            "_len": 92110,
+            "_sha256": "2c8d76af0a1331569a0f2823de82d2b0bea2fa8d62741aa7428a7767f7027cf3"
+          }
+        },
+        "status": 200
+      },
+      "delete_again_404": {
+        "body": {
+          "error": "no active override at this scope"
+        },
+        "status": 404
+      },
+      "delete_personal": {
+        "body": null,
+        "status": 204
+      },
+      "list_member": {
+        "body": {
+          "kind": "coding-task",
+          "scope": "user",
+          "sections": [
+            {
+              "body": {
+                "_head": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human intera",
+                "_len": 1276,
+                "_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human intera",
+                "_len": 1276,
+                "_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "intro",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Introduction & issue context",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "Repository:\n{% if repo.url %}\n- Remote: {{ repo.url }}\n- Base branch: {{ repo.base_branch or \"(use the repository's defa",
+                "_len": 1292,
+                "_sha256": "595b6ec1eead73a2f2298733a26b93eb7ddc40f64f0d518fad6857805f977e76"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "Repository:\n{% if repo.url %}\n- Remote: {{ repo.url }}\n- Base branch: {{ repo.base_branch or \"(use the repository's defa",
+                "_len": 1292,
+                "_sha256": "595b6ec1eead73a2f2298733a26b93eb7ddc40f64f0d518fad6857805f977e76"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "repo-context",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Repository context",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "{% if parent or children or related or blocked_by or blocking or other_relations %}\n## Work item relationships\n\nThis wor",
+                "_len": 4067,
+                "_sha256": "6897c174e68eab1835ce33853805b236b26e13200c26abd10130dc3167b8dff0"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "{% if parent or children or related or blocked_by or blocking or other_relations %}\n## Work item relationships\n\nThis wor",
+                "_len": 4067,
+                "_sha256": "6897c174e68eab1835ce33853805b236b26e13200c26abd10130dc3167b8dff0"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "relationships",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Work item relationships",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Session framing\n\nThe agent executes general tasks, including coding and non-coding work. A Git repository is optional",
+                "_len": 4257,
+                "_sha256": "acd86bb63cb7413b9e6b0df4b54b37eceaa31b6e9b2276e2090934b8cf5cd4a4"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Session framing\n\nThe agent executes general tasks, including coding and non-coding work. A Git repository is optional",
+                "_len": 4257,
+                "_sha256": "acd86bb63cb7413b9e6b0df4b54b37eceaa31b6e9b2276e2090934b8cf5cd4a4"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "session-framing",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Session framing",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Pi Dash CLI (`pidash`)\n\n`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and ",
+                "_len": 20267,
+                "_sha256": "1b1131da138e3e4a5d0b11363142703b4eac3d7248af0049a60af51b60786978"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Pi Dash CLI (`pidash`)\n\n`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and ",
+                "_len": 20267,
+                "_sha256": "1b1131da138e3e4a5d0b11363142703b4eac3d7248af0049a60af51b60786978"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "pidash-cli",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Pi Dash CLI usage",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Task lifecycle \u2014 one task, three stages\n\nThis issue is a **task with a goal**, and In Progress / In Review / In Test ",
+                "_len": 5832,
+                "_sha256": "e526258015852c5c2be83f00ed7ccc836bdb92e41299ffc328c813864bb08ffe"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Task lifecycle \u2014 one task, three stages\n\nThis issue is a **task with a goal**, and In Progress / In Review / In Test ",
+                "_len": 5832,
+                "_sha256": "e526258015852c5c2be83f00ed7ccc836bdb92e41299ffc328c813864bb08ffe"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "task-lifecycle",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Task lifecycle",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Default posture\n\n- Determine the issue's current state group first. Route per the state map below.\n- Maintain the iss",
+                "_len": 2465,
+                "_sha256": "3e53387ba0c3fc757f1eb3b02f25f99c59ab1e421dde6aaa3e41da5625d6605e"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Default posture\n\n- Determine the issue's current state group first. Route per the state map below.\n- Maintain the iss",
+                "_len": 2465,
+                "_sha256": "3e53387ba0c3fc757f1eb3b02f25f99c59ab1e421dde6aaa3e41da5625d6605e"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "default-posture",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Default posture",
+              "version": 0
+            },
+            {
+              "body": "PERSONAL autonomy",
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Autonomy / escalation model\n\nMaintain an explicit autonomy assessment in the workpad throughout the run.\n\nFields:\n\n- ",
+                "_len": 1470,
+                "_sha256": "31939ae58a1ddacf9c828cf5d87bfded193899eff9331d045ac81b14626ef99e"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "autonomy",
+              "needs_attention": false,
+              "source": "user:19a3bb94-30b3-4e62-8116-edea68ffe7eb",
+              "title": "Autonomy & escalation model",
+              "version": 1
+            },
+            {
+              "body": {
+                "_head": "## State routing (Step 0)\n\nBased on `issue.state_group`:\n\n- `backlog` \u2014 do nothing. The issue is not ready for work. Pos",
+                "_len": 1308,
+                "_sha256": "aabb9ef64e97c190ae4be512639c79d0796fed8f41a50e009bb22a62e245fe94"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## State routing (Step 0)\n\nBased on `issue.state_group`:\n\n- `backlog` \u2014 do nothing. The issue is not ready for work. Pos",
+                "_len": 1308,
+                "_sha256": "aabb9ef64e97c190ae4be512639c79d0796fed8f41a50e009bb22a62e245fe94"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "state-routing",
+              "needs_attention": false,
+              "source": "default",
+              "title": "State routing",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Step 0.5 \u2014 Analyze & scope (read, think, decide)\n\nBefore any workpad setup or git work, build your own understanding ",
+                "_len": 18111,
+                "_sha256": "b42199b0a057a5730bb6dfe2a988fde23ff4d092c42a3ef876a11980242b71c5"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Step 0.5 \u2014 Analyze & scope (read, think, decide)\n\nBefore any workpad setup or git work, build your own understanding ",
+                "_len": 18111,
+                "_sha256": "b42199b0a057a5730bb6dfe2a988fde23ff4d092c42a3ef876a11980242b71c5"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "analyze-and-scope",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Analyze & scope",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Step 1 \u2014 Workpad setup\n\n{% if workpad_body %}\nThe workpad already exists from a prior run. Its current body is shown ",
+                "_len": 5492,
+                "_sha256": "fb057ce332542bd2fee3c4384b2f918cab20f65f669e41bb9b5cc3a6c015a940"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Step 1 \u2014 Workpad setup\n\n{% if workpad_body %}\nThe workpad already exists from a prior run. Its current body is shown ",
+                "_len": 5492,
+                "_sha256": "fb057ce332542bd2fee3c4384b2f918cab20f65f669e41bb9b5cc3a6c015a940"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "workpad-setup",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Workpad setup",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Step 2 \u2014 Implementation and validation\n\nBefore editing any files, make sure you are on the work branch \u2014 the platform",
+                "_len": 12042,
+                "_sha256": "0a3e49e311311391e72a56b34f0931069e6ffc31f80e06f62f76f2ca017d5ce2"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Step 2 \u2014 Implementation and validation\n\nBefore editing any files, make sure you are on the work branch \u2014 the platform",
+                "_len": 12042,
+                "_sha256": "0a3e49e311311391e72a56b34f0931069e6ffc31f80e06f62f76f2ca017d5ce2"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "implementation",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Implementation & validation",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Blocking the run\n\nUse this when completion is blocked by missing required tools or missing auth/permissions that cann",
+                "_len": 2774,
+                "_sha256": "348bd77f57ea99aae41220315249aa36f6f66864f643a861826101d9c7dec37e"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Blocking the run\n\nUse this when completion is blocked by missing required tools or missing auth/permissions that cann",
+                "_len": 2774,
+                "_sha256": "348bd77f57ea99aae41220315249aa36f6f66864f643a861826101d9c7dec37e"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "blocking",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Blocking the run",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Guardrails\n\n- Do not edit the issue title or description for planning or progress tracking. Use the workpad (`pidash ",
+                "_len": 1263,
+                "_sha256": "b79c9edc034046611dceb95512167f35cf649ad597023970a2203ca22d445dd9"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Guardrails\n\n- Do not edit the issue title or description for planning or progress tracking. Use the workpad (`pidash ",
+                "_len": 1263,
+                "_sha256": "b79c9edc034046611dceb95512167f35cf649ad597023970a2203ca22d445dd9"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "guardrails",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Guardrails",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Workpad template\n\nUse this exact structure for the workpad body (the document you write via `pidash workpad update --",
+                "_len": 3582,
+                "_sha256": "a7c323a41c213fa69fb1248869f79802198285f2d0742660e124d3c92578c5ea"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Workpad template\n\nUse this exact structure for the workpad body (the document you write via `pidash workpad update --",
+                "_len": 3582,
+                "_sha256": "a7c323a41c213fa69fb1248869f79802198285f2d0742660e124d3c92578c5ea"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "workpad-template",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Workpad template",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Ending the run\n\nThere is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends",
+                "_len": 8049,
+                "_sha256": "75d6f86ea874dd15fbff74d4ca0d979930b2601c70a9b3020da020204dfbf48d"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Ending the run\n\nThere is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends",
+                "_len": 8049,
+                "_sha256": "75d6f86ea874dd15fbff74d4ca0d979930b2601c70a9b3020da020204dfbf48d"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "ending-run",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Ending the run",
+              "version": 0
+            }
+          ]
+        },
+        "status": 200
+      },
+      "list_outsider": {
+        "body": {
+          "error": "forbidden"
+        },
+        "status": 403
+      },
+      "list_unknown_kind": {
+        "body": {
+          "error": "unknown kind 'nope'",
+          "kinds": ["coding-task", "review", "test", "scheduler"]
+        },
+        "status": 400
+      },
+      "list_unknown_workspace": {
+        "body": {
+          "error": "workspace not found"
+        },
+        "status": 404
+      },
+      "list_workspace_scope": {
+        "body": {
+          "kind": "coding-task",
+          "scope": "workspace",
+          "sections": [
+            {
+              "body": {
+                "_head": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human intera",
+                "_len": 1276,
+                "_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "Pi Dash is a project management tool that orchestrates AI agents to drive issues to completion with minimal human intera",
+                "_len": 1276,
+                "_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "intro",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Introduction & issue context",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "Repository:\n{% if repo.url %}\n- Remote: {{ repo.url }}\n- Base branch: {{ repo.base_branch or \"(use the repository's defa",
+                "_len": 1292,
+                "_sha256": "595b6ec1eead73a2f2298733a26b93eb7ddc40f64f0d518fad6857805f977e76"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "Repository:\n{% if repo.url %}\n- Remote: {{ repo.url }}\n- Base branch: {{ repo.base_branch or \"(use the repository's defa",
+                "_len": 1292,
+                "_sha256": "595b6ec1eead73a2f2298733a26b93eb7ddc40f64f0d518fad6857805f977e76"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "repo-context",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Repository context",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "{% if parent or children or related or blocked_by or blocking or other_relations %}\n## Work item relationships\n\nThis wor",
+                "_len": 4067,
+                "_sha256": "6897c174e68eab1835ce33853805b236b26e13200c26abd10130dc3167b8dff0"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "{% if parent or children or related or blocked_by or blocking or other_relations %}\n## Work item relationships\n\nThis wor",
+                "_len": 4067,
+                "_sha256": "6897c174e68eab1835ce33853805b236b26e13200c26abd10130dc3167b8dff0"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "relationships",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Work item relationships",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Session framing\n\nThe agent executes general tasks, including coding and non-coding work. A Git repository is optional",
+                "_len": 4257,
+                "_sha256": "acd86bb63cb7413b9e6b0df4b54b37eceaa31b6e9b2276e2090934b8cf5cd4a4"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Session framing\n\nThe agent executes general tasks, including coding and non-coding work. A Git repository is optional",
+                "_len": 4257,
+                "_sha256": "acd86bb63cb7413b9e6b0df4b54b37eceaa31b6e9b2276e2090934b8cf5cd4a4"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "session-framing",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Session framing",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Pi Dash CLI (`pidash`)\n\n`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and ",
+                "_len": 20267,
+                "_sha256": "1b1131da138e3e4a5d0b11363142703b4eac3d7248af0049a60af51b60786978"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Pi Dash CLI (`pidash`)\n\n`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and ",
+                "_len": 20267,
+                "_sha256": "1b1131da138e3e4a5d0b11363142703b4eac3d7248af0049a60af51b60786978"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "pidash-cli",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Pi Dash CLI usage",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Task lifecycle \u2014 one task, three stages\n\nThis issue is a **task with a goal**, and In Progress / In Review / In Test ",
+                "_len": 5832,
+                "_sha256": "e526258015852c5c2be83f00ed7ccc836bdb92e41299ffc328c813864bb08ffe"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Task lifecycle \u2014 one task, three stages\n\nThis issue is a **task with a goal**, and In Progress / In Review / In Test ",
+                "_len": 5832,
+                "_sha256": "e526258015852c5c2be83f00ed7ccc836bdb92e41299ffc328c813864bb08ffe"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "task-lifecycle",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Task lifecycle",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Default posture\n\n- Determine the issue's current state group first. Route per the state map below.\n- Maintain the iss",
+                "_len": 2465,
+                "_sha256": "3e53387ba0c3fc757f1eb3b02f25f99c59ab1e421dde6aaa3e41da5625d6605e"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Default posture\n\n- Determine the issue's current state group first. Route per the state map below.\n- Maintain the iss",
+                "_len": 2465,
+                "_sha256": "3e53387ba0c3fc757f1eb3b02f25f99c59ab1e421dde6aaa3e41da5625d6605e"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "default-posture",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Default posture",
+              "version": 0
+            },
+            {
+              "body": "WORKSPACE autonomy",
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Autonomy / escalation model\n\nMaintain an explicit autonomy assessment in the workpad throughout the run.\n\nFields:\n\n- ",
+                "_len": 1470,
+                "_sha256": "31939ae58a1ddacf9c828cf5d87bfded193899eff9331d045ac81b14626ef99e"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "autonomy",
+              "needs_attention": false,
+              "source": "workspace",
+              "title": "Autonomy & escalation model",
+              "version": 2
+            },
+            {
+              "body": {
+                "_head": "## State routing (Step 0)\n\nBased on `issue.state_group`:\n\n- `backlog` \u2014 do nothing. The issue is not ready for work. Pos",
+                "_len": 1308,
+                "_sha256": "aabb9ef64e97c190ae4be512639c79d0796fed8f41a50e009bb22a62e245fe94"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## State routing (Step 0)\n\nBased on `issue.state_group`:\n\n- `backlog` \u2014 do nothing. The issue is not ready for work. Pos",
+                "_len": 1308,
+                "_sha256": "aabb9ef64e97c190ae4be512639c79d0796fed8f41a50e009bb22a62e245fe94"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "state-routing",
+              "needs_attention": false,
+              "source": "default",
+              "title": "State routing",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Step 0.5 \u2014 Analyze & scope (read, think, decide)\n\nBefore any workpad setup or git work, build your own understanding ",
+                "_len": 18111,
+                "_sha256": "b42199b0a057a5730bb6dfe2a988fde23ff4d092c42a3ef876a11980242b71c5"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Step 0.5 \u2014 Analyze & scope (read, think, decide)\n\nBefore any workpad setup or git work, build your own understanding ",
+                "_len": 18111,
+                "_sha256": "b42199b0a057a5730bb6dfe2a988fde23ff4d092c42a3ef876a11980242b71c5"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "analyze-and-scope",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Analyze & scope",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Step 1 \u2014 Workpad setup\n\n{% if workpad_body %}\nThe workpad already exists from a prior run. Its current body is shown ",
+                "_len": 5492,
+                "_sha256": "fb057ce332542bd2fee3c4384b2f918cab20f65f669e41bb9b5cc3a6c015a940"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Step 1 \u2014 Workpad setup\n\n{% if workpad_body %}\nThe workpad already exists from a prior run. Its current body is shown ",
+                "_len": 5492,
+                "_sha256": "fb057ce332542bd2fee3c4384b2f918cab20f65f669e41bb9b5cc3a6c015a940"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "workpad-setup",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Workpad setup",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Step 2 \u2014 Implementation and validation\n\nBefore editing any files, make sure you are on the work branch \u2014 the platform",
+                "_len": 12042,
+                "_sha256": "0a3e49e311311391e72a56b34f0931069e6ffc31f80e06f62f76f2ca017d5ce2"
+              },
+              "customizable": "overridable",
+              "default_body": {
+                "_head": "## Step 2 \u2014 Implementation and validation\n\nBefore editing any files, make sure you are on the work branch \u2014 the platform",
+                "_len": 12042,
+                "_sha256": "0a3e49e311311391e72a56b34f0931069e6ffc31f80e06f62f76f2ca017d5ce2"
+              },
+              "editable_at_personal": true,
+              "editable_at_workspace": true,
+              "key": "implementation",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Implementation & validation",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Blocking the run\n\nUse this when completion is blocked by missing required tools or missing auth/permissions that cann",
+                "_len": 2774,
+                "_sha256": "348bd77f57ea99aae41220315249aa36f6f66864f643a861826101d9c7dec37e"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Blocking the run\n\nUse this when completion is blocked by missing required tools or missing auth/permissions that cann",
+                "_len": 2774,
+                "_sha256": "348bd77f57ea99aae41220315249aa36f6f66864f643a861826101d9c7dec37e"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "blocking",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Blocking the run",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Guardrails\n\n- Do not edit the issue title or description for planning or progress tracking. Use the workpad (`pidash ",
+                "_len": 1263,
+                "_sha256": "b79c9edc034046611dceb95512167f35cf649ad597023970a2203ca22d445dd9"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Guardrails\n\n- Do not edit the issue title or description for planning or progress tracking. Use the workpad (`pidash ",
+                "_len": 1263,
+                "_sha256": "b79c9edc034046611dceb95512167f35cf649ad597023970a2203ca22d445dd9"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "guardrails",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Guardrails",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Workpad template\n\nUse this exact structure for the workpad body (the document you write via `pidash workpad update --",
+                "_len": 3582,
+                "_sha256": "a7c323a41c213fa69fb1248869f79802198285f2d0742660e124d3c92578c5ea"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Workpad template\n\nUse this exact structure for the workpad body (the document you write via `pidash workpad update --",
+                "_len": 3582,
+                "_sha256": "a7c323a41c213fa69fb1248869f79802198285f2d0742660e124d3c92578c5ea"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "workpad-template",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Workpad template",
+              "version": 0
+            },
+            {
+              "body": {
+                "_head": "## Ending the run\n\nThere is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends",
+                "_len": 8049,
+                "_sha256": "75d6f86ea874dd15fbff74d4ca0d979930b2601c70a9b3020da020204dfbf48d"
+              },
+              "customizable": "locked",
+              "default_body": {
+                "_head": "## Ending the run\n\nThere is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends",
+                "_len": 8049,
+                "_sha256": "75d6f86ea874dd15fbff74d4ca0d979930b2601c70a9b3020da020204dfbf48d"
+              },
+              "editable_at_personal": false,
+              "editable_at_workspace": false,
+              "key": "ending-run",
+              "needs_attention": false,
+              "source": "default",
+              "title": "Ending the run",
+              "version": 0
+            }
+          ]
+        },
+        "status": 200
+      },
+      "preview_cross_workspace_issue_404": {
+        "body": {
+          "error": "issue not found"
+        },
+        "status": 404
+      },
+      "preview_draft": {
+        "body": {
+          "kind": "coding-task",
+          "prompt": {
+            "_len": 69099,
+            "_sha256": "6c316279a96cd1c7a3fd113ad8e8bdf9b8b54e2f3d40790ccf5d73ff462e7f20"
+          }
+        },
+        "status": 200
+      },
+      "preview_draft_locked_denied": {
+        "body": {
+          "error": "section 'intro' cannot be overridden at scope 'workspace'"
+        },
+        "status": 403
+      },
+      "preview_draft_not_in_recipe": {
+        "body": {
+          "error": "section 'cloud-intro' is not part of the 'coding-task' prompt"
+        },
+        "status": 400
+      },
+      "preview_issue": {
+        "body": {
+          "kind": "coding-task",
+          "prompt": {
+            "_len": 69103,
+            "_sha256": "5a4e0dcb6d60322db7212265da63e5abc000a4a2b15182991c9df9f1620a6b2c"
+          }
+        },
+        "status": 200
+      },
+      "preview_member_denied_workspace_scope": {
+        "body": {
+          "error": "forbidden"
+        },
+        "status": 403
+      },
+      "preview_missing_issue_id": {
+        "body": {
+          "error": "issue_id is required for this kind"
+        },
+        "status": 400
+      },
+      "preview_scheduler": {
+        "body": {
+          "kind": "scheduler",
+          "prompt": {
+            "_len": 21849,
+            "_sha256": "ce018631571abc3615144d66eb24967b5fbd8b9ff63fa086fc8bf03984c01c5c"
+          }
+        },
+        "status": 200
+      },
+      "preview_scheduler_missing_binding": {
+        "body": {
+          "error": "binding_id is required for the scheduler kind"
+        },
+        "status": 400
+      },
+      "preview_unknown_binding": {
+        "body": {
+          "error": "scheduler binding not found"
+        },
+        "status": 404
+      },
+      "preview_unknown_issue": {
+        "body": {
+          "error": "issue not found"
+        },
+        "status": 404
+      },
+      "put_admin_workspace_scope": {
+        "body": {
+          "body": "admin test-cycle",
+          "created_at": "2026-09-28T04:52:20.217834Z",
+          "id": "6a4ed078-31c9-4656-8a13-25826c1d2642",
+          "is_active": true,
+          "is_workspace_level": true,
+          "needs_attention": false,
+          "section_key": "test-cycle",
+          "updated_at": "2026-09-28T04:52:46.485804Z",
+          "updated_by": "cdf35877-b085-4a02-bd92-872493fb553f",
+          "user": null,
+          "version": 2,
+          "workspace": "204fd67f-6485-47a0-98e2-079bd6b34202"
+        },
+        "status": 200
+      },
+      "put_bad_jinja": {
+        "body": {
+          "detail": "override for section 'test-cycle' fails to render as part of the 'test' prompt: 'oops_xyz' is undefined",
+          "error": "override validation failed"
+        },
+        "status": 400
+      },
+      "put_create_personal": {
+        "body": {
+          "body": "member test-cycle",
+          "created_at": "2026-09-28T04:52:46.435372Z",
+          "id": "393d3f5b-528c-4fc9-b00b-5c1e750c27e7",
+          "is_active": true,
+          "is_workspace_level": false,
+          "needs_attention": false,
+          "section_key": "test-cycle",
+          "updated_at": "2026-09-28T04:52:46.435381Z",
+          "updated_by": "19a3bb94-30b3-4e62-8116-edea68ffe7eb",
+          "user": "19a3bb94-30b3-4e62-8116-edea68ffe7eb",
+          "version": 1,
+          "workspace": "204fd67f-6485-47a0-98e2-079bd6b34202"
+        },
+        "status": 200
+      },
+      "put_locked": {
+        "body": {
+          "error": "section 'intro' is locked and cannot be overridden"
+        },
+        "status": 403
+      },
+      "put_member_workspace_scope_denied": {
+        "body": {
+          "error": "forbidden"
+        },
+        "status": 403
+      },
+      "put_missing_body": {
+        "body": {
+          "error": "body is required"
+        },
+        "status": 400
+      },
+      "put_outsider_denied": {
+        "body": {
+          "error": "forbidden"
+        },
+        "status": 403
+      },
+      "put_unknown_section": {
+        "body": {
+          "error": "unknown section 'nope'"
+        },
+        "status": 404
+      },
+      "trace": "views.py:149-177 (list: member gate, kind check, scope split), 192-243 (put: write perm, registry 404, tier gates, body required, validate_override -> 400, upsert -> 200), 292-319 (delete), 322-357 (compiled + dual automatic body), 360-439 (preview: admin-or-member, scope gate, issue/binding required, draft gate, 422 render-failed)"
+    },
+    "upsert": {
+      "create": {
+        "body": "v1 body",
+        "id": "1b42102c-ce80-48fa-b839-60026c9c56f7",
+        "is_active": true,
+        "needs_attention": false,
+        "version": 1
+      },
+      "delete_deactivates": true,
+      "delete_row_still_present_inactive": true,
+      "trace": "views.py:245-290 (_upsert: select_for_update in transaction, F(version)+1 bump, IntegrityError race retry; _apply_update 280-290 clears needs_attention + refresh_from_db), 307-319 (delete: is_active=False, 204 No Content)",
+      "update": {
+        "body": "v2 body",
+        "needs_attention": false,
+        "version": 2
+      }
+    }
+  },
+  "fixture_id": "FIX-handlers",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "PUT scope reads body-then-query (?scope); DELETE scope reads query only. _issue_context overwrites run.kind with the requested kind (views.py:460). Render failure on preview is 422 {'error':'render failed','detail':...}."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/views.py:149-177 (PromptSectionListEndpoint.get), 192-243 (put), 245-290 (_upsert/_apply_update), 292-319 (delete), 322-357 (PromptCompiledEndpoint.get + dual automatic body), 360-439 (PromptPreviewEndpoint.post + _issue_context/_scheduler_context)",
+    "prompting/urls.py:13-37 (4 routes)"
+  ]
+}
