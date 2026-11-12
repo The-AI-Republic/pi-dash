@@ -709,6 +709,7 @@ fn zoned_date(column: issues::Column, tz: &Tz) -> SimpleExpr {
 fn date_term(term: &str, tz: &Tz) -> Option<SimpleExpr> {
     Some(match term {
         "created_at__date" => zoned_date(issues::Column::CreatedAt, tz),
+        "updated_at__date" => zoned_date(issues::Column::UpdatedAt, tz),
         "completed_at__date" => zoned_date(issues::Column::CompletedAt, tz),
         "start_date" => issue(issues::Column::StartDate).into(),
         "target_date" => issue(issues::Column::TargetDate).into(),
@@ -2243,6 +2244,17 @@ mod tests {
             .expect("expr"),
         );
         assert!(text.contains(r#"CAST(("issue"."created_at" AT TIME ZONE 'Asia/Kolkata') AS date) >= CAST('2026-01-02' AS date)"#), "{text}");
+        // PDASHOSS01-312: the `updated_at` filter predicates its own column.
+        let text = render(
+            legacy_expr(
+                "updated_at__date__lte",
+                &FilterValue::Day(chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day")),
+                &tz,
+            )
+            .expect("expr"),
+        );
+        assert!(text.contains(r#"CAST(("issue"."updated_at" AT TIME ZONE 'Asia/Kolkata') AS date) <= CAST('2026-01-12' AS date)"#), "{text}");
+        assert!(!text.contains("created_at"), "{text}");
         let text = render(
             legacy_expr(
                 "name__icontains",

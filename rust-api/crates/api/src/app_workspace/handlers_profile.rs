@@ -2419,8 +2419,8 @@ fn p_parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// Compile the legacy predicates for the Q7 subscriber scope
 /// (`user.py:484-494`): the SAME `**filters` dict, resolved against
-/// `IssueSubscriber`. Only `created_by`, `project` and `created_at`
-/// lookups resolve there; every other name is a Django `FieldError` →
+/// `IssueSubscriber`. Only `created_by`, `project`, `created_at` and
+/// `updated_at` lookups resolve there; every other name is a Django `FieldError` →
 /// generic 500. Date validation mirrors the pilot compiler (garbage
 /// bounds are `ValidationError` → 400 invalid detail).
 fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr, Denial> {
@@ -2470,28 +2470,23 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => pidash_db::entity::issue_subscribers::Column::CreatedAt,
+                "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
+                _ => return Err(Denial::ServerError),
+            };
             if text.parse::<chrono::NaiveDate>().is_err()
                 && chrono::DateTime::parse_from_rfc3339(text).is_err()
             {
                 return Err(Denial::BadError(INVALID.to_owned()));
             }
             match operator {
-                "contains" => Ok(p_col(
-                    "sub",
-                    pidash_db::entity::issue_subscribers::Column::CreatedAt,
-                )
-                .cast_as(p_a("text"))
-                .like(s_like_pattern(text))),
+                "contains" => Ok(p_col("sub", column)
+                    .cast_as(p_a("text"))
+                    .like(s_like_pattern(text))),
                 "gte" | "lte" => {
                     let right = Expr::val(text.clone()).cast_as(p_a("date"));
-                    let left = p_col(
-                        "sub",
-                        pidash_db::entity::issue_subscribers::Column::CreatedAt,
-                    )
-                    .cast_as(p_a("date"));
+                    let left = p_col("sub", column).cast_as(p_a("date"));
                     Ok(if operator == "gte" {
                         left.gte(right)
                     } else {
@@ -2506,19 +2501,17 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => pidash_db::entity::issue_subscribers::Column::CreatedAt,
+                "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
+                _ => return Err(Denial::ServerError),
+            };
             let operator = match operator {
                 "gte" => ">=",
                 "lte" => "<=",
                 _ => return Err(Denial::ServerError),
             };
-            let left = p_col(
-                "sub",
-                pidash_db::entity::issue_subscribers::Column::CreatedAt,
-            )
-            .cast_as(p_a("date"));
+            let left = p_col("sub", column).cast_as(p_a("date"));
             let right = Expr::val(day.to_string()).cast_as(p_a("date"));
             Ok(if operator == ">=" {
                 left.gte(right)
