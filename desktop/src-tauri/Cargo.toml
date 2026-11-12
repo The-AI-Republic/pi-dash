@@ -51,6 +51,13 @@ tokio = { version = "1", default-features = false, features = ["time", "macros",
 # `access(2)`: whether the app may update the installed CLI in place.
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Whether a tray icon is actually drawn (`tray_host`): the StatusNotifier
+# watcher on the session bus, and the X11 system-tray selection. Both crates
+# are already in the tree through Tauri.
+zbus = "5"
+x11-dl = "2"
+
 [dev-dependencies]
 tempfile = "3"
 # Timestamps for the chat frame variants in `chat`'s hermetic stream tests.
