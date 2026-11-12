@@ -38,6 +38,7 @@
 //! step — the inventory suite, not this module, pins the
 //! worker-owned set.
 
+pub mod aws_credentials;
 pub mod execute_seams;
 pub mod kms_transport;
 pub mod model_runtime;
