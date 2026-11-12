@@ -204,6 +204,11 @@ class DevMachineRevokeEndpoint(APIView):
                 machine.revoked_at = now
                 machine.save(update_fields=["revoked_at", "updated_at"])
             MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(revoked_at=now)
+            # "Remove this computer" revokes both credentials (design §11).
+            from pi_dash.runner.models import EngineCredentialRevokeReason
+            from pi_dash.runner.services.engine_credentials import revoke_engine_credential
+
+            revoke_engine_credential(machine, reason=EngineCredentialRevokeReason.MACHINE_REMOVED)
             runners = list(Runner.objects.select_for_update().filter(dev_machine=machine, revoked_at__isnull=True))
 
             # Enqueue before Runner.revoke() closes sessions; this mirrors runner-delete.
@@ -293,6 +298,48 @@ class DevMachineDeleteEndpoint(APIView):
         delete_dev_machine_svc(machine, purge_local=purge_local)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    #: Owner-settable machine fields: the built-in engine controls
+    #: (``built_engine_as_runner`` design §8) and the machine's name (§4.10).
+    #: ``engine_auto_pause_reason`` is server-set and read-only.
+    FIELDS = ("engine_paused_by_owner", "engine_team_runs", "label")
+
+    def patch(self, request, machine_id):
+        """``PATCH /api/runners/dev-machines/<machine_id>/`` — owner controls.
+
+        Owner only (a machine is user-scoped and private). Body may carry
+        ``engine_paused_by_owner`` / ``engine_team_runs`` (booleans) and
+        ``label`` (the machine's name; empty resets it to the hostname, and
+        renames its engine runners everywhere they are shown). Pausing
+        releases the machine's engines' queued locality pins to their pods
+        in the same transaction; resuming drains them.
+        """
+        from pi_dash.runner.services.machine_identity import (
+            MachineControlError,
+            parse_machine_controls,
+            update_machine_controls,
+        )
+
+        workspace_id = _request_workspace_id(request)
+        if not workspace_id:
+            return Response(
+                {"error": "workspace is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_workspace_member(request.user, workspace_id):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            values = parse_machine_controls(request.data, self.FIELDS)
+        except MachineControlError as exc:
+            return Response({"error": exc.code}, status=exc.http_status)
+        machine = DevMachine.objects.filter(pk=machine_id).first()
+        if machine is None or not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            machine = update_machine_controls(machine_id, request.user, values)
+        except MachineControlError as exc:
+            return Response({"error": exc.code}, status=exc.http_status)
+        return Response(_serialize_dev_machine(machine, request.user, workspace_id), status=status.HTTP_200_OK)
+
 
 class RunnerListEndpoint(APIView):
     """List runners in a workspace.
@@ -302,16 +349,39 @@ class RunnerListEndpoint(APIView):
     optional ``?project=<uuid>`` narrows to every pod owned by that project
     (a project may own several pods), which is how the project-scoped AI
     Workers panel filters this list.
+
+    ``?project=<uuid>`` alone is enough — like the pod list endpoint, the
+    project wins and its workspace is used, so the old web's Runs-on picker
+    works without a ``workspace`` param. ``?workspace=`` alone still scopes
+    to the whole workspace; neither is 400.
+
+    Optional ``?assignable_for=<issue-id | "new">`` (design §7.4) adds the
+    per-row eligibility read: ``assignable``, ``not_assignable_code``,
+    ``is_busy`` and ``queue_depth``.
     """
 
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        project_id = request.query_params.get("project")
         workspace_id = request.query_params.get("workspace")
-        if not workspace_id:
+        if project_id:
+            from pi_dash.db.models.project import Project
+
+            project = Project.objects.filter(pk=project_id).first()
+            if project is None:
+                return Response(
+                    {"error": "project not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            # ``project`` wins: the workspace used is the project's
+            # workspace, so a mismatched ``workspace`` param cannot widen
+            # what is visible.
+            workspace_id = project.workspace_id
+        elif not workspace_id:
             return Response(
-                {"error": "workspace is required"},
+                {"error": "project or workspace is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         # The visibility/filter rules (membership, private-runner ownership,
@@ -328,7 +398,19 @@ class RunnerListEndpoint(APIView):
             )
         except PermissionDenied:
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-        return Response(RunnerSerializer(qs, many=True).data)
+        context = {"request": request}
+        assignable_for = request.query_params.get("assignable_for")
+        if assignable_for is not None:
+            from pi_dash.db.models.issue import Issue
+
+            try:
+                issue = None if assignable_for == "new" else Issue.objects.filter(pk=assignable_for).first()
+            except (ValueError, TypeError):
+                issue = None
+                assignable_for = "new"
+            context["assignable_issue"] = issue
+            context["user"] = request.user
+        return Response(RunnerSerializer(qs, many=True, context=context).data)
 
 
 class RunnerDetailEndpoint(APIView):
@@ -376,6 +458,20 @@ class RunnerDetailEndpoint(APIView):
                 )
             runner.name = new_name
             updates.append("name")
+        pod_dispatch_changed = False
+        if "pod_dispatch" in request.data:
+            from pi_dash.runner.models import RunnerPodDispatch
+
+            new_dispatch = request.data.get("pod_dispatch")
+            if new_dispatch not in RunnerPodDispatch.values:
+                return Response(
+                    {"error": "pod_dispatch must be one of: " + ", ".join(RunnerPodDispatch.values)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if new_dispatch != runner.pod_dispatch:
+                runner.pod_dispatch = new_dispatch
+                updates.append("pod_dispatch")
+                pod_dispatch_changed = True
         new_pod_id = request.data.get("pod") if "pod" in request.data else None
         # Hold the pod lock for the duration of the runner save so a concurrent
         # pod soft-delete cannot leave the runner pointing at an inactive pod.
@@ -392,6 +488,37 @@ class RunnerDetailEndpoint(APIView):
                         {"error": "pod is in a different workspace"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                # An engine runner is one per machine and project, so it
+                # only moves between pods of its own project (design §7).
+                if runner.is_engine and runner.pod is not None and new_pod.project_id != runner.pod.project_id:
+                    return Response(
+                        {
+                            "error": "a built-in engine runner can only move between pods of its project",
+                            "code": "engine_runner_project_fixed",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                is_real_move = new_pod.id != runner.pod_id
+                # Cross-project move (§13.1, §23.4): refused while any issue
+                # is dedicated to the runner — I1/E2 would break. Same-project
+                # moves follow the runner (§13.1): assigned_pod tracks it below.
+                if is_real_move:
+                    old_project_id = runner.pod.project_id if runner.pod is not None else None
+                    if new_pod.project_id != old_project_id:
+                        from pi_dash.db.models.issue import Issue
+
+                        dedicated_issues = list(
+                            Issue.objects.filter(assigned_runner=runner).values_list("id", "name")[:20]
+                        )
+                        if dedicated_issues:
+                            return Response(
+                                {
+                                    "error": "runner has assigned issues; clear their dedicated runner first",
+                                    "code": "runner_has_assigned_issues",
+                                    "issues": [{"id": str(i), "name": n} for i, n in dedicated_issues],
+                                },
+                                status=status.HTTP_409_CONFLICT,
+                            )
                 # Refuse to move a runner that has a non-terminal run *bound*
                 # to it — either one it is actively serving (``runner=``) or
                 # one reserved for it (``pinned_runner=``, e.g. a queued or
@@ -418,9 +545,33 @@ class RunnerDetailEndpoint(APIView):
                 runner.pod = new_pod
                 updates.append("pod")
                 runner.save(update_fields=list(set(updates + ["updated_at"])))
+                # §13.1 follow: dedicated issues move with the runner.
+                if is_real_move:
+                    from pi_dash.db.models.issue import Issue
+
+                    Issue.objects.filter(assigned_runner=runner).update(assigned_pod=new_pod)
+                if pod_dispatch_changed:
+                    self._apply_pod_dispatch_change(runner)
         elif updates:
-            runner.save(update_fields=list(set(updates + ["updated_at"])))
+            with transaction.atomic():
+                runner.save(update_fields=list(set(updates + ["updated_at"])))
+                if pod_dispatch_changed:
+                    self._apply_pod_dispatch_change(runner)
         return Response(RunnerSerializer(runner).data)
+
+    @staticmethod
+    def _apply_pod_dispatch_change(runner):
+        """Turning an engine's pod work off releases its queued locality pins
+        to the pod in the same transaction; turning it on lets it take pod
+        work at once (design §7)."""
+        from pi_dash.runner.models import RunnerPodDispatch
+        from pi_dash.runner.services.dispatch_rules import release_locality_pins
+
+        if runner.pod_dispatch == RunnerPodDispatch.PINNED_ONLY:
+            if runner.is_engine:
+                release_locality_pins([runner.pk])
+        else:
+            transaction.on_commit(lambda rid=runner.pk: drain_for_runner_by_id(rid))
 
     def delete(self, request, runner_id):
         """Hard-delete a runner. Cancels in-flight runs first so historic

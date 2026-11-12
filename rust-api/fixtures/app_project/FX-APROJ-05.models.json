@@ -1,0 +1,2343 @@
+{
+  "_trace": "apps/api/pi_dash/db/models/project.py:28-31 (ROLE), :34-40 (ProjectNetwork), :72-299 (Project incl. resolve :191-224, Meta :228-253, save :255-299), :302-311 (ProjectBaseModel), :314-329 (ProjectMemberInvite), :332-382 (ProjectMember), :386-403 (ProjectIdentifier), :422-439 (ProjectDeployBoard), :442-461 (ProjectPublicMember), :464-494 (ProjectUserProperty); apps/api/pi_dash/db/models/state.py:14-22 (StateGroup), :26-76 (DEFAULT_STATES), :79-90 (managers), :93-140 (State); apps/api/pi_dash/db/models/estimate.py:13-15 (EstimateType), :18-40 (Estimate), :43-57 (EstimatePoint); apps/api/pi_dash/db/models/deploy_board.py:19-57 (DeployBoard); ROLE comparison apps/api/pi_dash/app/permissions/base.py:13-16; audit columns apps/api/pi_dash/db/mixins.py:16-70, pk apps/api/pi_dash/db/models/base.py:17-18",
+  "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. Columns/defaults/constraints introspected from live model _meta; save()/resolve() executed against scratch rows; partial-index enforcement proven with a duplicate INSERT.",
+  "models": {
+    "Project": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "project_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "project_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "CharField",
+          "max_length": 255
+        },
+        {
+          "name": "description",
+          "column": "description",
+          "type": "TextField",
+          "blank": true
+        },
+        {
+          "name": "description_text",
+          "column": "description_text",
+          "type": "JSONField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "description_html",
+          "column": "description_html",
+          "type": "JSONField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "network",
+          "column": "network",
+          "type": "PositiveSmallIntegerField",
+          "default": 2,
+          "choices": [
+            [
+              "0",
+              "Secret"
+            ],
+            [
+              "2",
+              "Public"
+            ]
+          ],
+          "choices_truncated": false,
+          "choices_count": 2
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_project"
+        },
+        {
+          "name": "identifier",
+          "column": "identifier",
+          "type": "CharField",
+          "max_length": 12,
+          "db_index": true
+        },
+        {
+          "name": "default_assignee",
+          "column": "default_assignee_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "CASCADE",
+          "related_name": "default_assignee"
+        },
+        {
+          "name": "project_lead",
+          "column": "project_lead_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "CASCADE",
+          "related_name": "project_lead"
+        },
+        {
+          "name": "emoji",
+          "column": "emoji",
+          "type": "CharField",
+          "max_length": 255,
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "icon_prop",
+          "column": "icon_prop",
+          "type": "JSONField",
+          "null": true
+        },
+        {
+          "name": "module_view",
+          "column": "module_view",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "cycle_view",
+          "column": "cycle_view",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "issue_views_view",
+          "column": "issue_views_view",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "page_view",
+          "column": "page_view",
+          "type": "BooleanField",
+          "default": true
+        },
+        {
+          "name": "intake_view",
+          "column": "intake_view",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "is_time_tracking_enabled",
+          "column": "is_time_tracking_enabled",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "is_issue_type_enabled",
+          "column": "is_issue_type_enabled",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "is_default",
+          "column": "is_default",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "guest_view_all_features",
+          "column": "guest_view_all_features",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "members_can_edit_states",
+          "column": "members_can_edit_states",
+          "type": "BooleanField",
+          "default": true
+        },
+        {
+          "name": "cover_image",
+          "column": "cover_image",
+          "type": "TextField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "cover_image_asset",
+          "column": "cover_image_asset_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "fk_to": "db.FileAsset",
+          "on_delete": "SET_NULL",
+          "related_name": "project_cover_image"
+        },
+        {
+          "name": "estimate",
+          "column": "estimate_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.Estimate",
+          "on_delete": "SET_NULL",
+          "related_name": "projects"
+        },
+        {
+          "name": "archive_in",
+          "column": "archive_in",
+          "type": "IntegerField",
+          "default": 0
+        },
+        {
+          "name": "close_in",
+          "column": "close_in",
+          "type": "IntegerField",
+          "default": 0
+        },
+        {
+          "name": "logo_props",
+          "column": "logo_props",
+          "type": "JSONField",
+          "default": "builtins.dict"
+        },
+        {
+          "name": "default_state",
+          "column": "default_state_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.State",
+          "on_delete": "SET_NULL",
+          "related_name": "default_state"
+        },
+        {
+          "name": "archived_at",
+          "column": "archived_at",
+          "type": "DateTimeField",
+          "null": true
+        },
+        {
+          "name": "timezone",
+          "column": "timezone",
+          "type": "CharField",
+          "max_length": 255,
+          "default": "UTC",
+          "choices": [
+            [
+              "Africa/Abidjan",
+              "Africa/Abidjan"
+            ],
+            [
+              "Africa/Accra",
+              "Africa/Accra"
+            ],
+            [
+              "Africa/Addis_Ababa",
+              "Africa/Addis_Ababa"
+            ],
+            [
+              "Africa/Algiers",
+              "Africa/Algiers"
+            ],
+            [
+              "Africa/Asmara",
+              "Africa/Asmara"
+            ],
+            [
+              "Africa/Bamako",
+              "Africa/Bamako"
+            ],
+            [
+              "Africa/Bangui",
+              "Africa/Bangui"
+            ],
+            [
+              "Africa/Banjul",
+              "Africa/Banjul"
+            ]
+          ],
+          "choices_truncated": true,
+          "choices_count": 433
+        },
+        {
+          "name": "external_source",
+          "column": "external_source",
+          "type": "CharField",
+          "max_length": 255,
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "external_id",
+          "column": "external_id",
+          "type": "CharField",
+          "max_length": 255,
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "repo_url",
+          "column": "repo_url",
+          "type": "CharField",
+          "max_length": 512,
+          "blank": true,
+          "default": ""
+        },
+        {
+          "name": "base_branch",
+          "column": "base_branch",
+          "type": "CharField",
+          "max_length": 128,
+          "blank": true,
+          "default": "main"
+        },
+        {
+          "name": "agent_default_interval_seconds",
+          "column": "agent_default_interval_seconds",
+          "type": "IntegerField",
+          "default": 10800
+        },
+        {
+          "name": "agent_default_max_ticks",
+          "column": "agent_default_max_ticks",
+          "type": "IntegerField",
+          "default": 10
+        },
+        {
+          "name": "agent_review_default_interval_seconds",
+          "column": "agent_review_default_interval_seconds",
+          "type": "IntegerField",
+          "default": 10800
+        },
+        {
+          "name": "agent_test_default_interval_seconds",
+          "column": "agent_test_default_interval_seconds",
+          "type": "IntegerField",
+          "default": 10800
+        },
+        {
+          "name": "agent_ticking_enabled",
+          "column": "agent_ticking_enabled",
+          "type": "BooleanField",
+          "default": true
+        },
+        {
+          "name": "default_agent_executor",
+          "column": "default_agent_executor",
+          "type": "CharField",
+          "max_length": 24,
+          "default": "pi_dash.core.agent_execution.get_default_agent_executor",
+          "choices": [
+            [
+              "local_runner",
+              "Local Runner"
+            ],
+            [
+              "cloud_agent",
+              "Pi Dash Cloud Agent"
+            ],
+            [
+              "managed_runner",
+              "Pi Dash Agent"
+            ]
+          ],
+          "choices_truncated": false,
+          "choices_count": 3
+        }
+      ],
+      "meta": {
+        "db_table": "projects",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "identifier",
+            "workspace",
+            "deleted_at"
+          ],
+          [
+            "name",
+            "workspace",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "project_unique_identifier_workspace_when_deleted_at_null",
+            "fields": [
+              "identifier",
+              "workspace"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          },
+          {
+            "name": "project_unique_name_workspace_when_deleted_at_null",
+            "fields": [
+              "name",
+              "workspace"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          },
+          {
+            "name": "project_unique_default_per_workspace",
+            "fields": [
+              "workspace"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True), ('is_default', True))"
+          }
+        ]
+      }
+    },
+    "ProjectMember": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectmember_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectmember_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_projectmember"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_projectmember"
+        },
+        {
+          "name": "member",
+          "column": "member_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "CASCADE",
+          "related_name": "member_project"
+        },
+        {
+          "name": "comment",
+          "column": "comment",
+          "type": "TextField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "role",
+          "column": "role",
+          "type": "PositiveSmallIntegerField",
+          "default": 5,
+          "choices": [
+            [
+              "20",
+              "Admin"
+            ],
+            [
+              "15",
+              "Member"
+            ],
+            [
+              "5",
+              "Guest"
+            ]
+          ],
+          "choices_truncated": false,
+          "choices_count": 3
+        },
+        {
+          "name": "view_props",
+          "column": "view_props",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.project.get_default_props"
+        },
+        {
+          "name": "default_props",
+          "column": "default_props",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.project.get_default_props"
+        },
+        {
+          "name": "preferences",
+          "column": "preferences",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.project.get_default_preferences"
+        },
+        {
+          "name": "sort_order",
+          "column": "sort_order",
+          "type": "FloatField",
+          "default": 65535
+        },
+        {
+          "name": "is_active",
+          "column": "is_active",
+          "type": "BooleanField",
+          "default": true
+        }
+      ],
+      "meta": {
+        "db_table": "project_members",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "project",
+            "member",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "project_member_unique_project_member_when_deleted_at_null",
+            "fields": [
+              "project",
+              "member"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "ProjectMemberInvite": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectmemberinvite_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectmemberinvite_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_projectmemberinvite"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_projectmemberinvite"
+        },
+        {
+          "name": "email",
+          "column": "email",
+          "type": "CharField",
+          "max_length": 255
+        },
+        {
+          "name": "accepted",
+          "column": "accepted",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "token",
+          "column": "token",
+          "type": "CharField",
+          "max_length": 255
+        },
+        {
+          "name": "message",
+          "column": "message",
+          "type": "TextField",
+          "null": true
+        },
+        {
+          "name": "responded_at",
+          "column": "responded_at",
+          "type": "DateTimeField",
+          "null": true
+        },
+        {
+          "name": "role",
+          "column": "role",
+          "type": "PositiveSmallIntegerField",
+          "default": 5,
+          "choices": [
+            [
+              "20",
+              "Admin"
+            ],
+            [
+              "15",
+              "Member"
+            ],
+            [
+              "5",
+              "Guest"
+            ]
+          ],
+          "choices_truncated": false,
+          "choices_count": 3
+        }
+      ],
+      "meta": {
+        "db_table": "project_member_invites",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [],
+        "constraints": []
+      }
+    },
+    "ProjectIdentifier": {
+      "columns": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "BigAutoField",
+          "blank": true,
+          "unique": true,
+          "primary_key": true
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectidentifier_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectidentifier_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "project_identifiers"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "OneToOneField",
+          "unique": true,
+          "db_index": true
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "CharField",
+          "max_length": 12,
+          "db_index": true
+        }
+      ],
+      "meta": {
+        "db_table": "project_identifiers",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "name",
+            "workspace",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "unique_name_workspace_when_deleted_at_null",
+            "fields": [
+              "name",
+              "workspace"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "ProjectUserProperty": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectuserproperty_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectuserproperty_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_projectuserproperty"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_projectuserproperty"
+        },
+        {
+          "name": "user",
+          "column": "user_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "CASCADE",
+          "related_name": "project_property_user"
+        },
+        {
+          "name": "filters",
+          "column": "filters",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.issue.get_default_filters"
+        },
+        {
+          "name": "display_filters",
+          "column": "display_filters",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.issue.get_default_display_filters"
+        },
+        {
+          "name": "display_properties",
+          "column": "display_properties",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.issue.get_default_display_properties"
+        },
+        {
+          "name": "rich_filters",
+          "column": "rich_filters",
+          "type": "JSONField",
+          "default": "builtins.dict"
+        },
+        {
+          "name": "preferences",
+          "column": "preferences",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.project.get_default_preferences"
+        },
+        {
+          "name": "sort_order",
+          "column": "sort_order",
+          "type": "FloatField",
+          "default": 65535
+        }
+      ],
+      "meta": {
+        "db_table": "project_user_properties",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "user",
+            "project",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "project_user_property_unique_user_project_when_deleted_at_null",
+            "fields": [
+              "user",
+              "project"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "ProjectDeployBoard": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectdeployboard_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectdeployboard_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_projectdeployboard"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_projectdeployboard"
+        },
+        {
+          "name": "anchor",
+          "column": "anchor",
+          "type": "CharField",
+          "max_length": 255,
+          "unique": true,
+          "db_index": true,
+          "default": "pi_dash.db.models.project.get_anchor"
+        },
+        {
+          "name": "comments",
+          "column": "comments",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "reactions",
+          "column": "reactions",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "intake",
+          "column": "intake_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.Intake",
+          "on_delete": "SET_NULL",
+          "related_name": "board_intake"
+        },
+        {
+          "name": "votes",
+          "column": "votes",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "views",
+          "column": "views",
+          "type": "JSONField",
+          "default": "pi_dash.db.models.project.get_default_views"
+        }
+      ],
+      "meta": {
+        "db_table": "project_deploy_boards",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "project",
+            "anchor"
+          ]
+        ],
+        "constraints": []
+      }
+    },
+    "ProjectPublicMember": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectpublicmember_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "projectpublicmember_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_projectpublicmember"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_projectpublicmember"
+        },
+        {
+          "name": "member",
+          "column": "member_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "CASCADE",
+          "related_name": "public_project_members"
+        }
+      ],
+      "meta": {
+        "db_table": "project_public_members",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "project",
+            "member",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "project_public_member_unique_project_member_when_deleted_at_null",
+            "fields": [
+              "project",
+              "member"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "State": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "state_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "state_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_state"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_state"
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "CharField",
+          "max_length": 255
+        },
+        {
+          "name": "description",
+          "column": "description",
+          "type": "TextField",
+          "blank": true
+        },
+        {
+          "name": "color",
+          "column": "color",
+          "type": "CharField",
+          "max_length": 255
+        },
+        {
+          "name": "slug",
+          "column": "slug",
+          "type": "SlugField",
+          "max_length": 100,
+          "blank": true,
+          "db_index": true
+        },
+        {
+          "name": "sequence",
+          "column": "sequence",
+          "type": "FloatField",
+          "default": 65535
+        },
+        {
+          "name": "group",
+          "column": "group",
+          "type": "CharField",
+          "max_length": 20,
+          "default": "backlog",
+          "choices": [
+            [
+              "backlog",
+              "Backlog"
+            ],
+            [
+              "unstarted",
+              "Unstarted"
+            ],
+            [
+              "started",
+              "Started"
+            ],
+            [
+              "review",
+              "Review"
+            ],
+            [
+              "test",
+              "Test"
+            ],
+            [
+              "completed",
+              "Completed"
+            ],
+            [
+              "cancelled",
+              "Cancelled"
+            ],
+            [
+              "triage",
+              "Triage"
+            ]
+          ],
+          "choices_truncated": false,
+          "choices_count": 8
+        },
+        {
+          "name": "is_triage",
+          "column": "is_triage",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "default",
+          "column": "default",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "external_source",
+          "column": "external_source",
+          "type": "CharField",
+          "max_length": 255,
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "external_id",
+          "column": "external_id",
+          "type": "CharField",
+          "max_length": 255,
+          "null": true,
+          "blank": true
+        }
+      ],
+      "meta": {
+        "db_table": "states",
+        "ordering": [
+          "sequence"
+        ],
+        "unique_together": [
+          [
+            "name",
+            "project",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "state_unique_name_project_when_deleted_at_null",
+            "fields": [
+              "name",
+              "project"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "Estimate": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "estimate_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "estimate_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_estimate"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_estimate"
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "CharField",
+          "max_length": 255
+        },
+        {
+          "name": "description",
+          "column": "description",
+          "type": "TextField",
+          "blank": true
+        },
+        {
+          "name": "type",
+          "column": "type",
+          "type": "CharField",
+          "max_length": 255,
+          "default": "categories",
+          "choices": [
+            [
+              "categories",
+              "Categories"
+            ],
+            [
+              "points",
+              "Points"
+            ]
+          ],
+          "choices_truncated": false,
+          "choices_count": 2
+        },
+        {
+          "name": "last_used",
+          "column": "last_used",
+          "type": "BooleanField",
+          "default": false
+        }
+      ],
+      "meta": {
+        "db_table": "estimates",
+        "ordering": [
+          "name"
+        ],
+        "unique_together": [
+          [
+            "name",
+            "project",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "estimate_unique_name_project_when_deleted_at_null",
+            "fields": [
+              "name",
+              "project"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "EstimatePoint": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "estimatepoint_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "estimatepoint_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_estimatepoint"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_estimatepoint"
+        },
+        {
+          "name": "estimate",
+          "column": "estimate_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Estimate",
+          "on_delete": "CASCADE",
+          "related_name": "points"
+        },
+        {
+          "name": "key",
+          "column": "key",
+          "type": "IntegerField",
+          "default": 0
+        },
+        {
+          "name": "description",
+          "column": "description",
+          "type": "TextField",
+          "blank": true
+        },
+        {
+          "name": "value",
+          "column": "value",
+          "type": "CharField",
+          "max_length": 255
+        }
+      ],
+      "meta": {
+        "db_table": "estimate_points",
+        "ordering": [
+          "value"
+        ],
+        "unique_together": [],
+        "constraints": []
+      }
+    },
+    "DeployBoard": {
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "deployboard_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "deployboard_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_deployboard"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_deployboard"
+        },
+        {
+          "name": "entity_identifier",
+          "column": "entity_identifier",
+          "type": "UUIDField",
+          "max_length": 32,
+          "null": true
+        },
+        {
+          "name": "entity_name",
+          "column": "entity_name",
+          "type": "CharField",
+          "max_length": 30,
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "anchor",
+          "column": "anchor",
+          "type": "CharField",
+          "max_length": 255,
+          "unique": true,
+          "db_index": true,
+          "default": "pi_dash.db.models.deploy_board.get_anchor"
+        },
+        {
+          "name": "is_comments_enabled",
+          "column": "is_comments_enabled",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "is_reactions_enabled",
+          "column": "is_reactions_enabled",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "intake",
+          "column": "intake_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.Intake",
+          "on_delete": "SET_NULL",
+          "related_name": "publish_intake"
+        },
+        {
+          "name": "is_votes_enabled",
+          "column": "is_votes_enabled",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
+          "name": "view_props",
+          "column": "view_props",
+          "type": "JSONField",
+          "default": "builtins.dict"
+        },
+        {
+          "name": "is_activity_enabled",
+          "column": "is_activity_enabled",
+          "type": "BooleanField",
+          "default": true
+        },
+        {
+          "name": "is_disabled",
+          "column": "is_disabled",
+          "type": "BooleanField",
+          "default": false
+        }
+      ],
+      "meta": {
+        "db_table": "deploy_boards",
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "entity_name",
+            "entity_identifier",
+            "deleted_at"
+          ]
+        ],
+        "constraints": [
+          {
+            "name": "deploy_board_unique_entity_name_entity_identifier_when_deleted_at_null",
+            "fields": [
+              "entity_name",
+              "entity_identifier"
+            ],
+            "condition": "(AND: ('deleted_at__isnull', True))"
+          }
+        ]
+      }
+    },
+    "ProjectBaseModel": {
+      "abstract": true,
+      "columns": [
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "updated_at",
+          "column": "updated_at",
+          "type": "DateTimeField",
+          "blank": true
+        },
+        {
+          "name": "created_by",
+          "column": "created_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "%(class)s_created_by"
+        },
+        {
+          "name": "updated_by",
+          "column": "updated_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "db_index": true,
+          "fk_to": "db.User",
+          "on_delete": "SET_NULL",
+          "related_name": "%(class)s_updated_by"
+        },
+        {
+          "name": "deleted_at",
+          "column": "deleted_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "id",
+          "column": "id",
+          "type": "UUIDField",
+          "max_length": 32,
+          "unique": true,
+          "db_index": true,
+          "primary_key": true,
+          "default": "uuid.uuid4"
+        },
+        {
+          "name": "project",
+          "column": "project_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Project",
+          "on_delete": "CASCADE",
+          "related_name": "project_%(class)s"
+        },
+        {
+          "name": "workspace",
+          "column": "workspace_id",
+          "type": "ForeignKey",
+          "db_index": true,
+          "fk_to": "db.Workspace",
+          "on_delete": "CASCADE",
+          "related_name": "workspace_%(class)s"
+        }
+      ]
+    }
+  },
+  "enums": {
+    "StateGroup": [
+      {
+        "name": "BACKLOG",
+        "value": "backlog"
+      },
+      {
+        "name": "UNSTARTED",
+        "value": "unstarted"
+      },
+      {
+        "name": "STARTED",
+        "value": "started"
+      },
+      {
+        "name": "REVIEW",
+        "value": "review"
+      },
+      {
+        "name": "TEST",
+        "value": "test"
+      },
+      {
+        "name": "COMPLETED",
+        "value": "completed"
+      },
+      {
+        "name": "CANCELLED",
+        "value": "cancelled"
+      },
+      {
+        "name": "TRIAGE",
+        "value": "triage"
+      }
+    ],
+    "DEFAULT_STATES": [
+      {
+        "name": "Backlog",
+        "color": "#60646C",
+        "sequence": 15000,
+        "group": "backlog",
+        "default": true
+      },
+      {
+        "name": "Todo",
+        "color": "#60646C",
+        "sequence": 25000,
+        "group": "unstarted"
+      },
+      {
+        "name": "In Progress",
+        "color": "#F59E0B",
+        "sequence": 35000,
+        "group": "started"
+      },
+      {
+        "name": "In Review",
+        "color": "#5B5BD6",
+        "sequence": 40000,
+        "group": "review"
+      },
+      {
+        "name": "In Test",
+        "color": "#14B8A6",
+        "sequence": 42500,
+        "group": "test"
+      },
+      {
+        "name": "Done",
+        "color": "#46A758",
+        "sequence": 45000,
+        "group": "completed"
+      },
+      {
+        "name": "Cancelled",
+        "color": "#9AA4BC",
+        "sequence": 55000,
+        "group": "cancelled"
+      },
+      {
+        "name": "Triage",
+        "color": "#4E5355",
+        "sequence": 65000,
+        "group": "triage"
+      }
+    ],
+    "EstimateType": [
+      {
+        "name": "CATEGORIES",
+        "value": "categories"
+      },
+      {
+        "name": "POINTS",
+        "value": "points"
+      }
+    ],
+    "ProjectNetwork": [
+      {
+        "name": "SECRET",
+        "value": 0
+      },
+      {
+        "name": "PUBLIC",
+        "value": 2
+      }
+    ],
+    "Project_NETWORK_CHOICES": [
+      [
+        0,
+        "Secret"
+      ],
+      [
+        2,
+        "Public"
+      ]
+    ],
+    "IntakeIssueStatus": [
+      {
+        "name": "PENDING",
+        "value": -2
+      },
+      {
+        "name": "REJECTED",
+        "value": -1
+      },
+      {
+        "name": "SNOOZED",
+        "value": 0
+      },
+      {
+        "name": "ACCEPTED",
+        "value": 1
+      },
+      {
+        "name": "DUPLICATE",
+        "value": 2
+      }
+    ]
+  },
+  "ROLE": {
+    "model": {
+      "ADMIN": 20,
+      "MEMBER": 15,
+      "GUEST": 5
+    },
+    "permissions": {
+      "ADMIN": 20,
+      "MEMBER": 15,
+      "GUEST": 5
+    },
+    "drift": false
+  },
+  "save_behaviors": {
+    "identifier_upper_strip_name_untouched": {
+      "sent_name": "  low 709770d9  ",
+      "stored_name": "  low 709770d9  ",
+      "sent_identifier": "  x709770 ",
+      "stored_identifier": "X709770"
+    },
+    "first_project_auto_default": true,
+    "timezone_backfill": {
+      "workspace_tz": "America/New_York",
+      "project_tz": "America/New_York"
+    },
+    "timezone_explicit_kept": "Asia/Tokyo",
+    "second_project_not_default": false,
+    "default_flip_clears_old": {
+      "p1": false,
+      "p2": true
+    },
+    "unset_last_default": {
+      "raised": "ValidationError: ['Default project cannot be unset without assigning another default project.']"
+    },
+    "state_save_slug_sequence": [
+      {
+        "slug": "my-new-state",
+        "sequence": 65535
+      },
+      {
+        "slug": "second",
+        "sequence": 80535.0
+      }
+    ],
+    "projectbasemodel_workspace_backfill": {
+      "sent_ws": "490f24bb-7f7c-428e-bc45-5b8b1ae3e99e",
+      "stored_ws": "d04b3616-d0d4-4e5f-8bd2-b33f19b9ae3f",
+      "project_ws": "d04b3616-d0d4-4e5f-8bd2-b33f19b9ae3f"
+    },
+    "member_save_creates_user_property": [
+      {
+        "sort_order": 65535.0
+      }
+    ]
+  },
+  "resolve_matrix": {
+    "uuid": {
+      "ok": true,
+      "id": "b3b89233-332f-47cc-8d29-af99b0d90707",
+      "identifier": "X709770"
+    },
+    "uuid_obj": {
+      "ok": true,
+      "id": "b3b89233-332f-47cc-8d29-af99b0d90707",
+      "identifier": "X709770"
+    },
+    "identifier_exact": {
+      "ok": true,
+      "id": "b3b89233-332f-47cc-8d29-af99b0d90707",
+      "identifier": "X709770"
+    },
+    "identifier_lower": {
+      "ok": true,
+      "id": "b3b89233-332f-47cc-8d29-af99b0d90707",
+      "identifier": "X709770"
+    },
+    "identifier_padded": {
+      "ok": true,
+      "id": "b3b89233-332f-47cc-8d29-af99b0d90707",
+      "identifier": "X709770"
+    },
+    "missing": {
+      "ok": false,
+      "exc": "Http404",
+      "args": [
+        "Project not found"
+      ]
+    },
+    "missing_uuid": {
+      "ok": false,
+      "exc": "Http404",
+      "args": [
+        "Project not found"
+      ]
+    },
+    "wrong_workspace": {
+      "ok": false,
+      "exc": "Http404",
+      "args": [
+        "Project not found"
+      ]
+    },
+    "none_value": {
+      "ok": false,
+      "exc": "Http404",
+      "args": [
+        "Project not found"
+      ]
+    },
+    "int_value": {
+      "ok": false,
+      "exc": "Http404",
+      "args": [
+        "Project not found"
+      ]
+    },
+    "deleted": {
+      "ok": false,
+      "exc": "Http404",
+      "args": [
+        "Project not found"
+      ]
+    }
+  },
+  "resolve_id": {
+    "uuid": "b3b89233-332f-47cc-8d29-af99b0d90707",
+    "identifier": "b3b89233-332f-47cc-8d29-af99b0d90707"
+  },
+  "db_partial_unique_enforced": {
+    "raised": "IntegrityError: duplicate key value violates unique constraint \"project_unique_identifier_workspace_when_deleted_at_null\"\nDETAIL:  Key (identifier, workspace_id)=(S709770, d04b3616-d0d4-4e5f-8bd2-b33f19b9ae3f) alread"
+  },
+  "referenced_not_owned": {
+    "ref_Workspace": {
+      "db_table": "workspaces",
+      "columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "name",
+        "logo",
+        "logo_asset",
+        "owner",
+        "slug",
+        "organization_size",
+        "timezone",
+        "background_color"
+      ],
+      "column_count": 14
+    },
+    "ref_WorkspaceMember": {
+      "db_table": "workspace_members",
+      "columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "workspace",
+        "member",
+        "role",
+        "company_role",
+        "view_props",
+        "default_props",
+        "issue_props",
+        "is_active",
+        "getting_started_checklist",
+        "tips",
+        "explored_features"
+      ],
+      "column_count": 17
+    },
+    "ref_User": {
+      "db_table": "users",
+      "columns": [
+        "password",
+        "last_login",
+        "id",
+        "username",
+        "mobile_number",
+        "email",
+        "display_name",
+        "first_name",
+        "last_name",
+        "avatar",
+        "avatar_asset",
+        "cover_image",
+        "cover_image_asset",
+        "date_joined",
+        "created_at",
+        "updated_at",
+        "last_location",
+        "created_location",
+        "is_superuser",
+        "is_managed",
+        "is_password_expired",
+        "is_active",
+        "is_staff",
+        "is_email_verified",
+        "is_password_autoset",
+        "is_password_reset_required",
+        "token",
+        "last_active",
+        "last_login_time",
+        "last_logout_time",
+        "last_login_ip",
+        "last_logout_ip",
+        "last_login_medium",
+        "last_login_uagent",
+        "token_updated_at",
+        "is_bot",
+        "bot_type",
+        "user_timezone",
+        "is_email_valid",
+        "masked_at",
+        "groups",
+        "user_permissions"
+      ],
+      "column_count": 42
+    },
+    "ref_UserFavorite": {
+      "db_table": "user_favorites",
+      "columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "workspace",
+        "project",
+        "user",
+        "entity_type",
+        "entity_identifier",
+        "name",
+        "is_folder",
+        "sequence",
+        "parent"
+      ],
+      "column_count": 15
+    },
+    "ref_Intake": {
+      "db_table": "intakes",
+      "columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "project",
+        "workspace",
+        "name",
+        "description",
+        "is_default",
+        "view_props",
+        "logo_props"
+      ],
+      "column_count": 13
+    },
+    "ref_Issue": {
+      "db_table": "issues",
+      "columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "project",
+        "workspace",
+        "parent",
+        "state",
+        "point",
+        "estimate_point",
+        "name",
+        "description_json",
+        "description_html",
+        "description_stripped",
+        "description_binary",
+        "priority",
+        "complexity_score",
+        "start_date",
+        "target_date",
+        "sequence_id",
+        "sort_order",
+        "completed_at",
+        "archived_at",
+        "is_draft",
+        "external_source",
+        "external_id",
+        "type",
+        "git_work_branch",
+        "workpad",
+        "created_via",
+        "assigned_pod",
+        "agent_executor",
+        "assignees",
+        "labels"
+      ],
+      "column_count": 36
+    },
+    "ref_IssueSequence": {
+      "db_table": "issue_sequences",
+      "columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "project",
+        "workspace",
+        "issue",
+        "sequence",
+        "deleted"
+      ],
+      "column_count": 11
+    }
+  }
+}

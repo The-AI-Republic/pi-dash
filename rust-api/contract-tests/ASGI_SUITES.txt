@@ -1,0 +1,34 @@
+# Suites whose Django runs need an async (ASGI) server (PIDASHCONV-821).
+#
+# The matrix serves Django with `runserver` (sync WSGI) by default: it is
+# what the suites' READMEs document and what the existing Django workflows
+# use. The suites listed here are the exception: they stream SSE/event
+# responses whose views return async iterators, and runserver can never
+# serve those — Django logs "StreamingHttpResponse must consume
+# asynchronous iterators in order to serve them synchronously" and the
+# client hangs waiting for headers until its timeout (proven in CI run
+# 38064376679: assistant 4/4 SSE tests + runner web-chat replay, all
+# ReadTimeout in stream open with that warning in the server log).
+#
+# For these suites the workflow serves Django with
+# `python -m uvicorn pi_dash.asgi:application` instead — same Django app,
+# same responses, but the stream flushes incrementally. Both Django
+# starts (the oracle run and the Rust-upstream restart) use uvicorn; the
+# Rust run is unaffected (pidash-api is async natively).
+#
+#   assistant: documented requirement — contract-tests/README.md
+#     "Backend under test (assistant domain)" runs uvicorn on 8891.
+#   runner: same hang signature on GET .../chat/sessions/.../events/
+#     (async-iterator warning + >30s header timeout); its README still
+#     shows runserver illustratively ("e.g."), CI proves uvicorn needed.
+#   loop: not a streaming suite — it pins the wire input production sees
+#     (NEWPIDASH-25). Production serves Django with gunicorn +
+#     UvicornWorker (apps/api/bin/docker-entrypoint-api.sh), which leaves
+#     a missing Content-Type empty; runserver's wsgiref handler fills in
+#     CONTENT_TYPE=text/plain instead, so
+#     loop/test_body_negotiation.py::test_missing_content_type_is_unsupported_media_type
+#     read 'Unsupported media type "text/plain"' under runserver and the
+#     production 'Unsupported media type ""' under uvicorn (and on Rust).
+assistant
+loop
+runner
