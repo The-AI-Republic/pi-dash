@@ -701,7 +701,7 @@ class RunnerCreateEndpoint(APIView):
                     wants_engine = agent_kind == ENGINE_AGENT_KIND or (not agent_kind and legacy_machine)
                     if not wants_engine:
                         provisioning = RunnerProvisioning.MANUAL
-                        name = body_name or _next_auto_runner_name(pod)
+                        name = body_name or _next_auto_runner_name(pod, dev_machine)
                     else:
                         provisioning = RunnerProvisioning.DESKTOP_BUNDLED
                         if dev_machine is None:
@@ -729,7 +729,7 @@ class RunnerCreateEndpoint(APIView):
                             break
                         if legacy_machine:
                             # Older desktop builds keep naming their runners.
-                            name = body_name or _next_auto_runner_name(pod)
+                            name = body_name or _next_auto_runner_name(pod, dev_machine)
                         else:
                             # Client-supplied names are ignored for engines.
                             name = engine_runner_name(dev_machine, workspace, project, pod)
@@ -843,12 +843,29 @@ def _engine_refusal(user, dev_machine: DevMachine) -> Optional[Response]:
     return None
 
 
-def _next_auto_runner_name(pod: Pod) -> str:
+def _next_auto_runner_name(pod: Pod, dev_machine: Optional[DevMachine] = None) -> str:
     """Generate ``runner_NNN`` numbered higher than any existing runner
-    in the same pod. Used by ``RunnerCreateEndpoint`` when the caller
-    didn't supply ``name``. Race-safe via the retry loop in the caller.
+    on the same dev machine. Used by ``RunnerCreateEndpoint`` when the
+    caller didn't supply ``name``. Race-safe via the retry loop in the
+    caller; the dev-machine row lock (``select_for_update``) serializes
+    concurrent adds on one computer.
+
+    The daemon requires runner names to be unique across the whole
+    computer (``runner/src/config/schema.rs::validate``), not just within
+    a pod. Counting per pod made every pod's first runner ``runner_001``,
+    so the second pod/workspace on one daemon failed with a duplicate-name
+    error. Counting per ``dev_machine`` keeps the sequence machine-wide;
+    engine runners are not affected (they use
+    ``builtin-<machine>-<workspace>-<project>`` via ``engine_runner_name``).
+
+    When there is no machine identity (no ``dev_machine_id`` and no
+    ``host_label``), fall back to the pod count so legacy callers still
+    get a name.
     """
-    count = Runner.objects.filter(pod=pod).count()
+    if dev_machine is not None:
+        count = Runner.objects.filter(dev_machine=dev_machine).count()
+    else:
+        count = Runner.objects.filter(pod=pod).count()
     return f"runner_{count + 1:03d}"
 
 
