@@ -96,8 +96,6 @@ use pidash_services::dispatch::{
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
-use pidash_services::domain::issues as domain_issues;
-use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteOptions, WriteScope, WriteTxn};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
@@ -1073,14 +1071,6 @@ async fn bound_issue_wtxn(
     Ok(row)
 }
 
-/// Map a domain-write failure onto the tool errors: the model only
-/// ever sees the message, the ledger the Python type. Fault-path only
-/// (the row write itself): races the old inline SQL would surface as
-/// `OperationalError`/`IntegrityError` arrive stringified instead.
-fn domain_error(error: domain::DomainError) -> ToolExecError {
-    ToolExecError::Db(sqlx::Error::Protocol(error.to_string()))
-}
-
 /// A SeaORM read failure as the tool error the old sqlx read raised: the
 /// wrapped sqlx error when there is one (so Postgres codes still classify),
 /// otherwise its message.
@@ -1340,100 +1330,50 @@ async fn op_create_project_issue(
         .await
         .map_err(orm_error)?;
     // The save rides `domain::issues::create` on the audit `WriteTxn`:
-    // the hooks repair a missing tool state (same default-then-fallback
-    // queries), take the advisory lock, scan the effective sequence and
-    // sort order, resolve the default pod, stamp `completed_at` for a
-    // tool-supplied completed state only (a repaired state never stamps
-    // — the assembled `None` rides through), and strip the html. The
-    // fire and the created activity are both skipped: the after-commit
-    // fire step below drives the bespoke fire and Django sends no
-    // activity on this path, so the chain stays empty. Both hooks are
-    // still registered: `create` resolves them eagerly and an
-    // unregistered lookup panics the task (PIDASHCONV-1596). The issue
-    // commits with the audit transaction; the earlier separate domain
-    // transaction (which left the issue standing on a post-write audit
-    // failure) is gone.
+    // The shared core (NEWPIDASH-190 §4.3): insert + chain with the
+    // AfterCommit fire rule on the audit `WriteTxn` (hooks repair a
+    // missing tool state, take the advisory lock, scan the effective
+    // sequence and sort order, resolve the default pod, stamp
+    // `completed_at` for a tool-supplied completed state only, and
+    // strip the html; the fire and the created activity are both
+    // skipped — the after-commit fire step below drives the bespoke
+    // fire and Django sends no activity on this path).
     // `to_safe_html` never yields `""` (the `<p></p>` fallback), so the
     // hook's `NULL` arm is defensive, kept for the port's exact shape.
     let html = to_safe_html(Some(description));
-    let now = Utc::now();
-    let issue_id = Uuid::new_v4();
-    let fields = IssueFieldSet {
-        id: issue_id,
-        created_at: now,
-        updated_at: now,
-        created_by_id: Some(scope.creator_id),
-        updated_by_id: None,
-        deleted_at: None,
-        project_id,
-        workspace_id: scope.workspace_id,
-        parent_id: None,
-        state_id: tool_state,
-        point: None,
-        estimate_point_id: None,
-        name: stripped_title.to_owned(),
-        description_json: serde_json::Value::Object(serde_json::Map::new()),
-        description_html: html,
-        description_stripped: None,
-        description_binary: None,
-        priority: "none".to_owned(),
-        complexity_score: 0,
-        start_date: None,
-        target_date: None,
-        sequence_id: 0,
-        sort_order: 65535.0,
-        completed_at: None,
-        archived_at: None,
-        is_draft: false,
-        external_source: None,
-        external_id: None,
-        type_id: None,
-        git_work_branch: String::new(),
-        workpad: String::new(),
-        created_via: Some("cloud_agent".to_owned()),
-        assigned_pod_id: None,
-        // The tool create path accepts no dedicated runner (design §7: the
-        // web app and v1 surfaces own the write path); always NULL here.
-        assigned_runner_id: None,
-        agent_executor: None,
-    };
-    // Inert: the fire is skipped (the caller drives it post-commit).
-    let fire = domain_issues::FireSpec {
-        dispatch_immediate: true,
-        pod_once: false,
-
-        created_by: Some(scope.creator_id),
-        moved_by_run: None,
-        now,
-    };
     let domain_ctx = write_ctx(scope, project_id);
     let transition = ctx.transition_hook.clone();
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(WorkerTaskEnqueueHook::new(&ctx.pool));
     let pool = ctx.pool.clone();
     txn.hooks_mut().register(transition);
     txn.hooks_mut().register(enqueue);
-    let outcome = domain_issues::create(
-        &domain_ctx,
-        txn,
-        &pool,
-        domain_issues::CreateIssue {
-            fields,
-            assignees: Vec::new(),
-            default_assignee: None,
-            labels: Vec::new(),
-            fire,
-            origin: None,
-            activity_requested: serde_json::Value::Null,
-            activity_notification: None,
-            activity_require_origin: false,
-            skip_activity: true,
-            skip_fire: true,
-            model_activity: None,
-            created_override: None,
-        },
-    )
-    .await
-    .map_err(domain_error)?;
+    let create = pidash_services::operations::core::issues::IssueCreate {
+        project_id,
+        name: stripped_title.to_owned(),
+        description_html: html,
+        state: tool_state,
+        created_via: Some("cloud_agent".to_owned()),
+        apply_default_assignee: false,
+        fire: pidash_services::operations::core::issues::CreateFire::AfterCommit,
+    };
+    let created =
+        pidash_services::operations::core::issues::create(txn, &domain_ctx, &pool, &create)
+            .await
+            .map_err(|error| match error {
+                pidash_services::operations::core::CoreError::Request(message) => {
+                    ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
+                }
+                pidash_services::operations::core::CoreError::Missing(model) => {
+                    ToolExecError::Missing { model }
+                }
+                pidash_services::operations::core::CoreError::Db(domain_error) => {
+                    ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
+                }
+                pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+                    ToolExecError::Db(sqlx_error)
+                }
+            })?;
+    let issue_id = created.issue_id;
     // The deferred `select_for_update` (`tools.py:351`; see above):
     // taken on the audit transaction and held until the audit commits.
     let locked = project_lock_query(project_id)
@@ -1446,8 +1386,8 @@ async fn op_create_project_issue(
     if locked.is_none() {
         return Err(ToolExecError::Missing { model: "Project" });
     }
-    let state_id = outcome.issue.state_id;
-    let sequence_id = i64::from(outcome.issue.sequence_id);
+    let state_id = created.state_id;
+    let sequence_id = i64::from(created.sequence_id);
     // `{"created": True, **_issue_data(issue)}` (brief, `created`
     // first): the project identifier plus the resolved state.
     let project_identifier = proj_entity::Entity::find_by_id(project_id)
