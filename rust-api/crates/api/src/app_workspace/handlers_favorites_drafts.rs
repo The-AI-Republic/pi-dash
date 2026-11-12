@@ -51,8 +51,7 @@
 //!   at the project's workspace; a missing project row 404s (not the FK 400).
 //! * Draft list `issue_filters` run over the DraftIssue queryset, so `labels`,
 //!   `assignees`, `cycle`, `module`, `mentions`, `subscriber`, `intake_status`,
-//!   `inbox_status` and `logged_by` params raise `FieldError` → the generic 500; the
-//!   `updated_at` param filters `created_at` (`issue_filters.py:236`).
+//!   `inbox_status` and `logged_by` params raise `FieldError` → the generic 500.
 //! * The draft cycle subquery is `[:1]` with NO `ORDER BY` (nondeterministic pick);
 //!   the assignee `ArrayAgg` guard accepts ANY active project membership of the
 //!   assignee (no project scoping) (`draft.py:55-60`, `:76`).
@@ -3223,8 +3222,8 @@ async fn favorite_list(
 
 /// Dispatcher order (`issue_filters.py:437-465`): presence-based, each filter
 /// inserts its predicates; shared keys keep FIRST position with the LATER
-/// value (`updated_at` overwrites `created_at`'s `created_at__date__*`;
-/// `inbox_status` overwrites `intake_status`'s `issue_intake__status__in`).
+/// value (`inbox_status` overwrites `intake_status`'s
+/// `issue_intake__status__in`).
 /// `.filter(**filters)` then builds predicates in final-dict order and the
 /// FIRST failure wins: `FieldError` → generic 500, `ValidationError` → 400
 /// `{"error": "Please provide valid detail"}`.
@@ -3288,6 +3287,7 @@ fn draft_zoned_date(column: draft_issues::Column, timezone: &Tz) -> SimpleExpr {
 fn draft_date_term(term: &str, timezone: &Tz) -> SimpleExpr {
     match term {
         "created_at__date" => draft_zoned_date(draft_issues::Column::CreatedAt, timezone),
+        "updated_at__date" => draft_zoned_date(draft_issues::Column::UpdatedAt, timezone),
         "completed_at__date" => draft_zoned_date(draft_issues::Column::CompletedAt, timezone),
         "start_date" => draft_col(draft_issues::Column::StartDate).into(),
         "target_date" => draft_col(draft_issues::Column::TargetDate).into(),
@@ -3478,9 +3478,7 @@ fn compile_draft_filters(
                 }
             }
             "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
-            // BUG: the `updated_at` param filters `created_at`
-            // (`issue_filters.py:236`), overwriting that param's keys.
-            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
+            "updated_at" => compile_date_param(&mut insert, "updated_at__date", raw, now, timezone),
             "start_date" => compile_date_param(&mut insert, "start_date", raw, now, timezone),
             "target_date" => compile_date_param(&mut insert, "target_date", raw, now, timezone),
             "completed_at" => {
