@@ -20,6 +20,12 @@ from pi_dash.runner.views import (
     ChatMessageCompleteEndpoint,
     ChatMessageStartedEndpoint,
     ChatStartedEndpoint,
+    DaemonDevMachineEndpoint,
+    DevMachineMergeEndpoint,
+    DevMachineReplaceCandidatesEndpoint,
+    EngineCredentialRevokeEndpoint,
+    EngineModelTokenEndpoint,
+    EngineProfileEndpoint,
     HealthEndpoint,
     MachineCommandResultEndpoint,
     MachineSessionDeleteEndpoint,
@@ -113,6 +119,32 @@ urlpatterns = [
         "runners/<uuid:runner_id>/sessions/<uuid:sid>/poll",
         runner_session_poll,
         name="runner-session-poll",
+    ),
+    # Built-in engine (built_engine_as_runner §4.3): profile and sign-out
+    # with the machine token; model tokens with the engine credential only.
+    path("engine/profile/", EngineProfileEndpoint.as_view(), name="engine-profile"),
+    path("engine/model-token/", EngineModelTokenEndpoint.as_view(), name="engine-model-token"),
+    path(
+        "engine/credential/revoke/",
+        EngineCredentialRevokeEndpoint.as_view(),
+        name="engine-credential-revoke",
+    ),
+    # Machine identity (§4.10, §13). ``desktop-enroll/`` above is a literal
+    # segment, so it still wins over the ``<uuid>`` route.
+    path(
+        "dev-machines/<uuid:dev_machine_id>/",
+        DaemonDevMachineEndpoint.as_view(),
+        name="daemon-dev-machine",
+    ),
+    path(
+        "dev-machines/<uuid:dev_machine_id>/merge-into/",
+        DevMachineMergeEndpoint.as_view(),
+        name="dev-machine-merge-into",
+    ),
+    path(
+        "dev-machines/<uuid:dev_machine_id>/replace-candidates/",
+        DevMachineReplaceCandidatesEndpoint.as_view(),
+        name="dev-machine-replace-candidates",
     ),
     # Machine-level control session lifecycle + poll. Keyed on the dev
     # machine (not a runner) and authenticated by the shared MachineToken,

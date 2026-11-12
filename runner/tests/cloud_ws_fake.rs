@@ -14,6 +14,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
+// Tungstenite fixes the handshake callback's error type to its HTTP response.
+#[allow(clippy::result_large_err)]
 async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

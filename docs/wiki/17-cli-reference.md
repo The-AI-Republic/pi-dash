@@ -248,9 +248,29 @@ List projects in the active workspace. Prints JSON.
 pidash project list
 ```
 
+Pi Dash writes two `context.md` files so an agent can tell which project a
+directory belongs to and what else exists in the workspace:
+
+- **Working-dir** `<working_dir>/.pidash/context.md` (`scope: "project"`) — the
+  single project that working directory belongs to. Authoritative for "which
+  project am I working in". Written at `runner add` and when the daemon resolves
+  a workspace, and excluded from the repo via `$GIT_DIR/info/exclude` (never
+  `.gitignore`).
+- **Machine-level** `~/.pidash/context.md` (`scope: "machine"`) — every project
+  in every workspace this machine is bound to, keyed by workspace slug. The
+  lookup table for "what else exists in this workspace" and the fallback when
+  there is no working-dir file. Written on `auth login`, at `runner add`, and
+  when the daemon resolves a workspace, and refreshable with
+  `pidash context refresh`. Its location follows `PIDASH_CONFIG_DIR` when set,
+  otherwise `~/.pidash`.
+
+Both files carry a `generated_at` RFC 3339 UTC stamp, and each project carries a
+`repo_url`.
+
 ### `pidash context init`
 
-Write `.pidash/context.md` for a local workspace directory.
+Write the working-dir `.pidash/context.md` for a local directory, scoped to one
+project.
 
 ```
 pidash context init --project <PROJECT> [--workspace <PATH>]
@@ -260,6 +280,16 @@ pidash context init --project <PROJECT> [--workspace <PATH>]
 | ----------------- | --------------------------------------------------- |
 | `--project <P>`   | Project identifier or UUID. **Required.**           |
 | `--workspace <P>` | Local workspace dir. Defaults to current directory. |
+
+### `pidash context refresh`
+
+Rewrite the machine-level `~/.pidash/context.md` for the bound workspace,
+replacing that workspace's project list wholesale (pruning deleted projects) and
+leaving other workspaces intact.
+
+```
+pidash context refresh
+```
 
 ---
 
@@ -317,13 +347,13 @@ pidash issue list --project <P> [--cursor <C>] [--per-page <N>] [--order-by <F>]
 | `--per-page <N>`    | Items per page. Server default if omitted.                                                                       |
 | `--order-by <F>`    | Sort field, e.g. `-created_at` (default), `priority`, `state__name`.                                             |
 | `--state <S>`       | State names (case-insensitive) and/or UUIDs, comma-separated. An unknown name fails with the valid names listed. |
-| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated.      |
+| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated, plus shortcuts `open` (`backlog,unstarted,started,review,test`), `closed` (`completed,cancelled`) and `all` (no filter). Aliases may be mixed with concrete groups. Defaults to `open` when neither `--state` nor `--state-group` is given. |
 | `--parent <P>`      | Sub-issues of this parent (`PROJ-123`, resolved to a UUID client-side, or a UUID); `none` for top-level only.    |
 | `--label <L>`       | Label names (case-insensitive) and/or UUIDs, comma-separated.                                                    |
 | `--priority <P>`    | `urgent` \| `high` \| `medium` \| `low` \| `none`, comma-separated.                                              |
 | `--fields <F>`      | Return only these fields per item, e.g. `id,sequence_id,name,state,parent`.                                      |
 
-Values within one flag OR together; different flags AND together. Example — Backlog sub-issues of an epic, small payload:
+Values within one flag OR together; different flags AND together. With neither `--state` nor `--state-group`, `issue list` defaults to `open` (`backlog,unstarted,started,review,test`); the response includes `"state_group": "open"` so agents know closed items were excluded. Use `--state-group closed` for done/cancelled, or `--state-group all` for today's behaviour (every item). An explicit `--state` or `--state-group` disables the default. Example — Backlog sub-issues of an epic, small payload:
 
 ```
 pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state

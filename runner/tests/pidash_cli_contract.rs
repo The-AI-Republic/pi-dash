@@ -542,6 +542,12 @@ async fn http_401_maps_to_exit_auth() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("401");
     assert_eq!(err.exit_code, EXIT_AUTH);
+    // 401 must read as an authentication failure — not be collapsed into the
+    // 403 wording — and must carry the server's reason.
+    assert_eq!(
+        err.message,
+        "HTTP 401 Unauthorized: authentication failed: bad token"
+    );
 }
 
 #[tokio::test]
@@ -555,6 +561,66 @@ async fn http_403_maps_to_exit_auth() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("403");
     assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: forbidden"
+    );
+}
+
+#[tokio::test]
+async fn http_403_surfaces_drf_detail_in_message() {
+    // DRF permission classes (e.g. ProjectEntityPermission's project-role
+    // check) answer with {"detail": "..."} — that text must reach the
+    // operator-facing message, not just the stderr detail blob.
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"detail":"You do not have permission to perform this action."}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("403");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: You do not have permission to perform this action."
+    );
+}
+
+#[tokio::test]
+async fn http_403_surfaces_handrolled_error_in_message() {
+    // The issue views hand-roll their 403s as {"error": "..."} with an
+    // endpoint-specific explanation.
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"an agent run cannot re-tick its own issue"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("403");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: an agent run cannot re-tick its own issue"
+    );
+}
+
+#[tokio::test]
+async fn http_401_with_unrecognized_body_keeps_generic_message() {
+    // A proxy or gateway may answer with non-JSON; the message falls back to
+    // the generic label and the raw body still rides along as detail.
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 401,
+        status_text: "Unauthorized",
+        body: "<html>gateway says no</html>".into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("401");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.message, "HTTP 401 Unauthorized: authentication failed");
+    assert_eq!(err.detail.as_deref(), Some("<html>gateway says no</html>"));
 }
 
 #[tokio::test]
@@ -634,11 +700,17 @@ async fn writes_carry_the_run_id_header_reads_do_not() {
 
     client.get("users/me/").await.expect("get");
     client
-        .patch("workspaces/acme/projects/p/work-items/i/", &serde_json::json!({"state": "s"}))
+        .patch(
+            "workspaces/acme/projects/p/work-items/i/",
+            &serde_json::json!({"state": "s"}),
+        )
         .await
         .expect("patch");
     client
-        .post("workspaces/acme/projects/p/work-items/i/comments/", &serde_json::json!({"comment_html": "x"}))
+        .post(
+            "workspaces/acme/projects/p/work-items/i/comments/",
+            &serde_json::json!({"comment_html": "x"}),
+        )
         .await
         .expect("post");
 
@@ -657,11 +729,17 @@ async fn writes_without_a_run_id_send_no_header() {
     let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
     let client = client(&fake);
     client
-        .patch("workspaces/acme/projects/p/work-items/i/", &serde_json::json!({"state": "s"}))
+        .patch(
+            "workspaces/acme/projects/p/work-items/i/",
+            &serde_json::json!({"state": "s"}),
+        )
         .await
         .expect("patch");
     let recorded = fake.recorded.lock().unwrap();
-    assert_eq!(recorded[0].run_id, None, "operator use must look like a human move");
+    assert_eq!(
+        recorded[0].run_id, None,
+        "operator use must look like a human move"
+    );
 }
 
 #[tokio::test]
@@ -679,6 +757,7 @@ async fn run_yield_posts_outcome_to_the_run_yield_route() {
             outcome: pidash::cli::run_cmd::Outcome::Done,
             note: Some("  approved  ".into()),
             run_id: None,
+            stop_ticking: false,
         },
     )
     .await
@@ -694,6 +773,67 @@ async fn run_yield_posts_outcome_to_the_run_yield_route() {
     let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
     assert_eq!(body["outcome"], "done");
     assert_eq!(body["note"], "approved");
+    assert!(
+        body.get("stop_ticking").is_none(),
+        "without --stop-ticking no key may reach the server"
+    );
+}
+
+#[tokio::test]
+async fn run_yield_stop_ticking_puts_the_signal_in_the_body() {
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(r#"{"ok":true,"outcome":"done","stop_ticking":true}"#)
+    }))
+    .await;
+    let run_id = "123e4567-e89b-12d3-a456-426614174000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("yield");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(body["outcome"], "done");
+    assert_eq!(body["stop_ticking"], true);
+}
+
+#[tokio::test]
+async fn run_yield_stop_ticking_succeeds_against_an_older_server_that_ignores_it() {
+    // An older server does not know `stop_ticking`: it accepts the POST,
+    // rejects nothing, and answers without echoing the unknown key.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(r#"{"ok":true,"outcome":"progressed"}"#)
+    }))
+    .await;
+    let run_id = "123e4567-e89b-12d3-a456-426614174000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Progressed,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("yield must succeed against a server that ignores the key");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(body["stop_ticking"], true);
 }
 
 #[tokio::test]
@@ -706,6 +846,7 @@ async fn run_yield_without_a_run_id_fails_before_any_request() {
             outcome: pidash::cli::run_cmd::Outcome::Progressed,
             note: None,
             run_id: None,
+            stop_ticking: false,
         },
     )
     .await
@@ -742,9 +883,12 @@ const LIST_PATH: &str = "/api/v1/workspaces/acme/projects/ENG/work-items/";
 
 #[tokio::test]
 async fn issue_list_without_filters_sends_no_query() {
+    // No flags now defaults to open groups (PDASHOSS01-352).
     assert_eq!(
         list_paths(list_args("ENG")).await,
-        vec![LIST_PATH.to_string()]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
     );
 }
 
@@ -772,9 +916,12 @@ async fn issue_list_state_group_flag() {
 async fn issue_list_label_flag_maps_to_labels_param() {
     let mut args = list_args("ENG");
     args.label = Some("bug,frontend".into());
+    // Label alone still gets the default open filter.
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?labels=bug%2Cfrontend")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&labels=bug%2Cfrontend"
+        )]
     );
 }
 
@@ -784,7 +931,9 @@ async fn issue_list_priority_flag() {
     args.priority = Some("urgent,high".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?priority=urgent%2Chigh")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&priority=urgent%2Chigh"
+        )]
     );
 }
 
@@ -795,7 +944,7 @@ async fn issue_list_fields_flag() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
         )]
     );
 }
@@ -806,7 +955,9 @@ async fn issue_list_parent_none_sends_null_without_lookup() {
     args.parent = Some("none".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?parent=null")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=null"
+        )]
     );
 }
 
@@ -817,9 +968,86 @@ async fn issue_list_parent_uuid_is_passed_as_is() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?parent=00000000-0000-0000-0000-000000000009"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=00000000-0000-0000-0000-000000000009"
         )]
     );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_open_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_closed_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("closed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state_group=completed%2Ccancelled")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_omits_filter() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    assert_eq!(list_paths(args).await, vec![LIST_PATH.to_string()]);
+}
+
+#[tokio::test]
+async fn issue_list_state_group_mixed_alias() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open,completed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_response_carries_visible_state_group() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let resp = pidash::cli::issue::list_issues(&client, &list_args("ENG"))
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "open");
+    assert_eq!(resp["count"], 0);
+}
+
+#[tokio::test]
+async fn issue_list_explicit_state_disables_default_and_omits_state_group_key() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state = Some("Backlog".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    // Explicit --state: no default, and no state_group key (or null).
+    assert!(resp.get("state_group").is_none() || resp["state_group"].is_null());
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_shows_all_in_output() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "all");
 }
 
 #[tokio::test]
@@ -872,7 +1100,6 @@ async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
     assert!(err.detail.unwrap_or_default().contains("Valid states"));
 }
 
-
 // ---------------------------------------------------------------------------
 // `pidash page …` — the read path into project pages (PDASHOSS01-185).
 // ---------------------------------------------------------------------------
@@ -899,7 +1126,10 @@ async fn page_list_hits_the_project_pages_route() {
 
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(recorded[0].method, "GET");
-    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/pages/");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/pages/"
+    );
     assert_eq!(recorded[0].api_key.as_deref(), Some("test-token"));
 }
 
@@ -1000,7 +1230,9 @@ async fn page_get_body_only_uses_the_same_route_and_succeeds() {
 #[tokio::test]
 async fn page_get_body_only_errors_when_the_server_omits_markdown() {
     let fake = start_fake(Box::new(|_req| {
-        CannedResponse::ok(r#"{"id":"00000000-0000-0000-0000-0000000000f1","description_html":"<p>x</p>"}"#)
+        CannedResponse::ok(
+            r#"{"id":"00000000-0000-0000-0000-0000000000f1","description_html":"<p>x</p>"}"#,
+        )
     }))
     .await;
 
@@ -1098,7 +1330,10 @@ async fn page_create_posts_to_the_project_pages_route() {
 
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(recorded[0].method, "POST");
-    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/pages/");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/pages/"
+    );
     assert_eq!(recorded[0].run_id.as_deref(), Some("run-7"));
     assert_eq!(
         body_json(&recorded[0]),
@@ -1388,7 +1623,16 @@ async fn page_create_body_file_dash_reads_stdin() {
 
     let out = run_pidash(
         &fake,
-        &["page", "create", "--project", "ENG", "--title", "X", "--body-file", "-"],
+        &[
+            "page",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--body-file",
+            "-",
+        ],
         "# Piped\n\nfrom stdin\n",
     )
     .await;
@@ -1411,14 +1655,27 @@ async fn page_body_and_body_file_conflict_at_the_cli() {
     let out = run_pidash(
         &fake,
         &[
-            "page", "create", "--project", "ENG", "--title", "X", "--body", "x", "--body-file", "-",
+            "page",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--body",
+            "x",
+            "--body-file",
+            "-",
         ],
         "",
     )
     .await;
 
     assert_ne!(out.code, Some(0));
-    assert!(out.stderr.contains("cannot be used with"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("cannot be used with"),
+        "stderr: {}",
+        out.stderr
+    );
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
 
@@ -1439,7 +1696,15 @@ async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
 
     let out = run_pidash(
         &fake,
-        &["page", "update", "conventions", "--project", "ENG", "--title", "Y"],
+        &[
+            "page",
+            "update",
+            "conventions",
+            "--project",
+            "ENG",
+            "--title",
+            "Y",
+        ],
         "",
     )
     .await;
@@ -1492,7 +1757,10 @@ async fn issue_create_description_file_sends_the_file_as_markdown() {
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].method, "POST");
-    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/work-items/");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/work-items/"
+    );
     assert_eq!(
         body_json(&recorded[0]),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
@@ -1506,7 +1774,14 @@ async fn issue_create_description_file_dash_reads_stdin() {
     let out = run_pidash(
         &fake,
         &[
-            "issue", "create", "--project", "ENG", "--title", "X", "--description-file", "-",
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description-file",
+            "-",
         ],
         LONG_BODY,
     )
@@ -1527,7 +1802,14 @@ async fn issue_create_inline_description_is_sent_as_markdown() {
     let out = run_pidash(
         &fake,
         &[
-            "issue", "create", "--project", "ENG", "--title", "X", "--description", "## Hi",
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description",
+            "## Hi",
         ],
         "",
     )
@@ -1550,7 +1832,13 @@ async fn issue_patch_description_file_sends_the_file_as_markdown() {
 
     let out = run_pidash(
         &fake,
-        &["issue", "patch", "ENG-1", "--description-file", path.to_str().unwrap()],
+        &[
+            "issue",
+            "patch",
+            "ENG-1",
+            "--description-file",
+            path.to_str().unwrap(),
+        ],
         "",
     )
     .await;
@@ -1592,16 +1880,36 @@ async fn issue_patch_description_file_dash_reads_stdin() {
 async fn issue_description_and_description_file_conflict_at_the_cli() {
     for args in [
         &[
-            "issue", "create", "--project", "ENG", "--title", "X", "--description", "x",
-            "--description-file", "-",
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description",
+            "x",
+            "--description-file",
+            "-",
         ][..],
-        &["issue", "patch", "ENG-1", "--description", "x", "--description-file", "-"][..],
+        &[
+            "issue",
+            "patch",
+            "ENG-1",
+            "--description",
+            "x",
+            "--description-file",
+            "-",
+        ][..],
     ] {
         let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
         let out = run_pidash(&fake, args, "body").await;
 
         assert_ne!(out.code, Some(0), "{args:?}");
-        assert!(out.stderr.contains("cannot be used with"), "stderr: {}", out.stderr);
+        assert!(
+            out.stderr.contains("cannot be used with"),
+            "stderr: {}",
+            out.stderr
+        );
         assert!(fake.recorded.lock().unwrap().is_empty());
     }
 }
@@ -1615,20 +1923,49 @@ async fn issue_empty_description_file_or_stdin_exits_2_without_a_request() {
 
     for (args, stdin) in [
         (
-            vec!["issue", "create", "--project", "ENG", "--title", "X", "--description-file", "-"],
+            vec![
+                "issue",
+                "create",
+                "--project",
+                "ENG",
+                "--title",
+                "X",
+                "--description-file",
+                "-",
+            ],
             "",
         ),
         (
-            vec!["issue", "create", "--project", "ENG", "--title", "X", "--description-file", &empty],
+            vec![
+                "issue",
+                "create",
+                "--project",
+                "ENG",
+                "--title",
+                "X",
+                "--description-file",
+                &empty,
+            ],
             "",
         ),
-        (vec!["issue", "patch", "ENG-1", "--description-file", "-"], "   \n"),
-        (vec!["issue", "patch", "ENG-1", "--description-file", &empty], ""),
+        (
+            vec!["issue", "patch", "ENG-1", "--description-file", "-"],
+            "   \n",
+        ),
+        (
+            vec!["issue", "patch", "ENG-1", "--description-file", &empty],
+            "",
+        ),
     ] {
         let fake = start_fake(issue_patch_handler()).await;
         let out = run_pidash(&fake, &args, stdin).await;
 
-        assert_eq!(out.code, Some(EXIT_INVALID), "{args:?} stderr: {}", out.stderr);
+        assert_eq!(
+            out.code,
+            Some(EXIT_INVALID),
+            "{args:?} stderr: {}",
+            out.stderr
+        );
         assert!(out.stderr.contains("is empty"), "stderr: {}", out.stderr);
         assert!(fake.recorded.lock().unwrap().is_empty(), "{args:?}");
     }
@@ -1791,7 +2128,9 @@ async fn fetch_project_labels_follows_next_page_results_true_across_pages() {
                      {"id":"l-2","name":"frontend"}]}"#,
             )
         } else if req.path.contains("cursor=") {
-            CannedResponse::ok(r#"{"count":0,"next_cursor":"1000:3:0","next_page_results":false,"results":[]}"#)
+            CannedResponse::ok(
+                r#"{"count":0,"next_cursor":"1000:3:0","next_page_results":false,"results":[]}"#,
+            )
         } else {
             CannedResponse::ok(
                 r#"{"count":1,"next_cursor":"1000:1:0","next_page_results":true,"results":[
@@ -1943,6 +2282,10 @@ async fn issue_patch_add_label_merges_with_the_issues_current_labels() {
             add_label: vec!["bug".into()],
             remove_label: vec![],
             clear_labels: false,
+            git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await
@@ -1979,6 +2322,10 @@ async fn issue_patch_clear_labels_sends_an_empty_array() {
             add_label: vec![],
             remove_label: vec![],
             clear_labels: true,
+            git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await
@@ -2024,6 +2371,10 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
             add_label: vec!["bug".into()],
             remove_label: vec!["Frontend".into()],
             clear_labels: false,
+            git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await

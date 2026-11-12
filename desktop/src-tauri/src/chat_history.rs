@@ -24,11 +24,19 @@
 //! identifier the same way it already supplies the workspace slug — this module
 //! is a consumer of the session the webview holds, never a second copy of it.
 //!
+//! The engine keeps its own copy of each conversation in its per-account home.
+//! That home now belongs to the computer's Pi Dash daemon
+//! (`<daemon data>/engine/<account>/codex-home`), which the app never deletes
+//! from. Clearing an account's history here removes the app's store and any
+//! engine home a build before the shared daemon left under the app's own data
+//! (`AppPaths::legacy_engine_home`) that the migration has not moved yet.
+//!
 //! **Why the chat working copy is a separate tree.** A local chat and a managed
 //! issue run must never modify the same working copy at the same time. Rather
-//! than coordinate locks with the daemon (which owns managed-run lifecycle), a
-//! local chat operates in its own tree under `managed/chat/<account>/workdirs/`,
-//! distinct from managed runs' `managed/workdirs/`. The two can never collide
+//! than coordinate locks with the daemon (which owns the runs), a local chat
+//! operates in its own tree under `managed/chat/<account>/workdirs/`, outside
+//! every task folder (the daemon's, and the legacy `managed/workdirs/`;
+//! design §12.1, PIDESKAPP-25). The two can never collide
 //! because they are never the same path — the concurrency rule holds by
 //! construction. See [`chat_working_dir`] and the `working_dirs_never_collide`
 //! test.
@@ -41,7 +49,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
 
-use crate::managed_runner::ManagedPaths;
+use crate::app_paths::AppPaths;
 
 /// Schema version stored in SQLite's `user_version`. Bump when the schema
 /// changes and add a migration arm in [`migrate`].
@@ -129,7 +137,7 @@ pub async fn chat_create_session<R: Runtime>(
     account: String,
     session: NewChatSession,
 ) -> Result<ChatSession, String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let working_dir =
         resolve_chat_working_dir(&paths, &account, &session.workspace, &session.project)?;
     let conn = open(&paths, &account)?;
@@ -169,7 +177,7 @@ pub async fn chat_list_sessions<R: Runtime>(
     app: AppHandle<R>,
     account: String,
 ) -> Result<Vec<ChatSession>, String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let conn = open(&paths, &account)?;
     let mut stmt = conn
         .prepare(
@@ -192,7 +200,7 @@ pub async fn chat_get_session<R: Runtime>(
     account: String,
     session_id: String,
 ) -> Result<Option<ChatSession>, String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let conn = open(&paths, &account)?;
     conn.query_row(
         "SELECT id, title, workspace, project, working_dir, engine_version, engine_thread_id, \
@@ -211,7 +219,7 @@ pub async fn chat_list_events<R: Runtime>(
     account: String,
     session_id: String,
 ) -> Result<Vec<ChatEvent>, String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let conn = open(&paths, &account)?;
     let mut stmt = conn
         .prepare(
@@ -238,10 +246,10 @@ pub async fn chat_append_event<R: Runtime>(
     session_id: String,
     event: NewChatEvent,
 ) -> Result<ChatEvent, String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let mut conn = open(&paths, &account)?;
     let now = now_millis();
-    let tx = conn.transaction().map_err(sql_err)?;
+    let tx = begin_write(&mut conn).map_err(sql_err)?;
 
     let exists: bool = tx
         .query_row(
@@ -307,8 +315,17 @@ pub async fn chat_set_thread_id<R: Runtime>(
     session_id: String,
     engine_thread_id: String,
 ) -> Result<(), String> {
-    let paths = ManagedPaths::resolve(&app)?;
-    let conn = open(&paths, &account)?;
+    let paths = AppPaths::resolve(&app)?;
+    set_thread_id(&paths, &account, &session_id, &engine_thread_id)
+}
+
+fn set_thread_id(
+    paths: &AppPaths,
+    account: &str,
+    session_id: &str,
+    engine_thread_id: &str,
+) -> Result<(), String> {
+    let conn = open(paths, account)?;
     let changed = conn
         .execute(
             "UPDATE sessions SET engine_thread_id = ?2, updated_at = ?3 WHERE id = ?1",
@@ -329,7 +346,7 @@ pub async fn chat_rename_session<R: Runtime>(
     session_id: String,
     title: String,
 ) -> Result<(), String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let conn = open(&paths, &account)?;
     let changed = conn
         .execute(
@@ -352,7 +369,7 @@ pub async fn chat_delete_session<R: Runtime>(
     account: String,
     session_id: String,
 ) -> Result<(), String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let conn = open(&paths, &account)?;
     // `ON DELETE CASCADE` removes the events; foreign keys are enabled in open().
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
@@ -360,17 +377,18 @@ pub async fn chat_delete_session<R: Runtime>(
     Ok(())
 }
 
-/// Clear all of an account's chat history — every session and event.
+/// Clear all of an account's chat history — every session and event, and the
+/// engine's own copy of them.
 ///
-/// Used both by the "clear all history" affordance and, when the user opts in,
-/// by sign-out (see [`clear_account_history`], which `managed_sign_out` calls).
+/// The "clear all history" affordance. Sign-out reaches the same wipe through
+/// [`clear_account_history`] when the user opts in.
 #[tauri::command]
 pub async fn chat_clear_history<R: Runtime>(
     app: AppHandle<R>,
     account: String,
 ) -> Result<(), String> {
-    let paths = ManagedPaths::resolve(&app)?;
-    clear_account_history(&paths, &account)
+    let paths = AppPaths::resolve(&app)?;
+    clear_history_while_signed_in(&paths, &account)
 }
 
 /// Resolve (and create) the working copy a local chat runs in.
@@ -385,7 +403,7 @@ pub async fn chat_working_dir<R: Runtime>(
     workspace: String,
     project: String,
 ) -> Result<String, String> {
-    let paths = ManagedPaths::resolve(&app)?;
+    let paths = AppPaths::resolve(&app)?;
     let dir = resolve_chat_working_dir(&paths, &account, &workspace, &project)?;
     Ok(dir.to_string_lossy().into_owned())
 }
@@ -394,19 +412,36 @@ pub async fn chat_working_dir<R: Runtime>(
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Remove an account's entire chat tree (DB, WAL, working copies).
+/// Remove an account's entire chat tree (DB, WAL, working copies) and the
+/// engine's copy of its conversations.
 ///
-/// Not a Tauri command itself — `managed_sign_out` calls this when the user
-/// asked to clear history on sign-out, and [`chat_clear_history`] wraps it for
+/// Not a Tauri command itself — `app_clear_account_history` calls this when the user
+/// asked to delete history on sign-out, and [`chat_clear_history`] wraps it for
 /// the in-app "clear all" action. Removing the whole directory rather than just
 /// deleting rows also reclaims the working copies and leaves no WAL/journal
 /// behind for a later reader.
-pub fn clear_account_history(paths: &ManagedPaths, account: &str) -> Result<(), String> {
-    let dir = account_dir(paths, account)?;
-    match std::fs::remove_dir_all(&dir) {
+///
+/// A legacy engine home goes as a whole for the same reason: its transcripts
+/// are not only session rollouts but `history.jsonl`, thread, log and memory
+/// databases and attachments, so deleting selected files would leave copies
+/// behind. Both removals are attempted even if the first fails.
+pub fn clear_account_history(paths: &AppPaths, account: &str) -> Result<(), String> {
+    let chat = remove_tree(&account_dir(paths, account)?, "chat history");
+    let engine = remove_tree(&paths.legacy_engine_home(account)?, "engine history");
+    chat.and(engine)
+}
+
+/// [`clear_account_history`] for an account that stays signed in. The same
+/// wipe: the app runs no engine, so there is no engine home to put back.
+fn clear_history_while_signed_in(paths: &AppPaths, account: &str) -> Result<(), String> {
+    clear_account_history(paths, account)
+}
+
+fn remove_tree(dir: &Path, what: &str) -> Result<(), String> {
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("removing chat history {}: {e}", dir.display())),
+        Err(e) => Err(format!("removing {what} {}: {e}", dir.display())),
     }
 }
 
@@ -415,8 +450,8 @@ pub fn clear_account_history(paths: &ManagedPaths, account: &str) -> Result<(), 
 /// A fresh connection per call keeps this module free of shared `!Sync` state;
 /// WAL plus a busy timeout make the occasional overlapping call from the UI
 /// safe. The DB file is `0600` and its directory `0700` on Unix, matching the
-/// credential handling in `managed_runner`.
-fn open(paths: &ManagedPaths, account: &str) -> Result<Connection, String> {
+/// rest of the app's own files.
+fn open(paths: &AppPaths, account: &str) -> Result<Connection, String> {
     let dir = account_dir(paths, account)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     restrict_dir(&dir);
@@ -439,6 +474,17 @@ fn open(paths: &ManagedPaths, account: &str) -> Result<Connection, String> {
         restrict_file(Path::new(&sidecar));
     }
     Ok(conn)
+}
+
+/// Start a transaction that reads and then writes.
+///
+/// `IMMEDIATE` takes the write lock up front. A deferred transaction would
+/// start as a reader, and in WAL mode its first write fails at once with
+/// `SQLITE_BUSY_SNAPSHOT` ("database is locked") if another connection
+/// committed after its reads; the busy timeout does not retry that case.
+/// Taking the lock at `BEGIN` makes overlapping history writes wait their turn.
+fn begin_write(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
 }
 
 /// Create the schema on first open and apply migrations on later ones.
@@ -482,16 +528,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 }
 
 /// The account's chat directory: `<managed>/chat/<account-key>`.
-fn account_dir(paths: &ManagedPaths, account: &str) -> Result<PathBuf, String> {
+fn account_dir(paths: &AppPaths, account: &str) -> Result<PathBuf, String> {
     Ok(paths.chat_dir.join(account_key(account)?))
 }
 
 /// Resolve (and create) the working copy a chat operates in.
 ///
-/// Lives under the account's chat tree, so it is always a different path from a
-/// managed run's `workdirs/<workspace>/<project>`.
+/// Lives under the account's chat tree, so it is always a different path from
+/// any task folder.
 fn resolve_chat_working_dir(
-    paths: &ManagedPaths,
+    paths: &AppPaths,
     account: &str,
     workspace: &str,
     project: &str,
@@ -511,17 +557,18 @@ fn resolve_chat_working_dir(
 }
 
 /// Turn an account identifier (a user id, or an email) into a single
-/// filesystem-safe, traversal-proof directory name.
+/// filesystem-safe, traversal-proof directory name. Shared with
+/// `AppPaths::legacy_engine_home`, so every per-account tree uses one key.
 ///
 /// The visible prefix is the identifier with anything outside `[A-Za-z0-9_-]`
 /// dropped, so a directory is still recognisable to a human browsing the tree;
 /// an FNV-1a suffix over the *raw* bytes disambiguates values that filter to the
 /// same prefix (e.g. `a@b` vs `a.b`) and guarantees uniqueness. The output
-/// charset is limited to `[A-Za-z0-9_-]`, so no account value can escape the
-/// chat tree with `..` or an absolute path.
-fn account_key(account: &str) -> Result<String, String> {
+/// charset is limited to `[A-Za-z0-9_-]`, so no account value can escape its
+/// tree with `..` or an absolute path.
+pub(crate) fn account_key(account: &str) -> Result<String, String> {
     if account.trim().is_empty() {
-        return Err("chat history requires a signed-in account".into());
+        return Err("a signed-in account is required".into());
     }
     let prefix: String = account
         .chars()
@@ -596,13 +643,13 @@ fn sql_err(e: rusqlite::Error) -> String {
 }
 
 #[cfg(unix)]
-fn restrict_dir(path: &Path) {
+pub(crate) fn restrict_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
 }
 
 #[cfg(not(unix))]
-fn restrict_dir(_path: &Path) {}
+pub(crate) fn restrict_dir(_path: &Path) {}
 
 #[cfg(unix)]
 fn restrict_file(path: &Path) {
@@ -617,10 +664,10 @@ fn restrict_file(_path: &Path) {}
 mod tests {
     use super::*;
 
-    /// A `ManagedPaths` rooted at a temp dir, so the store's real path logic
+    /// A `AppPaths` rooted at a temp dir, so the store's real path logic
     /// runs without a Tauri `AppHandle`.
-    fn paths(root: &Path) -> ManagedPaths {
-        ManagedPaths::for_test_root(root.join("managed"))
+    fn paths(root: &Path) -> AppPaths {
+        AppPaths::at(root.join("managed"))
     }
 
     fn new_session() -> NewChatSession {
@@ -634,7 +681,7 @@ mod tests {
 
     // The Tauri commands are thin wrappers over these helpers; the tests drive
     // the helpers directly so they need no AppHandle.
-    fn create(paths: &ManagedPaths, account: &str, s: NewChatSession) -> ChatSession {
+    fn create(paths: &AppPaths, account: &str, s: NewChatSession) -> ChatSession {
         let working_dir =
             resolve_chat_working_dir(paths, account, &s.workspace, &s.project).unwrap();
         let conn = open(paths, account).unwrap();
@@ -667,7 +714,7 @@ mod tests {
         record
     }
 
-    fn append(paths: &ManagedPaths, account: &str, session_id: &str, role: &str) -> ChatEvent {
+    fn append(paths: &AppPaths, account: &str, session_id: &str, role: &str) -> ChatEvent {
         let mut conn = open(paths, account).unwrap();
         let now = now_millis();
         let tx = conn.transaction().unwrap();
@@ -698,7 +745,7 @@ mod tests {
         ev
     }
 
-    fn list_sessions(paths: &ManagedPaths, account: &str) -> Vec<ChatSession> {
+    fn list_sessions(paths: &AppPaths, account: &str) -> Vec<ChatSession> {
         let conn = open(paths, account).unwrap();
         let mut stmt = conn
             .prepare(
@@ -712,7 +759,7 @@ mod tests {
             .unwrap()
     }
 
-    fn count_events(paths: &ManagedPaths, account: &str, session_id: &str) -> i64 {
+    fn count_events(paths: &AppPaths, account: &str, session_id: &str) -> i64 {
         let conn = open(paths, account).unwrap();
         conn.query_row(
             "SELECT COUNT(*) FROM events WHERE session_id=?1",
@@ -735,7 +782,10 @@ mod tests {
         // account root even before the DB is ever opened.
         let workdir = resolve_chat_working_dir(&paths, "user-perms", "acme", "web").unwrap();
         assert_eq!(mode(&base), 0o700, "account dir must be 0700 after resolve");
-        assert!(workdir.starts_with(&base), "working dir under the account root");
+        assert!(
+            workdir.starts_with(&base),
+            "working dir under the account root"
+        );
 
         // Open + write so the WAL sidecar exists while the connection is live.
         let conn = open(&paths, "user-perms").unwrap();
@@ -743,7 +793,10 @@ mod tests {
             .unwrap();
         assert_eq!(mode(&base.join("history.db")), 0o600, "db must be 0600");
         let wal = base.join("history.db-wal");
-        assert!(wal.exists(), "WAL sidecar should exist while the DB is open");
+        assert!(
+            wal.exists(),
+            "WAL sidecar should exist while the DB is open"
+        );
         assert_eq!(mode(&wal), 0o600, "WAL sidecar must not be world-readable");
     }
 
@@ -813,15 +866,44 @@ mod tests {
     }
 
     #[test]
+    fn clear_history_removes_a_legacy_engine_copy_for_that_account_only() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let rollout = |account: &str| {
+            let home = paths.legacy_engine_home(account).unwrap();
+            let file = home.join("sessions/2026/10/05/rollout.jsonl");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "transcript").unwrap();
+            file
+        };
+        create(&paths, "user-1", new_session());
+        let (first, second) = (rollout("user-1"), rollout("user-2"));
+
+        clear_history_while_signed_in(&paths, "user-1").unwrap();
+        assert_eq!(list_sessions(&paths, "user-1").len(), 0);
+        assert!(
+            !paths.legacy_engine_home("user-1").unwrap().exists(),
+            "clear all history left the engine's copy at {}",
+            first.display()
+        );
+        assert!(
+            second.exists(),
+            "another account's engine history must survive"
+        );
+        // An account with nothing to clear is not an error.
+        clear_history_while_signed_in(&paths, "user-3").unwrap();
+    }
+
+    #[test]
     fn working_dirs_never_collide_with_managed_runs() {
         let root = tempfile::tempdir().unwrap();
         let paths = paths(root.path());
         let chat_dir = resolve_chat_working_dir(&paths, "user-1", "acme", "web").unwrap();
-        // The managed-run working copy for the same workspace/project.
-        let managed_dir = paths.workdirs.join("acme").join("web");
+        // The legacy task folder for the same workspace/project.
+        let managed_dir = paths.legacy_workdirs().join("acme").join("web");
         assert_ne!(chat_dir, managed_dir);
-        // And the chat dir is not nested inside the managed-runs tree.
-        assert!(!chat_dir.starts_with(&paths.workdirs));
+        // And the chat dir is not nested inside the legacy task tree.
+        assert!(!chat_dir.starts_with(paths.legacy_workdirs()));
         assert!(chat_dir.starts_with(&paths.chat_dir));
     }
 
@@ -861,5 +943,54 @@ mod tests {
             .unwrap()
             .unwrap_or(false);
         assert!(!exists);
+    }
+
+    /// A history write that commits while an append is between its reads and
+    /// its insert (`chat_set_thread_id` landing during `chat_append_event`)
+    /// must wait for the append, not make the append fail with
+    /// "database is locked".
+    #[test]
+    fn overlapping_thread_id_write_does_not_fail_an_append() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let session = create(&paths, "user-1", new_session());
+
+        // The append's opening reads, exactly as chat_append_event does them.
+        let mut conn = open(&paths, "user-1").unwrap();
+        let tx = begin_write(&mut conn).unwrap();
+        let next_seq: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id=?1",
+                params![session.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // The thread-id write arrives on its own connection mid-append.
+        let writer = {
+            let paths = paths.clone();
+            let id = session.id.clone();
+            std::thread::spawn(move || set_thread_id(&paths, "user-1", &id, "thread-1"))
+        };
+        // Give the other write time to commit if nothing holds it off.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let inserted = tx.execute(
+            "INSERT INTO events (id,session_id,seq,role,content,created_at) \
+             VALUES (?1,?2,?3,'assistant','reply',?4)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                session.id,
+                next_seq,
+                now_millis()
+            ],
+        );
+        assert!(inserted.is_ok(), "append failed: {inserted:?}");
+        tx.commit().unwrap();
+
+        assert_eq!(writer.join().unwrap(), Ok(()));
+        assert_eq!(count_events(&paths, "user-1", &session.id), 1);
+        let stored = list_sessions(&paths, "user-1");
+        assert_eq!(stored[0].engine_thread_id.as_deref(), Some("thread-1"));
     }
 }

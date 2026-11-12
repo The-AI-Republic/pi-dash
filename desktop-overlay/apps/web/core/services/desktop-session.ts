@@ -17,14 +17,24 @@
  * Runs after the sign-out request (which needs the CSRF cookie) and before the
  * navigation. Failure is swallowed: a sign-out that cannot clear local data
  * must still land the user on the sign-in page rather than throw.
+ *
+ * The wipe takes `localStorage` with it, so the one thing there that has to
+ * outlive a sign-out — the local-chat approval mode — is handed to the host
+ * first (see `desktop-approval-modes.ts`).
  */
 
-import { isDesktop } from "@/services/agent-runtime";
+import { getAgentAccount, isDesktop } from "@/services/agent-runtime";
+import { stashApprovalModes } from "@/services/desktop-approval-modes";
 
 type Native = { core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> } };
 
 export async function clearDesktopSessionData(): Promise<void> {
   if (!isDesktop()) return;
+  try {
+    await stashApprovalModes(getAgentAccount());
+  } catch {
+    // Signing out matters more than keeping a preference; wipe regardless.
+  }
   try {
     await (window as unknown as { __TAURI__: Native }).__TAURI__.core.invoke<void>("desktop_clear_web_data");
   } catch {

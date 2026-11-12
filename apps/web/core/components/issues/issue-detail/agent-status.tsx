@@ -111,6 +111,22 @@ export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t
   return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
 }
 
+/** Exported for tests — `_stop_clock` retains `next_run_at`, so a disarmed
+ * clock still carries a timestamp; the tile must gate on the clock being
+ * armed (or an entry being queued), not on the timestamp existing. */
+export function formatNextTick(
+  ticker: TIssueAgentTicker | null | undefined,
+  now: number,
+  t: TranslationFn
+): string | null {
+  if (!ticker) return null;
+  // A queued entry (design §4.5) is due now and starts the moment the
+  // active run ends — say so instead of "due now".
+  if (ticker.pending_entry) return t("queued");
+  if (!ticker.enabled) return null;
+  return formatUntil(ticker.next_run_at, now, t);
+}
+
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
   const value = payload?.[key];
   if (typeof value !== "string") return null;
@@ -139,7 +155,8 @@ function getPayloadStringList(payload: Record<string, unknown> | null | undefine
 function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn): string | null {
   const liveState = run.live_state;
   if (!liveState) return null;
-  const lastActivity = formatRelativePast(liveState.last_event_at, now, t);
+  // With observability off only the watchdog's activity stamp is reported.
+  const lastActivity = formatRelativePast(liveState.last_event_at ?? liveState.agent_last_activity_at, now, t);
   if (liveState.last_event_summary && lastActivity) {
     return `${truncate(liveState.last_event_summary)} (${lastActivity})`;
   }
@@ -148,13 +165,118 @@ function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn
   return null;
 }
 
-function getRunView(
+/** Dedicated-runner waiting reason (§14.3, §23.5). pause_reason wins. */
+export function formatDispatchWaitReason(
+  wait: { reason: string; pause_reason?: string | null; runner_last_seen_at?: string | null; runs_ahead?: number },
+  now: number,
+  t: TranslationFn
+): string {
+  const lastSeen = wait.runner_last_seen_at ? formatRelativePast(wait.runner_last_seen_at, now, t) : null;
+  switch (wait.reason) {
+    case "runner_offline": {
+      if (lastSeen) return t("offline, last seen {time}", { time: lastSeen });
+      return t("offline");
+    }
+    case "runner_paused": {
+      return formatPauseReason(wait.pause_reason ?? null, t);
+    }
+    case "runner_busy": {
+      const ahead = wait.runs_ahead ?? 0;
+      if (ahead > 0) return t("busy, {count} {runs} ahead", { count: ahead, runs: ahead === 1 ? t("run") : t("runs") });
+      return t("busy");
+    }
+    case "runner_not_permitted": {
+      return t("the runner can't take this issue");
+    }
+    case "dispatching": {
+      return t("dispatching");
+    }
+    default:
+      return wait.reason;
+  }
+}
+
+function formatPauseReason(reason: string | null, t: TranslationFn): string {
+  switch (reason) {
+    case "dispatch_paused":
+      return t("paused by its owner");
+    case "owner_paused":
+      return t("paused by its owner");
+    case "engine_sign_in_required":
+      return t("the engine's sign-in expired");
+    case "gateway_session_revoked":
+      return t("the gateway session was revoked");
+    case "wallet_empty":
+      return t("the wallet is empty");
+    case "profile_unavailable":
+      return t("the profile is unavailable");
+    case "engine_disabled":
+      return t("the engine is disabled");
+    default:
+      return reason ? t("paused: {reason}", { reason }) : t("paused");
+  }
+}
+
+export function formatWaitingRunRecord(
+  run: TIssueAgentRunSummary,
+  ticker: TIssueAgentTicker | null | undefined,
+  runCount: number,
+  now: number,
+  t: TranslationFn
+): AgentStatusView | null {
+  const wait = run.dispatch_wait;
+  if (!wait || run.status !== "queued") return null;
+  const runnerName = run.pinned_runner_name ?? wait.runner_name ?? run.runner_name ?? "runner";
+  const reason = formatDispatchWaitReason(wait, now, t);
+  const expires = wait.expires_at ? formatUntil(wait.expires_at, now, t) : null;
+  const isDedicated = wait.pin_kind === "dedicated";
+  const expiresSuffix =
+    isDedicated && wait.reason !== "runner_busy" && wait.reason !== "dispatching" && expires
+      ? t(" Fails at {time} if it does not reconnect.")
+      : expires && isDedicated
+        ? t(" Fails in {time}.")
+        : "";
+  const title = t("Waiting for runner {name}", { name: runnerName });
+  const detail = `${reason}.${expiresSuffix}`;
+  const badge =
+    wait.reason === "runner_offline"
+      ? t("Offline")
+      : wait.reason === "runner_paused"
+        ? t("Paused")
+        : wait.reason === "runner_busy"
+          ? wait.runs_ahead > 0
+            ? t("{count} ahead", { count: wait.runs_ahead })
+            : t("Busy")
+          : t("Waiting");
+  const badgeVariant = wait.reason === "runner_offline" || wait.reason === "runner_paused" ? "warning" : "neutral";
+  return { title, detail, badge, badgeVariant, icon: Clock3, iconClassName: "text-warning-primary" };
+}
+
+/** Exported for tests — the run view always outranks getTickerOnlyView on
+ * the detail page, so the stop_signal precedence lives here. */
+export function getRunView(
   run: TIssueAgentRunSummary,
   ticker: TIssueAgentTicker | null | undefined,
   runCount: number,
   now: number,
   t: TranslationFn
 ): AgentStatusView {
+  // Cloud runs stay RUNNING while a cancel is pending (the worker holds
+  // capacity until it finalizes), so they show "Stopping" when the stamp
+  // is present even though the status has not yet moved to cancel_requested.
+  const isCloudCancelling = run.status === "running" && run.cancel_requested_at != null;
+  if (isCloudCancelling) {
+    const liveDetail = getLiveDetail(run, now, t);
+    const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : liveDetail;
+    return {
+      title: t("Stopping the AI agent"),
+      detail: runnerDetail ?? t("Waiting for the runner to confirm cancellation."),
+      badge: t("Stopping"),
+      badgeVariant: "warning" as const,
+      icon: LoaderCircle,
+      iconClassName: "animate-spin text-warning-primary",
+    };
+  }
   const liveDetail = getLiveDetail(run, now, t);
   const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : null;
   const nextTick = formatUntil(ticker?.next_run_at, now, t);
@@ -174,7 +296,9 @@ function getRunView(
     getPayloadString(run.done_payload, "summary");
 
   switch (run.status) {
-    case "queued":
+    case "queued": {
+      const waiting = formatWaitingRunRecord(run, ticker, runCount, now, t);
+      if (waiting) return waiting;
       return {
         title: t("AI agent is queued"),
         detail:
@@ -186,6 +310,7 @@ function getRunView(
         icon: Clock3,
         iconClassName: "text-tertiary",
       };
+    }
     case "assigned":
       return {
         title: t("AI agent is starting on this issue"),
@@ -196,6 +321,18 @@ function getRunView(
         iconClassName: "animate-spin text-accent-primary",
       };
     case "running":
+      // The runner's passive-kill watchdog has seen no agent event for its
+      // unhealthy threshold; the run is still going until the kill threshold.
+      if (run.live_state?.agent_health === "unhealthy") {
+        return {
+          title: t("AI agent has gone quiet"),
+          detail: liveDetail ?? runnerDetail,
+          badge: t("Unhealthy"),
+          badgeVariant: "warning",
+          icon: CircleAlert,
+          iconClassName: "text-warning-primary",
+        };
+      }
       return {
         title: t("AI agent is working on this issue"),
         detail:
@@ -286,6 +423,21 @@ function getRunView(
         iconClassName: "text-danger-primary",
       };
     case "completed":
+      // A stop_signal disarm is always produced by a run, so this run view —
+      // not getTickerOnlyView — is what renders after the agent stops its own
+      // clock (`active_run ?? latest_run` wins). Surface the stop here.
+      if (ticker && !ticker.enabled && ticker.disarm_reason === "stop_signal") {
+        return {
+          title: t("AI agent ticking stopped by the agent"),
+          detail: `${formatRunDone(runCount, t)} — ${t(
+            "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it."
+          )}`,
+          badge: t("Stopped"),
+          badgeVariant: "neutral",
+          icon: CirclePause,
+          iconClassName: "text-tertiary",
+        };
+      }
       return {
         title: t("AI agent run completed"),
         detail: doneDetail,
@@ -338,6 +490,19 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
     };
   }
 
+  if (ticker.disarm_reason === "stop_signal") {
+    return {
+      title: t("AI agent ticking stopped by the agent"),
+      detail: t(
+        "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it."
+      ),
+      badge: t("Stopped"),
+      badgeVariant: "neutral",
+      icon: CirclePause,
+      iconClassName: "text-tertiary",
+    };
+  }
+
   if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: t("AI agent run limit reached"),
@@ -377,7 +542,9 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const activeRun = status?.active_run;
   const activeRunStatus = activeRun?.status;
   const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
-  const canAbortActiveRun = hasActiveAgentRun && activeRunStatus !== "cancel_requested";
+  const isCancelling =
+    activeRunStatus === "cancel_requested" || (activeRun?.cancel_requested_at != null && activeRunStatus === "running");
+  const canAbortActiveRun = hasActiveAgentRun && !isCancelling;
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
   const canReTick = Boolean(ticker?.can_re_tick);
   const { reTick, isSubmitting: isReTicking } = useReTick();
@@ -428,9 +595,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   if (!view) return null;
 
   const Icon = view.icon;
-  // A queued entry (design §4.5) is due now and starts the moment the
-  // active run ends — say so instead of "due now".
-  const nextTick = ticker?.pending_entry ? t("queued") : formatUntil(ticker?.next_run_at, now, t);
+  const nextTick = formatNextTick(ticker, now, t);
   const tickBudget = formatTickBudget(ticker, t);
 
   return (

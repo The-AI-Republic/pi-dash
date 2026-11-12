@@ -10,6 +10,7 @@ import { useTranslation } from "@pi-dash/i18n";
 import { cn } from "@pi-dash/utils";
 import { AppHeader } from "@/components/core/app-header";
 import { ContentWrapper } from "@/components/core/content-wrapper";
+import { NewSchedulerButton } from "@/components/project/scheduler-bindings/new-scheduler-button";
 import { ProjectSchedulersHeader } from "./header";
 
 export default function ProjectSchedulersLayout() {
@@ -31,7 +32,8 @@ export default function ProjectSchedulersLayout() {
       <AppHeader header={<ProjectSchedulersHeader />} />
       <ContentWrapper>
         <div className="flex h-full w-full flex-col">
-          {/* Tab bar: List | Calendar. Single sidebar entry, internal toggle. */}
+          {/* Tab bar: List | Calendar, plus the admin-only "New Scheduler"
+              control right-aligned so it shows on every tab. */}
           <div className="flex items-center gap-1 border-b border-subtle px-4 pt-3">
             <SchedulerTabLink to={`${basePath}/list`} active={isListActive} icon={<ListIcon className="size-4" />}>
               {t("List")}
@@ -43,6 +45,9 @@ export default function ProjectSchedulersLayout() {
             >
               {t("Calendar")}
             </SchedulerTabLink>
+            <div className="ml-auto pb-2">
+              {workspaceSlug && projectId && <NewSchedulerButton workspaceSlug={workspaceSlug} projectId={projectId} />}
+            </div>
           </div>
           <div className="flex-1 overflow-auto">
             <Outlet />

@@ -34,6 +34,14 @@ pub struct DesktopHttp {
     // Abort signals for in-flight requests and streams, keyed by the page's
     // request id, so a canceled request stops instead of completing unseen.
     inflight: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
+    // Cancels that arrived before the request registered. The request and
+    // stream commands are async (spawned, so track runs on a later poll)
+    // while cancel is sync (runs inline), so a fast page-side abort can be
+    // handled first. Each entry holds a pre-notified Notify that track
+    // adopts instead of inserting a fresh one. Stale entries are pruned,
+    // so cancels for ids that never track cannot accumulate.
+    // Lock order: always pre_cancel before inflight.
+    pre_cancel: std::sync::Mutex<HashMap<String, (Arc<Notify>, Instant)>>,
 }
 
 impl DesktopHttp {
@@ -48,15 +56,22 @@ impl DesktopHttp {
                 .build()?,
             generation: Mutex::new(0),
             inflight: Default::default(),
+            pre_cancel: Default::default(),
         })
     }
 
     fn track(&self, id: &str) -> Inflight<'_> {
-        let cancel = Arc::new(Notify::new());
-        self.inflight
-            .lock()
-            .unwrap()
-            .insert(id.to_owned(), cancel.clone());
+        let now = Instant::now();
+        let mut pre = self.pre_cancel.lock().unwrap();
+        pre.retain(|_, (_, at)| now.duration_since(*at) < PRE_CANCEL_TTL);
+        // Adopt a cancel that landed before this request registered; it is
+        // already notified, so the caller's select fires at once.
+        let cancel = pre
+            .remove(id)
+            .map(|(cancel, _)| cancel)
+            .unwrap_or_else(|| Arc::new(Notify::new()));
+        let mut inflight = self.inflight.lock().unwrap();
+        inflight.insert(id.to_owned(), cancel.clone());
         Inflight {
             http: self,
             id: id.to_owned(),
@@ -65,9 +80,33 @@ impl DesktopHttp {
     }
 
     fn cancel(&self, id: &str) {
-        if let Some(cancel) = self.inflight.lock().unwrap().remove(id) {
+        let now = Instant::now();
+        let mut pre = self.pre_cancel.lock().unwrap();
+        pre.retain(|_, (_, at)| now.duration_since(*at) < PRE_CANCEL_TTL);
+        let mut inflight = self.inflight.lock().unwrap();
+        if let Some(cancel) = inflight.remove(id) {
             // notify_one stores a permit, so a cancel that arrives before the
             // request starts waiting is not lost.
+            cancel.notify_one();
+        } else {
+            // No entry yet: the async request task may not have run track yet.
+            // Leave a pre-notified tombstone for track to adopt.
+            let cancel = Arc::new(Notify::new());
+            cancel.notify_one();
+            pre.insert(id.to_owned(), (cancel, now));
+        }
+    }
+
+    /// Abort every in-flight request and stream. The page that asked for
+    /// them is gone (reload, redirect, crash) and can no longer cancel
+    /// them itself: without this, each reload orphans one Rust task per
+    /// open stream until sign-out bumps the session generation.
+    pub(crate) fn cancel_all(&self) {
+        let pending: Vec<Arc<Notify>> = {
+            let mut inflight = self.inflight.lock().unwrap();
+            std::mem::take(&mut *inflight).into_values().collect()
+        };
+        for cancel in pending {
             cancel.notify_one();
         }
     }
@@ -93,6 +132,10 @@ impl Drop for Inflight<'_> {
 
 const CANCELED: &str = "API request canceled";
 const TIMED_OUT: &str = "API request timed out";
+// How long a cancel that landed before its request stays outstanding. The
+// gap between the request and cancel IPCs is milliseconds; this just has to
+// outlive spawn scheduling under load.
+const PRE_CANCEL_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,6 +193,12 @@ fn same_origin(a: &Url, b: &Url) -> bool {
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
+/// Only the main window showing the app UI may make native API requests.
+fn from_app_ui(label: &str, source: &Url, config: &crate::AppConfig) -> bool {
+    let trusted = config.bundle_root.as_ref().unwrap_or(&config.target_url);
+    label == "main" && same_origin(source, trusted)
+}
+
 fn allowed_api_url(url: &Url, api: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && same_origin(url, api)
@@ -158,11 +207,31 @@ fn allowed_api_url(url: &Url, api: &Url) -> bool {
         && (url.path().starts_with("/api/") || url.path().starts_with("/auth/"))
 }
 
-fn cookie_header(cookies: Vec<Cookie<'static>>, url: &Url) -> Option<header::HeaderValue> {
+fn cookie_header(mut cookies: Vec<Cookie<'static>>, url: &Url) -> Option<header::HeaderValue> {
     let jar = Jar::default();
     // cookies_for_url in Wry on macOS only compares exact domains and loses
     // .example.com cookies for api.example.com. Use the full native jar and
     // let the HTTP cookie store enforce domain, path, Secure and expiry.
+    //
+    // The native store can hold two cookies of one name that differ only in
+    // host-only-ness, and for a deployment that sets a cookie domain it always
+    // does: the sign-in navigation lets the webview store the server's
+    // ``Domain=.example.com`` pair itself, while every rotation afterwards is
+    // written back through a domain accessor that strips the leading dot, so it
+    // lands on a *separate* host-only cookie and the navigation's copy keeps its
+    // original value forever. Both serialize to the same jar key here, so the
+    // one added last decides what we send -- and an expired duplicate does not
+    // merely lose, it *evicts* the live cookie and we send no cookie at all.
+    // Either way the API 401s, the page's refresh succeeds, its replay reads
+    // this same jar and 401s again, and the user is bounced to sign-in one
+    // access-token lifetime after every sign-in.
+    //
+    // So drop the dead ones first, then add the rest oldest-expiry-first: when
+    // duplicates collapse, the longest-lived -- the most recently rotated --
+    // value wins. Session cookies sort first and never displace a dated one.
+    let now = unix_now();
+    cookies.retain(|cookie| !cookie_expired(cookie));
+    cookies.sort_by_key(|cookie| cookie_expiry(cookie, now));
     for cookie in cookies {
         jar.add_cookie_str(&cookie.to_string(), url);
     }
@@ -194,17 +263,25 @@ fn response_cookie(raw: &str, url: &Url) -> Option<Cookie<'static>> {
     Some(cookie)
 }
 
-fn cookie_expired(cookie: &Cookie<'_>) -> bool {
-    if let Some(age) = cookie.max_age() {
-        return age.whole_seconds() <= 0;
-    }
-    let now = std::time::SystemTime::now()
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
-    cookie
-        .expires_datetime()
-        .is_some_and(|expiry| expiry.unix_timestamp() <= now)
+        .as_secs() as i64
+}
+
+/// When the cookie stops being valid, or `None` for a session cookie. `Max-Age`
+/// takes precedence over `Expires`, per RFC 6265 section 5.2.2.
+fn cookie_expiry(cookie: &Cookie<'_>, now: i64) -> Option<i64> {
+    if let Some(age) = cookie.max_age() {
+        return Some(now.saturating_add(age.whole_seconds()));
+    }
+    cookie.expires_datetime().map(|at| at.unix_timestamp())
+}
+
+fn cookie_expired(cookie: &Cookie<'_>) -> bool {
+    let now = unix_now();
+    cookie_expiry(cookie, now).is_some_and(|expiry| expiry <= now)
 }
 
 fn safe_request_header(name: &header::HeaderName) -> bool {
@@ -260,8 +337,7 @@ async fn send(
     let source = window
         .url()
         .map_err(|_| "cannot determine request source")?;
-    let trusted = config.bundle_root.as_ref().unwrap_or(&config.target_url);
-    if window.label() != "main" || !same_origin(&source, trusted) {
+    if !from_app_ui(window.label(), &source, &config) {
         return Err("native API requests require the app UI".into());
     }
     let mut url = request.url;
@@ -528,6 +604,67 @@ mod tests {
         assert!(http.inflight.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn cancel_arriving_before_track_still_cancels_the_request() {
+        let http = DesktopHttp::new(api()).unwrap();
+        http.cancel("r1");
+        let inflight = http.track("r1");
+        tokio::time::timeout(Duration::from_secs(1), inflight.cancel.notified())
+            .await
+            .expect("cancel that arrived before track was lost");
+        drop(inflight);
+        assert!(http.inflight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_pre_cancel_does_not_poison_a_later_request() {
+        let http = DesktopHttp::new(api()).unwrap();
+        http.cancel("r1");
+        {
+            let mut pre = http.pre_cancel.lock().unwrap();
+            let (_, at) = pre.get_mut("r1").expect("tombstone missing");
+            *at = Instant::now() - PRE_CANCEL_TTL - Duration::from_secs(1);
+        }
+        let inflight = http.track("r1");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), inflight.cancel.notified())
+                .await
+                .is_err(),
+            "stale tombstone must not cancel a later request"
+        );
+        drop(inflight);
+    }
+
+    // A page reload destroys the JS world without running its cleanup, so
+    // the page never sends desktop_api_cancel. cancel_all is the Rust-side
+    // safety net the page-load hook calls: every tracked entry must be
+    // aborted, while entries tracked afterwards (the new page's requests)
+    // must be untouched.
+    #[tokio::test]
+    async fn cancel_all_aborts_every_inflight_entry_but_not_later_ones() {
+        let http = DesktopHttp::new(api()).unwrap();
+        let first = http.track("r1");
+        let second = http.track("r2");
+        http.cancel_all();
+        tokio::time::timeout(Duration::from_secs(1), first.cancel.notified())
+            .await
+            .expect("cancel_all missed r1");
+        tokio::time::timeout(Duration::from_secs(1), second.cancel.notified())
+            .await
+            .expect("cancel_all missed r2");
+        drop(first);
+        drop(second);
+        assert!(http.inflight.lock().unwrap().is_empty());
+        let later = http.track("r3");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), later.cancel.notified())
+                .await
+                .is_err(),
+            "cancel_all must not poison entries tracked after it"
+        );
+        drop(later);
+    }
+
     #[test]
     fn finished_requests_do_not_leak_or_evict_a_reused_id() {
         let http = DesktopHttp::new(api()).unwrap();
@@ -648,5 +785,152 @@ mod tests {
             &Url::parse("tauri://evil.test/").unwrap()
         ));
         assert!(!same_origin(&bundle, &api()));
+    }
+
+    // `cargo tauri dev` serves the bundled SPA from the CLI's dev server, not
+    // the `tauri://` protocol, so that is the app UI's origin in bundled-dev.
+    #[test]
+    fn bundled_dev_app_ui_served_by_the_cli_dev_server_is_trusted() {
+        let dev_url = Url::parse("http://127.0.0.1:1430/").unwrap();
+        let config = crate::AppConfig {
+            target_url: Url::parse("http://localhost:8000").unwrap(),
+            bundle_root: Some(crate::bundle_root_for(Some(&dev_url))),
+            web_base: Url::parse("http://localhost:8000").unwrap(),
+        };
+        let page = Url::parse("http://127.0.0.1:1430/acme/projects/").unwrap();
+        assert!(from_app_ui("main", &page, &config));
+        assert!(!from_app_ui("other", &page, &config));
+        for foreign in [
+            "http://127.0.0.1:1431/",
+            "http://localhost:8000/",
+            "https://evil.test/",
+        ] {
+            let source = Url::parse(foreign).unwrap();
+            assert!(!from_app_ui("main", &source, &config), "{foreign}");
+        }
+    }
+
+    #[test]
+    fn release_app_ui_is_trusted_only_on_the_bundle_origin() {
+        let config = crate::AppConfig {
+            target_url: Url::parse("https://pidash.example.com").unwrap(),
+            bundle_root: Some(crate::bundle_root_for(None)),
+            web_base: Url::parse("https://pidash.example.com").unwrap(),
+        };
+        let page = Url::parse(crate::BUNDLE_ORIGIN)
+            .unwrap()
+            .join("/acme/")
+            .unwrap();
+        assert!(from_app_ui("main", &page, &config));
+        let dev = Url::parse("http://127.0.0.1:1430/").unwrap();
+        assert!(!from_app_ui("main", &dev, &config));
+    }
+
+    // A deployment with AIREPUBLIC_COOKIE_DOMAIN set (production does: see
+    // deployments/ec2/SETUP-PROD.md) leaves the native store holding *two*
+    // cookies per name. The sign-in navigation stores the server's
+    // ``Domain=.airepublic.com`` copy through the webview; every rotation after
+    // that is written from Rust, where the cookie crate's ``domain()`` strips
+    // the leading dot, so it lands on a separate host-only cookie and the
+    // navigation's copy is never updated again. Both collapse to one jar key,
+    // so the request must carry the freshest value regardless of the order the
+    // native store reports them in -- and must never carry none at all.
+    #[test]
+    fn rotated_cookie_wins_over_a_stale_duplicate_in_any_order() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let fresh = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Max-Age=600",
+        );
+        let stale = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Max-Age=60",
+        );
+        for order in [
+            vec![fresh.clone(), stale.clone()],
+            vec![stale, fresh.clone()],
+        ] {
+            let sent = cookie_header(order, &url)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            assert_eq!(sent, "pidash_access=rotated");
+        }
+
+        // Once the sign-in copy passes the access TTL it must be ignored, not
+        // allowed to evict the rotated cookie and sign the user out.
+        let expired = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        );
+        for order in [vec![fresh.clone(), expired.clone()], vec![expired, fresh]] {
+            let sent = cookie_header(order, &url)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            assert_eq!(sent, "pidash_access=rotated");
+        }
+    }
+
+    #[test]
+    fn a_session_cookie_never_displaces_a_dated_duplicate() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let dated = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Max-Age=600",
+        );
+        let session =
+            cookie("pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly");
+        for order in [vec![dated.clone(), session.clone()], vec![session, dated]] {
+            let sent = cookie_header(order, &url)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            assert_eq!(sent, "pidash_access=rotated");
+        }
+    }
+
+    // The duplicate ranking has to work on the shape the native store actually
+    // hands back, which is never the one the server sent: Wry rebuilds every
+    // cookie from ``expiresDate``, so ``window.cookies()`` yields an absolute
+    // ``Expires`` and never a ``Max-Age``. Measured on macOS 26: a cookie that
+    // expires while sitting in the store is still reported, and reported *after*
+    // the live one -- so the dead sign-in copy is exactly the last insert that
+    // would evict the rotated cookie.
+    #[test]
+    fn duplicates_are_ranked_by_the_absolute_expiry_the_native_store_returns() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let rotated = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Expires=Wed, 01 Jan 2031 00:00:00 GMT",
+        );
+        assert_eq!(
+            rotated.max_age(),
+            None,
+            "the native store reports no Max-Age"
+        );
+        let sign_in_live = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Tue, 01 Jan 2030 00:00:00 GMT",
+        );
+        let sign_in_dead = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        );
+        for order in [
+            vec![rotated.clone(), sign_in_live.clone()],
+            vec![sign_in_live, rotated.clone()],
+            // The order the native store was measured to report: dead copy last.
+            vec![rotated.clone(), sign_in_dead.clone()],
+            vec![sign_in_dead, rotated],
+        ] {
+            assert_eq!(
+                cookie_header(order, &url)
+                    .map(|v| v.to_str().unwrap().to_owned())
+                    .unwrap_or_default(),
+                "pidash_access=rotated"
+            );
+        }
+    }
+
+    #[test]
+    fn max_age_takes_precedence_over_expires_when_ranking_duplicates() {
+        let now = 1_700_000_000;
+        // Max-Age wins even when Expires disagrees (RFC 6265 section 5.2.2).
+        let c = cookie("a=b; Max-Age=600; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(cookie_expiry(&c, now), Some(now + 600));
+        assert!(!cookie_expired(&c));
+        // A session cookie has no expiry and so sorts before any dated cookie.
+        assert_eq!(cookie_expiry(&cookie("a=b"), now), None);
     }
 }

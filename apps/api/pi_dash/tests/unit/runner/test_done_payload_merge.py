@@ -27,12 +27,18 @@ from pi_dash.runner.services.agent_run_finalization import finalize_agent_run, m
 
 @pytest.mark.unit
 def test_merge_keeps_the_yield_under_a_bridge_payload():
-    existing = {"status": "waiting_on_human", "note": "asked", "yielded_at": "2026-09-13T00:00:00Z"}
+    existing = {
+        "status": "waiting_on_human",
+        "note": "asked",
+        "yielded_at": "2026-09-13T00:00:00Z",
+        "stop_ticking": True,
+    }
     incoming = {"conclusion": "success", "result": "final message"}
     merged = merge_done_payload(existing, incoming)
     assert merged["status"] == "waiting_on_human"
     assert merged["note"] == "asked"
     assert merged["yielded_at"] == "2026-09-13T00:00:00Z"
+    assert merged["stop_ticking"] is True
     assert merged["conclusion"] == "success"
     assert merged["result"] == "final message"
 
@@ -123,17 +129,39 @@ def test_yield_then_complete_applies_the_yield_to_the_clock(issue, runner, creat
 
 @pytest.mark.unit
 def test_yield_then_complete_stops_the_clock_when_asked(issue, runner, create_user):
+    """The explicit ``stop_ticking`` survives the bridge's final payload
+    and is what stops the clock (``stop_signal``)."""
+    IssueAgentTicker.objects.create(issue=issue, enabled=True, next_run_at=timezone.now())
+    run = _running(issue, runner, create_user)
+    run.done_payload = {
+        "status": "waiting_on_human",
+        "stop_ticking": True,
+        "yielded_at": timezone.now().isoformat(),
+    }
+    run.save(update_fields=["done_payload"])
+    with mock.patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
+        assert finalize_agent_run(run.id, AgentRunStatus.COMPLETED, updates={"done_payload": {"conclusion": "success"}})
+    run.refresh_from_db()
+    assert run.done_payload["status"] == "waiting_on_human"
+    assert run.done_payload["stop_ticking"] is True
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.enabled is False
+    assert ticker.disarm_reason == TickerDisarmReason.STOP_SIGNAL
+
+
+@pytest.mark.unit
+def test_yield_without_stop_ticking_keeps_the_clock(issue, runner, create_user):
+    """Outcomes are informational — a ``waiting_on_human`` yield without
+    the flag leaves the review clock armed (PDASHOSS01-247)."""
     IssueAgentTicker.objects.create(issue=issue, enabled=True, next_run_at=timezone.now())
     run = _running(issue, runner, create_user)
     run.done_payload = {"status": "waiting_on_human", "yielded_at": timezone.now().isoformat()}
     run.save(update_fields=["done_payload"])
     with mock.patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
         assert finalize_agent_run(run.id, AgentRunStatus.COMPLETED, updates={"done_payload": {"conclusion": "success"}})
-    run.refresh_from_db()
-    assert run.done_payload["status"] == "waiting_on_human"
     ticker = IssueAgentTicker.objects.get(issue=issue)
-    assert ticker.enabled is False
-    assert ticker.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert ticker.enabled is True
+    assert ticker.disarm_reason == TickerDisarmReason.NONE
 
 
 @pytest.mark.unit

@@ -37,6 +37,7 @@ from pi_dash.assistant.models import (
 from pi_dash.assistant.runtime import events, history
 from pi_dash.assistant.runtime.agent import assistant
 from pi_dash.assistant.runtime.deps import AssistantDeps
+from pi_dash.assistant.runtime.provider_errors import classify_provider_error
 from pi_dash.core.permissions import workspace_role
 from pi_dash.settings.redis import redis_instance
 
@@ -154,7 +155,7 @@ def _finalize_row(ctx: _Ctx, message: AssistantMessage, text: str, status: str):
         )
 
 
-def _complete_turn(ctx: _Ctx, model_messages, usage, model_used):
+def _complete_turn(ctx: _Ctx, model_messages, usage, model_used, *, truncated: bool = False):
     with transaction.atomic():
         turn = AssistantTurn.objects.select_for_update().get(pk=ctx.turn.id)
         turn.status = TurnStatus.COMPLETED
@@ -164,9 +165,10 @@ def _complete_turn(ctx: _Ctx, model_messages, usage, model_used):
         turn.completed_at = timezone.now()
         turn.save()
         AssistantThread.objects.filter(pk=ctx.thread.id, active_turn_id=ctx.turn.id).update(active_turn=None)
-    events.append_event(
-        ctx.thread, "turn_completed", payload={"turn_id": str(ctx.turn.id), "usage": usage or {}}, turn=ctx.turn
-    )
+    payload = {"turn_id": str(ctx.turn.id), "usage": usage or {}}
+    if truncated:
+        payload["truncated"] = True
+    events.append_event(ctx.thread, "turn_completed", payload=payload, turn=ctx.turn)
     events.prune_turn_deltas(ctx.turn)
 
 
@@ -356,7 +358,7 @@ async def _run_turn(turn_id: str):
     except Exception as exc:  # noqa: BLE001 — classify provider failures
         await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
-        code, detail = _classify_error(exc)
+        code, detail = await db_sync_to_async(_classify_error)(exc, ctx.user)
         await db_sync_to_async(_fail_turn)(ctx, code, detail)
         return
 
@@ -364,7 +366,10 @@ async def _run_turn(turn_id: str):
 
     model_messages = await db_sync_to_async(history.dump_new_messages)(result)
     usage = _extract_usage(result)
-    await db_sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
+    truncated = _was_cut_off(result)
+    if truncated:
+        await db_sync_to_async(_mark_cut_off)(ctx)
+    await db_sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label, truncated=truncated)
 
 
 def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
@@ -439,34 +444,90 @@ def _extract_usage(result) -> dict:
     }
 
 
-def _classify_error(exc: Exception) -> tuple[str, str]:
-    text = str(exc).lower()
-    # Credit exhaustion is a distinct, user-actionable condition — routed
-    # providers (OpenRouter, and any metered gateway) answer 402 rather than
-    # 401 for it. Without this it lands in the generic "unexpected error"
-    # bucket, which tells the user nothing about what to do.
-    #
-    # The status code is read from the exception, never substring-matched:
-    # "402" appears in request ids and token counts, so matching it in the
-    # message text misclassifies unrelated errors. The remaining markers are
-    # provider error *codes* and phrases specific enough to trust.
-    if getattr(exc, "status_code", None) == 402 or any(
-        s in text
-        for s in ("payment required", "insufficient_credits", "insufficient credits",
-                  "no_credit_account", "quota exceeded")
-    ):
-        return "provider_out_of_credit", "The provider rejected the request for lack of credit."
-    if any(s in text for s in ("401", "unauthorized", "api key", "authentication", "invalid_api_key")):
-        return "provider_auth_failed", "Your API key was rejected by the provider."
-    if any(
-        s in text
-        for s in ("connection", "timeout", "timed out", "unreachable", "could not connect", "name resolution")
-    ):
-        return "provider_unreachable", "Could not reach the configured provider endpoint."
-    if any(s in text for s in ("model_not_found", "does not exist", "unknown model", "no such model")):
-        return "model_invalid", "The configured model name was not accepted by the provider."
-    logger.exception("assistant turn failed: %s", exc)
+def _classify_error(exc: Exception, user=None) -> tuple[str, str]:
+    # A typed error raised inside the run — by a model adapter or an ee
+    # provider — already carries its stable code and user-facing detail.
+    # Guessing from the message text instead would erase both and land it in
+    # the generic "unexpected error" bucket. The cause chain is walked because
+    # the agent runtime may re-raise a provider failure wrapped in its own type.
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, AssistantError):
+            return cause.code, cause.detail
+        cause = cause.__cause__
+
+    typed = _turn_error(exc, user)
+    if typed is not None:
+        return typed.code, typed.detail
+    if _hit_output_limit(exc):
+        return "response_truncated", "The reply was cut off because it reached the model's output limit."
+    logger.error("assistant turn failed: %s", exc, exc_info=exc)
     return "internal", "The assistant hit an unexpected error."
+
+
+def _turn_error(exc: Exception, user) -> AssistantError | None:
+    """Ask the model-provider seam how this failure should read for ``user``.
+
+    The wording depends on how the user reaches the model (their own key, or a
+    metered gateway), which only the seam knows. The hook is looked up rather
+    than imported because an overlay replaces that module wholesale: a build
+    whose overlay predates the hook must still classify errors, and a hook
+    that itself fails must not strand the turn as running.
+    """
+    from pi_dash.ee.assistant import model_provider
+
+    hook = getattr(model_provider, "turn_error_for_user", None)
+    if hook is not None and user is not None:
+        try:
+            typed = hook(user, exc)
+            return typed if isinstance(typed, AssistantError) else None
+        except Exception:  # noqa: BLE001 — never fail the failure path
+            logger.exception("turn_error_for_user failed; using the default classifier")
+    return classify_provider_error(exc)
+
+
+def _hit_output_limit(exc: Exception) -> bool:
+    """True when the model ran out of output tokens before it could reply.
+
+    The runtime raises instead of returning when the limit lands mid-tool-call
+    or before any text, so this never reaches :func:`_was_cut_off`.
+    """
+    from pydantic_ai.exceptions import IncompleteToolCall, UnexpectedModelBehavior
+
+    if isinstance(exc, IncompleteToolCall):
+        return True
+    return isinstance(exc, UnexpectedModelBehavior) and "token limit" in str(exc).lower()
+
+
+def _was_cut_off(result) -> bool:
+    """True when the final reply ended because the output limit was reached."""
+    try:
+        return result.response.finish_reason == "length"
+    except Exception:  # noqa: BLE001 — a missing field is "not truncated"
+        return False
+
+
+def _mark_cut_off(ctx: _Ctx) -> None:
+    """Flag the turn's last reply as cut off, in the row and on the stream.
+
+    The row was already finalized as completed while streaming — the finish
+    reason is only known once the whole run returns — so the flag is written
+    to its payload and the envelope is sent again for clients to merge.
+    """
+    message = (
+        AssistantMessage.objects.filter(turn=ctx.turn, kind=MessageKind.ASSISTANT).order_by("-seq").first()
+    )
+    if message is None:
+        return
+    message.payload = {**(message.payload or {}), "truncated": True}
+    message.save(update_fields=["payload"])
+    events.append_event(
+        ctx.thread,
+        "message_completed",
+        payload={"turn_id": str(ctx.turn.id), "message": events.message_envelope(message)},
+        message=message,
+        turn=ctx.turn,
+    )
 
 
 # --------------------------------------------------------------------------- #
