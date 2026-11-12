@@ -4,7 +4,8 @@
 # runs twice per matrix entry: first against live Django (oracle validity),
 # then against pidash-api serve with PIDASH_DJANGO_UPSTREAM pointing at that
 # same Django and EVERY PIDASH_RUST_* flag set to 1. One matrix job per suite
-# keeps failures attributable and each job under 30 minutes.
+# keeps failures attributable and bounds each job's duration (the job cap
+# is 60 minutes; the runner shard runs 421 tests per backend and needs ~35).
 #
 # The database and Redis are reset between the two runs (drop + recreate +
 # migrate, FLUSHDB): suites must see a pristine backend on both sides, and
