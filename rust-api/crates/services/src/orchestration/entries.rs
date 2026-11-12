@@ -2647,6 +2647,91 @@ mod tests {
         assert!(seam.dispatched.is_empty());
     }
 
+    #[tokio::test]
+    async fn t7_domain_fire_request_moved_by_run_matches_agent_move() {
+        // NEWPIDASH-190 Part 2.4 prerequisite comparison: the domain chain's
+        // `FireSpec { moved_by_run }` path (`run_chain` →
+        // `transition.fire` → `fire_state_transition`) and the agent's
+        // explicit `handle_issue_state_transition` call with
+        // `TransitionRequest { moved_by_run }` enter the same orchestration
+        // entry with the same ticket: the clock always queues (or parks),
+        // so an agent move never dispatches. Both must give
+        // `entry-queued`, no created run, and the same ticker write.
+        let case = transition_case("T5b_entry_queued_agent");
+        let now = frozen_now();
+        let mover = uid(0x62);
+        let from_states = {
+            let mut seam = FakeEntriesSeam::minimal();
+            seam.states
+                .insert(uid(0x30), state_view("In Progress", "started"));
+            seam.states
+                .insert(uid(0x32), state_view("In Review", "review"));
+            (
+                seam.states[&uid(0x30)].clone(),
+                seam.states[&uid(0x32)].clone(),
+            )
+        };
+        let (from, to) = from_states;
+        let mut ticker_setup = ticker_row(uid(0x01), now);
+        ticker_setup.used = 3;
+        ticker_setup.granted = 10;
+        ticker_setup.enabled = true;
+        ticker_setup.next_run_at = Some(now);
+        let mut queued_saves = Vec::new();
+        for fires in [false, true] {
+            let mut seam = FakeEntriesSeam::minimal();
+            set_issue_state(&mut seam, uid(0x32));
+            seam.runs
+                .insert(mover, run_view(mover, AgentRunStatus::Running));
+            seam.latest.insert(uid(0x01), mover);
+            seam.tickers.insert(uid(0x01), ticker_setup.clone());
+            let mut preflight = FakePreflight::allow();
+            if fires {
+                let req = FireRequest {
+                    issue_id: uid(0x01),
+                    prev_state_id: Some(uid(0x30)),
+                    current_state_id: Some(uid(0x32)),
+                    dispatch_immediate: true,
+                    moved_by_run: Some(mover),
+                    now,
+                    jitter_secs: 0.0,
+                    created_by: None,
+                    pod_once: false,
+                };
+                let outcome = fire_state_transition(&mut seam, &mut preflight, &req)
+                    .await
+                    .expect("fire runs");
+                match outcome {
+                    FireOutcome::Called(transition) => {
+                        assert_eq!(transition.reason, case["reason"].as_str().unwrap());
+                        assert!(transition.created_run.is_none());
+                    }
+                    other => panic!("expected Called, got {other:?} pad"),
+                }
+            } else {
+                let mut req = transition_req(Some(from.clone()), Some(to.clone()), now);
+                req.moved_by_run = Some(mover);
+                req.actor = Some(uid(0x40));
+                let outcome = handle_issue_state_transition(&mut seam, &mut preflight, &req)
+                    .await
+                    .expect("transition runs");
+                assert_eq!(outcome.reason, case["reason"].as_str().unwrap());
+                assert!(outcome.created_run.is_none());
+            }
+            let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+            assert_ticker_scalars(&case["after"]["ticker"], row);
+            assert_eq!(row.next_run_at, Some(now));
+            assert_eq!(row.pending_entry_actor_id, None);
+            assert_eq!(row.resume_parent_run_id, Some(mover));
+            assert!(seam.dispatched.is_empty());
+            queued_saves.push(seam.ticker_saves.len());
+        }
+        // Both paths write the ticker exactly once (the agent writes
+        // inside its audit transaction; the domain path writes through
+        // the hook) — identical observable side effects, never a dispatch.
+        assert_eq!(queued_saves, vec![1, 1]);
+    }
+
     #[test]
     fn t6b_bare_no_dispatch_fallback_is_verbatim() {
         // Stub-only path: every real enter/move reconcile branch sets a

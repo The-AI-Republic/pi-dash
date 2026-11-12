@@ -7,6 +7,7 @@
 //! structurally unchanged.
 
 pub mod comments;
+pub mod issues;
 pub mod relations;
 pub mod workpad;
 
@@ -26,6 +27,9 @@ pub enum CoreError {
     /// (`check_targets`). Every wrapper maps the contained message to
     /// its own envelope (operations' 400, the agent's `InvalidArg`).
     Request(String),
+    /// A required row is absent (`State`/`Issue` misses the agent's
+    /// driver returns as `InvalidArg` on the wrapper).
+    Missing(&'static str),
 }
 
 impl fmt::Display for CoreError {
@@ -34,6 +38,7 @@ impl fmt::Display for CoreError {
             Self::Db(error) => write!(f, "database error: {error}"),
             Self::Sqlx(error) => write!(f, "database error: {error}"),
             Self::Request(message) => write!(f, "request refused: {message}"),
+            Self::Missing(model) => write!(f, "missing {model}"),
         }
     }
 }
@@ -44,6 +49,7 @@ impl std::error::Error for CoreError {
             Self::Db(error) => Some(error),
             Self::Sqlx(error) => Some(error),
             Self::Request(_) => None,
+            Self::Missing(_) => None,
         }
     }
 }
