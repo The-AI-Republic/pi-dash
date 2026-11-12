@@ -1,0 +1,172 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-04",
+  "_method": "Django shell probes (pi_dash.settings.test) on scratch pidash_conv659; read shapes from a live page row, write shapes via is_valid().",
+  "_source": "apps/api/pi_dash/api/serializers/page.py:27-112",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "units": {
+    "PageLiteSerializer": {
+      "source": "serializers/page.py:27-47",
+      "render_keys": [
+        "id",
+        "name",
+        "parent",
+        "owned_by",
+        "access",
+        "is_locked",
+        "archived_at",
+        "created_at",
+        "updated_at"
+      ],
+      "render": {
+        "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+        "name": "Fixture page",
+        "parent": "None",
+        "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "access": "0",
+        "is_locked": "False",
+        "archived_at": "None",
+        "created_at": "2026-10-02T23:17:12.040770Z",
+        "updated_at": "2026-10-02T23:17:12.040770Z"
+      }
+    },
+    "PageDetailSerializer": {
+      "source": "serializers/page.py:50-69",
+      "render_keys": [
+        "id",
+        "name",
+        "parent",
+        "owned_by",
+        "access",
+        "is_locked",
+        "archived_at",
+        "created_at",
+        "updated_at",
+        "description_html",
+        "description_stripped",
+        "description_markdown"
+      ],
+      "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b",
+      "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+      "description_stripped": "Titlepara with boldab"
+    },
+    "PageWriteSerializer": {
+      "source": "serializers/page.py:72-93",
+      "markdown_only": {
+        "valid": true,
+        "validated": {
+          "name": "'n'",
+          "description_markdown": "'# hi'"
+        }
+      },
+      "html_only": {
+        "valid": true,
+        "validated": {
+          "description_html": "'<p>hi</p>'"
+        }
+      },
+      "both_bodies": {
+        "valid": false,
+        "errors": {
+          "non_field_errors": [
+            {
+              "message": "Send the body as description_markdown or description_html, not both.",
+              "code": "invalid"
+            }
+          ]
+        }
+      },
+      "blank_name": {
+        "valid": false,
+        "errors": {
+          "name": [
+            {
+              "message": "This field may not be blank.",
+              "code": "blank"
+            }
+          ]
+        }
+      },
+      "bad_access": {
+        "valid": false,
+        "errors": {
+          "access": [
+            {
+              "message": "\"99\" is not a valid choice.",
+              "code": "invalid_choice"
+            }
+          ]
+        }
+      },
+      "access_values": [
+        true,
+        true
+      ],
+      "has_body_markdown": true,
+      "has_body_true": true,
+      "has_body_false": false
+    },
+    "PageCreateSerializer": {
+      "source": "serializers/page.py:96-99",
+      "ok": {
+        "valid": true,
+        "validated": {
+          "name": "'New page'"
+        }
+      },
+      "missing_name": {
+        "valid": false,
+        "errors": {
+          "name": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ]
+        }
+      },
+      "blank_name": {
+        "valid": false,
+        "errors": {
+          "name": [
+            {
+              "message": "This field may not be blank.",
+              "code": "blank"
+            }
+          ]
+        }
+      }
+    },
+    "PageUpdateSerializer": {
+      "source": "serializers/page.py:102-112",
+      "ok_subset": {
+        "valid": true,
+        "validated": {
+          "access": "0"
+        }
+      },
+      "empty": {
+        "valid": false,
+        "errors": {
+          "non_field_errors": [
+            {
+              "message": "Nothing to update: send at least one of name, description_markdown, description_html, parent, access.",
+              "code": "invalid"
+            }
+          ]
+        }
+      },
+      "both_bodies": {
+        "valid": false,
+        "errors": {
+          "non_field_errors": [
+            {
+              "message": "Send the body as description_markdown or description_html, not both.",
+              "code": "invalid"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

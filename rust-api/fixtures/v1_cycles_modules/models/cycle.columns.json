@@ -1,0 +1,395 @@
+{
+ "_method": "ast field walk of db/models/cycle.py, db/models/module.py, db/models/project.py (ProjectBaseModel), db/mixins.py (audit/soft-delete) and db/models/base.py (UUID pk): python3 /tmp/gen_cycmod_fixtures.py; declaration kwargs read from Call nodes; no DB touched",
+ "archived_at_guards": "Cycle.archived_at DateTimeField null (cycle.py:75); list/detail querysets filter archived_at__isnull=True (views/cycle.py:197,469); archive list filters archived_at__isnull=False (views/cycle.py:630); patch rejects archived_at set (views/cycle.py:504-508)",
+ "defaults": {
+  "get_default_display_filters": "cycle.py:30-39",
+  "get_default_display_properties": "cycle.py:42-57",
+  "get_default_filters": "cycle.py:16-27"
+ },
+ "fixture": "FX-CYCMOD-01",
+ "models": {
+  "Cycle": {
+   "fields": [
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='CharField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "max_length": 255,
+       "verbose_name": "Cycle Name"
+      }
+     },
+     "line": 61,
+     "name": "name"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='TextField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "blank": true,
+       "verbose_name": "Cycle Description"
+      }
+     },
+     "line": 62,
+     "name": "description"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='DateTimeField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "blank": true,
+       "null": true,
+       "verbose_name": "Start Date"
+      }
+     },
+     "line": 63,
+     "name": "start_date"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='DateTimeField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "blank": true,
+       "null": true,
+       "verbose_name": "End Date"
+      }
+     },
+     "line": 64,
+     "name": "end_date"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='ForeignKey', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+       "related_name": "owned_by_cycle"
+      }
+     },
+     "line": 65,
+     "name": "owned_by"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='dict', ctx=Load())"
+      }
+     },
+     "line": 70,
+     "name": "view_props"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='FloatField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": 65535
+      }
+     },
+     "line": 71,
+     "name": "sort_order"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='CharField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "blank": true,
+       "max_length": 255,
+       "null": true
+      }
+     },
+     "line": 72,
+     "name": "external_source"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='CharField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "blank": true,
+       "max_length": 255,
+       "null": true
+      }
+     },
+     "line": 73,
+     "name": "external_id"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='dict', ctx=Load())"
+      }
+     },
+     "line": 74,
+     "name": "progress_snapshot"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='DateTimeField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "null": true
+      }
+     },
+     "line": 75,
+     "name": "archived_at"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='dict', ctx=Load())"
+      }
+     },
+     "line": 76,
+     "name": "logo_props"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='CharField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "choices": "Name(id='TIMEZONE_CHOICES', ctx=Load())",
+       "default": "UTC",
+       "max_length": 255
+      }
+     },
+     "line": 79,
+     "name": "timezone"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='IntegerField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": 1
+      }
+     },
+     "line": 80,
+     "name": "version"
+    }
+   ],
+   "meta": {
+    "db_table": "cycles",
+    "ordering": [
+     "-created_at"
+    ],
+    "span": [
+     82,
+     86
+    ],
+    "verbose_name": "Cycle",
+    "verbose_name_plural": "Cycles"
+   },
+   "methods": [
+    {
+     "name": "save",
+     "span": [
+      88,
+      97
+     ]
+    },
+    {
+     "name": "__str__",
+     "span": [
+      99,
+      101
+     ]
+    }
+   ],
+   "model": "Cycle",
+   "span": [
+    60,
+    101
+   ]
+  },
+  "CycleIssue": {
+   "fields": [
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='ForeignKey', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+       "related_name": "issue_cycle"
+      }
+     },
+     "line": 109,
+     "name": "issue"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='ForeignKey', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+       "related_name": "issue_cycle"
+      }
+     },
+     "line": 110,
+     "name": "cycle"
+    }
+   ],
+   "meta": {
+    "constraints": "List(elts=[Call(func=Attribute(value=Name(id='models', ctx=Load()), attr='UniqueConstraint', ctx=Load()), args=[], keywords=[keyword(arg='fields', value=List(elts=[Constant(value='cycle'), Constant(value='issue')], ctx=Load())), keyword(arg='condition', value=Call(func=Attribute(value=Name(id='model",
+    "db_table": "cycle_issues",
+    "ordering": [
+     "-created_at"
+    ],
+    "span": [
+     112,
+     124
+    ],
+    "unique_together": [
+     "issue",
+     "cycle",
+     "deleted_at"
+    ],
+    "verbose_name": "Cycle Issue",
+    "verbose_name_plural": "Cycle Issues"
+   },
+   "methods": [
+    {
+     "name": "__str__",
+     "span": [
+      126,
+      127
+     ]
+    }
+   ],
+   "model": "CycleIssue",
+   "span": [
+    104,
+    127
+   ]
+  },
+  "CycleUserProperties": {
+   "fields": [
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='ForeignKey', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+       "related_name": "cycle_user_properties"
+      }
+     },
+     "line": 131,
+     "name": "cycle"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='ForeignKey', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+       "related_name": "cycle_user_properties"
+      }
+     },
+     "line": 132,
+     "name": "user"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='get_default_filters', ctx=Load())"
+      }
+     },
+     "line": 137,
+     "name": "filters"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='get_default_display_filters', ctx=Load())"
+      }
+     },
+     "line": 138,
+     "name": "display_filters"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='get_default_display_properties', ctx=Load())"
+      }
+     },
+     "line": 139,
+     "name": "display_properties"
+    },
+    {
+     "decl": {
+      "func": "Attribute(value=Name(id='models', ctx=Load()), attr='JSONField', ctx=Load())",
+      "kind": "Call",
+      "kwargs": {
+       "default": "Name(id='dict', ctx=Load())"
+      }
+     },
+     "line": 140,
+     "name": "rich_filters"
+    }
+   ],
+   "meta": {
+    "constraints": "List(elts=[Call(func=Attribute(value=Name(id='models', ctx=Load()), attr='UniqueConstraint', ctx=Load()), args=[], keywords=[keyword(arg='fields', value=List(elts=[Constant(value='cycle'), Constant(value='user')], ctx=Load())), keyword(arg='condition', value=Call(func=Attribute(value=Name(id='models",
+    "db_table": "cycle_user_properties",
+    "ordering": [
+     "-created_at"
+    ],
+    "span": [
+     142,
+     154
+    ],
+    "unique_together": [
+     "cycle",
+     "user",
+     "deleted_at"
+    ],
+    "verbose_name": "Cycle User Property",
+    "verbose_name_plural": "Cycle User Properties"
+   },
+   "methods": [
+    {
+     "name": "__str__",
+     "span": [
+      156,
+      157
+     ]
+    }
+   ],
+   "model": "CycleUserProperties",
+   "span": [
+    130,
+    157
+   ]
+  }
+ },
+ "shared_base": {
+  "base": {
+   "audit_cols": "created_at/updated_at (mixins TimeAudit), created_by/updated_by FK db.User SET_NULL null (mixins UserAudit), deleted_at null blank (mixins SoftDeleteModel); id UUID pk default=uuid4 (base.py)",
+   "managers": "objects=SoftDeletionManager (deleted_at IS NULL filter), all_objects=plain Manager (mixins.py)",
+   "project_fk": "db/models/project.py:302-304",
+   "save_sets_workspace_from_project": "db/models/project.py:309-311",
+   "workspace_fk": "db/models/project.py:302-304"
+  }
+ },
+ "trace": [
+  "db/models/cycle.py:16-57 defaults",
+  "db/models/cycle.py:60-101 Cycle (Meta 82-87, save 88-97)",
+  "db/models/cycle.py:104-127 CycleIssue (Meta 112-124)",
+  "db/models/cycle.py:130-157 CycleUserProperties (Meta 142-154)"
+ ]
+}

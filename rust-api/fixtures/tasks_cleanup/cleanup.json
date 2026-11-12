@@ -1,0 +1,182 @@
+{
+  "_about": "D-09 cleanup retention + mongo flush behaviour. Ported from 01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_method": "Values produced by executing the named Python code under pi_dash.settings.test with no DB/S3/mongo (venv /tmp/ct100-django-venv). Cutoff timestamps frozen at 2026-09-28T06:00:00+00:00 for determinism; production uses timezone.now(). QuerySet.iterator stubbed to return self so the real filter/values chains compile; deletes/updates intercepted after the real filter construction. Generators: /tmp/fx_d09.py, /tmp/fx_d09b.py, /tmp/fx_d09c.py (throwaway, not committed).",
+  "_trace": [
+    "cleanup_task.py:38-51 get_mongo_collection driver semantics",
+    "cleanup_task.py:54-89 flush_to_mongo_and_delete driver semantics",
+    "cleanup_task.py:92-163 process_cleanup_task driver semantics (BATCH_SIZE=500)",
+    "cleanup_task.py:167-183 transform_api_log golden",
+    "cleanup_task.py:186-202 transform_email_log golden",
+    "cleanup_task.py:205-222 transform_page_version golden",
+    "cleanup_task.py:225-242 transform_issue_description_version golden",
+    "cleanup_task.py:245-263 transform_webhook_log golden",
+    "cleanup_task.py:267-291 get_api_logs_queryset SQL",
+    "cleanup_task.py:294-318 get_email_logs_queryset SQL",
+    "cleanup_task.py:321-354 get_page_versions_queryset SQL (keep newest 20)",
+    "cleanup_task.py:357-390 get_issue_description_versions_queryset SQL (keep newest 20)",
+    "cleanup_task.py:393-419 get_webhook_logs_queryset SQL",
+    "cleanup_task.py:422-479 delete_* task wiring (task name -> mongo collection)"
+  ],
+  "batch_size": 500,
+  "cutoff_env": "HARD_DELETE_AFTER_DAYS read via os.environ.get with default '30' (note: settings.HARD_DELETE_AFTER_DAYS defaults to 60; these functions do NOT use the setting)",
+  "cutoff_frozen": "2026-08-29 06:00:00+00:00",
+  "transforms": {
+    "api_log_full": {
+      "id": "7",
+      "created_at": "2026-01-02 03:04:05+00:00",
+      "token_identifier": "tok_abc",
+      "path": "/api/issues",
+      "method": "POST",
+      "query_params": {
+        "page": "2"
+      },
+      "headers": {
+        "X-A": "b"
+      },
+      "body": {
+        "k": 1
+      },
+      "response_code": 201,
+      "response_body": {
+        "id": "x"
+      },
+      "ip_address": "10.0.0.1",
+      "user_agent": "ua/1",
+      "created_by_id": "42"
+    },
+    "api_log_missing_created_at_is_none": {
+      "id": "8",
+      "created_at": null,
+      "token_identifier": "t",
+      "path": "/p",
+      "method": "GET",
+      "query_params": null,
+      "headers": null,
+      "body": null,
+      "response_code": 200,
+      "response_body": null,
+      "ip_address": "127.0.0.1",
+      "user_agent": "u",
+      "created_by_id": "1"
+    },
+    "email_log_processed_at_none": {
+      "id": "11",
+      "created_at": "2026-02-03 04:05:06+00:00",
+      "receiver_id": "5",
+      "triggered_by_id": "6",
+      "entity_identifier": "E-1",
+      "entity_name": "issue",
+      "data": {
+        "a": 1
+      },
+      "processed_at": null,
+      "sent_at": "2026-02-03 05:00:00+00:00",
+      "entity": "issue",
+      "old_value": "a",
+      "new_value": "b",
+      "created_by_id": "6"
+    },
+    "page_version_nones": {
+      "id": "21",
+      "created_at": "2026-03-01 00:00:00+00:00",
+      "page_id": "aaaaaaaa-1111-2222-3333-444444444444",
+      "workspace_id": "bbbbbbbb-1111-2222-3333-444444444444",
+      "owned_by_id": "9",
+      "description_html": "<p>hi</p>",
+      "description_binary": null,
+      "description_stripped": "hi",
+      "description_json": {
+        "t": "doc"
+      },
+      "sub_pages_data": {
+        "x": []
+      },
+      "created_by_id": "9",
+      "updated_by_id": "10",
+      "deleted_at": null,
+      "last_saved_at": null
+    },
+    "issue_description_version": {
+      "id": "31",
+      "created_at": null,
+      "issue_id": "100",
+      "workspace_id": "cccccccc-1111-2222-3333-444444444444",
+      "project_id": "dddddddd-1111-2222-3333-444444444444",
+      "created_by_id": "3",
+      "updated_by_id": "4",
+      "owned_by_id": "4",
+      "last_saved_at": "2026-04-01 12:00:00+00:00",
+      "description_binary": "Ymlu",
+      "description_html": "<p>v</p>",
+      "description_stripped": "v",
+      "description_json": {},
+      "deleted_at": "2026-04-02 00:00:00+00:00"
+    },
+    "webhook_log_str_coercions": {
+      "id": "55",
+      "created_at": "2026-05-01 00:00:00+00:00",
+      "workspace_id": "eeeeeeee-1111-2222-3333-444444444444",
+      "webhook": "77",
+      "event_type": "ISSUE_CREATED",
+      "request_method": "POST",
+      "request_headers": "{'H': 'v'}",
+      "request_body": "{'n': 1}",
+      "response_status": "200",
+      "response_body": "ok",
+      "response_headers": "{'R': 'h'}",
+      "retry_count": "0"
+    }
+  },
+  "driver": {
+    "get_mongo_collection_unconfigured_returns_none": null,
+    "get_mongo_collection": "None when MongoConnection.is_configured() is falsy ('MongoDB not configured' info log); None on ANY exception from get_collection after log_exception (broad except :48-51).",
+    "flush_empty_buffer_returns_none": null,
+    "flush_ordering": "bulk_write([InsertOne(doc) for doc in buffer]) FIRST (only when collection is not None and mongo_available); BulkWriteError -> log + return WITHOUT deleting; else model.all_objects.filter(id__in=ids_to_delete).delete(). delete() returns (count, {model: count}); logged count guards isinstance tuple.",
+    "process_batches": "Iterates the queryset (a .iterator() generator); appends (transform(record), record['id']); flushes every 500; final partial batch flushed iff non-empty. mongo_available = (collection is not None) sampled once. total_processed counts flushed records only."
+  },
+  "querysets": {
+    "api_logs_sql": "SELECT \"api_activity_logs\".\"id\", \"api_activity_logs\".\"created_at\", \"api_activity_logs\".\"token_identifier\", \"api_activity_logs\".\"path\", \"api_activity_logs\".\"method\", \"api_activity_logs\".\"query_params\", \"api_activity_logs\".\"headers\", \"api_activity_logs\".\"body\", \"api_activity_logs\".\"response_code\", \"api_activity_logs\".\"response_body\", \"api_activity_logs\".\"ip_address\", \"api_activity_logs\".\"user_agent\", \"api_activity_logs\".\"created_by_id\" FROM \"api_activity_logs\" WHERE \"api_activity_logs\".\"created_at\" <= 2026-08-29 06:00:00+00:00 ORDER BY \"api_activity_logs\".\"created_at\" DESC",
+    "api_logs_note": "all_objects (no deleted_at scope on read) + created_at__lte + 13 .values keys in source order; default ordering applies.",
+    "email_logs_sql": "SELECT \"email_notification_logs\".\"id\", \"email_notification_logs\".\"created_at\", \"email_notification_logs\".\"receiver_id\", \"email_notification_logs\".\"triggered_by_id\", \"email_notification_logs\".\"entity_identifier\", \"email_notification_logs\".\"entity_name\", \"email_notification_logs\".\"data\", \"email_notification_logs\".\"processed_at\", \"email_notification_logs\".\"sent_at\", \"email_notification_logs\".\"entity\", \"email_notification_logs\".\"old_value\", \"email_notification_logs\".\"new_value\", \"email_notification_logs\".\"created_by_id\" FROM \"email_notification_logs\" WHERE \"email_notification_logs\".\"sent_at\" <= 2026-08-29 06:00:00+00:00 ORDER BY \"email_notification_logs\".\"created_at\" DESC",
+    "email_logs_note": "predicate is sent_at__lte (NOT created_at).",
+    "page_versions_sql": "SELECT \"page_versions\".\"id\", \"page_versions\".\"created_at\", \"page_versions\".\"page_id\", \"page_versions\".\"workspace_id\", \"page_versions\".\"owned_by_id\", \"page_versions\".\"description_html\", \"page_versions\".\"description_binary\", \"page_versions\".\"description_stripped\", \"page_versions\".\"description_json\", \"page_versions\".\"sub_pages_data\", \"page_versions\".\"created_by_id\", \"page_versions\".\"updated_by_id\", \"page_versions\".\"deleted_at\", \"page_versions\".\"last_saved_at\" FROM \"page_versions\" WHERE \"page_versions\".\"id\" IN (SELECT \"col1\" FROM ( SELECT * FROM ( SELECT U0.\"id\" AS \"col1\", ROW_NUMBER() OVER (PARTITION BY U0.\"page_id\" ORDER BY U0.\"created_at\" DESC) AS \"qual0\", U0.\"created_at\" AS \"qual1\" FROM \"page_versions\" U0 ORDER BY U0.\"created_at\" DESC ) \"qualify\" WHERE \"qual0\" > 20 ) \"qualify_mask\" ORDER BY \"qual1\" DESC) ORDER BY \"page_versions\".\"created_at\" DESC",
+    "page_versions_note": "ROW_NUMBER() OVER (PARTITION BY page_id ORDER BY created_at DESC), keep rows with row_num > 20 i.e. delete everything but the newest 20 per page (ties broken arbitrarily by Postgres).",
+    "issue_description_versions_sql": "SELECT \"issue_description_versions\".\"id\", \"issue_description_versions\".\"created_at\", \"issue_description_versions\".\"issue_id\", \"issue_description_versions\".\"workspace_id\", \"issue_description_versions\".\"project_id\", \"issue_description_versions\".\"created_by_id\", \"issue_description_versions\".\"updated_by_id\", \"issue_description_versions\".\"owned_by_id\", \"issue_description_versions\".\"last_saved_at\", \"issue_description_versions\".\"description_binary\", \"issue_description_versions\".\"description_html\", \"issue_description_versions\".\"description_stripped\", \"issue_description_versions\".\"description_json\", \"issue_description_versions\".\"deleted_at\" FROM \"issue_description_versions\" WHERE \"issue_description_versions\".\"id\" IN (SELECT \"col1\" FROM ( SELECT * FROM ( SELECT U0.\"id\" AS \"col1\", ROW_NUMBER() OVER (PARTITION BY U0.\"issue_id\" ORDER BY U0.\"created_at\" DESC) AS \"qual0\" FROM \"issue_description_versions\" U0 ) \"qualify\" WHERE \"qual0\" > 20 ) \"qualify_mask\")",
+    "issue_description_versions_note": "Same newest-20 window partitioned by issue_id.",
+    "webhook_logs_sql": "SELECT \"webhook_logs\".\"id\", \"webhook_logs\".\"created_at\", \"webhook_logs\".\"workspace_id\", \"webhook_logs\".\"webhook\", \"webhook_logs\".\"event_type\", \"webhook_logs\".\"request_method\", \"webhook_logs\".\"request_headers\", \"webhook_logs\".\"request_body\", \"webhook_logs\".\"response_status\", \"webhook_logs\".\"response_body\", \"webhook_logs\".\"response_headers\", \"webhook_logs\".\"retry_count\" FROM \"webhook_logs\" WHERE \"webhook_logs\".\"created_at\" <= 2026-08-29 06:00:00+00:00 ORDER BY \"webhook_logs\".\"created_at\" ASC",
+    "webhook_logs_note": "Explicit .order_by('created_at') ASC + chunk_size=100 (all others use BATCH_SIZE=500)."
+  },
+  "tasks": {
+    "delete_api_logs": {
+      "collection": "api_activity_logs",
+      "task_name": "API Activity Log"
+    },
+    "delete_email_notification_logs": {
+      "collection": "email_notification_logs",
+      "task_name": "Email Notification Log"
+    },
+    "delete_page_versions": {
+      "collection": "page_versions",
+      "task_name": "Page Version"
+    },
+    "delete_issue_description_versions": {
+      "collection": "issue_description_versions",
+      "task_name": "Issue Description Version"
+    },
+    "delete_webhook_logs": {
+      "collection": "webhook_logs",
+      "task_name": "Webhook Log"
+    }
+  },
+  "db_before_after": {
+    "delete_api_logs": {
+      "before": "api_activity_logs rows with created_at <= now()-30d present (any count N).",
+      "emitted": "<api_logs_sql> then per-500-batch: mongo bulk_write, then DELETE FROM api_activity_logs WHERE id IN (...).",
+      "after": "0 rows with created_at <= cutoff; mongo collection holds the transformed docs. When mongo configured but archival fails: 0 rows deleted (early return)."
+    },
+    "delete_page_versions": {
+      "before": "A page with 25 versions.",
+      "after": "20 newest (by created_at DESC) remain; 5 oldest deleted after mongo archival. Pages with <=20 versions untouched (subquery empty)."
+    }
+  }
+}

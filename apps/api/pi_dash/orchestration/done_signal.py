@@ -147,6 +147,7 @@ def ingest_into_run(run, text: str):
     terminal record.
     """
     from pi_dash.runner.models import AgentRunStatus
+    from pi_dash.runner.services.error_details import merge_error_details
 
     now = timezone.now()
 
@@ -155,20 +156,20 @@ def ingest_into_run(run, text: str):
     except DoneSignalError as exc:
         from pi_dash.runner.failure import classify
 
-        run.error = f"done-signal parse error: {exc}"
+        run.error_details = merge_error_details(run.error_details, error=f"done-signal parse error: {exc}")
         run.done_payload = None
         if not run.is_terminal:
             run.status = AgentRunStatus.FAILED
         if run.status == AgentRunStatus.FAILED and not run.failure_reason:
             # This writer bypasses ``finalize_agent_run``, so the canonical
             # failure_reason invariant is kept here (PDASHOSS01-183).
-            run.failure_reason = classify(run.error).value
+            run.failure_reason = classify(run.error or "").value
         run.ended_at = now
-        run.save(update_fields=["error", "done_payload", "status", "ended_at", "failure_reason"])
+        run.save(update_fields=["error_details", "done_payload", "status", "ended_at", "failure_reason"])
         return None
 
     run.done_payload = signal.payload
-    run.error = ""
+    run.error_details = merge_error_details(run.error_details, error="")
     if signal.status == "completed":
         run.status = AgentRunStatus.COMPLETED
         run.ended_at = now
@@ -183,5 +184,5 @@ def ingest_into_run(run, text: str):
         # human comments. Leave ended_at NULL so observability tooling
         # doesn't treat the row as finished.
         run.status = AgentRunStatus.PAUSED_AWAITING_INPUT
-    run.save(update_fields=["done_payload", "error", "status", "ended_at"])
+    run.save(update_fields=["done_payload", "error_details", "status", "ended_at"])
     return signal

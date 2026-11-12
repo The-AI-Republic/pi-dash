@@ -1,0 +1,246 @@
+{
+  "_trace": "orchestration/relations.py:72-74 (GROUP_LIMIT), :269-277 (_item), :280-313 (grouped_relations: live rows 287-290, type map 291-296, visibility pool 298-305, sort + cap 307-312)",
+  "_method": "live grouped_relations on pidash_524_scratch; visible pool = member_project_issues(u4) (FX4A member only)",
+  "keys_always_present": [
+    "blocked_by",
+    "blocking",
+    "duplicate",
+    "finish_after",
+    "finish_before",
+    "implemented_by",
+    "implements",
+    "relates_to",
+    "start_after",
+    "start_before"
+  ],
+  "grouped_unscoped": {
+    "blocked_by": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004101",
+        "identifier": "FX4A-1",
+        "name": "FX4 A one",
+        "state": "Todo",
+        "state_group": "unstarted"
+      },
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004132",
+        "identifier": "FX4A-11",
+        "name": "FX4 grouped A2",
+        "state": "Todo",
+        "state_group": "unstarted"
+      },
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004133",
+        "identifier": "FX4A-12",
+        "name": "FX4 legacy other",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "blocking": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004122",
+        "identifier": "FX4A-7",
+        "name": "FX4 unrel B",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "relates_to": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004102",
+        "identifier": "FX4A-2",
+        "name": "FX4 A two",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "duplicate": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004103",
+        "identifier": "FX4A-3",
+        "name": "FX4 A three",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "start_before": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004121",
+        "identifier": "FX4A-6",
+        "name": "FX4 unrel A",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "start_after": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004124",
+        "identifier": "FX4A-9",
+        "name": "FX4 unrel VB",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "finish_before": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004123",
+        "identifier": "FX4A-8",
+        "name": "FX4 unrel VA",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "finish_after": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004112",
+        "identifier": "FX4A-5",
+        "name": "FX4 race B",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "implemented_by": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004111",
+        "identifier": "FX4A-4",
+        "name": "FX4 race A",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "implements": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004104",
+        "identifier": "FX4B-1",
+        "name": "FX4 B one",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ]
+  },
+  "grouped_visible_member_FX4A": {
+    "blocked_by": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004101",
+        "identifier": "FX4A-1",
+        "name": "FX4 A one",
+        "state": "Todo",
+        "state_group": "unstarted"
+      },
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004132",
+        "identifier": "FX4A-11",
+        "name": "FX4 grouped A2",
+        "state": "Todo",
+        "state_group": "unstarted"
+      },
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004133",
+        "identifier": "FX4A-12",
+        "name": "FX4 legacy other",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "blocking": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004122",
+        "identifier": "FX4A-7",
+        "name": "FX4 unrel B",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "relates_to": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004102",
+        "identifier": "FX4A-2",
+        "name": "FX4 A two",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "duplicate": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004103",
+        "identifier": "FX4A-3",
+        "name": "FX4 A three",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "start_before": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004121",
+        "identifier": "FX4A-6",
+        "name": "FX4 unrel A",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "start_after": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004124",
+        "identifier": "FX4A-9",
+        "name": "FX4 unrel VB",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "finish_before": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004123",
+        "identifier": "FX4A-8",
+        "name": "FX4 unrel VA",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "finish_after": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004112",
+        "identifier": "FX4A-5",
+        "name": "FX4 race B",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "implemented_by": [
+      {
+        "id": "99999999-aaaa-bbbb-cccc-000000004111",
+        "identifier": "FX4A-4",
+        "name": "FX4 race A",
+        "state": "Todo",
+        "state_group": "unstarted"
+      }
+    ],
+    "implements": []
+  },
+  "visibility_narrowing": {
+    "implements_unscoped": [
+      "FX4B-1"
+    ],
+    "implements_visible": []
+  },
+  "sort_demo_blocked_by": [
+    "FX4A-1",
+    "FX4A-11",
+    "FX4A-12"
+  ],
+  "legacy_row": {
+    "stored": "(FX4A-12->FX4A-10, blocking)",
+    "reads_from_hub_as": "blocked_by",
+    "hub_blocked_by": [
+      "FX4A-1",
+      "FX4A-11",
+      "FX4A-12"
+    ]
+  },
+  "cap_case": {
+    "seed": "101 relates_to targets",
+    "len": 100,
+    "first": "FX4A-14",
+    "last": "FX4A-113"
+  }
+}

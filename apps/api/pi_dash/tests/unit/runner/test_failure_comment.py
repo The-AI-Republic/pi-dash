@@ -588,7 +588,7 @@ def test_cloud_writer_safety_net_uses_error_code(db, create_user, workspace, pod
 def test_backfill_migration_classifies_existing_failed_rows(
     db, create_user, workspace, pod, issue
 ):
-    """The 0031 data migration runs the write-path classifier over rows
+    """The 0041 data migration runs the write-path classifier over rows
     that predate the failure_reason column."""
     from importlib import import_module
 
@@ -599,13 +599,14 @@ def test_backfill_migration_classifies_existing_failed_rows(
     stall_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
     ok_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.COMPLETED)
     AgentRun.objects.filter(pk=auth_run.pk).update(
-        error="401 authentication_failed: invalid authentication credentials", failure_reason=""
+        error_details={"message": "401 authentication_failed: invalid authentication credentials"},
+        failure_reason="",
     )
     AgentRun.objects.filter(pk=stall_run.pk).update(
-        error="agent stalled: no events for >360s", failure_reason=""
+        error_details={"message": "agent stalled: no events for >360s"}, failure_reason=""
     )
 
-    migration = import_module("pi_dash.runner.migrations.0033_backfill_failure_reason")
+    migration = import_module("pi_dash.runner.migrations.0041_backfill_failure_reason")
     migration.backfill_failure_reason(django_apps, None)
 
     auth_run.refresh_from_db()

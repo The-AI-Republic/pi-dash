@@ -79,6 +79,19 @@ if [ ! -x "$PIDASH_BIN" ]; then
   exit 1
 fi
 
+# The release archive carries the built-in engine under engine/<version>/,
+# but the cargo-dist installer only installs executables onto PATH. Let
+# pidash place the engine next to itself (~/.local/lib/pidash/engine/), off
+# PATH. Not fatal: sign-in still works without it, and `pidash engine
+# install` can be re-run later.
+echo ""
+echo "==> Installing the built-in agent engine..."
+if ! "$PIDASH_BIN" engine install; then
+  echo ""
+  echo "Warning: the built-in agent engine was not installed (see above)."
+  echo "Run \`pidash engine install\` to retry."
+fi
+
 echo ""
 echo "==> Starting authentication..."
 echo ""
