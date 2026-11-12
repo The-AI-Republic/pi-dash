@@ -105,6 +105,8 @@ pub struct CommentCreate {
 pub struct CommentCreated {
     /// The inserted comment id.
     pub id: Uuid,
+    /// The linked description id (the `description:` response field).
+    pub description_id: Uuid,
     /// The stored `created_at` (the override when set, else now).
     pub created_at: DateTime<Utc>,
 }
@@ -218,6 +220,7 @@ pub async fn create(
         .await?;
     Ok(CommentCreated {
         id: comment_id,
+        description_id,
         created_at,
     })
 }

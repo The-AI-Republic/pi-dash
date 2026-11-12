@@ -326,7 +326,6 @@ pub async fn create(
     let Some(comment_workspace) = comment_workspace else {
         return Err(Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
     };
-    let comment_id = Uuid::new_v4();
     let updated_at = now_utc();
     let comment_json = validated
         .comment_json
@@ -365,7 +364,6 @@ pub async fn create(
     // a bogus `issue_id` still violates the deferred FK at COMMIT, and
     // `handle_exception` answers the `IntegrityError` 400
     // (`api/views/base.py:142-147`).
-    let description_id = Uuid::new_v4();
     let mut txn = WriteTxn::begin(&deps.orm)
         .await
         .map_err(tool_domain_error)?;
@@ -395,7 +393,7 @@ pub async fn create(
         None,
     )
     .await;
-    let _saved = match save_result {
+    let saved = match save_result {
         Ok(saved) => saved,
         Err(error) => {
             let _ = txn.rollback().await;
@@ -408,7 +406,7 @@ pub async fn create(
     // requester.
     let response_actor = created_by;
     let decoded = DecodedComment {
-        id: comment_id.to_string(),
+        id: saved.id.to_string(),
         is_member: None,
         created_at: response_created_at,
         updated_at: pidash_compat::datetime::render_datetime_in(&updated_at, &tz),
@@ -428,7 +426,7 @@ pub async fn create(
         updated_by: Some(actor_id.to_string()),
         project: project_id.to_string(),
         workspace: comment_workspace.to_string(),
-        description: Some(description_id.to_string()),
+        description: Some(saved.description_id.to_string()),
         issue: issue_id.to_string(),
         actor: response_actor.map(|id| id.to_string()),
         parent: None,
@@ -461,7 +459,7 @@ pub async fn create(
     // shaped legs.
     if let Some(origin) = webhook_origin(options.emit_model_activity, write.origin.clone())? {
         let webhook = work_tasks::comment_model_activity_kwargs(
-            &comment_id.to_string(),
+            &saved.id.to_string(),
             requested_data_value(body, from_form),
             None,
             &actor_id.to_string(),
