@@ -21,7 +21,8 @@ BINDING_KEYS = {
     "scheduler_color", "project", "workspace", "dtstart", "tzid", "rrule",
     "rdates", "exdates", "extra_context", "enabled", "outcome_mode", "pod",
     "pod_name", "next_run_at", "last_run", "last_run_status",
-    "last_run_ended_at", "last_error", "actor", "created_at", "updated_at",
+    "last_run_ended_at", "last_error", "series_exhausted", "actor",
+    "created_at", "updated_at",
 }
 
 

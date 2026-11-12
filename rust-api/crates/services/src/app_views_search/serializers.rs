@@ -113,12 +113,13 @@ pub const VIEW_ISSUE_LIST_FIELDS: [&str; 26] = [
     "module_ids",
 ];
 
-/// `IssueViewSerializer` wire keys (`view.py:56-69`, `fields = "__all__"`),
+/// `IssueViewSerializer` wire keys (`view.py:56-71`, `fields = "__all__"`),
 /// in live DRF order (probed, not inferred): `id` first, then the declared
-/// `is_favorite` when annotated, then Django `_meta` order. This is the
-/// 21-key set pinned by `GLOBAL_VIEW_KEYS` in
+/// `is_favorite` when annotated, then Django `_meta` order (`anchor`
+/// follows `access`, NEWFRONT-972). This is the 22-key set pinned by
+/// `GLOBAL_VIEW_KEYS` in
 /// `contract-tests/app_views_search/test_global_views.py`.
-pub const ISSUE_VIEW_FIELDS: [&str; 21] = [
+pub const ISSUE_VIEW_FIELDS: [&str; 22] = [
     "id",
     "created_at",
     "updated_at",
@@ -131,6 +132,7 @@ pub const ISSUE_VIEW_FIELDS: [&str; 21] = [
     "display_properties",
     "rich_filters",
     "access",
+    "anchor",
     "sort_order",
     "logo_props",
     "is_locked",
@@ -331,6 +333,7 @@ pub struct IssueViewRow<'a> {
     pub display_properties: &'a Value,
     pub rich_filters: &'a Value,
     pub access: i32,
+    pub anchor: Option<&'a str>,
     pub sort_order: f64,
     pub logo_props: &'a Value,
     pub is_locked: bool,
@@ -342,7 +345,7 @@ pub struct IssueViewRow<'a> {
     pub owned_by: Option<&'a str>,
 }
 
-/// `IssueViewSerializer.to_representation` output: the 21 model keys in live
+/// `IssueViewSerializer.to_representation` output: the 22 model keys in live
 /// DRF order with `is_favorite` skipped when `None` (DRF `SkipField` → the
 /// key is absent, not `null`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -361,6 +364,7 @@ pub struct IssueViewView<'a> {
     pub display_properties: &'a Value,
     pub rich_filters: &'a Value,
     pub access: i32,
+    pub anchor: Option<&'a str>,
     pub sort_order: f64,
     pub logo_props: &'a Value,
     pub is_locked: bool,
@@ -388,6 +392,7 @@ pub fn issue_view_to_representation<'a>(row: &'a IssueViewRow<'a>) -> IssueViewV
         display_properties: row.display_properties,
         rich_filters: row.rich_filters,
         access: row.access,
+        anchor: row.anchor,
         sort_order: row.sort_order,
         logo_props: row.logo_props,
         is_locked: row.is_locked,
@@ -731,13 +736,17 @@ mod tests {
     #[test]
     fn issue_view_keys_follow_live_drf_order() {
         // Probed order (DRF 3.18.1): id, [is_favorite], created_at … owned_by.
-        assert_eq!(ISSUE_VIEW_FIELDS.len(), 21);
+        assert_eq!(ISSUE_VIEW_FIELDS.len(), 22);
         assert_eq!(
             &ISSUE_VIEW_FIELDS[..5],
             &["id", "created_at", "updated_at", "deleted_at", "name"]
         );
         assert_eq!(
-            &ISSUE_VIEW_FIELDS[16..],
+            &ISSUE_VIEW_FIELDS[11..14],
+            &["access", "anchor", "sort_order"]
+        );
+        assert_eq!(
+            &ISSUE_VIEW_FIELDS[17..],
             &[
                 "created_by",
                 "updated_by",
@@ -749,6 +758,7 @@ mod tests {
         // The contract suite's GLOBAL_VIEW_KEYS is exactly this set.
         let contract: HashSet<&str> = [
             "access",
+            "anchor",
             "archived_at",
             "created_at",
             "created_by",
@@ -800,6 +810,7 @@ mod tests {
             display_properties,
             rich_filters: rich,
             access: 1,
+            anchor: None,
             sort_order: 65535.0,
             logo_props: logo,
             is_locked: false,
@@ -821,7 +832,7 @@ mod tests {
         let body = serde_json::to_string(&issue_view_to_representation(&row)).unwrap();
         assert_eq!(
             body,
-            r#"{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","created_at":null,"updated_at":null,"deleted_at":null,"name":"My board","description":"","query":{"a":1},"filters":{"priority":["high"]},"display_filters":{"layout":"list"},"display_properties":{"key":true},"rich_filters":{},"access":1,"sort_order":65535.0,"logo_props":{},"is_locked":false,"archived_at":null,"created_by":null,"updated_by":null,"workspace":null,"project":null,"owned_by":"44444444-4444-4444-4444-444444444444"}"#
+            r#"{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","created_at":null,"updated_at":null,"deleted_at":null,"name":"My board","description":"","query":{"a":1},"filters":{"priority":["high"]},"display_filters":{"layout":"list"},"display_properties":{"key":true},"rich_filters":{},"access":1,"anchor":null,"sort_order":65535.0,"logo_props":{},"is_locked":false,"archived_at":null,"created_by":null,"updated_by":null,"workspace":null,"project":null,"owned_by":"44444444-4444-4444-4444-444444444444"}"#
         );
     }
 

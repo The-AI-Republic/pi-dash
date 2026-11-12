@@ -196,6 +196,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// The shared SeaORM connection over an sqlx pool (no I/O — it wraps the
+/// pool).
+fn sea_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 /// Python `str.strip()` membership (`db/models/project.py:210`): Rust
 /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
 /// `str.strip` against `char::is_whitespace` over all code points —
@@ -223,16 +229,21 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    use pidash_db::entity::projects as proj_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let row: Option<uuid::Uuid> = proj_entity::Entity::find()
+        .join(JoinType::InnerJoin, proj_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(proj_entity::Column::Identifier.eq(upper))
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(proj_entity::Column::Id)
+        .into_tuple()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 async fn membership(
@@ -241,87 +252,255 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i32>, Option<i32>), Denial> {
-    let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let project_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok((
-        workspace_role.and_then(|row| row.0).map(i32::from),
-        project_role.and_then(|row| row.0).map(i32::from),
-    ))
+    use pidash_db::entity::project_members as pm_entity;
+    use pidash_db::entity::workspace_members as wm_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    // `w.deleted_at IS NULL` in the raw join `ON` clause is the same
+    // predicate on an inner join as a `WHERE` filter on the joined
+    // table, so it stays a filter here.
+    let workspace_role: Option<i16> = wm_entity::Entity::find()
+        .join(JoinType::InnerJoin, wm_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(ws_entity::Column::DeletedAt.is_null())
+        .filter(wm_entity::Column::MemberId.eq(*user_id))
+        .filter(wm_entity::Column::IsActive.eq(true))
+        .filter(wm_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(wm_entity::Column::Role)
+        .into_tuple()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_role: Option<i16> = pm_entity::Entity::find()
+        .join(JoinType::InnerJoin, pm_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(ws_entity::Column::DeletedAt.is_null())
+        .filter(pm_entity::Column::ProjectId.eq(*project_id))
+        .filter(pm_entity::Column::MemberId.eq(Some(*user_id)))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(pm_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(pm_entity::Column::Role)
+        .into_tuple()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok((workspace_role.map(i32::from), project_role.map(i32::from)))
 }
 
 // ---------------------------------------------------------------------------
-// SQL
+// Sea-query builders (distributions + scope)
 // ---------------------------------------------------------------------------
 
-/// `Project` has a `"points"` estimate (`base.py:832-837`).
-/// `Project.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
-/// soft-deleted project is excluded.
-const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
-     JOIN workspaces w ON w.id = p.workspace_id AND w.slug = $1 \
-     JOIN estimates e ON e.id = p.estimate_id AND e.type = 'points' \
-     WHERE p.id = $2 AND p.deleted_at IS NULL)";
+/// Assignee distribution rows, points flavor, decoded by name.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+struct AssigneePointsRow {
+    display_name: Option<String>,
+    assignee_id: Option<uuid::Uuid>,
+    avatar_url: Option<String>,
+    total_estimates: Option<f64>,
+    completed_estimates: Option<f64>,
+    pending_estimates: Option<f64>,
+}
 
-/// Cycle row plus the `total_issues` annotation (`base.py:791-805`):
-/// distinct bridged issues that are not archived, not draft, not
-/// deleted, on a live bridge row. The annotation join carries none of
-/// the `IssueManager` excludes (Django never applies a related
-/// model's default manager across a join): no triage predicate, no
-/// project-archive predicate — unlike `DIST_WHERE_SQL` below, which
-/// queries through `issue_objects`. `Cycle.objects` is the soft-deletion
-/// manager (`mixins.py:61-67`), so a soft-deleted cycle reads as missing:
-/// `.first()` returns None and the view 500s on the `start_date`
-/// dereference (`base.py:789-807`), the same as an unknown id.
-const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snapshot, \
-     (SELECT COUNT(DISTINCT ci.issue_id) FROM cycle_issues ci \
-      JOIN issues i ON i.id = ci.issue_id AND i.deleted_at IS NULL \
-        AND i.archived_at IS NULL AND i.is_draft = FALSE \
-      WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL) AS total_issues \
-     FROM cycles c \
-     JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1 \
-     WHERE c.project_id = $2 AND c.id = $3 AND c.deleted_at IS NULL";
+/// Assignee distribution rows, issues flavor, decoded by name.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+struct AssigneeIssuesRow {
+    display_name: Option<String>,
+    assignee_id: Option<uuid::Uuid>,
+    avatar_url: Option<String>,
+    total_issues: Option<i64>,
+    completed_issues: Option<i64>,
+    pending_issues: Option<i64>,
+}
 
-/// Base scope shared by the four distribution queries: live bridge row
-/// plus the `IssueManager` excludes (the explicit archived/draft
-/// filters on the completed/pending aggregates layer on top).
-/// Split in two because SQL joins before it filters: each query adds
-/// its own distribution joins (`estimate_points`, `issue_assignees`,
-/// `issue_labels`) between the FROM and WHERE parts. Concatenating
-/// the extra joins after the WHERE clause is a syntax error (every
-/// analytics request 500s) — Django emits all joins in FROM, so the
-/// port must too.
-const DIST_FROM_SQL: &str = "FROM issues i \
-     JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
-     JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
-     JOIN projects p ON p.id = i.project_id AND p.id = $2 AND p.archived_at IS NULL \
-     LEFT JOIN states s ON s.id = i.state_id";
-const DIST_WHERE_SQL: &str =
-    "WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE \
-     AND NOT (s.group = 'triage')";
+/// Label distribution rows, points flavor, decoded by name.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+struct LabelPointsRow {
+    label_name: Option<String>,
+    color: Option<String>,
+    label_id: Option<uuid::Uuid>,
+    total_estimates: Option<f64>,
+    completed_estimates: Option<f64>,
+    pending_estimates: Option<f64>,
+}
 
-/// `avatar_url` Case/Concat (`base.py:951-969`).
-const AVATAR_CASE_SQL: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL \
-     THEN '/api/assets/v2/static/' || u.avatar_asset_id::text || '/' \
-     WHEN u.avatar_asset_id IS NULL THEN u.avatar ELSE NULL END";
+/// Label distribution rows, issues flavor, decoded by name.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+struct LabelIssuesRow {
+    label_name: Option<String>,
+    color: Option<String>,
+    label_id: Option<uuid::Uuid>,
+    total_issues: Option<i64>,
+    completed_issues: Option<i64>,
+    pending_issues: Option<i64>,
+}
+
+/// One total-points row (`SUM` over the cycle scope).
+#[derive(Debug, Clone, Copy, sea_orm::FromQueryResult)]
+struct TotalPointsRow {
+    total_points: Option<f64>,
+}
+
+/// Base scope shared by the distribution and burndown-total queries:
+/// live bridge row plus the `IssueManager` excludes (the explicit
+/// archived/draft filters on the completed/pending aggregates layer on
+/// top). Each query adds its own distribution joins between the FROM
+/// and WHERE parts, matching Django's join order.
+///
+/// The triage exclusion is `NOT (group = 'triage')` — three-valued, so
+/// `NULL`-state rows drop with it (`<>` is `NOT (=)` under the same
+/// NULL rule). Joined tables carry no `deleted_at` predicate: Django
+/// applies the soft-delete manager to the base table only.
+fn dist_scope_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{cycle_issues, issues, projects, states, workspaces};
+    use sea_orm::sea_query::{Alias, Condition, Expr, JoinType, Query};
+    let a = Alias::new;
+    let mut stmt = Query::select();
+    stmt.from_as(issues::Entity, a("i"))
+        .join_as(
+            JoinType::InnerJoin,
+            cycle_issues::Entity,
+            a("ci"),
+            Condition::all()
+                .add(
+                    Expr::col((a("ci"), cycle_issues::Column::IssueId))
+                        .equals((a("i"), issues::Column::Id)),
+                )
+                .add(Expr::col((a("ci"), cycle_issues::Column::CycleId)).eq(cycle_id))
+                .add(Expr::col((a("ci"), cycle_issues::Column::DeletedAt)).is_null()),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            a("w"),
+            Condition::all()
+                .add(
+                    Expr::col((a("w"), workspaces::Column::Id))
+                        .equals((a("i"), issues::Column::WorkspaceId)),
+                )
+                .add(Expr::col((a("w"), workspaces::Column::Slug)).eq(slug.to_owned())),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            a("p"),
+            Condition::all()
+                .add(
+                    Expr::col((a("p"), projects::Column::Id))
+                        .equals((a("i"), issues::Column::ProjectId)),
+                )
+                .add(Expr::col((a("p"), projects::Column::Id)).eq(project_id))
+                .add(Expr::col((a("p"), projects::Column::ArchivedAt)).is_null()),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            states::Entity,
+            a("s"),
+            Expr::col((a("s"), states::Column::Id)).equals((a("i"), issues::Column::StateId)),
+        )
+        .and_where(Expr::col((a("i"), issues::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((a("i"), issues::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((a("i"), issues::Column::IsDraft)).eq(false))
+        .and_where(Expr::col((a("s"), states::Column::Group)).ne("triage"));
+    stmt
+}
+
+/// `avatar_url` Case/Concat (`base.py:951-969`): asset URL when the
+/// user has an `avatar_asset_id`, else the stored avatar text.
+fn avatar_expr() -> sea_orm::sea_query::SimpleExpr {
+    use pidash_db::entity::users;
+    use sea_orm::sea_query::{Alias, CaseStatement, Expr, SimpleExpr};
+    use sea_query::extension::postgres::PgExpr;
+    let a = Alias::new;
+    let asset_id = Expr::col((a("u"), users::Column::AvatarAssetId));
+    let asset_text = asset_id.clone().cast_as(a("text"));
+    let url = Expr::val("/api/assets/v2/static/")
+        .concat(asset_text)
+        .concat(Expr::val("/"));
+    SimpleExpr::Case(Box::new(
+        CaseStatement::new()
+            .case(asset_id.clone().is_not_null(), url)
+            .case(
+                asset_id.is_null(),
+                Expr::col((a("u"), users::Column::Avatar)),
+            )
+            .finally(Expr::val(Option::<String>::None)),
+    ))
+}
+
+/// `CAST(ep.value AS DOUBLE PRECISION)` over the `ep` alias.
+fn estimate_value() -> sea_orm::sea_query::SimpleExpr {
+    use pidash_db::entity::estimate_points;
+    use sea_orm::sea_query::{Alias, Expr};
+    Expr::col((Alias::new("ep"), estimate_points::Column::Value))
+        .cast_as(Alias::new("double precision"))
+}
+
+/// `SUM(x) FILTER (WHERE cond)` compiled to `SUM(CASE WHEN cond THEN x
+/// END)`: rows where the condition is NOT TRUE (incl. NULL) contribute
+/// NULL, so the sum is NULL when nothing matches — as with `FILTER`.
+fn filtered_sum(
+    value: sea_orm::sea_query::SimpleExpr,
+    cond: sea_orm::sea_query::Condition,
+) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::{CaseStatement, Func, SimpleExpr};
+    Func::sum(SimpleExpr::Case(Box::new(
+        CaseStatement::new().case(cond, value),
+    )))
+    .into()
+}
+
+/// `COUNT(x) FILTER (WHERE cond)` compiled to `COUNT(CASE WHEN cond
+/// THEN x END)`: same NULL-skipping as `FILTER`.
+fn filtered_count(
+    value: sea_orm::sea_query::SimpleExpr,
+    cond: sea_orm::sea_query::Condition,
+) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::{CaseStatement, Func, SimpleExpr};
+    Func::count(SimpleExpr::Case(Box::new(
+        CaseStatement::new().case(cond, value),
+    )))
+    .into()
+}
+
+/// Completed/pending conditions over the `i` alias (the `FILTER`
+/// clauses of the four distributions).
+fn completed_cond() -> sea_orm::sea_query::Condition {
+    use pidash_db::entity::issues;
+    use sea_orm::sea_query::{Alias, Condition, Expr};
+    let a = Alias::new;
+    Condition::all()
+        .add(Expr::col((a("i"), issues::Column::CompletedAt)).is_not_null())
+        .add(Expr::col((a("i"), issues::Column::ArchivedAt)).is_null())
+        .add(Expr::col((a("i"), issues::Column::IsDraft)).eq(false))
+}
+
+fn pending_cond() -> sea_orm::sea_query::Condition {
+    use pidash_db::entity::issues;
+    use sea_orm::sea_query::{Alias, Condition, Expr};
+    let a = Alias::new;
+    Condition::all()
+        .add(Expr::col((a("i"), issues::Column::CompletedAt)).is_null())
+        .add(Expr::col((a("i"), issues::Column::ArchivedAt)).is_null())
+        .add(Expr::col((a("i"), issues::Column::IsDraft)).eq(false))
+}
+
+/// `total_issues` uses only the archived/draft filter (no
+/// completed split) in the issues flavor.
+fn issues_total_cond() -> sea_orm::sea_query::Condition {
+    use pidash_db::entity::issues;
+    use sea_orm::sea_query::{Alias, Condition, Expr};
+    let a = Alias::new;
+    Condition::all()
+        .add(Expr::col((a("i"), issues::Column::ArchivedAt)).is_null())
+        .add(Expr::col((a("i"), issues::Column::IsDraft)).eq(false))
+}
 
 /// Points assignee distribution (`base.py:843-899`): per-assignee
 /// estimate sums ordered by display name. `total_estimates` has no
@@ -329,71 +508,274 @@ const AVATAR_CASE_SQL: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL \
 /// filters on `estimate_point` (a nullable FK), so the ORM emits a LEFT
 /// OUTER JOIN and unestimated issues keep their group with NULL sums
 /// (PIDASHCONV-1185).
-fn points_assignee_sql() -> String {
-    format!(
-        "SELECT u.display_name, u.id AS assignee_id, {AVATAR_CASE_SQL} AS avatar_url, \
-         SUM(CAST(ep.value AS DOUBLE PRECISION)) AS total_estimates, \
-         SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
-         SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
-         {DIST_FROM_SQL} \
-         LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id \
-         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
-         LEFT JOIN users u ON u.id = ia.assignee_id \
-         {DIST_WHERE_SQL} \
-         GROUP BY u.display_name, u.id, {AVATAR_CASE_SQL} \
-         ORDER BY u.display_name"
+fn points_assignee_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{estimate_points, issue_assignees, issues, users};
+    use sea_orm::sea_query::{Alias, Expr, Func, JoinType, Order};
+    let a = Alias::new;
+    let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
+    stmt.join_as(
+        JoinType::LeftJoin,
+        estimate_points::Entity,
+        a("ep"),
+        Expr::col((a("ep"), estimate_points::Column::Id))
+            .equals((a("i"), issues::Column::EstimatePointId)),
     )
+    .join_as(
+        JoinType::LeftJoin,
+        issue_assignees::Entity,
+        a("ia"),
+        Expr::col((a("ia"), issue_assignees::Column::IssueId)).equals((a("i"), issues::Column::Id)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        users::Entity,
+        a("u"),
+        Expr::col((a("u"), users::Column::Id))
+            .equals((a("ia"), issue_assignees::Column::AssigneeId)),
+    )
+    .expr_as(
+        Expr::col((a("u"), users::Column::DisplayName)),
+        "display_name",
+    )
+    .expr_as(Expr::col((a("u"), users::Column::Id)), "assignee_id")
+    .expr_as(avatar_expr(), "avatar_url")
+    .expr_as(Func::sum(estimate_value()), "total_estimates")
+    .expr_as(
+        filtered_sum(estimate_value(), completed_cond()),
+        "completed_estimates",
+    )
+    .expr_as(
+        filtered_sum(estimate_value(), pending_cond()),
+        "pending_estimates",
+    )
+    .add_group_by([Expr::col((a("u"), users::Column::DisplayName)).into()])
+    .add_group_by([Expr::col((a("u"), users::Column::Id)).into()])
+    .add_group_by([avatar_expr()])
+    .order_by((a("u"), users::Column::DisplayName), Order::Asc);
+    stmt
 }
 
 /// Points label distribution (`base.py:901-931`). LEFT-joins
 /// `estimate_points` like the assignee query above (PIDASHCONV-1185).
-fn points_label_sql() -> String {
-    format!(
-        "SELECT l.name AS label_name, l.color, l.id AS label_id, \
-         SUM(CAST(ep.value AS DOUBLE PRECISION)) AS total_estimates, \
-         SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
-         SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
-         {DIST_FROM_SQL} \
-         LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id \
-         LEFT JOIN issue_labels il ON il.issue_id = i.id \
-         LEFT JOIN labels l ON l.id = il.label_id \
-         {DIST_WHERE_SQL} \
-         GROUP BY l.name, l.color, l.id \
-         ORDER BY l.name"
+fn points_label_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{estimate_points, issue_labels, issues, labels};
+    use sea_orm::sea_query::{Alias, Expr, Func, JoinType, Order};
+    let a = Alias::new;
+    let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
+    stmt.join_as(
+        JoinType::LeftJoin,
+        estimate_points::Entity,
+        a("ep"),
+        Expr::col((a("ep"), estimate_points::Column::Id))
+            .equals((a("i"), issues::Column::EstimatePointId)),
     )
+    .join_as(
+        JoinType::LeftJoin,
+        issue_labels::Entity,
+        a("il"),
+        Expr::col((a("il"), issue_labels::Column::IssueId)).equals((a("i"), issues::Column::Id)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        labels::Entity,
+        a("l"),
+        Expr::col((a("l"), labels::Column::Id)).equals((a("il"), issue_labels::Column::LabelId)),
+    )
+    .expr_as(Expr::col((a("l"), labels::Column::Name)), "label_name")
+    .expr_as(Expr::col((a("l"), labels::Column::Color)), "color")
+    .expr_as(Expr::col((a("l"), labels::Column::Id)), "label_id")
+    .expr_as(Func::sum(estimate_value()), "total_estimates")
+    .expr_as(
+        filtered_sum(estimate_value(), completed_cond()),
+        "completed_estimates",
+    )
+    .expr_as(
+        filtered_sum(estimate_value(), pending_cond()),
+        "pending_estimates",
+    )
+    .add_group_by([Expr::col((a("l"), labels::Column::Name)).into()])
+    .add_group_by([Expr::col((a("l"), labels::Column::Color)).into()])
+    .add_group_by([Expr::col((a("l"), labels::Column::Id)).into()])
+    .order_by((a("l"), labels::Column::Name), Order::Asc);
+    stmt
 }
 
 /// Issues assignee distribution (`base.py:942-998`): `Count` over the
 /// join key (NULL-skipping, like Django's `Count("assignee_id")`).
-fn issues_assignee_sql() -> String {
-    format!(
-        "SELECT u.display_name, u.id AS assignee_id, {AVATAR_CASE_SQL} AS avatar_url, \
-         COUNT(u.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE) AS total_issues, \
-         COUNT(u.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_issues, \
-         COUNT(u.id) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_issues \
-         {DIST_FROM_SQL} \
-         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
-         LEFT JOIN users u ON u.id = ia.assignee_id \
-         {DIST_WHERE_SQL} \
-         GROUP BY u.display_name, u.id, {AVATAR_CASE_SQL} \
-         ORDER BY u.display_name"
+fn issues_assignee_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{issue_assignees, issues, users};
+    use sea_orm::sea_query::{Alias, Expr, JoinType, Order};
+    let a = Alias::new;
+    let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
+    stmt.join_as(
+        JoinType::LeftJoin,
+        issue_assignees::Entity,
+        a("ia"),
+        Expr::col((a("ia"), issue_assignees::Column::IssueId)).equals((a("i"), issues::Column::Id)),
     )
+    .join_as(
+        JoinType::LeftJoin,
+        users::Entity,
+        a("u"),
+        Expr::col((a("u"), users::Column::Id))
+            .equals((a("ia"), issue_assignees::Column::AssigneeId)),
+    )
+    .expr_as(
+        Expr::col((a("u"), users::Column::DisplayName)),
+        "display_name",
+    )
+    .expr_as(Expr::col((a("u"), users::Column::Id)), "assignee_id")
+    .expr_as(avatar_expr(), "avatar_url")
+    .expr_as(
+        filtered_count(
+            Expr::col((a("u"), users::Column::Id)).into(),
+            issues_total_cond(),
+        ),
+        "total_issues",
+    )
+    .expr_as(
+        filtered_count(
+            Expr::col((a("u"), users::Column::Id)).into(),
+            completed_cond(),
+        ),
+        "completed_issues",
+    )
+    .expr_as(
+        filtered_count(
+            Expr::col((a("u"), users::Column::Id)).into(),
+            pending_cond(),
+        ),
+        "pending_issues",
+    )
+    .add_group_by([Expr::col((a("u"), users::Column::DisplayName)).into()])
+    .add_group_by([Expr::col((a("u"), users::Column::Id)).into()])
+    .add_group_by([avatar_expr()])
+    .order_by((a("u"), users::Column::DisplayName), Order::Asc);
+    stmt
 }
 
 /// Issues label distribution (`base.py:1000-1036`).
-fn issues_label_sql() -> String {
-    format!(
-        "SELECT l.name AS label_name, l.color, l.id AS label_id, \
-         COUNT(l.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE) AS total_issues, \
-         COUNT(l.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_issues, \
-         COUNT(l.id) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_issues \
-         {DIST_FROM_SQL} \
-         LEFT JOIN issue_labels il ON il.issue_id = i.id \
-         LEFT JOIN labels l ON l.id = il.label_id \
-         {DIST_WHERE_SQL} \
-         GROUP BY l.name, l.color, l.id \
-         ORDER BY l.name"
+fn issues_label_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{issue_labels, issues, labels};
+    use sea_orm::sea_query::{Alias, Expr, JoinType, Order};
+    let a = Alias::new;
+    let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
+    stmt.join_as(
+        JoinType::LeftJoin,
+        issue_labels::Entity,
+        a("il"),
+        Expr::col((a("il"), issue_labels::Column::IssueId)).equals((a("i"), issues::Column::Id)),
     )
+    .join_as(
+        JoinType::LeftJoin,
+        labels::Entity,
+        a("l"),
+        Expr::col((a("l"), labels::Column::Id)).equals((a("il"), issue_labels::Column::LabelId)),
+    )
+    .expr_as(Expr::col((a("l"), labels::Column::Name)), "label_name")
+    .expr_as(Expr::col((a("l"), labels::Column::Color)), "color")
+    .expr_as(Expr::col((a("l"), labels::Column::Id)), "label_id")
+    .expr_as(
+        filtered_count(
+            Expr::col((a("l"), labels::Column::Id)).into(),
+            issues_total_cond(),
+        ),
+        "total_issues",
+    )
+    .expr_as(
+        filtered_count(
+            Expr::col((a("l"), labels::Column::Id)).into(),
+            completed_cond(),
+        ),
+        "completed_issues",
+    )
+    .expr_as(
+        filtered_count(
+            Expr::col((a("l"), labels::Column::Id)).into(),
+            pending_cond(),
+        ),
+        "pending_issues",
+    )
+    .add_group_by([Expr::col((a("l"), labels::Column::Name)).into()])
+    .add_group_by([Expr::col((a("l"), labels::Column::Color)).into()])
+    .add_group_by([Expr::col((a("l"), labels::Column::Id)).into()])
+    .order_by((a("l"), labels::Column::Name), Order::Asc);
+    stmt
+}
+
+/// Total burndown points (`base.py` total over the cycle scope with the
+/// estimate join and the `ep.value IS NOT NULL` guard).
+fn total_points_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{estimate_points, issues};
+    use sea_orm::sea_query::{Alias, Expr, Func, JoinType};
+    let a = Alias::new;
+    let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
+    stmt.join_as(
+        JoinType::InnerJoin,
+        estimate_points::Entity,
+        a("ep"),
+        Expr::col((a("ep"), estimate_points::Column::Id))
+            .equals((a("i"), issues::Column::EstimatePointId)),
+    )
+    .and_where(Expr::col((a("ep"), estimate_points::Column::Value)).is_not_null())
+    .expr_as(Func::sum(estimate_value()), "total_points");
+    stmt
+}
+
+/// Run a built statement into typed rows, decoded by name.
+async fn query_built<T>(
+    db: &sea_orm::DatabaseConnection,
+    stmt: &sea_orm::sea_query::SelectStatement,
+) -> Result<Vec<T>, Denial>
+where
+    T: sea_orm::FromQueryResult,
+{
+    use sea_orm::ConnectionTrait;
+    let rows = db
+        .query_all(sea_orm::DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    rows.iter()
+        .map(|row| T::from_query_result(row, "").map_err(|_| Denial::ServerError))
+        .collect()
+}
+
+/// Run a built statement into one typed row, decoded by name.
+async fn query_one_built<T>(
+    db: &sea_orm::DatabaseConnection,
+    stmt: &sea_orm::sea_query::SelectStatement,
+) -> Result<Option<T>, Denial>
+where
+    T: sea_orm::FromQueryResult,
+{
+    use sea_orm::ConnectionTrait;
+    let rows = db
+        .query_all(sea_orm::DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    rows.first()
+        .map(|row| T::from_query_result(row, "").map_err(|_| Denial::ServerError))
+        .transpose()
 }
 
 /// Burndown completion rows, points flavor
@@ -401,6 +783,8 @@ fn issues_label_sql() -> String {
 /// an estimate, datestamp from `TruncDate(completed_at)` in the actor's
 /// active zone (`TimezoneMixin` activates `user_timezone`), bound as
 /// `$4`; the caller drops `NULL` dates (`item["date"] is not None`).
+/// sea-query cannot express the `AT TIME ZONE` conversion, so the
+/// statement stays hand-written (see the `// raw-sql:` at the call).
 const BURNDOWN_POINTS_SQL: &str =
     "SELECT (i.completed_at AT TIME ZONE $4)::date AS d, ep.value AS v \
      FROM issues i \
@@ -676,37 +1060,108 @@ async fn analytics_get(
     // `request.GET.get("type", "issues")` — last wins on repeats.
     let analytic_type = query.get("type").map(String::as_str).unwrap_or("issues");
 
-    let estimate_type: Option<(bool,)> = sqlx::query_as(ESTIMATE_TYPE_SQL)
-        .bind(&slug)
-        .bind(project_id)
-        .fetch_optional(&pool)
+    // `Project` has a `"points"` estimate (`base.py:832-837`).
+    // `Project.objects` is the soft-deletion manager, so a soft-deleted
+    // project is excluded.
+    use pidash_db::entity::estimates as est_entity;
+    use pidash_db::entity::projects as proj_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, RelationTrait};
+    let estimate_type = proj_entity::Entity::find()
+        .join(JoinType::InnerJoin, proj_entity::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            proj_entity::Entity::belongs_to(est_entity::Entity)
+                .from(proj_entity::Column::EstimateId)
+                .to(est_entity::Column::Id)
+                .into(),
+        )
+        .filter(ws_entity::Column::Slug.eq(slug.as_str()))
+        .filter(est_entity::Column::Type.eq("points"))
+        .filter(proj_entity::Column::Id.eq(project_id))
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .exists(&sea_conn(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let estimate_type = estimate_type.is_some_and(|row| row.0);
 
     // The annotation runs on the same fetch as the cycle itself; a
     // missing cycle leaves `None` and the `start_date` dereference
     // 500s (B1) — there is no 404 branch in Python.
-    /// Cycle row plus the `total_issues` annotation.
-    type CycleRow = (
-        uuid::Uuid,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<Value>,
-        Option<i64>,
+    /// Cycle row plus the `total_issues` annotation (distinct bridged
+    /// issues that are not archived, not draft, not deleted, on a live
+    /// bridge row; no `IssueManager` excludes across the join).
+    #[derive(Debug, Clone, sea_orm::FromQueryResult)]
+    #[allow(dead_code)]
+    struct AnalyticsCycleRow {
+        id: uuid::Uuid,
+        start_date: Option<chrono::DateTime<chrono::Utc>>,
+        end_date: Option<chrono::DateTime<chrono::Utc>>,
+        progress_snapshot: Option<Value>,
+        total_issues: Option<i64>,
+    }
+    use pidash_db::entity::cycle_issues as ci_entity;
+    use pidash_db::entity::cycles as c_entity;
+    use pidash_db::entity::issues as i_entity;
+    use sea_orm::sea_query::{Alias, Condition, Expr, Func, Query, SimpleExpr, SubQueryStatement};
+    let a = Alias::new;
+    let mut count_sub = Query::select();
+    count_sub
+        .expr_as(
+            Func::count_distinct(Expr::col((a("ci"), ci_entity::Column::IssueId))),
+            "n",
+        )
+        .from_as(ci_entity::Entity, a("ci"))
+        .join_as(
+            JoinType::InnerJoin,
+            i_entity::Entity,
+            a("i"),
+            Condition::all()
+                .add(
+                    Expr::col((a("i"), i_entity::Column::Id))
+                        .equals((a("ci"), ci_entity::Column::IssueId)),
+                )
+                .add(Expr::col((a("i"), i_entity::Column::DeletedAt)).is_null())
+                .add(Expr::col((a("i"), i_entity::Column::ArchivedAt)).is_null())
+                .add(Expr::col((a("i"), i_entity::Column::IsDraft)).eq(false)),
+        )
+        .and_where(
+            Expr::col((a("ci"), ci_entity::Column::CycleId))
+                .equals((a("cycles"), c_entity::Column::Id)),
+        )
+        .and_where(Expr::col((a("ci"), ci_entity::Column::DeletedAt)).is_null());
+    let total_sub: SimpleExpr = SimpleExpr::SubQuery(
+        None,
+        Box::new(SubQueryStatement::SelectStatement(count_sub)),
     );
-    let cycle: Option<CycleRow> = sqlx::query_as(CYCLE_SQL)
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_optional(&pool)
+    use sea_orm::QuerySelect;
+    let cycle: Option<AnalyticsCycleRow> = c_entity::Entity::find()
+        .join(JoinType::InnerJoin, c_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug.as_str()))
+        .filter(c_entity::Column::ProjectId.eq(project_id))
+        .filter(c_entity::Column::Id.eq(cycle_id))
+        .filter(c_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(c_entity::Column::Id)
+        .column(c_entity::Column::StartDate)
+        .column(c_entity::Column::EndDate)
+        .column(c_entity::Column::ProgressSnapshot)
+        .expr_as(total_sub, "total_issues")
+        .into_model::<AnalyticsCycleRow>()
+        .one(&sea_conn(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let Some((_id, start_date, end_date, snapshot, total_issues)) = cycle else {
+    let Some(AnalyticsCycleRow {
+        start_date,
+        end_date,
+        progress_snapshot,
+        total_issues,
+        ..
+    }) = cycle
+    else {
         return Err(Denial::ServerError);
     };
     // A DB-level `NULL` snapshot reads falsy, like Python `None`.
-    let snapshot = snapshot.unwrap_or(Value::Null);
+    let snapshot = progress_snapshot.unwrap_or(Value::Null);
     let (Some(start_date), Some(end_date)) = (start_date, end_date) else {
         return Err(Denial::NoDates);
     };
@@ -737,71 +1192,69 @@ async fn analytics_get(
     let mut chart = Value::Object(Map::new());
 
     if analytic_type == "points" && estimate_type {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                Option<String>,
-                Option<uuid::Uuid>,
-                Option<String>,
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-            ),
-        >(&points_assignee_sql())
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let rows: Vec<AssigneePointsRow> = query_built(
+            &sea_conn(&pool),
+            &points_assignee_stmt(&slug, project_id, cycle_id),
+        )
+        .await?;
         assignees = rows
             .into_iter()
-            .map(|(name, id, avatar, total, done, pending)| {
-                Value::Object(shape_assignee_points(
-                    name, id, avatar, total, done, pending,
-                ))
-            })
+            .map(
+                |AssigneePointsRow {
+                     display_name,
+                     assignee_id,
+                     avatar_url,
+                     total_estimates,
+                     completed_estimates,
+                     pending_estimates,
+                 }| {
+                    Value::Object(shape_assignee_points(
+                        display_name,
+                        assignee_id,
+                        avatar_url,
+                        total_estimates,
+                        completed_estimates,
+                        pending_estimates,
+                    ))
+                },
+            )
             .collect();
-        let rows = sqlx::query_as::<
-            _,
-            (
-                Option<String>,
-                Option<String>,
-                Option<uuid::Uuid>,
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-            ),
-        >(&points_label_sql())
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let rows: Vec<LabelPointsRow> = query_built(
+            &sea_conn(&pool),
+            &points_label_stmt(&slug, project_id, cycle_id),
+        )
+        .await?;
         labels = rows
             .into_iter()
-            .map(|(name, color, id, total, done, pending)| {
-                Value::Object(shape_label_points(name, color, id, total, done, pending))
-            })
+            .map(
+                |LabelPointsRow {
+                     label_name,
+                     color,
+                     label_id,
+                     total_estimates,
+                     completed_estimates,
+                     pending_estimates,
+                 }| {
+                    Value::Object(shape_label_points(
+                        label_name,
+                        color,
+                        label_id,
+                        total_estimates,
+                        completed_estimates,
+                        pending_estimates,
+                    ))
+                },
+            )
             .collect();
-        let total_points: Option<(Option<f64>,)> = sqlx::query_as(
-            "SELECT SUM(CAST(ep.value AS DOUBLE PRECISION)) FROM issues i \
-             JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
-             JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
-             JOIN projects p ON p.id = i.project_id AND p.id = $2 AND p.archived_at IS NULL \
-             LEFT JOIN states s ON s.id = i.state_id \
-             JOIN estimate_points ep ON ep.id = i.estimate_point_id \
-             WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE \
-             AND NOT (s.group = 'triage') AND ep.value IS NOT NULL",
+        let total_points_row: Option<TotalPointsRow> = query_one_built(
+            &sea_conn(&pool),
+            &total_points_stmt(&slug, project_id, cycle_id),
         )
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let total_points = total_points.and_then(|row| row.0).unwrap_or(0.0);
+        .await?;
+        let total_points = total_points_row
+            .and_then(|row| row.total_points)
+            .unwrap_or(0.0);
+        // raw-sql: AT TIME ZONE conversion to a date is not buildable by sea-query (no `AT TIME ZONE` helper); the scope/order match Django's TruncDate.
         let rows: Vec<(Option<NaiveDate>, String)> = sqlx::query_as(BURNDOWN_POINTS_SQL)
             .bind(&slug)
             .bind(project_id)
@@ -828,54 +1281,63 @@ async fn analytics_get(
     }
 
     if analytic_type == "issues" {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                Option<String>,
-                Option<uuid::Uuid>,
-                Option<String>,
-                i64,
-                i64,
-                i64,
-            ),
-        >(&issues_assignee_sql())
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let rows: Vec<AssigneeIssuesRow> = query_built(
+            &sea_conn(&pool),
+            &issues_assignee_stmt(&slug, project_id, cycle_id),
+        )
+        .await?;
         assignees = rows
             .into_iter()
-            .map(|(name, id, avatar, total, done, pending)| {
-                Value::Object(shape_assignee_issues(
-                    name, id, avatar, total, done, pending,
-                ))
-            })
+            .map(
+                |AssigneeIssuesRow {
+                     display_name,
+                     assignee_id,
+                     avatar_url,
+                     total_issues,
+                     completed_issues,
+                     pending_issues,
+                 }| {
+                    Value::Object(shape_assignee_issues(
+                        display_name,
+                        assignee_id,
+                        avatar_url,
+                        // FILTER counts are never NULL; the shape
+                        // takes plain i64 (Django Count).
+                        total_issues.unwrap_or(0),
+                        completed_issues.unwrap_or(0),
+                        pending_issues.unwrap_or(0),
+                    ))
+                },
+            )
             .collect();
-        let rows = sqlx::query_as::<
-            _,
-            (
-                Option<String>,
-                Option<String>,
-                Option<uuid::Uuid>,
-                i64,
-                i64,
-                i64,
-            ),
-        >(&issues_label_sql())
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let rows: Vec<LabelIssuesRow> = query_built(
+            &sea_conn(&pool),
+            &issues_label_stmt(&slug, project_id, cycle_id),
+        )
+        .await?;
         labels = rows
             .into_iter()
-            .map(|(name, color, id, total, done, pending)| {
-                Value::Object(shape_label_issues(name, color, id, total, done, pending))
-            })
+            .map(
+                |LabelIssuesRow {
+                     label_name,
+                     color,
+                     label_id,
+                     total_issues,
+                     completed_issues,
+                     pending_issues,
+                 }| {
+                    Value::Object(shape_label_issues(
+                        label_name,
+                        color,
+                        label_id,
+                        total_issues.unwrap_or(0),
+                        completed_issues.unwrap_or(0),
+                        pending_issues.unwrap_or(0),
+                    ))
+                },
+            )
             .collect();
+        // raw-sql: AT TIME ZONE conversion to a date is not buildable by sea-query (no `AT TIME ZONE` helper); the scope/order match Django's TruncDate.
         let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(BURNDOWN_ISSUES_SQL)
             .bind(&slug)
             .bind(project_id)
@@ -1091,39 +1553,50 @@ mod tests {
         );
     }
 
+    fn render(stmt: &sea_orm::sea_query::SelectStatement) -> String {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        stmt.to_string(PostgresQueryBuilder)
+    }
+
+    fn fixture_ids() -> (uuid::Uuid, uuid::Uuid) {
+        (
+            uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").expect("id"),
+            uuid::Uuid::parse_str("22345678-2234-2234-2234-223456789abc").expect("id"),
+        )
+    }
+
     #[test]
     fn sql_carries_scope_filters_and_avatar_case() {
+        let (project_id, cycle_id) = fixture_ids();
         for sql in [
-            points_assignee_sql(),
-            points_label_sql(),
-            issues_assignee_sql(),
-            issues_label_sql(),
+            render(&points_assignee_stmt("acme", project_id, cycle_id)),
+            render(&points_label_stmt("acme", project_id, cycle_id)),
+            render(&issues_assignee_stmt("acme", project_id, cycle_id)),
+            render(&issues_label_stmt("acme", project_id, cycle_id)),
+            render(&total_points_stmt("acme", project_id, cycle_id)),
         ] {
             for fragment in [
-                "ci.cycle_id = $3",
-                "ci.deleted_at IS NULL",
-                "w.slug = $1",
-                "p.id = $2",
-                "p.archived_at IS NULL",
-                "i.deleted_at IS NULL",
-                "NOT (s.group = 'triage')",
+                "cycle_id",
+                "\"deleted_at\" IS NULL",
+                "\"slug\"",
+                "archived_at",
+                "\"group\" <> 'triage'",
             ] {
                 assert!(
                     sql.contains(fragment),
-                    "distribution SQL must carry {fragment}"
+                    "distribution SQL must carry {fragment}: {sql}"
                 );
             }
         }
-        assert!(points_assignee_sql().contains("ep.value AS DOUBLE PRECISION"));
-        assert!(issues_assignee_sql().contains("COUNT(u.id)"));
-        assert!(issues_label_sql().contains("COUNT(l.id)"));
-        assert!(points_assignee_sql().contains("/api/assets/v2/static/"));
+        assert!(render(&points_assignee_stmt("acme", project_id, cycle_id))
+            .contains("double precision"));
+        assert!(render(&issues_assignee_stmt("acme", project_id, cycle_id)).contains("COUNT"));
+        assert!(render(&points_assignee_stmt("acme", project_id, cycle_id))
+            .contains("/api/assets/v2/static/"));
         // PIDASHCONV-1184: only the completion buckets truncate in the
         // actor's active zone; the range endpoints and "today" stay UTC.
         assert!(BURNDOWN_POINTS_SQL.contains("AT TIME ZONE $4"));
         assert!(BURNDOWN_ISSUES_SQL.contains("AT TIME ZONE $4"));
-        assert!(CYCLE_SQL.contains("COUNT(DISTINCT ci.issue_id)"));
-        assert!(ESTIMATE_TYPE_SQL.contains("e.type = 'points'"));
     }
 
     #[test]
@@ -1133,15 +1606,13 @@ mod tests {
         // analytics request answered 500. SQL joins before it filters,
         // so the last JOIN must precede WHERE, which must precede
         // GROUP BY.
+        let (project_id, cycle_id) = fixture_ids();
         for sql in [
-            points_assignee_sql(),
-            points_label_sql(),
-            issues_assignee_sql(),
-            issues_label_sql(),
+            render(&points_assignee_stmt("acme", project_id, cycle_id)),
+            render(&points_label_stmt("acme", project_id, cycle_id)),
+            render(&issues_assignee_stmt("acme", project_id, cycle_id)),
+            render(&issues_label_stmt("acme", project_id, cycle_id)),
         ] {
-            // `rfind`: the SELECT list carries `FILTER (WHERE ...)`
-            // aggregates, so the first WHERE is not the main clause —
-            // the main WHERE is the last one, after every join.
             let last_join = sql.rfind("JOIN").expect("distribution joins");
             let where_at = sql.rfind("WHERE").expect("distribution filter");
             let group_at = sql.find("GROUP BY").expect("distribution grouping");
@@ -1157,23 +1628,50 @@ mod tests {
         // `base.py:792-804`: the `total_issues` annotation filters only
         // archived/draft/deleted (+ live bridge). The join is not
         // queried through `issue_objects`, so no triage and no
-        // project-archive predicate — unlike DIST_WHERE_SQL.
-        let (subquery, _) = CYCLE_SQL.split_once("AS total_issues").expect("alias");
+        // project-archive predicate — unlike the distribution scope.
+        use pidash_db::entity::{cycle_issues, cycles, issues};
+        use sea_orm::sea_query::{Alias, Condition, Expr, Func, JoinType, Query};
+        let a = Alias::new;
+        let mut count_sub = Query::select();
+        count_sub
+            .expr_as(
+                Func::count_distinct(Expr::col((a("ci"), cycle_issues::Column::IssueId))),
+                "n",
+            )
+            .from_as(cycle_issues::Entity, a("ci"))
+            .join_as(
+                JoinType::InnerJoin,
+                issues::Entity,
+                a("i"),
+                Condition::all()
+                    .add(
+                        Expr::col((a("i"), issues::Column::Id))
+                            .equals((a("ci"), cycle_issues::Column::IssueId)),
+                    )
+                    .add(Expr::col((a("i"), issues::Column::DeletedAt)).is_null())
+                    .add(Expr::col((a("i"), issues::Column::ArchivedAt)).is_null())
+                    .add(Expr::col((a("i"), issues::Column::IsDraft)).eq(false)),
+            )
+            .and_where(
+                Expr::col((a("ci"), cycle_issues::Column::CycleId))
+                    .equals((a("cycles"), cycles::Column::Id)),
+            )
+            .and_where(Expr::col((a("ci"), cycle_issues::Column::DeletedAt)).is_null());
+        let sub_sql = render(&count_sub);
         for fragment in [
-            "i.deleted_at IS NULL",
-            "i.archived_at IS NULL",
-            "i.is_draft = FALSE",
-            "ci.deleted_at IS NULL",
+            "\"deleted_at\" IS NULL",
+            "\"archived_at\" IS NULL",
+            "\"is_draft\" = FALSE",
         ] {
             assert!(
-                subquery.contains(fragment),
-                "total_issues subquery must carry {fragment}"
+                sub_sql.contains(fragment),
+                "total_issues subquery must carry {fragment}: {sub_sql}"
             );
         }
-        for fragment in ["triage", "p.archived_at", "JOIN projects", "JOIN states"] {
+        for fragment in ["triage", "projects", "states"] {
             assert!(
-                !subquery.contains(fragment),
-                "total_issues subquery must not carry {fragment}"
+                !sub_sql.contains(fragment),
+                "total_issues subquery must not carry {fragment}: {sub_sql}"
             );
         }
     }

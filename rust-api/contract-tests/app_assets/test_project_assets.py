@@ -51,6 +51,74 @@ def test_post_shape_and_asset_url(org):
     assert row["entity_type"] == "ISSUE_DESCRIPTION"
 
 
+def test_post_empty_entity_identifier_stores_null_fk(org):
+    # NEWPIDASH-171: the comment composer parks an image before the
+    # comment exists and sends entity_identifier: "" (both frontends do).
+    # Django's ForeignKey.get_db_prep_save turns "" into NULL for a UUID
+    # target, so the row is stored with the entity FK NULL and 200 is
+    # answered with upload_data. Rust once rejected "" with 400.
+    r = org.request(
+        "POST", proj_base(org), "admin",
+        json=proj_payload(
+            entity_type="COMMENT_DESCRIPTION",
+            entity_identifier="",
+            name="probe.png",
+        ),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"upload_data", "asset_id", "asset_url"}
+    assert set(body["upload_data"].keys()) == {"url", "fields"}
+    row = seed_a.fetch(org.conn, body["asset_id"])
+    assert row["entity_type"] == "COMMENT_DESCRIPTION"
+    # The entity FK columns live outside seed_assets.fetch; read them
+    # directly (see the soft-deleted-workspace case below).
+    fk = org.conn.execute(
+        "SELECT comment_id, issue_id, page_id, draft_issue_id"
+        " FROM file_assets WHERE id = %s",
+        (body["asset_id"],),
+    ).fetchone()
+    assert fk[0] is None, "comment_id must be NULL for entity_identifier ''"
+    assert fk[1] is None, "issue_id must be NULL"
+    assert fk[2] is None, "page_id must be NULL"
+    assert fk[3] is None, "draft_issue_id must be NULL"
+
+
+def test_post_empty_entity_identifier_all_description_types(org):
+    # Same "" → NULL rule for every description entity type the composer
+    # parks through the project mint. No entity row needs to exist: ""
+    # stores NULL by the ForeignKey rule, not a lookup.
+    for entity_type, column in (
+        ("ISSUE_DESCRIPTION", "issue_id"),
+        ("PAGE_DESCRIPTION", "page_id"),
+        ("DRAFT_ISSUE_DESCRIPTION", "draft_issue_id"),
+    ):
+        r = org.request(
+            "POST", proj_base(org), "admin",
+            json=proj_payload(
+                entity_type=entity_type,
+                entity_identifier="",
+                name=f"{entity_type}.png",
+            ),
+        )
+        assert r.status_code == 200, (entity_type, r.text)
+        asset_id = r.json()["asset_id"]
+        value = org.conn.execute(
+            f"SELECT {column} FROM file_assets WHERE id = %s", (asset_id,)
+        ).fetchone()[0]
+        assert value is None, (entity_type, column)
+
+
+def test_post_non_uuid_entity_identifier_still_400(org):
+    # Only exactly "" maps to NULL; other non-UUID strings still reject.
+    r = org.request(
+        "POST", proj_base(org), "admin",
+        json=proj_payload(entity_identifier="nope"),
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"error": "Please provide valid detail"}
+
+
 def test_post_project_cover_500_duplicate_kwarg(org):
     # Ported bug: PROJECT_COVER resolves to {"project_id": ...} which
     # collides with the explicit project_id kwarg → TypeError → 500.

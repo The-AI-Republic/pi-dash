@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from rest_framework import status
 
+from pi_dash.authentication.utils.workspace_project_join import process_workspace_project_invitations
 from pi_dash.db.models import ProjectMember, ProjectMemberInvite, User, WorkspaceMember
 
 
@@ -71,3 +72,39 @@ class TestProjectInvitationsCreate:
         assert response.data == {"error": "You cannot invite a user with different role than workspace role"}
         assert not ProjectMemberInvite.objects.exists()
         task.delay.assert_not_called()
+
+
+@pytest.mark.contract
+class TestAcceptedProjectInviteJoin:
+    """process_workspace_project_invitations consumes accepted project invites (NEWFRONT-151)."""
+
+    @pytest.fixture
+    def invited_guest(self, workspace, project):
+        guest = User.objects.create_user(email="invited-guest@example.com", username="invited-guest")
+        ProjectMemberInvite.objects.create(
+            project=project,
+            workspace=workspace,
+            email=guest.email,
+            token="test-token",
+            role=5,
+            accepted=True,
+        )
+        return guest
+
+    @pytest.mark.django_db
+    def test_accepted_invite_creates_membership_and_consumes_invite(self, workspace, project, invited_guest):
+        process_workspace_project_invitations(invited_guest)
+
+        membership = ProjectMember.objects.get(project=project, member=invited_guest)
+        assert membership.workspace_id == workspace.id
+        assert membership.role == 5
+        assert WorkspaceMember.objects.filter(workspace=workspace, member=invited_guest).exists()
+        assert not ProjectMemberInvite.objects.filter(project=project, email=invited_guest.email).exists()
+
+    @pytest.mark.django_db
+    def test_repeat_join_is_idempotent(self, workspace, project, invited_guest):
+        process_workspace_project_invitations(invited_guest)
+        process_workspace_project_invitations(invited_guest)
+
+        assert ProjectMember.objects.filter(project=project, member=invited_guest).count() == 1
+        assert not ProjectMemberInvite.objects.filter(project=project, email=invited_guest.email).exists()

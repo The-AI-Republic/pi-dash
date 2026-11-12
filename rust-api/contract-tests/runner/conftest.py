@@ -123,6 +123,26 @@ def machine_flow(settings, seeder, daemon_world):
     # later, so unlink them first (their child rows are already gone via the
     # daemon_run/chat_world finalizers, which run before this one).
     owner_id = daemon_world["owner"]["id"]
+    # Machine sessions, engine credentials and extra machine tokens
+    # bound to the flow machine (#2910): their FKs declare
+    # SET_NULL/CASCADE at the ORM level only (the DB constraint carries
+    # no ON DELETE), so raw deletes must clear them first. (Tests may
+    # seed extra tokens on this machine, e.g. a second workspace's
+    # token for the machine-session convoy.)
+    flow_machine_id = seeder.db.fetchval(
+        "SELECT id FROM dev_machine WHERE owner_id = %s AND host_label = %s",
+        (owner_id, host_label),
+    )
+    if flow_machine_id:
+        seeder.db.execute(
+            "DELETE FROM machine_session WHERE dev_machine_id = %s", (flow_machine_id,)
+        )
+        seeder.db.execute(
+            "DELETE FROM engine_credential WHERE dev_machine_id = %s", (flow_machine_id,)
+        )
+        seeder.db.execute(
+            "DELETE FROM machine_token WHERE dev_machine_id = %s", (flow_machine_id,)
+        )
     seeder.db.execute("DELETE FROM runner_session WHERE runner_id = %s", (flow["runner_id"],))
     seeder.db.execute(
         "UPDATE agent_run SET runner_id = NULL, pinned_runner_id = NULL "

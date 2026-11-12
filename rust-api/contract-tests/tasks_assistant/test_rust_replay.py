@@ -18,7 +18,7 @@ worker (``pidash-api worker``) must be running against the same
 ``DATABASE_URL``; the Django worker must be stopped.
 
 Every path the turn walk covers is exercised: model resolution (missing
-config, unreachable endpoint, resolved BYOK), the instructions + the 17
+config, unreachable endpoint, resolved BYOK), the instructions + the 18
 local tool schemas on the wire (toolset), the streamed text, usage
 extraction, the terminal writes and the delta prune, the cancel key, and a
 mid-stream seam fault failing the turn at once (PIDASHCONV-1254, via a
@@ -65,6 +65,33 @@ SWEEP_CUTOFF_SECS = 390
 
 TIMEOUT_CODE = "turn_timeout"
 TIMEOUT_DETAIL = "The assistant took too long to respond."
+
+#: All 18 local tools in registration order (comments, github, issues, projects, runs).
+#: Both Django (apps/api/pi_dash/assistant/tools/*) and Rust
+#: (crates/api/src/turn/tool_schemas.rs) expose this surface; the test pins
+#: the complete ordered list so a future addition/removal fails loudly.
+#: ``list_project_runners`` landed in f92fe3c07 (Django) / 2ebb21608 (Rust,
+#: PDASHOSS01-350) — the delta that moved the suite from 17 to 18.
+EXPECTED_LOCAL_TOOL_NAMES = (
+    "create_comment",
+    "get_pull_request_status",
+    "search_issues",
+    "list_issues",
+    "list_my_issues",
+    "get_issue",
+    "create_issue",
+    "update_issue",
+    "relate_issues",
+    "unrelate_issues",
+    "list_issue_relations",
+    "list_projects",
+    "list_states",
+    "list_project_runners",
+    "list_labels",
+    "list_project_members",
+    "get_run_status",
+    "dispatch_coding_run",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -513,7 +540,7 @@ def test_complete_turn_streams_and_prunes(db_conn):
     """Stub provider: deltas stream, the turn completes, deltas are pruned.
 
     The stub records the request body, so the wire is asserted too: the
-    instructions travel as leading system messages and the 17 local tool
+    instructions travel as leading system messages and the 18 local tool
     schemas are offered (the model/toolset/instructions paths).
     """
     stub = _StubProvider()
@@ -566,15 +593,15 @@ def test_complete_turn_streams_and_prunes(db_conn):
         assert completed["payload"]["usage"] == row["usage"]
 
         # The wire the worker sent: one streaming completion request with the
-        # 17 local tools and the instruction system messages.
+        # 18 local tools and the instruction system messages.
         assert stub.requests, "the provider was called"
         body = stub.requests[0]["body"]
         assert body["stream"] is True
         assert body["model"] == MODEL_NAME
         tools = body["tools"]
         names = [t["function"]["name"] for t in tools]
-        assert len(names) == 17, f"the 17 local tools, got {names!r}"
-        assert names[0] == "create_comment"  # registration order
+        assert len(names) == 18, f"the 18 local tools, got {names!r}"
+        assert names == list(EXPECTED_LOCAL_TOOL_NAMES), f"registration order, got {names!r}"
         system = [m for m in body["messages"] if m["role"] == "system"]
         assert len(system) == 2, "base instructions + loop appendix"
         assert "Pi Dash" in system[0]["content"]
@@ -1046,7 +1073,7 @@ def test_toolsets_unavailable_runs_turn_without_tools(db_conn):
     The driver degrades a ``resolve_toolsets`` error to the all-tool-servers
     pseudo-entry and the run proceeds with no MCP legs: the skipped event is
     followed by ``turn_completed``, and the provider wire carries exactly
-    the 17 local tool schemas. Before the PIDASHCONV-1570 fix the live seam
+    the 18 local tool schemas. Before the PIDASHCONV-1570 fix the live seam
     returned before installing ``tools``, so ``open_stream`` failed the turn
     with ``internal`` / "assistant turn: toolsets were not resolved".
     """
@@ -1114,13 +1141,13 @@ def test_toolsets_unavailable_runs_turn_without_tools(db_conn):
             "the skipped event precedes turn_completed"
         )
 
-        # No MCP legs, built-ins kept: the wire carries exactly the 17
+        # No MCP legs, built-ins kept: the wire carries exactly the 18
         # local tool schemas.
         assert stub.requests, "the provider was called"
         tools = stub.requests[0]["body"]["tools"]
         names = [t["function"]["name"] for t in tools]
-        assert len(names) == 17, f"the 17 local tools, got {names!r}"
-        assert names[0] == "create_comment"  # registration order
+        assert len(names) == 18, f"the 18 local tools, got {names!r}"
+        assert names == list(EXPECTED_LOCAL_TOOL_NAMES), f"registration order, got {names!r}"
     finally:
         if shadow is not None:
             _remove_mcp_lookup_fault(db_conn, shadow)
@@ -1474,8 +1501,8 @@ def test_create_issue_dispatches_entry_run(db_conn):
     assert run["runner_id"] is None
     assert run["pinned_runner_id"] is None
     assert run["scheduler_binding_id"] is None
-    assert run["error"] == ""
-    assert run["error_code"] == ""
+    assert run["error_details"] == {}
+    assert run["refusal_category"] == ""
     assert run["dispatch_attempts"] == 0
     assert run["run_config"] == {"repo_ref": None, "repo_url": None, "git_work_branch": None}
     assert run["required_capabilities"] == []
@@ -1819,9 +1846,11 @@ def test_create_issue_prompt_failure_completes_turn(db_conn):
     assert len(runs) == 1, "the failed prompt build still commits its run row"
     run = runs[0]
     assert run["status"] == "failed"
-    assert run["error_code"] == "prompt_build_failed"
+    assert run["error_details"]["code"] == "prompt_build_failed"
     assert run["trigger"] == "state_transition"
-    assert run["error"].startswith("prompt build failed:")
+    assert run["error_details"]["message"].startswith("prompt build failed:")
+    assert set(run["error_details"]) == {"code", "message"}
+    assert run["refusal_category"] == ""
     result = _tool_result(requests)
     assert result["created"] is True
     assert str(result["id"]) == str(issue["id"])

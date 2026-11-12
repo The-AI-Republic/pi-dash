@@ -8,7 +8,10 @@
 //! 3. Poll `POST /api/v1/auth/device/token/` at the cloud-specified
 //!    interval until the user approves in the browser, hits a terminal
 //!    error, or the grant expires.
-//! 4. Write the returned `APIToken` to `[cli].token` in `config.toml`.
+//! 4. Exchange the returned `APIToken` for the workspace's dev-machine
+//!    token and store it in `config.toml`: as the default workspace
+//!    (`[cli].token`), or, with `--workspace`, next to the workspaces
+//!    already signed in (`[[cli.workspaces]]`).
 //!
 //! The cloud to talk to comes from `--url`, else this host's existing
 //! `[daemon].cloud_url`, else [`crate::DEFAULT_CLOUD_URL`] — never from a
@@ -21,11 +24,12 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Deserialize;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use crate::cli::runner_ops;
 use crate::config::file;
+use crate::engine::api::{EngineApi, EngineSignInState, IssuedEngineCredential};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -47,8 +51,11 @@ pub struct Args {
     #[arg(long)]
     pub force: bool,
 
-    /// Workspace slug to bind this CLI install to after login.
-    #[arg(long, hide = true)]
+    /// Sign in this workspace, next to the ones this computer already
+    /// serves. One daemon hosts runners of several workspaces, each with
+    /// its own token; without this flag, login refreshes the default
+    /// workspace.
+    #[arg(long)]
     pub workspace: Option<String>,
 
     /// Internal: finish a device-code grant that has *already* been approved,
@@ -66,6 +73,15 @@ pub struct Args {
     /// else), and argv is visible to other local processes.
     #[arg(long, hide = true)]
     pub device_code_stdin: bool,
+
+    /// Sign in only the built-in engine (design §4.3): renew its 14-day
+    /// credential without touching the daemon's, or add the engine to an
+    /// install that signed in before it existed. Needs this computer to be
+    /// signed in already (the credential is bound to its machine token).
+    /// With `--device-code-stdin`, redeems an engine grant the desktop app
+    /// approved.
+    #[arg(long)]
+    pub engine: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +98,15 @@ struct TokenSuccess {
     access_token: String,
     #[serde(default)]
     user_email: Option<String>,
+    /// Issued with the daemon credential when the instance can serve the
+    /// built-in engine (design §4.3).
+    #[serde(default)]
+    engine_credential: Option<IssuedEngineCredential>,
+    #[serde(
+        default,
+        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+    )]
+    engine_sign_in_state: Option<EngineSignInState>,
     // The server also returns `workspace_slug` here (the workspace the
     // approve step auto-picked), but the CLI deliberately ignores it
     // and re-resolves via `GET /api/v1/auth/workspaces/` so multi-
@@ -93,6 +118,15 @@ struct TokenSuccess {
 struct MachineTokenResponse {
     machine_token: String,
     workspace_slug: String,
+    /// The engine credential, when the server issues it with the machine
+    /// token rather than with the device token.
+    #[serde(default)]
+    engine_credential: Option<IssuedEngineCredential>,
+    #[serde(
+        default,
+        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+    )]
+    engine_sign_in_state: Option<EngineSignInState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +135,19 @@ struct TokenError {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    // Signing in replaces keychain items the keychain can never return:
+    // the ones this sign-in stores a new value for. Other credentials'
+    // broken items are kept as they are.
+    use crate::config::secrets::{ForgetScope, ITEM_ENGINE_CREDENTIAL, forget_unreadable};
+    let scope = if args.engine {
+        vec![ITEM_ENGINE_CREDENTIAL.to_string()]
+    } else {
+        Vec::new()
+    };
+    let _forget = forget_unreadable(paths, ForgetScope::Items(scope));
+    if args.engine {
+        return engine_login(&args, paths).await;
+    }
     let outcome = login_and_bind_workspace(&args, paths).await?;
 
     println!();
@@ -109,6 +156,10 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 }
 
 pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
+    let _forget = crate::config::secrets::forget_unreadable(
+        paths,
+        crate::config::secrets::ForgetScope::Items(Vec::new()),
+    );
     login_and_bind_workspace(&args, paths).await.map(|_| ())
 }
 
@@ -165,12 +216,12 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
 
-    // Persist the short-lived bridge APIToken just long enough to seed the
-    // local config and workspace binding. It is replaced below by a shared
-    // dev-machine MachineToken, which is the credential used by both the CLI
-    // and all runners hosted by this install.
-    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token, args.force)
-        .context("writing temporary [cli].token to config.toml")?;
+    // Refuse a cloud mismatch, and make sure `config.toml` exists so the
+    // dev-machine id can be persisted. Only after approval, so an aborted
+    // login on a fresh host leaves no config behind (bare `pidash` then
+    // still drops into login).
+    runner_ops::bind_cloud(paths, &cloud_url, args.force)
+        .context("binding config.toml to the cloud")?;
 
     println!();
     if let Some(email) = token.user_email.as_deref() {
@@ -179,16 +230,24 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         println!("✓ Logged in.");
     }
 
-    // v1: a CLI install is bound to one workspace. Resolve which one
-    // (auto-pick if there's only one membership; prompt otherwise),
-    // persist the choice, and use it for any subsequent runner-add.
-    let workspace_slug = resolve_workspace_binding(
-        paths,
-        &cloud_url,
-        &token.access_token,
-        args.workspace.as_deref(),
-    )
-    .await?;
+    // One daemon serves several workspaces (design §4.9). `--workspace`
+    // adds that workspace next to the ones already signed in; without it
+    // the login refreshes the default workspace (auto-picked when the
+    // account has one membership, the stored one when still valid, else
+    // a prompt). The short-lived bridge APIToken is never persisted: it is
+    // exchanged for the workspace's dev-machine token below.
+    let explicit_workspace = args
+        .workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let workspace_slug =
+        choose_workspace(paths, &cloud_url, &token.access_token, explicit_workspace).await?;
+    // A login that mints the machine id creates a new machine on the
+    // server: the case where it may replace an old one (design §4.10).
+    let minted_machine_id = file::load_config(paths)
+        .map(|c| c.daemon.dev_machine_id.is_none())
+        .unwrap_or(true);
     let dev_machine_id =
         runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;
     let host_label = crate::util::hostname::default_hostname();
@@ -201,13 +260,83 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
     )
     .await?;
-    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token, args.force)
-        .context("writing dev-machine token to config.toml")?;
-    if machine_token.workspace_slug != workspace_slug {
-        runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)
-            .context("writing returned workspace binding to config.toml")?;
+    // This workspace's own item is replaced (or, when it becomes the
+    // default, superseded) by this write, so a broken copy of it may go.
+    let _forget_own = crate::config::secrets::forget_unreadable(
+        paths,
+        crate::config::secrets::ForgetScope::Items(crate::config::secrets::ForgetScope::workspace(
+            &machine_token.workspace_slug,
+            false,
+        )),
+    );
+    let cfg = runner_ops::store_workspace_token(
+        paths,
+        &cloud_url,
+        &machine_token.workspace_slug,
+        &machine_token.machine_token,
+        explicit_workspace.is_none(),
+        args.force,
+    )
+    .context("writing dev-machine token to config.toml")?;
+    // The engine credential arrives with this sign-in when the instance
+    // can serve the engine (design §4.3): on the device token or the
+    // machine-token exchange.
+    let engine_credential = machine_token
+        .engine_credential
+        .clone()
+        .or(token.engine_credential.clone());
+    let engine_state = machine_token
+        .engine_sign_in_state
+        .or(token.engine_sign_in_state);
+    if let Some(credential) = engine_credential {
+        runner_ops::store_engine_credential(
+            paths,
+            Some(&credential),
+            engine_state.unwrap_or(EngineSignInState::Active),
+        )
+        .context("storing the engine credential")?;
+        println!(
+            "  Built-in engine: signed in{}",
+            until(credential.expires_at)
+        );
+    } else {
+        println!("  Built-in engine: not signed in by this server (`pidash login --engine` later)");
+    }
+    let user_id = fetch_user_id(&client, &cloud_url, &machine_token.machine_token).await;
+    if let Err(e) =
+        runner_ops::store_account(paths, token.user_email.as_deref(), user_id.as_deref())
+    {
+        tracing::warn!("recording the signed-in account failed: {e:#}");
     }
     println!("  Workspace: {}", machine_token.workspace_slug);
+    let signed_in = cfg
+        .cli
+        .as_ref()
+        .map(|c| c.workspace_slugs())
+        .unwrap_or_default();
+    if signed_in.len() > 1 {
+        println!("  Workspaces on this computer: {}", signed_in.join(", "));
+    }
+    report_credentials_store(paths);
+
+    // A running daemon picks the new or refreshed token up without a
+    // restart. Best-effort: no daemon, or an older one, just means the
+    // token is used from the next start.
+    crate::service::reload::notify_credentials_changed(paths).await;
+
+    // "Is this <label>, last seen <date>? Replace it" (design §4.10). Only
+    // for a new machine and only with someone at the terminal: the desktop
+    // app's pre-approved sign-in (`--device-code-stdin`) asks in its own
+    // window.
+    if minted_machine_id && !args.device_code_stdin && std::io::stdin().is_terminal() {
+        super::replace::offer_replace_after_login(
+            &client,
+            &cloud_url,
+            &machine_token.machine_token,
+            &dev_machine_id,
+        )
+        .await;
+    }
 
     // Best-effort: write the machine-level ~/.pidash/context.md now that the
     // dev-machine token and workspace binding are persisted. A failure here is
@@ -219,6 +348,140 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
 
     Ok(LoginOutcome { cloud_url })
+}
+
+/// ` (until <date>)`, or nothing when the expiry is unknown.
+fn until(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    expires_at
+        .map(|e| format!(" (until {})", e.format("%Y-%m-%d")))
+        .unwrap_or_default()
+}
+
+/// A sign-in moves plaintext credentials into the OS keychain under
+/// `credentials_store = "auto"` (design §4.3), and says where they are.
+fn report_credentials_store(paths: &Paths) {
+    match file::migrate_credentials_store(paths) {
+        Ok((_, "keychain")) => println!("  Credentials: stored in the OS keychain"),
+        Ok(_) => println!(
+            "  Credentials: stored in {} (0600)",
+            paths.config_path().display()
+        ),
+        Err(e) => println!("  (Credentials stay where they were: {e:#})"),
+    }
+}
+
+/// `pidash login --engine`: an engine-only device grant, redeemed with this
+/// computer's machine token so the credential is bound to this machine.
+async fn engine_login(args: &Args, paths: &Paths) -> Result<()> {
+    let cfg = file::load_config_opt(paths)?.ok_or_else(|| {
+        anyhow::anyhow!("this computer is not signed in; run `pidash auth login` first")
+    })?;
+    let cloud_url = match args.url.as_deref() {
+        Some(u) if u.trim_end_matches('/') != cfg.daemon.cloud_url => anyhow::bail!(
+            "this computer is signed in to {}; `--url {u}` does not match",
+            cfg.daemon.cloud_url
+        ),
+        _ => cfg.daemon.cloud_url.clone(),
+    };
+    let machine_token = cfg
+        .cli
+        .as_ref()
+        .and_then(|c| {
+            c.workspace_tokens()
+                .into_iter()
+                .map(|(_, t)| t)
+                .find(|t| t.starts_with("mt_"))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "this computer holds no daemon credential; run `pidash auth login` first (it signs in the engine too)"
+            )
+        })?;
+    let api = EngineApi::new(&cloud_url)?;
+    let (device_code, interval, expires_in) = if args.device_code_stdin {
+        (read_device_code(std::io::stdin().lock())?, 1, 300)
+    } else {
+        let raw = api
+            .start_engine_grant()
+            .await
+            .map_err(|e| anyhow::anyhow!("starting the engine sign-in failed: {e}"))?;
+        let start: StartResponse =
+            serde_json::from_value(raw).context("parsing the device-code start response")?;
+        print_user_code_block(&start);
+        if !args.no_browser {
+            let with_code = format!("{}?code={}", start.verification_uri, start.user_code);
+            let _ = crate::util::browser::open_url(&with_code);
+        }
+        (start.device_code, start.interval, start.expires_in)
+    };
+    let granted = poll_engine_grant(
+        &api,
+        &device_code,
+        &machine_token,
+        Duration::from_secs(interval.max(1)),
+        Duration::from_secs(expires_in + 5),
+    )
+    .await?;
+    let credential = granted.engine_credential;
+    runner_ops::store_engine_credential(
+        paths,
+        Some(&credential),
+        granted
+            .engine_sign_in_state
+            .unwrap_or(EngineSignInState::Active),
+    )
+    .context("storing the engine credential")?;
+    println!();
+    println!(
+        "✓ Built-in engine signed in{}.",
+        until(credential.expires_at)
+    );
+    report_credentials_store(paths);
+    crate::service::reload::notify_credentials_changed(paths).await;
+    Ok(())
+}
+
+/// Redeem an engine-only grant until the user approves it, with the
+/// machine token that binds the credential to this computer.
+pub(crate) async fn poll_engine_grant(
+    api: &EngineApi,
+    device_code: &str,
+    machine_token: &str,
+    interval: Duration,
+    within: Duration,
+) -> Result<crate::engine::api::EngineGrantResponse> {
+    use crate::engine::api::GrantPoll;
+    let deadline = std::time::Instant::now() + within;
+    let mut interval = interval;
+    loop {
+        match api.redeem_engine_grant(device_code, machine_token).await {
+            Ok(GrantPoll::Granted(granted)) => return Ok(granted),
+            Ok(GrantPoll::Pending) => {}
+            // RFC 8628 §3.5: add 5 seconds to the interval.
+            Ok(GrantPoll::SlowDown) => {
+                interval = (interval + Duration::from_secs(5)).min(Duration::from_secs(30));
+            }
+            Err(e) => match e.reason_code() {
+                Some("expired_token") => {
+                    anyhow::bail!(
+                        "the engine sign-in code expired — run `pidash login --engine` again"
+                    )
+                }
+                Some("access_denied") => {
+                    anyhow::bail!("the engine sign-in was denied in the browser")
+                }
+                _ => anyhow::bail!("the engine sign-in failed: {e}"),
+            },
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "the engine sign-in code expired before approval — run `pidash login --engine` again"
+            );
+        }
+        print!(".");
+        let _ = std::io::stdout().flush();
+        tokio::time::sleep(interval).await;
+    }
 }
 
 /// Where the cloud URL we're about to authenticate against came from.
@@ -335,8 +598,13 @@ async fn poll_for_token(
         let body_text = resp.text().await.unwrap_or_default();
 
         if status.is_success() {
-            return serde_json::from_str::<TokenSuccess>(&body_text)
-                .with_context(|| format!("parsing device-code token response: {body_text}"));
+            // Not quoting the body: it holds the access token.
+            return serde_json::from_str::<TokenSuccess>(&body_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "parsing device-code token response: {}",
+                    crate::engine::api::unparsable(&e)
+                )
+            });
         }
 
         // Parse the RFC 8628 error code. Anything we don't recognise is
@@ -365,18 +633,42 @@ async fn poll_for_token(
     }
 }
 
-/// Pick which workspace this CLI install is bound to and persist it
-/// to `[cli].workspace_slug`. Always reaches out to the cloud (even if
-/// a stored binding exists) so a stale slug from a removed membership
-/// gets corrected.
+/// Best-effort read of the signed-in user's id, for the IPC `Hello`.
+async fn fetch_user_id(client: &reqwest::Client, cloud_url: &str, token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Me {
+        #[serde(default)]
+        id: Option<serde_json::Value>,
+    }
+    let url = format!("{cloud_url}/api/v1/users/me/");
+    let resp = client
+        .get(&url)
+        .header("X-Api-Key", token)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let me: Me = resp.json().await.ok()?;
+    match me.id? {
+        serde_json::Value::String(s) => Some(s),
+        other => Some(other.to_string()),
+    }
+}
+
+/// Pick which workspace this login signs in. Always reaches out to the
+/// cloud (even if a stored binding exists) so a stale slug from a
+/// removed membership gets corrected. Writes nothing: the caller stores
+/// the workspace together with its token.
 ///
 /// Rules:
 /// - 0 memberships → bail; the user must be invited first.
 /// - 1 membership → silently use it (no prompt).
 /// - explicit slug → validate membership and use it without prompting.
-/// - ≥2 memberships without explicit slug → if a stored slug is still valid,
-///   keep it; else prompt the user to pick.
-async fn resolve_workspace_binding(
+/// - ≥2 memberships without explicit slug → if the stored default is
+///   still valid, keep it; else prompt the user to pick.
+async fn choose_workspace(
     paths: &Paths,
     cloud_url: &str,
     api_token: &str,
@@ -420,9 +712,6 @@ async fn resolve_workspace_binding(
         let picked = pick_workspace(&workspaces)?;
         picked.slug.clone()
     };
-
-    runner_ops::write_cli_workspace(paths, &chosen_slug)
-        .context("writing [cli].workspace_slug to config.toml")?;
     Ok(chosen_slug)
 }
 
@@ -483,9 +772,22 @@ async fn exchange_for_machine_token(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("machine-token exchange failed: HTTP {status}: {body}");
     }
-    resp.json::<MachineTokenResponse>()
+    // Read as text and parse here: serde's own message can quote a value,
+    // and this response carries the `mt_` and `ec_` credentials.
+    let body = resp
+        .text()
         .await
-        .context("parsing machine-token exchange response")
+        .context("reading machine-token exchange response")?;
+    parse_machine_token_response(&body)
+}
+
+fn parse_machine_token_response(body: &str) -> Result<MachineTokenResponse> {
+    serde_json::from_str::<MachineTokenResponse>(body).map_err(|e| {
+        anyhow::anyhow!(
+            "parsing machine-token exchange response: {}",
+            crate::engine::api::unparsable(&e)
+        )
+    })
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
@@ -513,6 +815,19 @@ fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_token_parse_error_never_prints_the_credentials() {
+        let body = r#"{"machine_token":"mt_secret","workspace_slug":"acme","engine_credential":"ec_secret"}"#;
+        let err = parse_machine_token_response(body).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(!msg.contains("ec_secret"), "{msg}");
+        assert!(!msg.contains("mt_secret"), "{msg}");
+        assert!(
+            msg.contains("parsing machine-token exchange response"),
+            "{msg}"
+        );
+    }
     use tempfile::tempdir;
 
     fn paths_for(root: &std::path::Path) -> Paths {
@@ -531,6 +846,7 @@ mod tests {
             workspace: None,
             force: false,
             device_code_stdin: false,
+            engine: false,
         }
     }
 
@@ -594,5 +910,94 @@ mod tests {
         let (url, source) = resolve_cloud_url(&args, &paths).unwrap();
         assert_eq!(url, "https://other.example.com");
         assert_eq!(source, CloudUrlSource::Flag);
+    }
+
+    #[test]
+    fn sign_in_responses_may_carry_the_engine_credential() {
+        let t: TokenSuccess = serde_json::from_str(
+            r#"{"access_token":"a","user_email":"d@x","engine_credential":
+                {"token":"ec_1","expires_at":"2026-11-18T00:00:00Z"},"engine_sign_in_state":"active"}"#,
+        )
+        .unwrap();
+        assert_eq!(t.engine_credential.unwrap().token, "ec_1");
+        assert_eq!(t.engine_sign_in_state, Some(EngineSignInState::Active));
+        // Older servers: no engine fields.
+        let m: MachineTokenResponse =
+            serde_json::from_str(r#"{"machine_token":"mt_1","workspace_slug":"acme"}"#).unwrap();
+        assert!(m.engine_credential.is_none());
+    }
+
+    #[tokio::test]
+    async fn engine_login_redeems_the_grant_with_the_machine_token() {
+        use crate::engine::test_server::{self, Handler};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let polls = Arc::new(AtomicUsize::new(0));
+        let p = polls.clone();
+        let handler: Handler = Arc::new(move |req| {
+            assert_eq!(req.path, crate::engine::api::DEVICE_TOKEN_PATH);
+            // The machine token binds the credential to this machine.
+            if req.bearer() != Some("mt_acme") {
+                return (401, r#"{"error":"machine_token_required"}"#.into());
+            }
+            assert_eq!(req.json()["device_code"], "DEV-1");
+            if p.fetch_add(1, Ordering::SeqCst) == 0 {
+                return (400, r#"{"error":"authorization_pending"}"#.into());
+            }
+            (
+                200,
+                r#"{"engine_credential":{"token":"ec_new","expires_at":"2026-11-18T00:00:00Z"},
+                    "engine_sign_in_state":"active"}"#
+                    .into(),
+            )
+        });
+        let server = test_server::start(handler).await;
+        let api = EngineApi::new(&server.url).unwrap();
+        let granted = poll_engine_grant(
+            &api,
+            "DEV-1",
+            "mt_acme",
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(granted.engine_credential.token, "ec_new");
+        assert_eq!(polls.load(Ordering::SeqCst), 2, "pending, then approved");
+
+        // Stored next to the daemon credentials, sign-in state recorded.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        runner_ops::write_cli_token(&paths, &server.url, "mt_acme", false).unwrap();
+        runner_ops::store_engine_credential(
+            &paths,
+            Some(&granted.engine_credential),
+            granted.engine_sign_in_state.unwrap(),
+        )
+        .unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        let cli = cfg.cli.unwrap();
+        assert_eq!(cli.engine_credential.unwrap().token, "ec_new");
+        assert_eq!(cli.engine_sign_in_state, Some(EngineSignInState::Active));
+        assert_eq!(
+            cli.token.as_deref(),
+            Some("mt_acme"),
+            "daemon credential untouched"
+        );
+
+        // A denied grant is an error, not a credential.
+        let denied: Handler = Arc::new(|_| (400, r#"{"error":"access_denied"}"#.into()));
+        let server = test_server::start(denied).await;
+        let api = EngineApi::new(&server.url).unwrap();
+        let err = poll_engine_grant(
+            &api,
+            "DEV-1",
+            "mt_acme",
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("denied"), "{err}");
     }
 }

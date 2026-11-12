@@ -2,22 +2,27 @@
 
 //! The api binary's domain-write hooks (ORM-03, PIDASHCONV-1521).
 //!
-//! [`AppTaskEnqueueHook`] is the [`TaskEnqueueHook`][pidash_services::domain::activity::TaskEnqueueHook]
-//! binding over `pidash_jobs::queue::enqueue`. [`AppMovePostCommitHook`] is the
-//! [`MovePostCommitHook`][pidash_services::domain::issues_move::MovePostCommitHook]
-//! binding over the move's drains, and [`AppMoveAdmissionCache`] the
-//! [`MoveAdmissionCache`][pidash_services::domain::issues_move::MoveAdmissionCache]
-//! binding over the binary's admission cache. Handlers that drive domain
-//! writes register them on the [`WriteTxn`][pidash_services::domain::WriteTxn]
-//! hook registry so domain chains can reach the binary's pool, pubsub and
-//! runner settings without depending on the jobs crate or the api crate.
+//! Thin same-signature wrappers over the public
+//! [`hooks`][pidash_jobs::hooks] bindings: [`AppTaskEnqueueHook`] is the
+//! outbox [`EnqueueHook`][pidash_jobs::hooks::EnqueueHook],
+//! [`AppMovePostCommitHook`] the [`MoveHook`][pidash_jobs::hooks::MoveHook]
+//! over this binary's inline terminal drain and move pod drain, and
+//! [`AppMoveAdmissionCache`] the
+//! [`LiveMoveAdmissionCache`][pidash_jobs::hooks::LiveMoveAdmissionCache].
+//! Handlers that drive domain writes register them on the
+//! [`WriteTxn`][pidash_services::domain::WriteTxn] hook registry so domain
+//! chains can reach the binary's pool, pubsub and runner settings without
+//! depending on the jobs crate or the api crate.
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use pidash_db::redis::client_from_settings;
-use pidash_jobs::queue::{self, NewJob};
-use pidash_jobs::TaskMessage;
+use pidash_jobs::hooks::{
+    EnqueueHook, LiveMoveAdmissionCache, MoveHook, OutboxTaskSink, TerminalEffectsDrain,
+};
+use pidash_jobs::issue_transition::PodDrain;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues_move::{
     MoveAdmissionCache, MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
@@ -26,24 +31,23 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::orchestration::{
-    drain_creation_outboxes, drain_pod_by_id, CreationDrainError, CreationOutboxes, MovePubsub,
-};
+use crate::orchestration::{drain_pod_by_id, drain_terminal_effects, MovePubsub};
 use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 
 /// `task.delay(*args, **kwargs)` through the jobs kernel: unported tasks
 /// forward Celery-format, like every other port. Enqueue failures log and
 /// the response stands (Django's broker publish is equally fire-and-forget
-/// from the view's perspective). Moved verbatim from the app-issue
-/// handlers' local `enqueue_task`.
+/// from the view's perspective).
 pub struct AppTaskEnqueueHook {
-    pool: PgPool,
+    hook: EnqueueHook,
 }
 
 impl AppTaskEnqueueHook {
     pub fn new(pool: &PgPool) -> Self {
-        Self { pool: pool.clone() }
+        Self {
+            hook: EnqueueHook::new(pool, Arc::new(OutboxTaskSink)),
+        }
     }
 }
 
@@ -54,17 +58,57 @@ impl TaskEnqueueHook for AppTaskEnqueueHook {
         args: Vec<Value>,
         kwargs: Map<String, Value>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.hook.enqueue_task(task, args, kwargs)
+    }
+}
+
+/// The api terminal-effects drain: the request applies finalized runs'
+/// terminal pairs synchronously with the ambient user (the old
+/// `drain_creation_outboxes` terminal leg).
+struct ApiTerminalEffectsDrain {
+    pool: PgPool,
+    state: AppState,
+}
+
+impl TerminalEffectsDrain for ApiTerminalEffectsDrain {
+    fn drain(
+        &self,
+        run_ids: &[Uuid],
+        created_by: Option<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let pool = self.pool.clone();
-        let message = TaskMessage::new(task, args, kwargs);
+        let state = self.state.clone();
+        let run_ids = run_ids.to_vec();
         Box::pin(async move {
-            let job = NewJob::new(
-                message.task.clone(),
-                Value::Array(message.args.clone()),
-                Value::Object(message.kwargs.clone()),
-            );
-            if let Err(error) = queue::enqueue(&pool, &job).await {
-                tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
-            }
+            drain_terminal_effects(&pool, &state, &run_ids, created_by).await;
+        })
+    }
+}
+
+/// The api move pod drain over the move's executor. Failures warn with
+/// the executor's detail (the old path formatted it into the drain
+/// error the chain leg logged) and erase to `()`.
+struct ApiMovePodDrain {
+    pool: PgPool,
+    state: AppState,
+}
+
+impl PodDrain for ApiMovePodDrain {
+    fn drain_pod(&self, pod_id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), ()>> + Send + '_>> {
+        let pool = self.pool.clone();
+        let state = self.state.clone();
+        Box::pin(async move {
+            let redis = client_from_settings(state.settings());
+            let pubsub = MovePubsub {
+                pool: &pool,
+                redis: redis.as_ref(),
+                runner: &state.settings().runner,
+            };
+            drain_pod_by_id(&pool, &pubsub, pod_id)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, %pod_id, "move pod drain failed");
+                })
         })
     }
 }
@@ -75,29 +119,30 @@ impl TaskEnqueueHook for AppTaskEnqueueHook {
 /// register one; the move chain calls it from its after-commit step, in
 /// the drivers' old order.
 pub struct AppMovePostCommitHook {
-    pool: PgPool,
-    state: AppState,
-    cache: RedisAdmissionCache,
+    hook: MoveHook,
 }
 
 impl AppMovePostCommitHook {
     pub fn new(pool: &PgPool, state: &AppState, cache: RedisAdmissionCache) -> Self {
-        Self {
+        let settings = state.settings();
+        let terminal = Arc::new(ApiTerminalEffectsDrain {
             pool: pool.clone(),
             state: state.clone(),
-            cache,
-        }
-    }
-
-    fn pubsub<'a>(
-        pool: &'a PgPool,
-        redis: Option<&'a redis::Client>,
-        state: &'a AppState,
-    ) -> MovePubsub<'a> {
-        MovePubsub {
-            pool,
-            redis,
-            runner: &state.settings().runner,
+        });
+        let pods = Arc::new(ApiMovePodDrain {
+            pool: pool.clone(),
+            state: state.clone(),
+        });
+        Self {
+            hook: MoveHook::new(
+                pool,
+                &settings.cloud_agent,
+                cache,
+                client_from_settings(settings),
+                &settings.runner,
+                terminal,
+                pods,
+            ),
         }
     }
 }
@@ -108,47 +153,14 @@ impl MovePostCommitHook for AppMovePostCommitHook {
         outboxes: MoveCreationOutboxes,
         terminal_created_by: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<(), MoveDrainError>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let state = self.state.clone();
-        let outboxes = CreationOutboxes {
-            dispatches: outboxes.dispatches,
-            deferred: outboxes.deferred,
-            terminal_effects: outboxes.terminal_effects,
-            cache: self.cache.clone(),
-        };
-        Box::pin(async move {
-            let redis = client_from_settings(state.settings());
-            let pubsub = Self::pubsub(&pool, redis.as_ref(), &state);
-            drain_creation_outboxes(
-                &pool,
-                &state,
-                outboxes,
-                |pod_id| drain_pod_by_id(&pool, &pubsub, pod_id),
-                terminal_created_by,
-            )
-            .await
-            .map_err(|error| match error {
-                CreationDrainError::Dispatch(error) => {
-                    MoveDrainError(format!("move creation dispatch failed: {error}"))
-                }
-                CreationDrainError::PodDrain(error) => {
-                    MoveDrainError(format!("move creation pod drain failed: {error}"))
-                }
-            })
-        })
+        self.hook.drain_creation(outboxes, terminal_created_by)
     }
 
     fn drain_pod(
         &self,
         pod_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), MoveDrainError>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let state = self.state.clone();
-        Box::pin(async move {
-            let redis = client_from_settings(state.settings());
-            let pubsub = Self::pubsub(&pool, redis.as_ref(), &state);
-            drain_pod_by_id(&pool, &pubsub, pod_id).await
-        })
+        self.hook.drain_pod(pod_id)
     }
 
     fn send_cancel(
@@ -156,18 +168,7 @@ impl MovePostCommitHook for AppMovePostCommitHook {
         runner_id: Uuid,
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        let state = self.state.clone();
-        Box::pin(async move {
-            let redis = client_from_settings(state.settings());
-            let pubsub = Self::pubsub(&pool, redis.as_ref(), &state);
-            let outcome =
-                pidash_services::app_issues::send_project_move_cancel(&pubsub, runner_id, run_id)
-                    .await;
-            for warning in outcome.warnings {
-                tracing::warn!("{warning}");
-            }
-        })
+        self.hook.send_cancel(runner_id, run_id)
     }
 }
 
@@ -176,27 +177,23 @@ impl MovePostCommitHook for AppMovePostCommitHook {
 /// one through their creation facts.
 #[derive(Clone)]
 pub struct AppMoveAdmissionCache {
-    cache: RedisAdmissionCache,
+    inner: LiveMoveAdmissionCache,
 }
 
 impl AppMoveAdmissionCache {
     pub fn new(cache: RedisAdmissionCache) -> Self {
-        Self { cache }
+        Self {
+            inner: LiveMoveAdmissionCache::new(cache),
+        }
     }
 }
 
 impl MoveAdmissionCache for AppMoveAdmissionCache {
     fn bucket_count(&self, key: &str) -> Result<Option<i64>, String> {
-        use pidash_services::dispatch::AdmissionCache;
-        self.cache
-            .bucket_count(key)
-            .map_err(|error| error.to_string())
+        self.inner.bucket_count(key)
     }
 
     fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), String> {
-        use pidash_services::dispatch::AdmissionCache;
-        self.cache
-            .add_or_incr(key, timeout_secs)
-            .map_err(|error| error.to_string())
+        self.inner.add_or_incr(key, timeout_secs)
     }
 }

@@ -47,10 +47,15 @@ use chrono_tz::Tz;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::app_issues::access;
 use crate::edge;
 use crate::state::AppState;
 use pidash_compat::py::python_dumps;
 pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
+use pidash_db::entity::{intakes as intake_entity, issues as issue_entity, projects, workspaces};
+use sea_orm::{
+    ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
 pub const UNAUTHENTICATED_BODY: &str =
@@ -355,15 +360,17 @@ pub async fn resolve_tenant(
     slug: &str,
     project_raw: &str,
 ) -> Result<Tenant, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
     if let Ok(id) = project_raw.parse::<Uuid>() {
-        let row: Option<(Uuid,)> = sqlx::query_as(
-            r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let Some((project_id,)) = row else {
+        let row: Option<Uuid> = projects::Entity::find_by_id(id)
+            .select_only()
+            .column(projects::Column::Id)
+            .filter(projects::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let Some(project_id) = row else {
             return Err(Denial::NotFound);
         };
         let workspace_id = workspace_of_project(pool, &project_id).await?;
@@ -373,15 +380,17 @@ pub async fn resolve_tenant(
         });
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(Uuid, Uuid)> = projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::WorkspaceId])
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match row {
         Some((project_id, workspace_id)) => Ok(Tenant {
             workspace_id,
@@ -392,14 +401,16 @@ pub async fn resolve_tenant(
 }
 
 async fn workspace_of_project(pool: &PgPool, project_id: &Uuid) -> Result<Uuid, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -426,49 +437,21 @@ pub async fn load_membership(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project_role = access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // `EXISTS` (never aggregates): an empty membership set reads as
     // `False`, exactly like the Django `.exists()` probes.
-    let workspace_member: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_admin: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_member, workspace_admin) =
-        (workspace_member.is_some(), workspace_admin.is_some());
+    let workspace_role = access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let workspace_admin = access::is_workspace_admin(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(Membership {
-        project_role: project_role.map(|row| row.0),
-        workspace_member,
+        project_role,
+        workspace_member: workspace_role.is_some(),
         workspace_admin,
     })
 }
@@ -481,14 +464,16 @@ pub async fn is_issue_creator(
     issue_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM issues WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = issue_entity::Entity::find_by_id(*issue_id)
+        .select_only()
+        .column(issue_entity::Column::Id)
+        .filter(issue_entity::Column::CreatedById.eq(*user_id))
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -581,31 +566,38 @@ pub async fn intake_id_for(
     slug: &str,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT i.id FROM intakes i
-           JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $1 AND i.project_id = $2 AND i.deleted_at IS NULL
-           ORDER BY i.name LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = intake_entity::Entity::find()
+        .select_only()
+        .column(intake_entity::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            intake_entity::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(intake_entity::Column::ProjectId.eq(*project_id))
+        .filter(intake_entity::Column::DeletedAt.is_null())
+        .order_by_asc(intake_entity::Column::Name)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row)
 }
 
 /// `project.guest_view_all_features` for the guest creator checks.
 pub async fn guest_view_all(pool: &PgPool, project_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        r#"SELECT p.guest_view_all_features FROM projects p
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<bool> = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .column(projects::Column::GuestViewAllFeatures)
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// Best-effort post-commit task enqueue (the D-02 intake pattern):

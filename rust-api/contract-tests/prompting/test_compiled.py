@@ -36,12 +36,56 @@ def test_compiled_runner_wire_compat(api, tenant_a, auth_a):
     assert "pidash run yield" in template
 
 
+def test_compiled_dedicated_runner_block(api, tenant_a, auth_a):
+    """PDASHOSS01-350 (design §14.8): the pidash-cli section documents
+    dedicated runners — when a dedicated runner is appropriate, the
+    refusal/options behaviour, and that a sub-issue does not inherit
+    its parent's runner."""
+    r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
+    assert r.status_code == 200, r.text
+    template = r.json()["template_body"]
+    assert "#### Pods and dedicated runners" in template
+    for fragment in (
+        "--runner <name-or-UUID>",
+        "--clear-runner",
+        "--pod-once",
+        "--assignable-for",
+        "dispatch_wait",
+        "There is no release for a dedicated run.",
+        "A sub-issue does **not** inherit its parent's runner",
+    ):
+        assert fragment in template, fragment
+
+
 def test_compiled_context_md_block(api, tenant_a, auth_a):
     """PIDASHCONV-1534: the pidash-cli section carries the two-tier
     context.md block (Django main e89aba75b, PDASHOSS01-161)."""
     r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
     assert r.status_code == 200, r.text
     assert "### Working context files (`context.md`)" in r.json()["template_body"]
+
+
+def test_compiled_scheduler_write_commands(api, tenant_a, auth_a):
+    """PIDASHCONV-1667: the pidash-cli section documents the scheduler
+    writes (Django main 7d64d46ad, PDASHOSS01-278 + PDASHOSS01-318), not
+    the old read-only text."""
+    r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
+    assert r.status_code == 200, r.text
+    template = r.json()["template_body"]
+    assert "#### Schedulers\n" in template
+    assert "#### Schedulers (read-only)" not in template
+    assert "There is no write access" not in template
+    for command in (
+        "pidash scheduler update",
+        "pidash scheduler run-now",
+        "pidash scheduler create",
+        "pidash scheduler edit",
+        "pidash scheduler delete",
+        "pidash scheduler install",
+        "pidash scheduler uninstall",
+    ):
+        assert command in template, command
+    assert "`is_builtin`" in template
 
 
 def test_compiled_unknown_kind_400(api, tenant_a, auth_a):

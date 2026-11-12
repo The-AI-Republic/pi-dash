@@ -44,12 +44,18 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use pidash_db::config::{Settings, StorageSettings};
+use pidash_db::entity::{file_assets, issues, pages};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_services::tasks_cleanup::assets as logic;
 use pidash_services::tasks_cleanup::assets::{AssetIdPair, CopyEntity, HeadMeta};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
 use crate::task_message::TaskMessage;
+use crate::tasks_mail::bs_normalize::normalize_bs;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// `pi_dash.bgtasks.file_asset_task.delete_unuploaded_file_asset`
@@ -108,10 +114,12 @@ pub struct OriginalAsset {
 
 /// A duplicate row to insert. `entity_*` FKs start empty;
 /// [`NewAsset::with_entity_field`] applies the mapped one.
+/// `created_by_id` is always `None` at the call site: the worker `save()`
+/// blanks the constructor-passed requester (`db/models/base.py:23-33`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewAsset {
     pub id: Uuid,
-    pub created_by_id: Uuid,
+    pub created_by_id: Option<Uuid>,
     pub attributes: Value,
     pub asset_key: String,
     pub workspace_id: Uuid,
@@ -177,12 +185,14 @@ pub trait AssetStore: Send + Sync {
         &self,
         asset_id: Uuid,
     ) -> impl std::future::Future<Output = Result<Option<String>, String>> + Send;
-    /// `save(update_fields=["storage_metadata"])` (+ the `auto_now` bump).
+    /// `save(update_fields=["storage_metadata"])`: the named column
+    /// only — `update_fields` restricts the UPDATE to it, so the
+    /// `auto_now` `updated_at` (and `updated_by`) are not written
+    /// (PIDASHCONV-1731).
     fn save_storage_metadata(
         &self,
         asset_id: Uuid,
         metadata: Option<Value>,
-        now: DateTime<Utc>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
     /// `Page/Issue.objects.get(id)`, live rows only.
     fn entity(
@@ -346,6 +356,231 @@ impl LiveS3ObjectStore {
         sign_copy_request(&storage, src_key, dst_key, amz_date, date_stamp)
             .map_err(|error| format!("s3 copy {src_key}: {error}"))
     }
+
+    /// One HEAD attempt: sign fresh (timestamps must be current) and send.
+    /// A transport send failure is retryable; a sign or client failure is
+    /// config (fail fast, like the raising boto3 constructor).
+    async fn head_once(&self, key: &str) -> HeadAttempt {
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let signed = match self.signed_head_for(key, &amz_date, &date_stamp) {
+            Ok(signed) => signed,
+            Err(error) => return HeadAttempt::Config(error),
+        };
+        let client = match self.client.as_ref() {
+            Some(client) => client,
+            None => {
+                return HeadAttempt::Config(format!("s3 head {key}: transport failure: no client"))
+            }
+        };
+        let response = match client
+            .head(&signed.url)
+            .header("Authorization", signed.authorization)
+            .header("x-amz-date", signed.amz_date)
+            .header("x-amz-content-sha256", signed.content_sha256)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return HeadAttempt::Transport(format!("s3 head {key}: transport failure: {error}"))
+            }
+        };
+        if response.status().is_success() {
+            return HeadAttempt::Found(head_meta_from_headers(response.headers()));
+        }
+        // HEAD answers carry no body, so there is no code to parse (a
+        // codeless 400 is final after one attempt, exactly like boto3).
+        HeadAttempt::Refused {
+            status: response.status().as_u16(),
+            code: None,
+        }
+    }
+
+    /// One PUT-copy attempt. A 200 whose body is an `<Error>` document
+    /// retries as a 500 (botocore `check_for_200_error`); only status 200
+    /// exactly is body-checked, other 2xx succeed unchecked like boto3.
+    async fn copy_once(&self, src_key: &str, dst_key: &str) -> CopyAttempt {
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let signed = match self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp) {
+            Ok(signed) => signed,
+            Err(error) => return CopyAttempt::Config(error),
+        };
+        let client = match self.client.as_ref() {
+            Some(client) => client,
+            None => {
+                return CopyAttempt::Config(format!(
+                    "s3 copy {src_key}: transport failure: no client"
+                ))
+            }
+        };
+        let mut request = client.put(&signed.url).body(Vec::new());
+        for (name, value) in &signed.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return CopyAttempt::Transport(format!(
+                    "s3 copy {src_key}: transport failure: {error}"
+                ))
+            }
+        };
+        let status = response.status().as_u16();
+        if status == 200 {
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(error) => {
+                    return CopyAttempt::Transport(format!(
+                        "s3 copy {src_key}: transport failure: {error}"
+                    ))
+                }
+            };
+            if copy_body_is_error(&body) {
+                tracing::debug!(
+                    src = src_key,
+                    dst = dst_key,
+                    "s3 copy 200 carried <Error>: treating as 500"
+                );
+                let code = std::str::from_utf8(&body)
+                    .ok()
+                    .and_then(s3_error_code)
+                    .map(str::to_owned);
+                return CopyAttempt::Refused { status: 500, code };
+            }
+            return CopyAttempt::Copied;
+        }
+        if response.status().is_success() {
+            return CopyAttempt::Copied;
+        }
+        // Error status: parse the `<Code>` for the retry decision. A body
+        // that will not read is a transport failure (retryable); an empty
+        // or codeless body decides on the status alone.
+        match response.bytes().await {
+            Ok(body) => {
+                let code = std::str::from_utf8(&body)
+                    .ok()
+                    .and_then(s3_error_code)
+                    .map(str::to_owned);
+                CopyAttempt::Refused { status, code }
+            }
+            Err(error) => {
+                CopyAttempt::Transport(format!("s3 copy {src_key}: transport failure: {error}"))
+            }
+        }
+    }
+}
+
+/// Botocore legacy retry mode for S3, exactly as Django's `S3Storage`
+/// client runs it (`Config` sets only the signature version):
+/// `max_attempts = 5` total with `rand * 2**(n-1)` backoff after failed
+/// attempt `n` (botocore 1.34 `data/_retry.json`, `__default__` delay
+/// `exponential`/`rand`/`growth_factor 2`). Measured against boto3
+/// 1.34.96 / botocore 1.34.162; the stub contract suite
+/// (`tasks_cleanup/test_s3_retry.py`) pins the attempt counts.
+pub(crate) const S3_MAX_ATTEMPTS: u32 = 5;
+
+/// One HEAD attempt's outcome. `Refused` is the swallowed `ClientError`
+/// (stored as NULL); `Transport` escapes to the task's broad `except`
+/// (the save is skipped); `Config` fails fast without retrying.
+enum HeadAttempt {
+    Found(HeadMeta),
+    Refused { status: u16, code: Option<String> },
+    Transport(String),
+    Config(String),
+}
+
+/// One PUT-copy attempt's outcome. `Refused` is the swallowed
+/// `ClientError` (the pair still counts); `Transport` escapes (the `[]`
+/// path); `Config` fails fast without retrying.
+enum CopyAttempt {
+    Copied,
+    Refused { status: u16, code: Option<String> },
+    Transport(String),
+    Config(String),
+}
+
+/// Statuses retried regardless of code: the legacy `__default__`
+/// policies (500/502/503/504/509) plus 429 (`too_many_requests`).
+fn s3_retryable_status(status: u16) -> bool {
+    matches!(status, 500 | 502 | 503 | 504 | 509 | 429)
+}
+
+/// Error codes retried on a 400: the legacy throttling policies plus
+/// S3's 400 policies (`RequestTimeout`, `BadDigest`). Every one of
+/// these policies pairs the code with `http_status_code` 400, so a
+/// retryable code on any other status (e.g. 403) is final after one
+/// attempt. `SlowDown` is deliberately absent: S3 sends it with a 503
+/// (covered by the status rule), and legacy mode does not code-retry
+/// it on a 400 — verified against boto3 1.34.96.
+fn s3_retryable_code(code: &str) -> bool {
+    matches!(
+        code,
+        "Throttling"
+            | "ThrottlingException"
+            | "ThrottledException"
+            | "RequestThrottledException"
+            | "ProvisionedThroughputExceededException"
+            | "RequestTimeout"
+            | "BadDigest"
+    )
+}
+
+/// The legacy retry decision for one service answer.
+pub(crate) fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
+    if s3_retryable_status(status) {
+        return true;
+    }
+    status == 400 && code.is_some_and(s3_retryable_code)
+}
+
+/// Extract the `<Code>` from an S3 error body, if any.
+pub(crate) fn s3_error_code(body: &str) -> Option<&str> {
+    let (_, after) = body.split_once("<Code>")?;
+    let (code, _) = after.split_once("</Code>")?;
+    let code = code.trim();
+    (!code.is_empty()).then_some(code)
+}
+
+/// True when a CopyObject 200 body is an `<Error>` document: the root
+/// tag after an optional XML prolog is `<Error>` (botocore parses the
+/// body and compares `root.tag == 'Error'`). Only `<Error>` counts:
+/// botocore additionally treats an unparseable 200 body as a 500, which
+/// real S3/MinIO never send (success always carries
+/// `<CopyObjectResult>`) and is not ported.
+fn copy_body_is_error(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return false,
+    };
+    let mut rest = text.trim_start();
+    if let Some(after) = rest.strip_prefix("<?") {
+        match after.find("?>") {
+            Some(end) => rest = after[end + 2..].trim_start(),
+            None => return false,
+        }
+    }
+    matches!(
+        rest.strip_prefix("<Error")
+            .and_then(|tail| tail.chars().next()),
+        Some('>' | '/' | ' ' | '\t' | '\r' | '\n')
+    )
+}
+
+/// The legacy delay after failed attempt `n` (1-based) given a `[0, 1)`
+/// draw: `rand * 2**(n-1)` seconds, uncapped like botocore.
+fn retry_backoff(failed_attempt: u32, rand01: f64) -> std::time::Duration {
+    let shifted = failed_attempt.saturating_sub(1);
+    std::time::Duration::from_secs_f64(rand01 * 2f64.powi(shifted as i32))
+}
+
+/// Sleep the legacy backoff after failed attempt `n` (1-based).
+pub(crate) async fn sleep_backoff(failed_attempt: u32) {
+    let rand01 = rand::random_range(0.0..1.0);
+    tokio::time::sleep(retry_backoff(failed_attempt, rand01)).await;
 }
 
 impl ObjectStore for LiveS3ObjectStore {
@@ -375,64 +610,85 @@ impl ObjectStore for LiveS3ObjectStore {
     }
 
     async fn head_object(&self, key: &str) -> Result<Option<HeadMeta>, String> {
-        let now = Utc::now();
-        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-        let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = self.signed_head_for(key, &amz_date, &date_stamp)?;
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| format!("s3 head {key}: transport failure: no client"))?;
-        let response = client
-            .head(&signed.url)
-            .header("Authorization", signed.authorization)
-            .header("x-amz-date", signed.amz_date)
-            .header("x-amz-content-sha256", signed.content_sha256)
-            .send()
-            .await
-            .map_err(|error| format!("s3 head {key}: transport failure: {error}"))?;
-        if response.status().is_success() {
-            return Ok(Some(head_meta_from_headers(response.headers())));
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.head_once(key).await {
+                HeadAttempt::Found(meta) => return Ok(Some(meta)),
+                HeadAttempt::Refused { status, code } => {
+                    // boto3 raises `ClientError` on any error status
+                    // (including a missing key); Django logs it and stores
+                    // `None`. Retryable answers get the legacy attempts
+                    // first; anything else (and anything exhausted) lands
+                    // here exactly once.
+                    if !s3_retryable_answer(status, code.as_deref()) || attempt >= S3_MAX_ATTEMPTS {
+                        tracing::warn!(object = key, status, "s3 head refused: storing NULL");
+                        return Ok(None);
+                    }
+                    tracing::debug!(object = key, status, attempt, "s3 head refused: retrying");
+                    sleep_backoff(attempt).await;
+                }
+                HeadAttempt::Transport(error) => {
+                    if attempt >= S3_MAX_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        object = key,
+                        error = error.as_str(),
+                        attempt,
+                        "s3 head transport failure: retrying"
+                    );
+                    sleep_backoff(attempt).await;
+                }
+                HeadAttempt::Config(error) => return Err(error),
+            }
         }
-        // boto3 raises `ClientError` on any error status (including a
-        // missing key); Django logs it and stores `None`.
-        tracing::warn!(
-            object = key,
-            status = response.status().as_u16(),
-            "s3 head refused: storing NULL"
-        );
-        Ok(None)
     }
 
     async fn copy_object(&self, src_key: &str, dst_key: &str) -> Result<(), String> {
-        let now = Utc::now();
-        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-        let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp)?;
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| format!("s3 copy {src_key}: transport failure: no client"))?;
-        let mut request = client.put(&signed.url).body(Vec::new());
-        for (name, value) in &signed.headers {
-            request = request.header(name.as_str(), value.as_str());
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.copy_once(src_key, dst_key).await {
+                CopyAttempt::Copied => return Ok(()),
+                CopyAttempt::Refused { status, code } => {
+                    // boto3 raises `ClientError` on any error status;
+                    // Django logs it and the pair still counts.
+                    // Retryable answers get the legacy attempts first.
+                    if !s3_retryable_answer(status, code.as_deref()) || attempt >= S3_MAX_ATTEMPTS {
+                        tracing::warn!(
+                            src = src_key,
+                            dst = dst_key,
+                            status,
+                            "s3 copy refused: pair still counts"
+                        );
+                        return Ok(());
+                    }
+                    tracing::debug!(
+                        src = src_key,
+                        dst = dst_key,
+                        status,
+                        attempt,
+                        "s3 copy refused: retrying"
+                    );
+                    sleep_backoff(attempt).await;
+                }
+                CopyAttempt::Transport(error) => {
+                    if attempt >= S3_MAX_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        src = src_key,
+                        dst = dst_key,
+                        error = error.as_str(),
+                        attempt,
+                        "s3 copy transport failure: retrying"
+                    );
+                    sleep_backoff(attempt).await;
+                }
+                CopyAttempt::Config(error) => return Err(error),
+            }
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("s3 copy {src_key}: transport failure: {error}"))?;
-        if response.status().is_success() {
-            return Ok(());
-        }
-        // boto3 raises `ClientError` on any error status; Django logs it
-        // and the pair still counts.
-        tracing::warn!(
-            src = src_key,
-            dst = dst_key,
-            status = response.status().as_u16(),
-            "s3 copy refused: pair still counts"
-        );
-        Ok(())
     }
 }
 
@@ -631,12 +887,7 @@ pub async fn run_sweep<S: AssetStore>(
 /// UUID text (`ValidationError` → the broad `except`), an unbuildable
 /// client, a refused head (stored as `NULL`, like the `ClientError`), a
 /// failed head (the save is skipped, like the `BotoCoreError`).
-pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
-    store: &S,
-    s3: &O,
-    asset_id_raw: &str,
-    now: DateTime<Utc>,
-) {
+pub async fn run_metadata<S: AssetStore, O: ObjectStore>(store: &S, s3: &O, asset_id_raw: &str) {
     let asset_id = match Uuid::parse_str(asset_id_raw) {
         Ok(id) => id,
         Err(_) => {
@@ -666,7 +917,7 @@ pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
             return;
         }
     };
-    if let Err(error) = store.save_storage_metadata(asset_id, metadata, now).await {
+    if let Err(error) = store.save_storage_metadata(asset_id, metadata).await {
         tracing::warn!(%asset_id, %error, "metadata save failed: silent skip");
     }
 }
@@ -728,7 +979,9 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
 ) -> Option<()> {
     let entity = CopyEntity::for_name(&request.entity_name)?;
     let entity_id = Uuid::parse_str(&request.entity_identifier).ok()?;
-    let user_id = Uuid::parse_str(&request.user_id).ok()?;
+    // Still parsed: a bad `user_id` fails the task. It binds nowhere —
+    // the worker `save()` blanks `created_by` (PIDASHCONV-1698).
+    Uuid::parse_str(&request.user_id).ok()?;
     let project_id = request
         .project_id
         .as_deref()
@@ -759,7 +1012,10 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
             logic::destination_key(&workspace_id_text, &new_uuid().simple().to_string(), &name);
         let duplicate = NewAsset {
             id: new_uuid(),
-            created_by_id: user_id,
+            // `create(created_by_id=user_id)` passes the requester to the
+            // constructor, but the worker `save()` blanks it before the
+            // INSERT (`db/models/base.py:23-33`), so the row stores NULL.
+            created_by_id: None,
             attributes: Value::Object(logic::duplicate_attributes(attributes)),
             asset_key: dst_key.clone(),
             workspace_id,
@@ -793,7 +1049,16 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
         store.mark_uploaded(new_ids).await.ok()?;
     }
     // Unconditional: re-serialize, save, convert — even with zero pairs.
-    let updated_html = logic::replace_asset_ids(&row.description_html, DESCRIPTION_TAG, &pairs);
+    let rewritten = logic::replace_asset_ids(&row.description_html, DESCRIPTION_TAG, &pairs);
+    // The splice rewrites `src` values only, while Django returns
+    // `str(soup)` — the full re-serialization — so normalize here before
+    // the save and the convert (PIDASHCONV-1699). A rejected parse keeps
+    // the original HTML, mirroring the `except ...: return html` path
+    // (`copy_s3_object.py:50-52`).
+    let updated_html = match normalize_bs(&rewritten) {
+        Ok(normalized) => normalized.html,
+        Err(_) => row.description_html.clone(),
+    };
     store
         .save_description_html(entity, entity_id, &updated_html, now)
         .await
@@ -819,6 +1084,43 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
     Some(())
 }
 
+/// Statement-shape pins for the ORM execution paths below (TASK-CLEANUP-1):
+/// the same predicates and ordering as the fixture-pinned SQL text in
+/// [`logic`]'s builders.
+pub fn sweep_stmt(
+    cutoff: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> sea_orm::sea_query::UpdateStatement {
+    use sea_orm::sea_query::{Alias, Expr, Query};
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("file_assets".to_owned()));
+    stmt.value(Alias::new("deleted_at".to_owned()), now);
+    stmt.and_where(
+        Expr::col((
+            Alias::new("file_assets".to_owned()),
+            Alias::new("deleted_at".to_owned()),
+        ))
+        .is_null(),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("file_assets".to_owned()),
+            Alias::new("created_at".to_owned()),
+        ))
+        .lt(cutoff),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("file_assets".to_owned()),
+            Alias::new("is_uploaded".to_owned()),
+        ))
+        .eq(false),
+    );
+    stmt
+}
+
+type OriginalAssetTuple = (Uuid, String, Value, f64, Option<String>, Option<Value>);
+
 /// Postgres [`AssetStore`]: the exact Django query shapes from
 /// [`logic`]'s SQL builders. Every table name is a literal at the call
 /// sites below, never caller input.
@@ -843,50 +1145,83 @@ impl AssetStore for PgAssetStore {
         cutoff: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<u64, String> {
-        let result = sqlx::query(logic::SWEEP_SQL)
-            .bind(now)
-            .bind(cutoff)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let result = file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .filter(file_assets::Column::CreatedAt.lt(cutoff))
+            .filter(file_assets::Column::IsUploaded.eq(false))
+            .exec(&conn)
             .await
-            .map_err(|e| db_error("sweep_unuploaded", e))?;
-        Ok(result.rows_affected())
+            .map_err(|e| db_error("sweep_unuploaded", into_sqlx(e)))?;
+        Ok(result.rows_affected)
     }
 
     async fn asset_key(&self, asset_id: Uuid) -> Result<Option<String>, String> {
-        sqlx::query_scalar::<_, Option<String>>(logic::METADATA_SELECT_SQL)
-            .bind(asset_id)
-            .fetch_optional(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = file_assets::Entity::find_by_id(asset_id)
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([file_assets::Column::Asset])
+            .into_tuple::<String>()
+            .one(&conn)
             .await
-            .map_err(|e| db_error("asset_key", e))
-            .map(|row| row.flatten())
+            .map_err(|e| db_error("asset_key", into_sqlx(e)))?;
+        Ok(row)
     }
 
     async fn save_storage_metadata(
         &self,
         asset_id: Uuid,
         metadata: Option<Value>,
-        now: DateTime<Utc>,
     ) -> Result<(), String> {
-        sqlx::query(logic::METADATA_SAVE_SQL)
-            .bind(metadata.map(sqlx::types::Json))
-            .bind(now)
-            .bind(asset_id)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::StorageMetadata,
+                sea_orm::sea_query::Expr::value(metadata),
+            )
+            .filter(file_assets::Column::Id.eq(asset_id))
+            .exec(&conn)
             .await
             .map(|_| ())
-            .map_err(|e| db_error("save_storage_metadata", e))
+            .map_err(|e| db_error("save_storage_metadata", into_sqlx(e)))
     }
 
     async fn entity(&self, entity: CopyEntity, id: Uuid) -> Result<Option<EntityRow>, String> {
-        let row: Option<(Uuid, Option<Uuid>, String)> =
-            sqlx::query_as(&logic::entity_select_sql(entity))
-                .bind(id)
-                .fetch_optional(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<(Uuid, Uuid, String)> = match entity {
+            CopyEntity::Page => pages::Entity::find_by_id(id)
+                .filter(pages::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([
+                    pages::Column::Id,
+                    pages::Column::WorkspaceId,
+                    pages::Column::DescriptionHtml,
+                ])
+                .into_tuple::<(Uuid, Uuid, String)>()
+                .one(&conn)
                 .await
-                .map_err(|e| db_error("entity", e))?;
+                .map_err(|e| db_error("entity", into_sqlx(e)))?,
+            CopyEntity::Issue => issues::Entity::find_by_id(id)
+                .filter(issues::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([
+                    issues::Column::Id,
+                    issues::Column::WorkspaceId,
+                    issues::Column::DescriptionHtml,
+                ])
+                .into_tuple::<(Uuid, Uuid, String)>()
+                .one(&conn)
+                .await
+                .map_err(|e| db_error("entity", into_sqlx(e)))?,
+        };
         Ok(row.map(|(id, workspace_id, description_html)| EntityRow {
             id,
-            workspace_id,
+            workspace_id: Some(workspace_id),
             description_html,
         }))
     }
@@ -897,18 +1232,29 @@ impl AssetStore for PgAssetStore {
         project_id: Option<Uuid>,
         ids: Vec<Uuid>,
     ) -> Result<Vec<OriginalAsset>, String> {
-        let sql = logic::original_assets_sql(project_id.is_none());
-        let mut query =
-            sqlx::query_as::<_, (Uuid, String, Value, f64, Option<String>, Option<Value>)>(&sql)
-                .bind(workspace_id);
-        if let Some(project) = project_id {
-            query = query.bind(project);
-        }
-        let rows = query
-            .bind(ids)
-            .fetch_all(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let mut query = file_assets::Entity::find()
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .filter(file_assets::Column::WorkspaceId.eq(workspace_id))
+            .filter(file_assets::Column::Id.is_in(ids.clone()));
+        query = match project_id {
+            Some(project) => query.filter(file_assets::Column::ProjectId.eq(project)),
+            None => query.filter(file_assets::Column::ProjectId.is_null()),
+        };
+        let rows: Vec<OriginalAssetTuple> = query
+            .select_only()
+            .columns([
+                file_assets::Column::Id,
+                file_assets::Column::Asset,
+                file_assets::Column::Attributes,
+                file_assets::Column::Size,
+                file_assets::Column::EntityType,
+                file_assets::Column::StorageMetadata,
+            ])
+            .into_tuple::<OriginalAssetTuple>()
+            .all(&conn)
             .await
-            .map_err(|e| db_error("original_assets", e))?;
+            .map_err(|e| db_error("original_assets", into_sqlx(e)))?;
         Ok(rows
             .into_iter()
             .map(
@@ -926,44 +1272,53 @@ impl AssetStore for PgAssetStore {
 
     async fn insert_duplicate(&self, asset: NewAsset, now: DateTime<Utc>) -> Result<Uuid, String> {
         let id = Uuid::new_v4();
-        sqlx::query(logic::DUPLICATE_INSERT_SQL)
-            .bind(id)
-            .bind(now)
-            .bind(now)
-            .bind(asset.created_by_id)
-            .bind(None::<Uuid>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(sqlx::types::Json(asset.attributes))
-            .bind(asset.asset_key)
-            .bind(asset.user_id)
-            .bind(asset.workspace_id)
-            .bind(asset.draft_issue_id)
-            .bind(asset.project_id)
-            .bind(asset.issue_id)
-            .bind(asset.comment_id)
-            .bind(asset.page_id)
-            .bind(asset.entity_type)
-            .bind(None::<String>)
-            .bind(false)
-            .bind(false)
-            .bind(None::<String>)
-            .bind(None::<String>)
-            .bind(asset.size)
-            .bind(false)
-            .bind(asset.storage_metadata.map(sqlx::types::Json))
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let model = file_assets::ActiveModel {
+            id: Set(id),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(asset.created_by_id),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            attributes: Set(asset.attributes),
+            asset: Set(asset.asset_key),
+            user_id: Set(asset.user_id),
+            workspace_id: Set(Some(asset.workspace_id)),
+            draft_issue_id: Set(asset.draft_issue_id),
+            project_id: Set(asset.project_id),
+            issue_id: Set(asset.issue_id),
+            comment_id: Set(asset.comment_id),
+            page_id: Set(asset.page_id),
+            entity_type: Set(asset.entity_type),
+            entity_identifier: Set(None),
+            is_deleted: Set(false),
+            is_archived: Set(false),
+            external_id: Set(None),
+            external_source: Set(None),
+            size: Set(asset.size),
+            is_uploaded: Set(false),
+            storage_metadata: Set(asset.storage_metadata),
+        };
+        model
+            .insert(&conn)
             .await
             .map(|_| id)
-            .map_err(|e| db_error("insert_duplicate", e))
+            .map_err(|e| db_error("insert_duplicate", into_sqlx(e)))
     }
 
     async fn mark_uploaded(&self, ids: Vec<Uuid>) -> Result<(), String> {
-        sqlx::query(logic::MARK_UPLOADED_SQL)
-            .bind(ids)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::IsUploaded,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .filter(file_assets::Column::Id.is_in(ids))
+            .exec(&conn)
             .await
             .map(|_| ())
-            .map_err(|e| db_error("mark_uploaded", e))
+            .map_err(|e| db_error("mark_uploaded", into_sqlx(e)))
     }
 
     async fn save_description_html(
@@ -973,14 +1328,36 @@ impl AssetStore for PgAssetStore {
         html: &str,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        sqlx::query(&logic::description_save_sql(entity))
-            .bind(html)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        // Dynamic-table sea-query statement (same pattern as the
+        // version/deletion builders): the table is the runtime `entity`
+        // value, not a compile-time entity. `issues` is write-guard
+        // covered, and compile-time `issues::Entity` writes outside
+        // `domain/` are allowlist-gated by policy (empty allowlist: "do
+        // not add new sites"); a table-agnostic update like every other
+        // UPDATE here keeps the guard's empty-allowlist gate reachable.
+        let mut stmt = sea_orm::sea_query::Query::update();
+        stmt.table(sea_orm::sea_query::Alias::new(entity.table().to_owned()));
+        stmt.value(
+            sea_orm::sea_query::Alias::new("description_html".to_owned()),
+            html,
+        )
+        .value(
+            sea_orm::sea_query::Alias::new("created_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(
+            sea_orm::sea_query::Alias::new("updated_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(sea_orm::sea_query::Alias::new("updated_at".to_owned()), now)
+        .and_where(
+            sea_orm::sea_query::Expr::col(sea_orm::sea_query::Alias::new("id".to_owned())).eq(id),
+        );
+        conn.execute(sea_orm::DbBackend::Postgres.build(&stmt))
             .await
             .map(|_| ())
-            .map_err(|e| db_error("save_description_html", e))
+            .map_err(|e| db_error("save_description_html", into_sqlx(e)))
     }
 
     async fn save_description_docs(
@@ -991,18 +1368,35 @@ impl AssetStore for PgAssetStore {
         description_binary: Option<Vec<u8>>,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        let sql = logic::description_docs_save_sql(entity, description_binary.is_some());
-        let mut query = sqlx::query(&sql).bind(sqlx::types::Json(description_json));
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let mut stmt = sea_orm::sea_query::Query::update();
+        stmt.table(sea_orm::sea_query::Alias::new(entity.table().to_owned()));
+        stmt.value(
+            sea_orm::sea_query::Alias::new("description_json".to_owned()),
+            description_json,
+        );
         if let Some(binary) = description_binary {
-            query = query.bind(binary);
+            stmt.value(
+                sea_orm::sea_query::Alias::new("description_binary".to_owned()),
+                binary,
+            );
         }
-        query
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
+        stmt.value(
+            sea_orm::sea_query::Alias::new("created_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(
+            sea_orm::sea_query::Alias::new("updated_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(sea_orm::sea_query::Alias::new("updated_at".to_owned()), now)
+        .and_where(
+            sea_orm::sea_query::Expr::col(sea_orm::sea_query::Alias::new("id".to_owned())).eq(id),
+        );
+        conn.execute(sea_orm::DbBackend::Postgres.build(&stmt))
             .await
             .map(|_| ())
-            .map_err(|e| db_error("save_description_docs", e))
+            .map_err(|e| db_error("save_description_docs", into_sqlx(e)))
     }
 }
 
@@ -1103,7 +1497,7 @@ pub fn register_metadata<S: ObjectStore + 'static>(
                 .unwrap_or_default()
                 .to_string();
             let store = PgAssetStore::new(pool);
-            run_metadata(&store, s3.as_ref(), &asset_id, Utc::now()).await;
+            run_metadata(&store, s3.as_ref(), &asset_id).await;
             Ok(Verdict::Ack)
         })
     });
@@ -1269,6 +1663,8 @@ mod tests {
         html: String,
         json: Value,
         binary: Option<Vec<u8>>,
+        created_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
     }
 
     #[derive(Debug, Default)]
@@ -1327,12 +1723,10 @@ mod tests {
             &self,
             asset_id: Uuid,
             metadata: Option<Value>,
-            now: DateTime<Utc>,
         ) -> Result<(), String> {
             let mut state = self.state.lock().unwrap();
             let asset = state.assets.get_mut(&asset_id).ok_or("missing")?;
             asset.storage = metadata;
-            asset.updated_at = now;
             state.saves.push(format!("metadata:{asset_id}"));
             Ok(())
         }
@@ -1399,7 +1793,7 @@ mod tests {
                     deleted_at: None,
                     created_at: now,
                     updated_at: now,
-                    created_by: Some(asset.created_by_id),
+                    created_by: asset.created_by_id,
                     workspace_id: asset.workspace_id,
                     user_id: asset.user_id,
                     project_id: asset.project_id,
@@ -1437,6 +1831,10 @@ mod tests {
                 .get_mut(&(entity.table().to_string(), id))
                 .ok_or("missing entity")?;
             row.html = html.to_string();
+            // Mirrors `description_save_sql`: the full worker save NULLs
+            // both audit columns (PIDASHCONV-1698).
+            row.created_by = None;
+            row.updated_by = None;
             let _ = now;
             state.saves.push(format!("html:{id}"));
             Ok(())
@@ -1459,6 +1857,10 @@ mod tests {
             if description_binary.is_some() {
                 row.binary = description_binary;
             }
+            // Mirrors `description_docs_save_sql`: the full worker save
+            // NULLs both audit columns (PIDASHCONV-1698).
+            row.created_by = None;
+            row.updated_by = None;
             let _ = now;
             state.saves.push(format!("docs:{id}"));
             Ok(())
@@ -1628,7 +2030,10 @@ mod tests {
                 uploaded: false,
                 deleted_at: None,
                 created_at: now,
-                updated_at: now,
+                // Distinct from the run time so the save's updated_at
+                // behaviour is observable (`save(update_fields)` never
+                // bumps it; PIDASHCONV-1731).
+                updated_at: utc(2020, 1, 1),
                 created_by: None,
                 workspace_id: ws,
                 user_id: None,
@@ -1652,22 +2057,26 @@ mod tests {
             down: false,
             client_ok: true,
         };
-        run_metadata(&store, &s3, &id.to_string(), now).await;
+        run_metadata(&store, &s3, &id.to_string()).await;
         {
             let state = store.state.lock().unwrap();
             assert_eq!(state.assets[&id].storage, Some(head.to_json()));
-            assert_eq!(state.assets[&id].updated_at, now);
+            assert_eq!(state.assets[&id].updated_at, utc(2020, 1, 1));
         }
 
         // Unknown head answers None → stored as NULL.
         let empty = FakeS3::up();
-        run_metadata(&store, &empty, &id.to_string(), now).await;
+        run_metadata(&store, &empty, &id.to_string()).await;
         assert_eq!(store.state.lock().unwrap().assets[&id].storage, None);
+        assert_eq!(
+            store.state.lock().unwrap().assets[&id].updated_at,
+            utc(2020, 1, 1)
+        );
 
         // Missing rows and bad UUIDs are silent: no further saves.
         let saves = store.state.lock().unwrap().saves.len();
-        run_metadata(&store, &empty, &Uuid::new_v4().to_string(), now).await;
-        run_metadata(&store, &empty, "not-a-uuid", now).await;
+        run_metadata(&store, &empty, &Uuid::new_v4().to_string()).await;
+        run_metadata(&store, &empty, "not-a-uuid").await;
         assert_eq!(store.state.lock().unwrap().saves.len(), saves);
     }
 
@@ -1706,7 +2115,7 @@ mod tests {
             down: true,
             ..FakeS3::up()
         };
-        run_metadata(&store, &down, &id.to_string(), now).await;
+        run_metadata(&store, &down, &id.to_string()).await;
         let state = store.state.lock().unwrap();
         assert_eq!(state.assets[&id].storage, Some(json!({})));
         assert!(state.saves.is_empty());
@@ -1745,7 +2154,7 @@ mod tests {
             client_ok: false,
             ..FakeS3::up()
         };
-        run_metadata(&store, &unbuilt, &id.to_string(), now).await;
+        run_metadata(&store, &unbuilt, &id.to_string()).await;
         let state = store.state.lock().unwrap();
         assert_eq!(state.assets[&id].storage, Some(json!({})));
         assert!(state.saves.is_empty());
@@ -1765,6 +2174,8 @@ mod tests {
                 html: format!("<p>t</p><image-component src=\"{asset}\"></image-component>"),
                 json: json!({}),
                 binary: None,
+                created_by: Some(user),
+                updated_by: Some(user),
             },
         );
         store.state.lock().unwrap().assets.insert(
@@ -1855,7 +2266,10 @@ mod tests {
         assert_eq!(dup.1.entity_type.as_deref(), Some("ISSUE_ATTACHMENT"));
         assert_eq!(dup.1.size, 9.0);
         assert_eq!(dup.1.storage, Some(json!({"ETag": "e"})));
-        assert_eq!(dup.1.created_by, Some(user));
+        // The worker `save()` blanks the constructor-passed requester
+        // (`db/models/base.py:23-33`): the duplicate inserts NULL
+        // (PIDASHCONV-1698).
+        assert_eq!(dup.1.created_by, None);
         assert_eq!(dup.1.issue_id, Some(entity));
         // The copy scope pins workspace + project; every other FK stays null.
         assert_eq!(dup.1.workspace_id, ws);
@@ -1873,6 +2287,9 @@ mod tests {
         assert!(!ent.html.contains(&asset.to_string()));
         assert_eq!(ent.json, json!({"doc": true}));
         assert_eq!(ent.binary, Some(vec![1, 2, 3]));
+        // Both full saves NULL the audit columns (PIDASHCONV-1698).
+        assert_eq!(ent.created_by, None);
+        assert_eq!(ent.updated_by, None);
         assert!(state.saves.iter().any(|s| s.starts_with("html:")));
         assert!(state.saves.iter().any(|s| s.starts_with("docs:")));
         drop(state);
@@ -1999,6 +2416,11 @@ mod tests {
         let state = store.state.lock().unwrap();
         assert!(state.saves.iter().any(|s| s.starts_with("html:")));
         assert!(!state.saves.iter().any(|s| s.starts_with("docs:")));
+        // The first save alone already NULLs the audit columns
+        // (PIDASHCONV-1698).
+        let ent = &state.entities[&("issues".to_string(), entity)];
+        assert_eq!(ent.created_by, None);
+        assert_eq!(ent.updated_by, None);
     }
 
     #[tokio::test]
@@ -2181,7 +2603,7 @@ mod tests {
     fn new_asset_applies_every_mapped_column() {
         let base = NewAsset {
             id: Uuid::new_v4(),
-            created_by_id: Uuid::new_v4(),
+            created_by_id: None,
             attributes: json!({}),
             asset_key: "k".to_string(),
             workspace_id: Uuid::from_u128(1),
@@ -2462,5 +2884,166 @@ mod tests {
         assert!(registry.owns(TASK_DELETE_UNUPLOADED));
         assert!(registry.owns(TASK_GET_METADATA));
         assert!(registry.owns(TASK_COPY_S3_OBJECTS));
+    }
+
+    #[test]
+    fn legacy_retryable_statuses() {
+        for status in [500, 502, 503, 504, 509, 429] {
+            assert!(s3_retryable_status(status), "{status}");
+        }
+        for status in [200, 201, 204, 301, 400, 403, 404, 411] {
+            assert!(!s3_retryable_status(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn legacy_retryable_codes() {
+        for code in [
+            "Throttling",
+            "ThrottlingException",
+            "ThrottledException",
+            "RequestThrottledException",
+            "ProvisionedThroughputExceededException",
+            "RequestTimeout",
+            "BadDigest",
+        ] {
+            assert!(s3_retryable_code(code), "{code}");
+        }
+        // `SlowDown` rides a 503 in reality and is not code-retried on a
+        // 400 (legacy mode); anything else finalizes after one attempt.
+        for code in [
+            "SlowDown",
+            "NoSuchKey",
+            "AccessDenied",
+            "InternalError",
+            "InvalidRequest",
+            "",
+        ] {
+            assert!(!s3_retryable_code(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn legacy_retry_decision_combos() {
+        assert!(s3_retryable_answer(503, None));
+        assert!(s3_retryable_answer(500, Some("InternalError")));
+        assert!(s3_retryable_answer(400, Some("RequestTimeout")));
+        assert!(s3_retryable_answer(400, Some("Throttling")));
+        assert!(!s3_retryable_answer(404, None));
+        assert!(!s3_retryable_answer(404, Some("NoSuchKey")));
+        assert!(!s3_retryable_answer(400, None));
+        assert!(!s3_retryable_answer(400, Some("SlowDown")));
+        assert!(!s3_retryable_answer(403, Some("AccessDenied")));
+        // A retryable code on a non-400 status is final: every legacy
+        // code policy pairs the code with `http_status_code` 400.
+        assert!(!s3_retryable_answer(403, Some("Throttling")));
+        assert!(!s3_retryable_answer(404, Some("RequestTimeout")));
+    }
+
+    #[test]
+    fn error_code_extraction() {
+        assert_eq!(
+            s3_error_code("<Error><Code>RequestTimeout</Code><Message>m</Message></Error>"),
+            Some("RequestTimeout")
+        );
+        assert_eq!(
+            s3_error_code(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>SlowDown</Code></Error>"
+            ),
+            Some("SlowDown")
+        );
+        assert_eq!(
+            s3_error_code("<CopyObjectResult><ETag>x</ETag></CopyObjectResult>"),
+            None
+        );
+        assert_eq!(s3_error_code(""), None);
+        assert_eq!(s3_error_code("<Error><Code></Code></Error>"), None);
+        assert_eq!(s3_error_code("<Error><Code>oops"), None);
+    }
+
+    #[test]
+    fn copy_200_body_error_detection() {
+        // Bare and prologued `<Error>` roots, with and without attributes.
+        for body in [
+            "<Error><Code>InternalError</Code></Error>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>InternalError</Code></Error>",
+            "  <Error><Code>x</Code></Error>",
+            "<Error xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Code>x</Code></Error>",
+            "<Error/>",
+        ] {
+            assert!(copy_body_is_error(body.as_bytes()), "{body}");
+        }
+        // Success bodies and near-misses are not errors.
+        for body in [
+            "<CopyObjectResult><ETag>\"x\"</ETag></CopyObjectResult>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CopyObjectResult><ETag>\"x\"</ETag></CopyObjectResult>",
+            "",
+            "   ",
+            "<html>proxy error</html>",
+            "<ErrorResponse><Code>x</Code></ErrorResponse>",
+            "<Errors><Error><Code>x</Code></Error></Errors>",
+        ] {
+            assert!(!copy_body_is_error(body.as_bytes()), "{body}");
+        }
+        assert!(!copy_body_is_error(&[0xff, 0xfe, 0x00]));
+    }
+
+    #[test]
+    fn legacy_backoff_is_rand_times_power_of_two() {
+        // `rand * 2**(n-1)` after failed attempt `n`, uncapped.
+        for (attempt, base) in [(1, 1.0), (2, 2.0), (3, 4.0), (4, 8.0)] {
+            assert_eq!(retry_backoff(attempt, 0.0), std::time::Duration::ZERO);
+            assert_eq!(
+                retry_backoff(attempt, 1.0),
+                std::time::Duration::from_secs_f64(base)
+            );
+        }
+        assert_eq!(S3_MAX_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn orm_statement_shapes_pin_predicates() {
+        // TASK-CLEANUP-1: the sweep keeps only live, stale, unuploaded
+        // rows; description saves keep the full-save audit NULLing with
+        // no deleted_at guard (matching `description_save_sql`).
+        use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        let now = utc(2026, 9, 28);
+        let cutoff = utc(2025, 9, 28);
+        let sql = sweep_stmt(cutoff, now).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.starts_with("UPDATE \"file_assets\" SET \"deleted_at\""),
+            "{sql}"
+        );
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"created_at\" <"), "{sql}");
+        assert!(sql.contains("\"is_uploaded\" = FALSE"), "{sql}");
+        // Save shapes: the update_many statements execute the same SET
+        // lists as the SQL-text pins (description_html + audit NULLs +
+        // updated_at by id, no `deleted_at` guard).
+        let id = Uuid::new_v4();
+        let html_sql = pages::Entity::update_many()
+            .col_expr(
+                pages::Column::DescriptionHtml,
+                sea_orm::sea_query::Expr::value("h".to_owned()),
+            )
+            .col_expr(
+                pages::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(None::<Uuid>),
+            )
+            .col_expr(
+                pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(None::<Uuid>),
+            )
+            .col_expr(
+                pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(pages::Column::Id.eq(id))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(html_sql.starts_with("UPDATE \"pages\" SET"), "{html_sql}");
+        assert!(html_sql.contains("\"description_html\" ="), "{html_sql}");
+        assert!(html_sql.contains("\"created_by_id\" = NULL"), "{html_sql}");
+        assert!(!html_sql.contains("\"deleted_at\""), "{html_sql}");
     }
 }

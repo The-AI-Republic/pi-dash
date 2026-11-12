@@ -5,30 +5,43 @@
 //! sites in `api`, `jobs` and the rest of `services` call these functions
 //! instead of executing SQL text. Reads stay where they are (design D5).
 //!
-//! Two execution shapes, by writer kind:
+//! Every writer takes a SeaORM [`ConnectionTrait`]: the caller's pool
+//! (`pidash_db::pool::sea_orm_connection(&pool)`) or the caller's open
+//! sqlx transaction (`pidash_db::orm_tx::TxConn::new(&mut tx)`), so no
+//! flow restructures its transaction. Two shapes, by writer kind:
 //!
 //! * Single-statement writers (middleware stamps, endpoint lifecycle,
-//!   deactivations, shims, single-row session ops) are generic over
-//!   `sqlx::Executor`: they run on the caller's pool or on the caller's
-//!   existing `sqlx` transaction with no restructuring. Best-effort vs
+//!   deactivations, shims, single-row session ops): best-effort vs
 //!   hard-error is the CALLER's choice (`let _ =` vs `?`), preserved
 //!   per call site — Django `save()` calls propagate, the Rust
 //!   middlewares deliberately swallow stamp failures, and both
 //!   behaviors are pinned by contract suites.
 //! * Transactional drivers (revoke, delete cascade, session open,
-//!   rotate, enroll mint) stay executor-generic on the caller's existing
-//!   `sqlx` transaction: each flow joins tables outside this module, and
+//!   rotate, enroll mint) run on the caller's existing sqlx transaction
+//!   through `TxConn`: each flow joins tables outside this module, and
 //!   design D5 runs the whole domain write on one transaction, so moving
 //!   one leg onto [`WriteTxn`][crate::domain::WriteTxn] alone would split
-//!   it. Their token SQL moves here; the flows convert to `WriteTxn`
-//!   whole when their aggregates do (ORM-03/ORM-07).
+//!   it. The flows convert to `WriteTxn` whole when their aggregates do
+//!   (ORM-03/ORM-07).
+//!
+//! Errors stay [`sqlx::Error`] (through [`pidash_db::orm_tx::into_sqlx`]),
+//! so the callers' SQLSTATE classification is unchanged.
 //!
 //! Clocks are load-bearing and preserved per shape: middleware stamps use
-//! the DB `now()`, flows holding a frozen timestamp bind it. Quoting is
-//! consolidated to the quoted form (no fixture pins the stamp text).
+//! the DB clock (`CURRENT_TIMESTAMP`, Postgres's `now()`), flows holding a
+//! frozen timestamp bind it.
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity::{api_tokens, machine_token, runner, runner_session};
+use pidash_db::orm_tx::into_sqlx;
+use sea_orm::sea_query::{Expr, Query};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
+
+/// A bound clock as the entity's `timestamptz` value.
+fn at(now: DateTime<Utc>) -> sea_orm::prelude::DateTimeWithTimeZone {
+    now.fixed_offset()
+}
 
 // ---------------------------------------------------------------------------
 // api_tokens
@@ -38,71 +51,75 @@ use uuid::Uuid;
 /// `api_token.last_used = now; save(update_fields=["last_used"])`.
 /// By presented token, DB clock. Best-effort at the middleware call
 /// sites; the id-stamped twin is [`touch_api_token_last_used_by_id`].
-const TOUCH_LAST_USED_SQL: &str =
-    "UPDATE \"api_tokens\" SET \"last_used\" = now() WHERE \"token\" = $1";
+fn touch_last_used_by_token_stmt(token: &str) -> sea_orm::UpdateMany<api_tokens::Entity> {
+    api_tokens::Entity::update_many()
+        .col_expr(
+            api_tokens::Column::LastUsed,
+            Expr::current_timestamp().into(),
+        )
+        .filter(api_tokens::Column::Token.eq(token))
+}
 
-/// By-id bound-clock twin of [`touch_api_token_last_used_by_token`]
-/// (device, CLI and enroll validators resolve the id first and stamp
-/// their frozen `now`).
-const TOUCH_LAST_USED_BY_ID_SQL: &str =
-    "UPDATE \"api_tokens\" SET \"last_used\" = $1 WHERE \"id\" = $2";
+/// Touch `last_used` by presented token (middleware shape).
+pub async fn touch_api_token_last_used_by_token(
+    db: &impl ConnectionTrait,
+    token: &str,
+) -> Result<(), sqlx::Error> {
+    touch_last_used_by_token_stmt(token)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
+/// Touch `last_used` by id with the caller's clock (device, CLI and
+/// enroll validators resolve the id first and stamp their frozen `now`).
+pub async fn touch_api_token_last_used_by_id(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    api_tokens::Entity::update_many()
+        .col_expr(api_tokens::Column::LastUsed, Expr::value(now))
+        .filter(api_tokens::Column::Id.eq(id))
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
+/// Deactivate by id with the caller's clock (device revoke shape,
+/// `device.py:496-511`: inline `is_active=False` save by id, NOT the
+/// `cli_token` helper).
+pub async fn deactivate_api_token_by_id(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    api_tokens::Entity::update_many()
+        .col_expr(api_tokens::Column::IsActive, Expr::value(false))
+        .col_expr(api_tokens::Column::UpdatedAt, Expr::value(now))
+        .filter(api_tokens::Column::Id.eq(id))
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
 
 /// `BaseModel.save` second statement on token PATCH and soft-delete:
 /// `updated_by` is stamped by the request actor after the main write.
-const STAMP_UPDATED_BY_SQL: &str = "UPDATE api_tokens SET updated_by_id = $1 WHERE id = $2";
-
-/// Device revoke endpoint (`device.py:496-511`): inline
-/// `is_active=False` save by id (NOT the `cli_token` helper).
-const DEACTIVATE_BY_ID_SQL: &str =
-    "UPDATE api_tokens SET is_active = false, updated_at = $1 WHERE id = $2";
-
-/// Touch `last_used` by presented token (middleware shape).
-pub async fn touch_api_token_last_used_by_token<'e, E>(
-    ex: E,
-    token: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_LAST_USED_SQL)
-        .bind(token)
-        .execute(ex)
+async fn stamp_updated_by(
+    db: &impl ConnectionTrait,
+    pk: Uuid,
+    actor: Uuid,
+) -> Result<(), sqlx::Error> {
+    api_tokens::Entity::update_many()
+        .col_expr(api_tokens::Column::UpdatedById, Expr::value(actor))
+        .filter(api_tokens::Column::Id.eq(pk))
+        .exec(db)
         .await
         .map(|_| ())
-}
-
-/// Touch `last_used` by id with the caller's clock.
-pub async fn touch_api_token_last_used_by_id<'e, E>(
-    ex: E,
-    id: Uuid,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_LAST_USED_BY_ID_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
-}
-
-/// Deactivate by id with the caller's clock (device revoke shape).
-pub async fn deactivate_api_token_by_id<'e, E>(
-    ex: E,
-    id: Uuid,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(DEACTIVATE_BY_ID_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+        .map_err(into_sqlx)
 }
 
 /// Resolved inputs for [`issue_token`]: everything the endpoint
@@ -133,36 +150,54 @@ pub struct IssuedApiToken {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Issue a user API key (`views/api.py:20-35`):
-/// `APIToken.objects.create(...)` with model defaults (`token` is
-/// `generate_token()`, `is_active` TRUE, `is_service` FALSE,
-/// `workspace_id` NULL, `allowed_rate_limit` `"60/min"`,
-/// `updated_by_id` NULL). `created_by_id` is the caller's
-/// [`NewApiToken::created_by`] stamp (`None` binds `NULL`, like the
-/// PATCH input's). `created`/`updated` are two separate `now()`
+/// The `api_tokens` row for [`issue_token`]: `APIToken.objects.create(...)`
+/// with model defaults (`token` is `generate_token()`, `is_active` TRUE,
+/// `is_service` FALSE, `workspace_id` NULL, `allowed_rate_limit`
+/// `"60/min"`, `updated_by_id` / `deleted_at` / `last_used` NULL).
+fn issue_token_row(
+    params: &NewApiToken,
+    id: Uuid,
+    token: &str,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> api_tokens::ActiveModel {
+    api_tokens::ActiveModel {
+        created_at: Set(at(created_at)),
+        updated_at: Set(at(updated_at)),
+        created_by_id: Set(params.created_by),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        id: Set(id),
+        label: Set(params.label.clone()),
+        description: Set(params.description.clone()),
+        is_active: Set(true),
+        last_used: Set(None),
+        token: Set(token.to_owned()),
+        user_id: Set(params.user_id),
+        user_type: Set(params.user_type),
+        workspace_id: Set(None),
+        expired_at: Set(params.expired_at.map(at)),
+        is_service: Set(false),
+        allowed_rate_limit: Set("60/min".to_owned()),
+    }
+}
+
+/// Issue a user API key (`views/api.py:20-35`). `created_by_id` is the
+/// caller's [`NewApiToken::created_by`] stamp (`None` binds `NULL`, like
+/// the PATCH input's). `created`/`updated` are two separate `now()`
 /// calls, like the endpoint's, so captured micros differ.
-pub async fn issue_token<'e, E>(ex: E, params: &NewApiToken) -> Result<IssuedApiToken, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+pub async fn issue_token(
+    db: &impl ConnectionTrait,
+    params: &NewApiToken,
+) -> Result<IssuedApiToken, sqlx::Error> {
     let id = Uuid::new_v4();
     let token = format!("pi_dash_api_{}", Uuid::new_v4().simple());
     let created_at = Utc::now();
     let updated_at = Utc::now();
-    let sql = bind_placeholders(api_token_insert_sql());
-    sqlx::query(&sql)
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(params.created_by)
-        .bind(id)
-        .bind(&params.label)
-        .bind(&params.description)
-        .bind(&token)
-        .bind(params.user_id)
-        .bind(params.user_type)
-        .bind(params.expired_at)
-        .execute(ex)
-        .await?;
+    api_tokens::Entity::insert(issue_token_row(params, id, &token, created_at, updated_at))
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(IssuedApiToken {
         id,
         token,
@@ -182,59 +217,68 @@ pub struct ApiTokenPatch {
     pub created_by: Option<Uuid>,
 }
 
-/// Token PATCH save (`views/api.py:68-71`): the partial serializer's
-/// full-row `UPDATE` plus the `updated_by` stamp. Two autocommit
-/// statements, in this order, like the endpoint. Pool-scoped: the
-/// endpoint never runs these in a transaction.
+/// Token PATCH (`views/api.py:68-71`): the partial serializer's full-row
+/// `UPDATE` (`SET` every writable attr, `deleted_at` included).
+fn update_token_stmt(
+    pk: Uuid,
+    now: DateTime<Utc>,
+    patch: &ApiTokenPatch,
+) -> sea_orm::UpdateMany<api_tokens::Entity> {
+    api_tokens::Entity::update_many()
+        .col_expr(api_tokens::Column::Label, Expr::value(patch.label.clone()))
+        .col_expr(
+            api_tokens::Column::Description,
+            Expr::value(patch.description.clone()),
+        )
+        .col_expr(api_tokens::Column::IsService, Expr::value(patch.is_service))
+        .col_expr(
+            api_tokens::Column::AllowedRateLimit,
+            Expr::value(patch.allowed_rate_limit.clone()),
+        )
+        .col_expr(api_tokens::Column::DeletedAt, Expr::value(patch.deleted_at))
+        .col_expr(
+            api_tokens::Column::CreatedById,
+            Expr::value(patch.created_by),
+        )
+        .col_expr(api_tokens::Column::UpdatedAt, Expr::value(now))
+        .filter(api_tokens::Column::Id.eq(pk))
+}
+
+/// Token PATCH save (`views/api.py:68-71`): the full-row `UPDATE` plus
+/// the `updated_by` stamp. Two autocommit statements, in this order,
+/// like the endpoint (the endpoint never runs these in a transaction).
 pub async fn update_token(
-    pool: &sqlx::PgPool,
+    db: &impl ConnectionTrait,
     pk: Uuid,
     actor: Uuid,
     now: DateTime<Utc>,
     patch: &ApiTokenPatch,
 ) -> Result<(), sqlx::Error> {
-    let sql = bind_placeholders(api_token_patch_save_sql());
-    sqlx::query(&sql)
-        .bind(&patch.label)
-        .bind(&patch.description)
-        .bind(patch.is_service)
-        .bind(&patch.allowed_rate_limit)
-        .bind(patch.deleted_at)
-        .bind(patch.created_by)
-        .bind(now)
-        .bind(pk)
-        .execute(pool)
-        .await?;
-    sqlx::query(STAMP_UPDATED_BY_SQL)
-        .bind(actor)
-        .bind(pk)
-        .execute(pool)
+    update_token_stmt(pk, now, patch)
+        .exec(db)
         .await
-        .map(|_| ())
+        .map_err(into_sqlx)?;
+    stamp_updated_by(db, pk, actor).await
 }
 
-/// Token soft-delete (`views/api.py:46-64`): the stamp-and-save (two
-/// separate `now()` calls, like the endpoint) plus the `updated_by`
-/// stamp. Two autocommit statements, in this order. Pool-scoped like
-/// [`update_token`].
+/// Token soft-delete (`views/api.py:46-64`): guarded lookup then
+/// `token.delete()` (`BaseModel.delete` stamps `deleted_at`, the
+/// concrete `save()` refreshes `updated_at`: two separate `now()` calls,
+/// like the endpoint) plus the `updated_by` stamp. Two autocommit
+/// statements, in this order, like [`update_token`].
 pub async fn soft_delete_token(
-    pool: &sqlx::PgPool,
+    db: &impl ConnectionTrait,
     pk: Uuid,
     actor: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let sql = bind_placeholders(api_token_soft_delete_sql());
-    sqlx::query(&sql)
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(pk)
-        .execute(pool)
-        .await?;
-    sqlx::query(STAMP_UPDATED_BY_SQL)
-        .bind(actor)
-        .bind(pk)
-        .execute(pool)
+    api_tokens::Entity::update_many()
+        .col_expr(api_tokens::Column::DeletedAt, Expr::value(Utc::now()))
+        .col_expr(api_tokens::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(api_tokens::Column::Id.eq(pk))
+        .exec(db)
         .await
-        .map(|_| ())
+        .map_err(into_sqlx)?;
+    stamp_updated_by(db, pk, actor).await
 }
 
 /// Resolved inputs for [`issue_device_token`]: the device mint's labels
@@ -252,30 +296,37 @@ pub struct NewDeviceToken {
 
 /// Device-code-flow mint (`device.py:363-369`): the fixed-shape INSERT
 /// (`is_active` TRUE, `user_type` 0, `is_service` FALSE,
-/// `allowed_rate_limit` `"60/min"`). Runs on the caller's executor —
-/// the device post-token handler mints inside its transaction.
-pub async fn issue_device_token<'e, E>(ex: E, params: &NewDeviceToken) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(
-        r#"INSERT INTO api_tokens
-           (id, created_at, updated_at, token, label, description,
-            is_active, user_type, user_id, workspace_id,
-            is_service, allowed_rate_limit)
-           VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7, $8, false, '60/min')"#,
-    )
-    .bind(params.id)
-    .bind(params.now)
-    .bind(params.now)
-    .bind(&params.token)
-    .bind(&params.label)
-    .bind(&params.description)
-    .bind(params.user_id)
-    .bind(params.workspace_id)
-    .execute(ex)
+/// `allowed_rate_limit` `"60/min"`; the audit, `deleted_at`,
+/// `last_used` and `expired_at` columns NULL). Runs on the caller's
+/// connection — the device post-token handler mints inside its
+/// transaction.
+pub async fn issue_device_token(
+    db: &impl ConnectionTrait,
+    params: &NewDeviceToken,
+) -> Result<(), sqlx::Error> {
+    api_tokens::Entity::insert(api_tokens::ActiveModel {
+        id: Set(params.id),
+        created_at: Set(at(params.now)),
+        updated_at: Set(at(params.now)),
+        token: Set(params.token.clone()),
+        label: Set(params.label.clone()),
+        description: Set(params.description.clone()),
+        is_active: Set(true),
+        user_type: Set(0),
+        user_id: Set(params.user_id),
+        workspace_id: Set(params.workspace_id),
+        is_service: Set(false),
+        allowed_rate_limit: Set("60/min".to_owned()),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        last_used: Set(None),
+        expired_at: Set(None),
+    })
+    .exec_without_returning(db)
     .await
     .map(|_| ())
+    .map_err(into_sqlx)
 }
 
 /// Resolved inputs for [`insert_github_shim_token`]: the FK shim row is
@@ -291,142 +342,41 @@ pub struct NewGithubShimToken {
     pub now: DateTime<Utc>,
 }
 
+/// The shim token's fixed description.
+const GITHUB_SHIM_DESCRIPTION: &str = "GitHub integration FK shim — not for auth";
+
 /// GitHub integration FK shim (`github.py:114-128` / the workspace
 /// webhook ensure): the inactive placeholder row the integration points
 /// at. The app and workspace call sites pass their own label/token
-/// formats; the column set is the union both used (`updated_by_id` /
-/// `deleted_at` are explicit NULLs, identical to omitting them).
-pub async fn insert_github_shim_token<'e, E>(
-    ex: E,
+/// formats; `user_type` 1 (bot), `updated_by_id` / `deleted_at` /
+/// `last_used` / `expired_at` NULL.
+pub async fn insert_github_shim_token(
+    db: &impl ConnectionTrait,
     params: &NewGithubShimToken,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(
-        r#"INSERT INTO api_tokens
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            label, description, is_active, last_used, token, user_id, user_type,
-            workspace_id, expired_at, is_service, allowed_rate_limit)
-           VALUES ($1,$2,$2,$3,NULL,NULL,$4,'GitHub integration FK shim — not for auth',false,NULL,$5,$3,1,$6,NULL,false,'60/min')"#,
-    )
-    .bind(params.id)
-    .bind(params.now)
-    .bind(params.actor_id)
-    .bind(&params.label)
-    .bind(&params.token)
-    .bind(params.workspace_id)
-    .execute(ex)
+) -> Result<(), sqlx::Error> {
+    api_tokens::Entity::insert(api_tokens::ActiveModel {
+        id: Set(params.id),
+        created_at: Set(at(params.now)),
+        updated_at: Set(at(params.now)),
+        created_by_id: Set(Some(params.actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        label: Set(params.label.clone()),
+        description: Set(GITHUB_SHIM_DESCRIPTION.to_owned()),
+        is_active: Set(false),
+        last_used: Set(None),
+        token: Set(params.token.clone()),
+        user_id: Set(params.actor_id),
+        user_type: Set(1),
+        workspace_id: Set(Some(params.workspace_id)),
+        expired_at: Set(None),
+        is_service: Set(false),
+        allowed_rate_limit: Set("60/min".to_owned()),
+    })
+    .exec_without_returning(db)
     .await
     .map(|_| ())
-}
-
-// ---------------------------------------------------------------------------
-// Moved builders: endpoint lifecycle SQL (byte-identical; fixtures pin it)
-// ---------------------------------------------------------------------------
-
-/// Swap the builders' symbolic placeholders for positional binds, left
-/// to right. `:now` takes a FRESH number per occurrence
-/// (`auto_now_add` / `auto_now` / `delete()` are separate `now()`
-/// calls); every other name reuses its first number.
-/// Moved verbatim from the token handlers with the builders it serves.
-fn bind_placeholders(fragment: String) -> String {
-    let mut out = String::with_capacity(fragment.len());
-    let mut numbers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut next = 0usize;
-    let bytes = fragment.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b':'
-            && index + 1 < bytes.len()
-            && (bytes[index + 1].is_ascii_alphabetic() || bytes[index + 1] == b'_')
-        {
-            let mut end = index + 1;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
-            }
-            let name = &fragment[index + 1..end];
-            if name == "now" {
-                next += 1;
-                out.push_str(&format!("${next}"));
-            } else {
-                let number = *numbers.entry(name.to_owned()).or_insert_with(|| {
-                    next += 1;
-                    next
-                });
-                out.push_str(&format!("${number}"));
-            }
-            index = end;
-        } else {
-            out.push(byte as char);
-            index += 1;
-        }
-    }
-    out
-}
-
-/// `api_tokens` concrete columns in `_meta` order (abstract parents
-/// first, then `id`, then `api.py:37-51` declared order): the
-/// `INSERT` column set for [`api_token_insert_sql`].
-/// Moved verbatim with the endpoint builders.
-const API_TOKEN_INSERT_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "label",
-    "description",
-    "is_active",
-    "last_used",
-    "token",
-    "user_id",
-    "user_type",
-    "workspace_id",
-    "expired_at",
-    "is_service",
-    "allowed_rate_limit",
-];
-
-/// Token create (`:29-35`):
-/// `APIToken.objects.create(label=..., description=...,
-/// user=..., user_type=..., expired_at=...)`.
-///
-/// Django fills: `token` via `generate_token()` (`api.py:20-21`),
-/// `created_by_id` from the request user (`:31`, `None` when
-/// anonymous), `is_active` TRUE (`api.py:41`), `is_service` FALSE
-/// (`api.py:50-51`), `workspace_id` NULL (`api.py:49`,
-/// `blank=True`), rate `"60/min"`, and stamps.
-/// Moved verbatim with the endpoint executor.
-fn api_token_insert_sql() -> String {
-    format!(
-        "INSERT INTO api_tokens ({}) VALUES (:now, :now, :actor, NULL, NULL, \
-         :id, :label, :description, TRUE, NULL, :token, :user, :user_type, \
-         NULL, :expired_at, FALSE, '60/min')",
-        API_TOKEN_INSERT_COLUMNS.join(", ")
-    )
-}
-
-/// Token delete (`:46-64`): guarded lookup then `token.delete()`
-/// (`BaseModel.delete` stamps `deleted_at`, the concrete `save()`
-/// refreshes `updated_at`).
-/// Moved verbatim with the endpoint executor.
-fn api_token_soft_delete_sql() -> String {
-    "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk".to_owned()
-}
-
-/// Token PATCH (`:68-71`): same guarded lookup, then the partial
-/// serializer's full-row `UPDATE` (`SET` every writable attr,
-/// `deleted_at` included).
-/// Moved verbatim with the endpoint executor.
-fn api_token_patch_save_sql() -> String {
-    "UPDATE api_tokens SET label = :label, description = :description, \
-     is_service = :is_service, allowed_rate_limit = :rate, \
-     deleted_at = :deleted_at, created_by_id = :created_by, \
-     updated_at = :now WHERE id = :pk"
-        .to_owned()
+    .map_err(into_sqlx)
 }
 
 /// `deactivate_api_token` (`services/cli_tokens.py:1-19`, full file),
@@ -434,23 +384,36 @@ fn api_token_patch_save_sql() -> String {
 /// tests: bridge tokens are deactivated for API-key callers on
 /// rotation/consume.
 pub mod cli_token {
+    use super::*;
+
     /// `CLI_DEVICE_API_TOKEN_DESCRIPTION` (`cli_tokens.py:9`).
     pub(crate) const DEVICE_FLOW_DESCRIPTION: &str =
         pidash_db::auth_oauth::models::api_token_device_flow::DEVICE_FLOW_DESCRIPTION;
-
-    /// `APIToken.objects.filter(token=$1, is_active=true).update(
-    /// is_active=false, updated_at=$2)` — fixture F7 `emitted_sql` without
-    /// the description guard.
-    pub(crate) const DEACTIVATE_SQL: &str = "UPDATE \"api_tokens\" SET \"is_active\" = false, \"updated_at\" = $1 WHERE \"api_tokens\".\"token\" = $2 AND \"api_tokens\".\"is_active\" = true";
-
-    /// Same with the CLI-device guard
-    /// (`.filter(description=CLI_DEVICE_API_TOKEN_DESCRIPTION)`).
-    pub(crate) const DEACTIVATE_CLI_ONLY_SQL: &str = "UPDATE \"api_tokens\" SET \"is_active\" = false, \"updated_at\" = $1 WHERE \"api_tokens\".\"token\" = $2 AND \"api_tokens\".\"is_active\" = true AND \"api_tokens\".\"description\" = $3";
 
     /// `if not raw_token: return 0` (`cli_tokens.py:14-15`): `None` or `""`
     /// short-circuits with no query.
     pub fn is_noop_token(raw_token: Option<&str>) -> bool {
         raw_token.unwrap_or("").is_empty()
+    }
+
+    /// `APIToken.objects.filter(token=, is_active=True)[.filter(
+    /// description=CLI_DEVICE_API_TOKEN_DESCRIPTION)].update(
+    /// is_active=False, updated_at=now)` — fixture F7.
+    pub(crate) fn deactivate_stmt(
+        token: &str,
+        only_cli_device_tokens: bool,
+        now: DateTime<Utc>,
+    ) -> sea_orm::UpdateMany<api_tokens::Entity> {
+        let update = api_tokens::Entity::update_many()
+            .col_expr(api_tokens::Column::IsActive, Expr::value(false))
+            .col_expr(api_tokens::Column::UpdatedAt, Expr::value(now))
+            .filter(api_tokens::Column::Token.eq(token))
+            .filter(api_tokens::Column::IsActive.eq(true));
+        if only_cli_device_tokens {
+            update.filter(api_tokens::Column::Description.eq(DEVICE_FLOW_DESCRIPTION))
+        } else {
+            update
+        }
     }
 
     /// Mark an `APIToken` inactive after its exchange for an `mt_` token
@@ -459,36 +422,21 @@ pub mod cli_token {
     /// `only_cli_device_tokens` — not a device-flow token). The revoke
     /// endpoint does NOT use this helper (inline `is_active=False` save,
     /// `device.py:496-511`).
-    pub async fn deactivate_api_token<'e, E>(
-        ex: E,
+    pub async fn deactivate_api_token(
+        db: &impl ConnectionTrait,
         raw_token: Option<&str>,
         only_cli_device_tokens: bool,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
+    ) -> Result<u64, sqlx::Error> {
         let token = raw_token.unwrap_or("");
         if token.is_empty() {
             return Ok(0);
         }
-        let rows = if only_cli_device_tokens {
-            sqlx::query(DEACTIVATE_CLI_ONLY_SQL)
-                .bind(now)
-                .bind(token)
-                .bind(DEVICE_FLOW_DESCRIPTION)
-                .execute(ex)
-                .await?
-                .rows_affected()
-        } else {
-            sqlx::query(DEACTIVATE_SQL)
-                .bind(now)
-                .bind(token)
-                .execute(ex)
-                .await?
-                .rows_affected()
-        };
-        Ok(rows)
+        deactivate_stmt(token, only_cli_device_tokens, now)
+            .exec(db)
+            .await
+            .map(|done| done.rows_affected)
+            .map_err(into_sqlx)
     }
 }
 
@@ -496,193 +444,192 @@ pub mod cli_token {
 // machine_token
 // ---------------------------------------------------------------------------
 
+/// One `machine_token` stamp: `SET <column> = <value> WHERE <filter>`.
+async fn stamp_machine_tokens(
+    db: &impl ConnectionTrait,
+    column: machine_token::Column,
+    value: sea_orm::sea_query::SimpleExpr,
+    filter: sea_orm::Condition,
+) -> Result<u64, sqlx::Error> {
+    machine_token::Entity::update_many()
+        .col_expr(column, value)
+        .filter(filter)
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
+
+/// `revoked_at = <now>` over `filter` (every revoke shape below).
+fn revoke_machine_stmt(
+    now: sea_orm::sea_query::SimpleExpr,
+    filter: sea_orm::Condition,
+) -> sea_orm::UpdateMany<machine_token::Entity> {
+    machine_token::Entity::update_many()
+        .col_expr(machine_token::Column::RevokedAt, now)
+        .filter(filter)
+}
+
+async fn revoke_machine(
+    db: &impl ConnectionTrait,
+    now: sea_orm::sea_query::SimpleExpr,
+    filter: sea_orm::Condition,
+) -> Result<(), sqlx::Error> {
+    revoke_machine_stmt(now, filter)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
+fn by_hash(token_hash: &str) -> sea_orm::Condition {
+    sea_orm::Condition::all().add(machine_token::Column::TokenHash.eq(token_hash))
+}
+
+fn by_id(id: Uuid) -> sea_orm::Condition {
+    sea_orm::Condition::all().add(machine_token::Column::Id.eq(id))
+}
+
+/// `touch_machine_token` (`runner/authentication.py:81-94`): stamp
+/// `last_used_at = now` and renew the 60-day idle expiry
+/// `expires_at = now + 60d`. Both stamps land together; every touch
+/// renews the expiry so use keeps the credential alive.
+async fn touch_machine_tokens(
+    db: &impl ConnectionTrait,
+    last_used: sea_orm::sea_query::SimpleExpr,
+    expires: sea_orm::sea_query::SimpleExpr,
+    filter: sea_orm::Condition,
+) -> Result<(), sqlx::Error> {
+    machine_token::Entity::update_many()
+        .col_expr(machine_token::Column::LastUsedAt, last_used)
+        .col_expr(machine_token::Column::ExpiresAt, expires)
+        .filter(filter)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
 /// Middleware stamp (`api_authentication.py:60-64`):
-/// `MachineToken.objects.filter(pk).update(last_used_at=now)`, by
-/// presented hash, DB clock. Best-effort at the middleware call sites;
+/// `MachineToken.objects.filter(pk).update(last_used_at=now)` plus the
+/// idle-expiry renewal (`runner/authentication.py:81-94`), by presented
+/// hash, DB clock. Best-effort at the middleware call sites;
 /// the by-id twins are [`touch_machine_token_last_used_by_id`] (bound
 /// clock) and [`touch_machine_token_last_used_by_id_now`] (DB clock).
-const TOUCH_MACHINE_LAST_USED_SQL: &str =
-    "UPDATE \"machine_token\" SET \"last_used_at\" = now() WHERE \"token_hash\" = $1";
+pub async fn touch_machine_token_last_used_by_hash(
+    db: &impl ConnectionTrait,
+    token_hash: &str,
+) -> Result<(), sqlx::Error> {
+    // raw-sql: SeaORM cannot express INTERVAL '60 days' on the DB clock.
+    let expires = Expr::cust("CURRENT_TIMESTAMP + INTERVAL '60 days'");
+    touch_machine_tokens(
+        db,
+        Expr::current_timestamp().into(),
+        expires,
+        by_hash(token_hash),
+    )
+    .await
+}
 
-/// By-id DB-clock twin of [`touch_machine_token_last_used_by_hash`]
-/// (validators that resolve the id first and stamp `now()`).
-const TOUCH_MACHINE_LAST_USED_BY_ID_NOW_SQL: &str =
-    "UPDATE \"machine_token\" SET \"last_used_at\" = now() WHERE \"id\" = $1";
+/// Touch `last_used_at` by id with the DB clock (validators that resolve
+/// the id first and stamp `now()`), renewing the idle expiry.
+pub async fn touch_machine_token_last_used_by_id_now(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+) -> Result<(), sqlx::Error> {
+    // raw-sql: SeaORM cannot express INTERVAL '60 days' on the DB clock.
+    let expires = Expr::cust("CURRENT_TIMESTAMP + INTERVAL '60 days'");
+    touch_machine_tokens(db, Expr::current_timestamp().into(), expires, by_id(id)).await
+}
 
-/// By-id bound-clock twin (device, CLI, enroll and runner validators
-/// stamp their frozen `now`).
-const TOUCH_MACHINE_LAST_USED_BY_ID_SQL: &str =
-    "UPDATE \"machine_token\" SET \"last_used_at\" = $1 WHERE \"id\" = $2";
+/// Touch `last_used_at` by id with the caller's clock (device, CLI,
+/// enroll and runner validators stamp their frozen `now`), renewing the
+/// 60-day idle expiry (`expires_at = now + 60d`).
+pub async fn touch_machine_token_last_used_by_id(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    touch_machine_tokens(
+        db,
+        Expr::value(now),
+        Expr::value(at(now + chrono::Duration::days(60))),
+        by_id(id),
+    )
+    .await
+}
 
 /// Middleware revoke-then-deny (`api_authentication.py:54-58`):
 /// `machine_token.revoke()` stamps `revoked_at` and the request is
 /// denied. By presented hash, DB clock.
-const REVOKE_MACHINE_BY_HASH_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = now() WHERE \"token_hash\" = $1";
-
-/// By-id DB-clock twin of [`revoke_machine_token_by_hash`].
-const REVOKE_MACHINE_BY_ID_NOW_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = now() WHERE \"id\" = $1";
-
-/// By-id bound-clock revoke (moved verbatim from the enroll column
-/// consts): validators stamp their frozen `now`.
-const REVOKE_MACHINE_BY_ID_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"id\" = $2";
-
-/// Conditional by-id revoke (device rotate path): only a live row
-/// flips, so a double rotate keeps the first `revoked_at`.
-const REVOKE_MACHINE_BY_ID_IF_ACTIVE_SQL: &str =
-    "UPDATE machine_token SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL";
-
-/// Touch `last_used_at` by presented hash (middleware shape).
-pub async fn touch_machine_token_last_used_by_hash<'e, E>(
-    ex: E,
+pub async fn revoke_machine_token_by_hash(
+    db: &impl ConnectionTrait,
     token_hash: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_MACHINE_LAST_USED_SQL)
-        .bind(token_hash)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(db, Expr::current_timestamp().into(), by_hash(token_hash)).await
 }
 
-/// Touch `last_used_at` by id with DB `now()`.
-pub async fn touch_machine_token_last_used_by_id_now<'e, E>(
-    ex: E,
+/// Revoke by id with the DB clock.
+pub async fn revoke_machine_token_by_id_now(
+    db: &impl ConnectionTrait,
     id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_MACHINE_LAST_USED_BY_ID_NOW_SQL)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(db, Expr::current_timestamp().into(), by_id(id)).await
 }
 
-/// Touch `last_used_at` by id with the caller's clock.
-pub async fn touch_machine_token_last_used_by_id<'e, E>(
-    ex: E,
+/// Revoke by id with the caller's clock (validators stamp their frozen
+/// `now`).
+pub async fn revoke_machine_token_by_id(
+    db: &impl ConnectionTrait,
     id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_MACHINE_LAST_USED_BY_ID_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(db, Expr::value(now), by_id(id)).await
 }
 
-/// Revoke-then-deny by presented hash (middleware shape).
-pub async fn revoke_machine_token_by_hash<'e, E>(ex: E, token_hash: &str) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_MACHINE_BY_HASH_SQL)
-        .bind(token_hash)
-        .execute(ex)
-        .await
-        .map(|_| ())
-}
-
-/// Revoke by id with DB `now()`.
-pub async fn revoke_machine_token_by_id_now<'e, E>(ex: E, id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_MACHINE_BY_ID_NOW_SQL)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
-}
-
-/// Revoke by id with the caller's clock.
-pub async fn revoke_machine_token_by_id<'e, E>(
-    ex: E,
+/// Revoke by id with the caller's clock, only when still live (device
+/// rotate path): a double rotate keeps the first `revoked_at`.
+pub async fn revoke_machine_token_by_id_if_active(
+    db: &impl ConnectionTrait,
     id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_MACHINE_BY_ID_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(
+        db,
+        Expr::value(now),
+        by_id(id).add(machine_token::Column::RevokedAt.is_null()),
+    )
+    .await
 }
 
-/// Revoke by id with the caller's clock, only when still live.
-pub async fn revoke_machine_token_by_id_if_active<'e, E>(
-    ex: E,
-    id: Uuid,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_MACHINE_BY_ID_IF_ACTIVE_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+/// Workspace machine-token revoke filter (`ee-overlay`
+/// `service.py:462-467`, `token_qs.update(revoked_at=now)`): live rows in
+/// the workspace, optionally only one user's.
+fn workspace_tokens_filter(workspace_id: Uuid, user_id: Option<Uuid>) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .add(machine_token::Column::RevokedAt.is_null())
+        .add_option(user_id.map(|user| machine_token::Column::UserId.eq(user)))
 }
-
-/// Workspace machine-token revoke, user-scoped arm (`ee-overlay`
-/// `service.py:462-467`, `token_qs.update(revoked_at=now)`): the
-/// overlay `revoke_machine_tokens` text verbatim — unquoted
-/// identifiers kept (D6 gap PIDASHCONV-1618). `$1` now, `$2`
-/// workspace, `$3` user, live rows only. Single-column stamp, no
-/// `updated_at` (the table has none).
-const REVOKE_MACHINE_TOKENS_BY_WORKSPACE_AND_USER_SQL: &str =
-    "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL AND user_id = $3";
-
-/// Workspace machine-token revoke, whole-workspace arm: same source,
-/// `$1` now, `$2` workspace, live rows only.
-const REVOKE_MACHINE_TOKENS_BY_WORKSPACE_SQL: &str =
-    "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL";
 
 /// Revoke live machine tokens by workspace, optionally scoped to one
 /// user (`_revoke_runtime_access`, `ee-overlay`
-/// `service.py:457-477`). Runs on the caller's executor — the overlay
+/// `service.py:457-477`). Runs on the caller's connection — the overlay
 /// calls this on its event transaction; `now` is the caller's shared
 /// stamp (tokens and the session sweep stamp the same instant).
-pub async fn revoke_machine_tokens_by_workspace<'e, E>(
-    ex: E,
+/// Single-column stamp, no `updated_at` (the table has none).
+pub async fn revoke_machine_tokens_by_workspace(
+    db: &impl ConnectionTrait,
     workspace_id: Uuid,
     user_id: Option<Uuid>,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    if let Some(user) = user_id {
-        sqlx::query(REVOKE_MACHINE_TOKENS_BY_WORKSPACE_AND_USER_SQL)
-            .bind(now)
-            .bind(workspace_id)
-            .bind(user)
-            .execute(ex)
-            .await
-            .map(|_| ())
-    } else {
-        sqlx::query(REVOKE_MACHINE_TOKENS_BY_WORKSPACE_SQL)
-            .bind(now)
-            .bind(workspace_id)
-            .execute(ex)
-            .await
-            .map(|_| ())
-    }
+) -> Result<(), sqlx::Error> {
+    revoke_machine(
+        db,
+        Expr::value(now),
+        workspace_tokens_filter(workspace_id, user_id),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -692,192 +639,133 @@ where
 /// Device rotate revoke (`device.py:113-117`):
 /// `MachineToken.objects.select_for_update().filter(workspace=,
 /// dev_machine=, revoked_at__isnull=True).update(revoked_at=now)`.
-/// Moved verbatim from the device-machine consts: `$1` now, `$2`
-/// workspace, `$3` dev machine, live rows only. The shape differs
-/// from the enroll twin below only in conjunct order (unguarded
-/// parens here vs `Q`-sorted parens there); the two stay separate
-/// functions per D6.
-const ROTATE_REVOKE_FOR_PAIR_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"workspace_id\" = $2 AND \"machine_token\".\"dev_machine_id\" = $3 AND \"machine_token\".\"revoked_at\" IS NULL";
-
-/// Enroll/desktop rotate revoke, machine branch
-/// (`enrollment.py:174-203`, `desktop.py:134-138`): `$1` now, `$2`
-/// dev machine, `$3` workspace, live rows only. Moved verbatim (the
-/// enroll and desktop builders spelled identical text). NOTE the
-/// filter asymmetry vs B1: `user` is NOT in the filter
-/// (BUG-rotate-user-omission, ported as-is).
-const ROTATE_REVOKE_FOR_MACHINE_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"workspace_id\" = $3)";
-
-/// Enroll rotate revoke, legacy branch (no dev machine): `$1` now,
-/// `$2` host label, `$3` user, `$4` workspace, over rows with
-/// `dev_machine_id IS NULL`. Moved verbatim.
-const ROTATE_REVOKE_LEGACY_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IS NULL AND \"machine_token\".\"host_label\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = $3 AND \"machine_token\".\"workspace_id\" = $4)";
-
-/// Machine revoke-all (`runners.py:198,238`, delete D1): `$1` now,
-/// `$2` dev machine, live rows only, no workspace scope. Moved
-/// verbatim (the manage builder, the delete const and the teardown
-/// callers spelled identical text).
-const REVOKE_TOKENS_FOR_MACHINE_SQL: &str =
-    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL)";
-
-/// Delete-cascade `SET_NULL` (`delete.py`): token rows SURVIVE with
-/// a NULLed machine link. `$1` dev machine. Moved verbatim.
-const CLEAR_TOKEN_MACHINES_SQL: &str =
-    "UPDATE \"machine_token\" SET \"dev_machine_id\" = NULL WHERE \"machine_token\".\"dev_machine_id\" IN ($1)";
-
-/// Machine-token mint: the plain 12-column `INSERT` in
-/// `mt_cols::COLUMNS` order (`$1..$12`: id, user, dev machine,
-/// workspace, host label, hash, fingerprint, label, is_service,
-/// created, last_used, revoked). The device const, the enroll
-/// builder and the desktop builder spelled identical text; the
-/// column list is rendered from the shared const so drift fails the
-/// pin test, not silently.
-fn machine_token_insert_sql() -> String {
-    let cols = pidash_db::runner_enroll::columns::machine_token::COLUMNS
-        .iter()
-        .map(|col| format!("\"{col}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
-        pidash_db::runner_enroll::columns::machine_token::TABLE,
-        (1..=pidash_db::runner_enroll::columns::machine_token::COLUMNS.len())
-            .map(|i| format!("${i}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-    )
+fn device_pair_filter(workspace_id: Uuid, dev_machine_id: Uuid) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .add(machine_token::Column::DevMachineId.eq(dev_machine_id))
+        .add(machine_token::Column::RevokedAt.is_null())
 }
 
-/// Sign-out revoke over bundled machines (`desktop.py:170-178`):
-/// `$1` now, `$2..` dev-machine ids in list order, live rows only.
-/// Moved verbatim with the builder's contract: empty input is a
-/// caller bug (Django raises `EmptyResultSet`), so the driver
-/// asserts like the builder did.
-fn signout_revoke_tokens_sql(machine_count: usize) -> String {
-    assert!(
-        machine_count > 0,
-        "signout revoke needs at least one machine id (the source returns 204 with no SQL when no machines match)"
-    );
-    format!(
-        "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ({}) AND \"machine_token\".\"revoked_at\" IS NULL)",
-        (0..machine_count)
-            .map(|i| format!("${}", 2 + i))
-            .collect::<Vec<_>>()
-            .join(", "),
-    )
+/// Enroll/desktop rotate revoke, machine branch
+/// (`enrollment.py:174-203`, `desktop.py:134-138`): live rows for the
+/// machine in the workspace. NOTE the filter asymmetry vs the device
+/// pair: `user` is NOT in the filter (BUG-rotate-user-omission, ported
+/// as-is), and there is no `LIMIT` (every live row in scope).
+fn machine_in_workspace_filter(dev_machine_id: Uuid, workspace_id: Uuid) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(machine_token::Column::DevMachineId.eq(dev_machine_id))
+        .add(machine_token::Column::RevokedAt.is_null())
+        .add(machine_token::Column::WorkspaceId.eq(workspace_id))
+}
+
+/// Enroll rotate revoke, legacy branch (no dev machine): live rows by
+/// host label, user and workspace with `dev_machine_id IS NULL`.
+fn legacy_host_filter(host_label: &str, user_id: Uuid, workspace_id: Uuid) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(machine_token::Column::DevMachineId.is_null())
+        .add(machine_token::Column::HostLabel.eq(host_label))
+        .add(machine_token::Column::RevokedAt.is_null())
+        .add(machine_token::Column::UserId.eq(user_id))
+        .add(machine_token::Column::WorkspaceId.eq(workspace_id))
+}
+
+/// Machine revoke-all (`runners.py:198,238`, delete D1) and desktop
+/// sign-out (`desktop.py:170-178`): live rows for the machines, no
+/// workspace scope.
+fn dev_machines_filter(dev_machine_ids: &[Uuid]) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(machine_token::Column::DevMachineId.is_in(dev_machine_ids.iter().copied()))
+        .add(machine_token::Column::RevokedAt.is_null())
 }
 
 /// Revoke every token for one device pair (device rotate shape).
-pub async fn revoke_tokens_for_device_pair<'e, E>(
-    ex: E,
+pub async fn revoke_tokens_for_device_pair(
+    db: &impl ConnectionTrait,
     workspace_id: Uuid,
     dev_machine_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(ROTATE_REVOKE_FOR_PAIR_SQL)
-        .bind(now)
-        .bind(workspace_id)
-        .bind(dev_machine_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(
+        db,
+        Expr::value(now),
+        device_pair_filter(workspace_id, dev_machine_id),
+    )
+    .await
 }
 
 /// Revoke live tokens for one machine in one workspace (enroll and
 /// desktop rotate shape).
-pub async fn revoke_tokens_for_machine_in_workspace<'e, E>(
-    ex: E,
+pub async fn revoke_tokens_for_machine_in_workspace(
+    db: &impl ConnectionTrait,
     dev_machine_id: Uuid,
     workspace_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(ROTATE_REVOKE_FOR_MACHINE_SQL)
-        .bind(now)
-        .bind(dev_machine_id)
-        .bind(workspace_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(
+        db,
+        Expr::value(now),
+        machine_in_workspace_filter(dev_machine_id, workspace_id),
+    )
+    .await
 }
 
 /// Revoke live legacy tokens by host label (enroll rotate without a
 /// dev machine).
-pub async fn revoke_tokens_legacy_host<'e, E>(
-    ex: E,
+pub async fn revoke_tokens_legacy_host(
+    db: &impl ConnectionTrait,
     host_label: &str,
     user_id: Uuid,
     workspace_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(ROTATE_REVOKE_LEGACY_SQL)
-        .bind(now)
-        .bind(host_label)
-        .bind(user_id)
-        .bind(workspace_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(
+        db,
+        Expr::value(now),
+        legacy_host_filter(host_label, user_id, workspace_id),
+    )
+    .await
 }
 
 /// Revoke live tokens for one dev machine (manage revoke-all and
 /// delete D1 shape; no workspace scope).
-pub async fn revoke_tokens_for_dev_machine<'e, E>(
-    ex: E,
+pub async fn revoke_tokens_for_dev_machine(
+    db: &impl ConnectionTrait,
     dev_machine_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_TOKENS_FOR_MACHINE_SQL)
-        .bind(now)
-        .bind(dev_machine_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_machine(db, Expr::value(now), dev_machines_filter(&[dev_machine_id])).await
 }
 
 /// Revoke live tokens for several dev machines (desktop sign-out).
 /// The only caller returns 204 before reaching here with an empty
-/// list; an empty list here panics, like the moved builder.
-pub async fn revoke_tokens_for_dev_machines<'e, E>(
-    ex: E,
+/// list; an empty list here panics (Django raises `EmptyResultSet`:
+/// the source returns 204 with no SQL when no machines match).
+pub async fn revoke_tokens_for_dev_machines(
+    db: &impl ConnectionTrait,
     dev_machine_ids: &[Uuid],
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = signout_revoke_tokens_sql(dev_machine_ids.len());
-    let mut query = sqlx::query(&sql).bind(now);
-    for id in dev_machine_ids {
-        query = query.bind(*id);
-    }
-    query.execute(ex).await.map(|_| ())
+) -> Result<(), sqlx::Error> {
+    assert!(
+        !dev_machine_ids.is_empty(),
+        "signout revoke needs at least one machine id (the source returns 204 with no SQL when no machines match)"
+    );
+    revoke_machine(db, Expr::value(now), dev_machines_filter(dev_machine_ids)).await
 }
 
-/// NULL a deleted machine's link on its token rows (delete cascade;
-/// the rows survive).
-pub async fn clear_token_dev_machines<'e, E>(ex: E, dev_machine_id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(CLEAR_TOKEN_MACHINES_SQL)
-        .bind(dev_machine_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+/// NULL a deleted machine's link on its token rows (delete cascade
+/// `SET_NULL`, `delete.py`: the token rows SURVIVE).
+pub async fn clear_token_dev_machines(
+    db: &impl ConnectionTrait,
+    dev_machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    stamp_machine_tokens(
+        db,
+        machine_token::Column::DevMachineId,
+        Expr::value(None::<Uuid>),
+        sea_orm::Condition::all().add(machine_token::Column::DevMachineId.eq(dev_machine_id)),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Resolved inputs for [`insert_machine_token`]: the caller mints
@@ -897,264 +785,254 @@ pub struct NewMachineToken {
     pub created_at: DateTime<Utc>,
 }
 
+/// The minted `machine_token` row: every column, `last_used_at` and
+/// `revoked_at` NULL.
+fn machine_token_row(params: &NewMachineToken) -> machine_token::ActiveModel {
+    let expires_at = params.created_at + chrono::Duration::days(60);
+    machine_token::ActiveModel {
+        id: Set(params.id),
+        user_id: Set(params.user_id),
+        dev_machine_id: Set(params.dev_machine_id),
+        workspace_id: Set(params.workspace_id),
+        host_label: Set(params.host_label.clone()),
+        token_hash: Set(params.token_hash.clone()),
+        token_fingerprint: Set(params.token_fingerprint.clone()),
+        label: Set(params.label.clone()),
+        is_service: Set(params.is_service),
+        created_at: Set(at(params.created_at)),
+        last_used_at: Set(None),
+        revoked_at: Set(None),
+        expires_at: Set(Some(at(expires_at))),
+    }
+}
+
 /// Mint one machine token row (device, enroll and desktop share the
-/// 12-column shape; `last_used_at`/`revoked_at` NULL).
-pub async fn insert_machine_token<'e, E>(ex: E, params: &NewMachineToken) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(&machine_token_insert_sql())
-        .bind(params.id)
-        .bind(params.user_id)
-        .bind(params.dev_machine_id)
-        .bind(params.workspace_id)
-        .bind(&params.host_label)
-        .bind(&params.token_hash)
-        .bind(&params.token_fingerprint)
-        .bind(&params.label)
-        .bind(params.is_service)
-        .bind(params.created_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(ex)
+/// shape).
+pub async fn insert_machine_token(
+    db: &impl ConnectionTrait,
+    params: &NewMachineToken,
+) -> Result<(), sqlx::Error> {
+    machine_token::Entity::insert(machine_token_row(params))
+        .exec_without_returning(db)
         .await
         .map(|_| ())
+        .map_err(into_sqlx)
 }
 
 // ---------------------------------------------------------------------------
 // runner_session
 // ---------------------------------------------------------------------------
 
-/// Single-session revoke (`sessions.py:307-309` /
-/// `pubsub.py:96-104`): unconditional stamp by id, moved verbatim
-/// from the session model consts.
-const REVOKE_SESSION_SQL: &str =
-    "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner_session\".\"id\" = $3";
+/// `revoked_at = now, revoked_reason = reason` over `filter` (every
+/// session revoke shape).
+fn revoke_sessions_stmt(
+    now: DateTime<Utc>,
+    reason: &str,
+    filter: sea_orm::Condition,
+) -> sea_orm::UpdateMany<runner_session::Entity> {
+    runner_session::Entity::update_many()
+        .col_expr(runner_session::Column::RevokedAt, Expr::value(now))
+        .col_expr(runner_session::Column::RevokedReason, Expr::value(reason))
+        .filter(filter)
+}
 
-/// Session heartbeat (`sessions.py`, `last_seen_at` stamp on every
-/// poll), moved verbatim from the session model consts.
-const TOUCH_SESSION_SQL: &str =
-    "UPDATE \"runner_session\" SET \"last_seen_at\" = $1 WHERE \"runner_session\".\"id\" = $2";
+async fn revoke_sessions(
+    db: &impl ConnectionTrait,
+    now: DateTime<Utc>,
+    reason: &str,
+    filter: sea_orm::Condition,
+) -> Result<u64, sqlx::Error> {
+    revoke_sessions_stmt(now, reason, filter)
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
 
-/// Revoke one session by id.
-pub async fn revoke_runner_session<'e, E>(
-    ex: E,
+/// Revoke one session by id (`sessions.py:307-309` / `pubsub.py:96-104`):
+/// an unconditional stamp.
+pub async fn revoke_runner_session(
+    db: &impl ConnectionTrait,
     id: Uuid,
     now: DateTime<Utc>,
     reason: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_SESSION_SQL)
-        .bind(now)
-        .bind(reason)
-        .bind(id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_sessions(
+        db,
+        now,
+        reason,
+        sea_orm::Condition::all().add(runner_session::Column::Id.eq(id)),
+    )
+    .await
+    .map(|_| ())
 }
 
-/// Revoke active sessions for one runner (enroll revoke S2,
-/// `:618-620`). `$1` = now, `$2` = stored reason, `$3` = runner. The
-/// `WHERE` order (`revoked_at IS NULL` first) is Django's `Q`-sorted
-/// kwargs, not the source filter order. Moved verbatim from the
-/// revoke kernel const.
-const REVOKE_RUNNER_SESSIONS_SQL: &str =
-    "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)";
-
-/// Revoke every live session for one runner.
-pub async fn revoke_runner_sessions_for_runner<'e, E>(
-    ex: E,
+/// Revoke every live session for one runner (enroll revoke S2,
+/// `:618-620`).
+pub async fn revoke_runner_sessions_for_runner(
+    db: &impl ConnectionTrait,
     runner_id: Uuid,
     now: DateTime<Utc>,
     reason: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REVOKE_RUNNER_SESSIONS_SQL)
-        .bind(now)
-        .bind(reason)
-        .bind(runner_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    revoke_sessions(
+        db,
+        now,
+        reason,
+        sea_orm::Condition::all()
+            .add(runner_session::Column::RevokedAt.is_null())
+            .add(runner_session::Column::RunnerId.eq(runner_id)),
+    )
+    .await
+    .map(|_| ())
 }
 
-/// Workspace session sweep, owner-scoped arm (`ee-overlay`
-/// `service.py:470-475`): Django's spanning
-/// `runner__workspace`/`runner__owner` update filter as the equivalent
-/// `runner_id IN (SELECT ...)` — the overlay
-/// `revoke_workspace_sessions` text verbatim (D6 gap PIDASHCONV-1618).
-/// `$1` now, `$2` reason, `$3` workspace, `$4` owner, live rows only.
-const REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_AND_OWNER_SQL: &str =
-    "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3 AND owner_id = $4)";
-
-/// Workspace session sweep, whole-workspace arm: same source, `$1`
-/// now, `$2` reason, `$3` workspace, live rows only.
-const REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_SQL: &str =
-    "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3)";
+/// Workspace session sweep (`ee-overlay` `service.py:470-475`): Django's
+/// spanning `runner__workspace` / `runner__owner` update filter as the
+/// equivalent `runner_id IN (SELECT id FROM runner WHERE ...)`, live rows
+/// only, optionally one owner's runners.
+fn workspace_sessions_filter(workspace_id: Uuid, owner_id: Option<Uuid>) -> sea_orm::Condition {
+    let runners = Query::select()
+        .column(runner::Column::Id)
+        .from(runner::Entity)
+        .and_where(runner::Column::WorkspaceId.eq(workspace_id))
+        .and_where_option(owner_id.map(|owner| runner::Column::OwnerId.eq(owner)))
+        .to_owned();
+    sea_orm::Condition::all()
+        .add(runner_session::Column::RevokedAt.is_null())
+        .add(runner_session::Column::RunnerId.in_subquery(runners))
+}
 
 /// Revoke live runner sessions by workspace, optionally scoped to one
 /// owner (`_revoke_runtime_access`, `ee-overlay`
-/// `service.py:457-477`). Runs on the caller's executor with the
+/// `service.py:457-477`). Runs on the caller's connection with the
 /// caller's shared `now`; the overlay passes its `membership_revoked`
 /// reason.
-pub async fn revoke_runner_sessions_by_workspace<'e, E>(
-    ex: E,
+pub async fn revoke_runner_sessions_by_workspace(
+    db: &impl ConnectionTrait,
     workspace_id: Uuid,
     owner_id: Option<Uuid>,
     now: DateTime<Utc>,
     reason: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    if let Some(owner) = owner_id {
-        sqlx::query(REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_AND_OWNER_SQL)
-            .bind(now)
-            .bind(reason)
-            .bind(workspace_id)
-            .bind(owner)
-            .execute(ex)
-            .await
-            .map(|_| ())
-    } else {
-        sqlx::query(REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_SQL)
-            .bind(now)
-            .bind(reason)
-            .bind(workspace_id)
-            .execute(ex)
-            .await
-            .map(|_| ())
-    }
+) -> Result<(), sqlx::Error> {
+    revoke_sessions(
+        db,
+        now,
+        reason,
+        workspace_sessions_filter(workspace_id, owner_id),
+    )
+    .await
+    .map(|_| ())
 }
 
-/// Stamp a session's heartbeat.
-pub async fn touch_runner_session<'e, E>(
-    ex: E,
+/// Stamp a session's heartbeat (`sessions.py`, `last_seen_at` on every
+/// poll).
+pub async fn touch_runner_session(
+    db: &impl ConnectionTrait,
     id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_SESSION_SQL)
-        .bind(now)
-        .bind(id)
-        .execute(ex)
+) -> Result<(), sqlx::Error> {
+    runner_session::Entity::update_many()
+        .col_expr(runner_session::Column::LastSeenAt, Expr::value(now))
+        .filter(runner_session::Column::Id.eq(id))
+        .exec(db)
         .await
         .map(|_| ())
+        .map_err(into_sqlx)
 }
 
-/// Idle-sweep bulk revoke (moved verbatim with the sweeps builder):
-/// one `UPDATE ... WHERE id IN (...)` over the swept ids. Empty input
-/// returns `Ok(0)` with no query, like the sweeps driver's early
-/// return (the builder would emit an invalid `IN ()`).
-pub async fn revoke_runner_sessions_by_ids<'e, E>(
-    ex: E,
+/// Idle-sweep bulk revoke: one `UPDATE ... WHERE id IN (...)` over the
+/// swept ids. Empty input returns `Ok(0)` with no query, like the sweeps
+/// driver's early return.
+pub async fn revoke_runner_sessions_by_ids(
+    db: &impl ConnectionTrait,
     ids: &[Uuid],
     now: DateTime<Utc>,
     reason: &str,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<u64, sqlx::Error> {
     if ids.is_empty() {
         return Ok(0);
     }
-    let sql = revoke_sessions_update(ids.len());
-    let mut query = sqlx::query(&sql).bind(now).bind(reason);
-    for sid in ids {
-        query = query.bind(*sid);
-    }
-    query.execute(ex).await.map(|done| done.rows_affected())
-}
-
-/// Bulk session revoke for `session_count` ids.
-/// Moved verbatim with the sweeps executor.
-fn revoke_sessions_update(session_count: usize) -> String {
-    let placeholders = (0..session_count)
-        .map(|i| format!("${}", i + 3))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-         \"runner_session\".\"id\" IN ({placeholders})"
+    revoke_sessions(
+        db,
+        now,
+        reason,
+        sea_orm::Condition::all().add(runner_session::Column::Id.is_in(ids.iter().copied())),
     )
+    .await
 }
 
 /// Session open (`views/sessions.py:169+184`): `create(runner=,
-/// protocol_version=, last_seen_at=now())`. Moved verbatim from the
-/// session model consts: `$1` id (caller-supplied fresh `uuid4`),
-/// `$2` runner, `$3` protocol version, `$4` `created_at`
-/// (`auto_now_add`), `$5` `last_seen_at`, `$6` `revoked_at` (NULL),
-/// `$7` `revoked_reason` (`""` default). No `RETURNING`: the PK is
+/// protocol_version=, last_seen_at=now())`: caller-supplied fresh
+/// `uuid4`, `created_at` (`auto_now_add`), `revoked_at` NULL,
+/// `revoked_reason` `""` (the default). No `RETURNING`: the PK is
 /// supplied, so Django fetches nothing back.
-const OPEN_SESSION_SQL: &str =
-    "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)";
-
-/// Runner-level session fast delete (delete cascade): `$1..` runner
-/// ids in fetch order. Moved verbatim from the delete kernel.
-fn delete_runner_sessions_sql(runner_count: usize) -> String {
-    format!(
-        "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ({})",
-        (1..=runner_count)
-            .map(|index| format!("${index}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-    )
+fn open_session_row(
+    id: Uuid,
+    runner_id: Uuid,
+    protocol_version: i32,
+    created_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
+) -> runner_session::ActiveModel {
+    runner_session::ActiveModel {
+        id: Set(id),
+        runner_id: Set(runner_id),
+        protocol_version: Set(protocol_version),
+        created_at: Set(at(created_at)),
+        last_seen_at: Set(Some(at(last_seen_at))),
+        revoked_at: Set(None),
+        revoked_reason: Set(String::new()),
+    }
 }
 
 /// Open one runner session. The two stamps are separate `now()` calls
 /// in Django's evaluation order: the `last_seen_at` kwarg first, then
 /// the `auto_now_add` `created_at` — so `last_seen_at` is never after
 /// `created_at`, like the source.
-pub async fn open_runner_session<'e, E>(
-    ex: E,
+pub async fn open_runner_session(
+    db: &impl ConnectionTrait,
     id: Uuid,
     runner_id: Uuid,
     protocol_version: i32,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<(), sqlx::Error> {
     let last_seen_at = Utc::now();
     let created_at = Utc::now();
-    sqlx::query(OPEN_SESSION_SQL)
-        .bind(id)
-        .bind(runner_id)
-        .bind(protocol_version)
-        .bind(created_at)
-        .bind(last_seen_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind("")
-        .execute(ex)
-        .await
-        .map(|_| ())
+    runner_session::Entity::insert(open_session_row(
+        id,
+        runner_id,
+        protocol_version,
+        created_at,
+        last_seen_at,
+    ))
+    .exec_without_returning(db)
+    .await
+    .map(|_| ())
+    .map_err(into_sqlx)
+}
+
+/// Runner-level session fast delete (delete cascade) over the runner
+/// ids.
+fn delete_runner_sessions_stmt(runner_ids: &[Uuid]) -> sea_orm::DeleteMany<runner_session::Entity> {
+    runner_session::Entity::delete_many()
+        .filter(runner_session::Column::RunnerId.is_in(runner_ids.iter().copied()))
 }
 
 /// Delete every session for several runners (delete cascade). The
 /// drivers never pass an empty list (the collector returns early on
-/// no rows); an empty list here is a no-op rather than an invalid
-/// `IN ()`, like the sweeps bulk revoke.
-pub async fn delete_runner_sessions_for_runners<'e, E>(
-    ex: E,
+/// no rows); an empty list here is a no-op rather than an `IN ()`, like
+/// the sweeps bulk revoke.
+pub async fn delete_runner_sessions_for_runners(
+    db: &impl ConnectionTrait,
     runner_ids: &[Uuid],
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<(), sqlx::Error> {
     if runner_ids.is_empty() {
         return Ok(());
     }
-    let sql = delete_runner_sessions_sql(runner_ids.len());
-    let mut query = sqlx::query(&sql);
-    for id in runner_ids {
-        query = query.bind(*id);
-    }
-    query.execute(ex).await.map(|_| ())
+    delete_runner_sessions_stmt(runner_ids)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
 }
 
 #[cfg(test)]
@@ -1171,43 +1049,92 @@ mod tests {
         serde_json::from_str(&body).unwrap_or_else(|e| panic!("{name} is valid JSON: {e}"))
     }
 
-    // Moved from the token handlers: translator vectors over the moved
-    // endpoint builders.
-    #[test]
-    fn bind_placeholders_vectors() {
-        assert_eq!(
-            bind_placeholders(api_token_insert_sql()),
-            "INSERT INTO api_tokens (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, TRUE, NULL, $7, $8, $9, NULL, $10, FALSE, '60/min')"
-        );
-        assert_eq!(
-            bind_placeholders(api_token_soft_delete_sql()),
-            "UPDATE api_tokens SET deleted_at = $1, updated_at = $2 WHERE id = $3"
-        );
-        assert_eq!(
-            bind_placeholders(api_token_patch_save_sql()),
-            "UPDATE api_tokens SET label = $1, description = $2, is_service = $3, allowed_rate_limit = $4, deleted_at = $5, created_by_id = $6, updated_at = $7 WHERE id = $8"
-        );
+    /// The rendered statement (values inlined), for shape pins.
+    fn sql<Q: sea_orm::QueryTrait>(stmt: &Q) -> String {
+        stmt.build(sea_orm::DbBackend::Postgres).to_string()
     }
 
-    // Moved write half of the endpoint unit test: builder shapes for
-    // the token lifecycle (the read-builder half stays with the
-    // queries module).
+    fn sample_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-05T10:00:00Z")
+            .expect("rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    // The token lifecycle statements: the create row carries Django's
+    // model defaults, the PATCH sets every writable attr (no
+    // `expired_at` / `user_type`), stamps go by id.
     #[test]
-    fn api_token_write_builders() {
-        assert_eq!(API_TOKEN_INSERT_COLUMNS.len(), 17);
-        let insert = api_token_insert_sql();
-        assert!(insert.contains("INSERT INTO api_tokens (created_at, updated_at"));
-        assert!(insert.contains(":token, :user, :user_type, NULL, :expired_at, FALSE, '60/min'"));
-        assert_eq!(
-            api_token_soft_delete_sql(),
-            "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk"
+    fn api_token_write_statements() {
+        let params = NewApiToken {
+            label: "L".to_owned(),
+            description: "D".to_owned(),
+            user_id: Uuid::nil(),
+            user_type: 1,
+            expired_at: None,
+            created_by: None,
+        };
+        let now = sample_now();
+        let insert = sql(&api_tokens::Entity::insert(issue_token_row(
+            &params,
+            Uuid::nil(),
+            "pi_dash_api_x",
+            now,
+            now,
+        )));
+        assert!(
+            insert.starts_with("INSERT INTO \"api_tokens\" ("),
+            "{insert}"
         );
-        let save = api_token_patch_save_sql();
-        assert!(save.contains("is_service = :is_service"));
-        assert!(save.contains("deleted_at = :deleted_at"));
-        assert!(save.contains("created_by_id = :created_by"));
-        assert!(!save.contains("expired_at"));
-        assert!(!save.contains("user_type"));
+        for column in [
+            "\"created_at\"",
+            "\"updated_at\"",
+            "\"created_by_id\"",
+            "\"updated_by_id\"",
+            "\"deleted_at\"",
+            "\"is_active\"",
+            "\"last_used\"",
+            "\"workspace_id\"",
+            "\"is_service\"",
+            "\"allowed_rate_limit\"",
+        ] {
+            assert!(insert.contains(column), "insert sets {column}: {insert}");
+        }
+        assert!(insert.contains("'60/min'"), "{insert}");
+        assert!(
+            insert.contains("TRUE") && insert.contains("FALSE"),
+            "{insert}"
+        );
+        let patch = ApiTokenPatch {
+            label: "L".to_owned(),
+            description: "D".to_owned(),
+            is_service: true,
+            allowed_rate_limit: "10/min".to_owned(),
+            deleted_at: None,
+            created_by: None,
+        };
+        let save = sql(&update_token_stmt(Uuid::nil(), now, &patch));
+        for set in [
+            "\"label\" = 'L'",
+            "\"description\" = 'D'",
+            "\"is_service\" = TRUE",
+            "\"allowed_rate_limit\" = '10/min'",
+            "\"deleted_at\" = NULL",
+            "\"created_by_id\" = NULL",
+            "\"updated_at\" = '2026-11-05 10:00:00.000000 +00:00'",
+        ] {
+            assert!(save.contains(set), "patch sets {set}: {save}");
+        }
+        assert!(!save.contains("expired_at"), "{save}");
+        assert!(!save.contains("user_type"), "{save}");
+        assert!(
+            save.ends_with("WHERE \"api_tokens\".\"id\" = '00000000-0000-0000-0000-000000000000'"),
+            "{save}"
+        );
+        let touch = sql(&touch_last_used_by_token_stmt("tok"));
+        assert_eq!(
+            touch,
+            "UPDATE \"api_tokens\" SET \"last_used\" = CURRENT_TIMESTAMP WHERE \"api_tokens\".\"token\" = 'tok'"
+        );
     }
 
     // Moved F7 tests: deactivation SQL against the fixture.
@@ -1223,18 +1150,24 @@ mod tests {
             "CLI_DEVICE_API_TOKEN_DESCRIPTION='Issued by pidash auth login (device-code flow).'"
         );
         let emitted = f7["emitted_sql"].as_str().expect("emitted sql");
-        // (Django fragment, Rust rendering with quoted identifiers).
+        let now = sample_now();
+        let base = sql(&cli_token::deactivate_stmt("tok", false, now));
+        let cli_only = sql(&cli_token::deactivate_stmt("tok", true, now));
+        // (Django fragment, SeaORM rendering with quoted identifiers).
         for (frag, rust) in [
-            ("SET is_active=false", "\"is_active\" = false"),
-            ("updated_at=%s", "\"updated_at\" = $1"),
-            ("WHERE token=%s", "\"token\" = $2"),
-            ("is_active=true", "\"is_active\" = true"),
+            ("SET is_active=false", "SET \"is_active\" = FALSE"),
+            (
+                "updated_at=%s",
+                "\"updated_at\" = '2026-11-05 10:00:00.000000 +00:00'",
+            ),
+            ("WHERE token=%s", "\"api_tokens\".\"token\" = 'tok'"),
+            ("is_active=true", "\"api_tokens\".\"is_active\" = TRUE"),
         ] {
             assert!(emitted.contains(frag), "emitted sql has {frag}");
+            assert!(base.contains(rust), "base sql has {frag} as {rust}: {base}");
             assert!(
-                cli_token::DEACTIVATE_SQL.contains(rust)
-                    || cli_token::DEACTIVATE_CLI_ONLY_SQL.contains(rust),
-                "rust sql has {frag} as {rust}"
+                cli_only.contains(rust),
+                "cli sql has {frag} as {rust}: {cli_only}"
             );
         }
         assert!(
@@ -1242,11 +1175,13 @@ mod tests {
             "description guard recorded"
         );
         assert!(
-            cli_token::DEACTIVATE_CLI_ONLY_SQL.contains("\"description\" = $3"),
-            "cli-only sql guards description"
+            cli_only.contains(
+                "\"api_tokens\".\"description\" = 'Issued by pidash auth login (device-code flow).'"
+            ),
+            "cli-only sql guards description: {cli_only}"
         );
         assert!(
-            !cli_token::DEACTIVATE_SQL.contains("description"),
+            !base.contains("description"),
             "base sql has no description guard"
         );
     }
@@ -1258,33 +1193,49 @@ mod tests {
         assert!(!cli_token::is_noop_token(Some("pi_dash_api_x")));
     }
 
-    // Moved S2 pin (the revoke kernel's `s2_where_order_is_q_sorted`
-    // is deleted with the const): the WHERE order is Django's
-    // Q-sorted kwargs, not the source filter order.
+    // Session statements: the S2 revoke filters live rows of the
+    // runner, open writes every column, the fast delete goes by runner.
     #[test]
-    fn revoke_runner_sessions_where_order_is_q_sorted() {
+    fn runner_session_statements() {
+        let now = sample_now();
+        let runner = Uuid::nil();
+        let s2 = sql(&revoke_sessions_stmt(
+            now,
+            "r",
+            sea_orm::Condition::all()
+                .add(runner_session::Column::RevokedAt.is_null())
+                .add(runner_session::Column::RunnerId.eq(runner)),
+        ));
         assert_eq!(
-            REVOKE_RUNNER_SESSIONS_SQL,
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)"
+            s2,
+            "UPDATE \"runner_session\" SET \"revoked_at\" = '2026-11-05 10:00:00.000000 +00:00', \"revoked_reason\" = 'r' WHERE \"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '00000000-0000-0000-0000-000000000000'"
         );
-    }
-
-    // Moved open/delete pins (the session model's `OPEN_INSERT_SQL`
-    // test and the delete kernel's fast-delete test are deleted with
-    // their SQL).
-    #[test]
-    fn session_open_and_delete_sql_pins() {
-        assert_eq!(
-            OPEN_SESSION_SQL,
-            "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        let open = sql(&runner_session::Entity::insert(open_session_row(
+            Uuid::nil(),
+            runner,
+            4,
+            now,
+            now,
+        )));
+        assert!(
+            open.starts_with("INSERT INTO \"runner_session\" ("),
+            "{open}"
         );
+        for column in [
+            "\"id\"",
+            "\"runner_id\"",
+            "\"protocol_version\"",
+            "\"created_at\"",
+            "\"last_seen_at\"",
+            "\"revoked_at\"",
+            "\"revoked_reason\"",
+        ] {
+            assert!(open.contains(column), "open sets {column}: {open}");
+        }
+        let delete = sql(&delete_runner_sessions_stmt(&[runner, runner]));
         assert_eq!(
-            delete_runner_sessions_sql(1),
-            "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ($1)"
-        );
-        assert_eq!(
-            delete_runner_sessions_sql(3),
-            "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ($1, $2, $3)"
+            delete,
+            "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000')"
         );
     }
 
@@ -1309,7 +1260,7 @@ mod tests {
         let mut tx = pool.begin().await.expect("begin");
         let sid = Uuid::new_v4();
         let runner_id = Uuid::new_v4();
-        open_runner_session(&mut *tx, sid, runner_id, 4)
+        open_runner_session(&pidash_db::orm_tx::TxConn::new(&mut tx), sid, runner_id, 4)
             .await
             .expect("open");
         let row: (i32, Option<DateTime<Utc>>) =
@@ -1320,12 +1271,17 @@ mod tests {
                 .expect("read open row");
         assert_eq!(row.0, 4);
         assert_eq!(row.1, None);
-        touch_runner_session(&mut *tx, sid, Utc::now())
+        touch_runner_session(&pidash_db::orm_tx::TxConn::new(&mut tx), sid, Utc::now())
             .await
             .expect("touch");
-        revoke_runner_session(&mut *tx, sid, Utc::now(), "flow-test")
-            .await
-            .expect("revoke");
+        revoke_runner_session(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            sid,
+            Utc::now(),
+            "flow-test",
+        )
+        .await
+        .expect("revoke");
         let reason: (String,) =
             sqlx::query_as("SELECT revoked_reason FROM runner_session WHERE id = $1")
                 .bind(sid)
@@ -1333,7 +1289,7 @@ mod tests {
                 .await
                 .expect("read revoked row");
         assert_eq!(reason.0, "flow-test");
-        delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
+        delete_runner_sessions_for_runners(&pidash_db::orm_tx::TxConn::new(&mut tx), &[runner_id])
             .await
             .expect("delete");
         let left: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM runner_session WHERE id = $1")
@@ -1345,110 +1301,109 @@ mod tests {
         tx.rollback().await.expect("rollback");
     }
 
-    // Moved revoke half of the sweeps byte-exact test (the select
-    // half stays with the sweeps module).
+    // Machine-flow filters: the device pair and the enroll machine
+    // branch differ only in conjunct order; the machine branch has no
+    // user filter (BUG-rotate-user-omission, ported as-is) and no
+    // `LIMIT`; the legacy branch is `dev_machine_id IS NULL` by host.
     #[test]
-    fn revoke_sessions_update_byte_exact() {
+    fn machine_flow_statements() {
+        let now = sample_now();
+        let id = Uuid::nil();
+        let render = |filter| sql(&revoke_machine_stmt(Expr::value(now), filter));
+        let prefix =
+            "UPDATE \"machine_token\" SET \"revoked_at\" = '2026-11-05 10:00:00.000000 +00:00' WHERE ";
+        let nil = "'00000000-0000-0000-0000-000000000000'";
         assert_eq!(
-            revoke_sessions_update(1),
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-             \"runner_session\".\"id\" IN ($3)"
+            render(device_pair_filter(id, id)),
+            format!("{prefix}\"machine_token\".\"workspace_id\" = {nil} AND \"machine_token\".\"dev_machine_id\" = {nil} AND \"machine_token\".\"revoked_at\" IS NULL")
+        );
+        let machine = render(machine_in_workspace_filter(id, id));
+        assert_eq!(
+            machine,
+            format!("{prefix}\"machine_token\".\"dev_machine_id\" = {nil} AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"workspace_id\" = {nil}")
+        );
+        assert!(!machine.contains("user_id"));
+        assert!(!machine.contains("LIMIT"));
+        let legacy = render(legacy_host_filter("h", id, id));
+        assert_eq!(
+            legacy,
+            format!("{prefix}\"machine_token\".\"dev_machine_id\" IS NULL AND \"machine_token\".\"host_label\" = 'h' AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = {nil} AND \"machine_token\".\"workspace_id\" = {nil}")
+        );
+        assert!(!legacy.contains("LIMIT"));
+        assert_eq!(
+            render(dev_machines_filter(&[id, id])),
+            format!("{prefix}\"machine_token\".\"dev_machine_id\" IN ({nil}, {nil}) AND \"machine_token\".\"revoked_at\" IS NULL")
         );
         assert_eq!(
-            revoke_sessions_update(3),
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-             \"runner_session\".\"id\" IN ($3, $4, $5)"
+            sql(&revoke_machine_stmt(Expr::current_timestamp().into(), by_hash("h"))),
+            "UPDATE \"machine_token\" SET \"revoked_at\" = CURRENT_TIMESTAMP WHERE \"machine_token\".\"token_hash\" = 'h'"
+        );
+        let insert = sql(&machine_token::Entity::insert(machine_token_row(
+            &NewMachineToken {
+                id,
+                user_id: id,
+                dev_machine_id: None,
+                workspace_id: id,
+                host_label: "h".to_owned(),
+                token_hash: "x".to_owned(),
+                token_fingerprint: "f".to_owned(),
+                label: "l".to_owned(),
+                is_service: true,
+                created_at: now,
+            },
+        )));
+        assert_eq!(
+            insert,
+            format!("INSERT INTO \"machine_token\" (\"id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\", \"expires_at\", \"user_id\", \"workspace_id\", \"dev_machine_id\") VALUES ({nil}, 'h', 'x', 'f', 'l', TRUE, '2026-11-05 10:00:00.000000 +00:00', NULL, NULL, '2027-01-04 10:00:00.000000 +00:00', {nil}, {nil}, NULL)")
         );
     }
 
-    // Moved enroll revoke-text pin (the only production use of the
-    // enroll revoke const was this assertion).
-    #[test]
-    fn machine_revoke_by_id_sql_is_quoted_qualified() {
-        assert_eq!(
-            REVOKE_MACHINE_BY_ID_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"id\" = $2"
-        );
-    }
-
-    // Moved machine-flow pins (the enroll/desktop/manage/delete/db
-    // pin tests are deleted with their builders; these carry the
-    // text here).
-    #[test]
-    fn machine_flow_sql_pins() {
-        assert_eq!(
-            ROTATE_REVOKE_FOR_PAIR_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"workspace_id\" = $2 AND \"machine_token\".\"dev_machine_id\" = $3 AND \"machine_token\".\"revoked_at\" IS NULL"
-        );
-        assert_eq!(
-            ROTATE_REVOKE_FOR_MACHINE_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"workspace_id\" = $3)"
-        );
-        assert_eq!(
-            ROTATE_REVOKE_LEGACY_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IS NULL AND \"machine_token\".\"host_label\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = $3 AND \"machine_token\".\"workspace_id\" = $4)"
-        );
-        assert_eq!(
-            REVOKE_TOKENS_FOR_MACHINE_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-        assert_eq!(
-            CLEAR_TOKEN_MACHINES_SQL,
-            "UPDATE \"machine_token\" SET \"dev_machine_id\" = NULL WHERE \"machine_token\".\"dev_machine_id\" IN ($1)"
-        );
-        assert_eq!(
-            machine_token_insert_sql(),
-            "INSERT INTO \"machine_token\" (\"id\", \"user_id\", \"dev_machine_id\", \"workspace_id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
-        );
-        assert_eq!(
-            signout_revoke_tokens_sql(1),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ($2) AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-        assert_eq!(
-            signout_revoke_tokens_sql(2),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ($2, $3) AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-        assert_eq!(
-            signout_revoke_tokens_sql(3),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ($2, $3, $4) AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-        // BUG-rotate-user-omission, ported as-is: no user_id on the
-        // machine branch (moved with the enroll B3 pin).
-        assert!(!ROTATE_REVOKE_FOR_MACHINE_SQL.contains("user_id"));
-        // Revokes every active row in scope — no LIMIT (fixture
-        // rotate_B3_after; moved with the enroll B3 pin).
-        assert!(!ROTATE_REVOKE_FOR_MACHINE_SQL.contains("LIMIT"));
-        assert!(!ROTATE_REVOKE_LEGACY_SQL.contains("LIMIT"));
-    }
-
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "at least one machine id")]
-    fn signout_revoke_builder_rejects_empty() {
-        signout_revoke_tokens_sql(0);
+    async fn signout_revoke_rejects_empty() {
+        let db = pidash_db::pool::sea_orm_connection(
+            &sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .expect("lazy pool"),
+        );
+        let _ = revoke_tokens_for_dev_machines(&db, &[], sample_now()).await;
     }
 
-    // D6 gap PIDASHCONV-1618: the workspace revoke consts are the
+    // D6 gap PIDASHCONV-1618: the workspace revoke filters are the
     // overlay `revoke_machine_tokens` / `revoke_workspace_sessions`
-    // text verbatim (unquoted identifiers kept) — pinned here so
-    // drift fails loudly.
+    // semantics (Django's spanning `runner__workspace` filter as an
+    // `IN (SELECT ...)`), pinned so drift fails loudly.
     #[test]
-    fn workspace_revoke_sql_pins() {
+    fn workspace_revoke_statements() {
+        let now = sample_now();
+        let id = Uuid::nil();
+        let nil = "'00000000-0000-0000-0000-000000000000'";
+        let tokens = |user| {
+            sql(&revoke_machine_stmt(
+                Expr::value(now),
+                workspace_tokens_filter(id, user),
+            ))
+        };
+        assert!(tokens(Some(id)).ends_with(&format!(
+            "WHERE \"machine_token\".\"workspace_id\" = {nil} AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = {nil}"
+        )));
+        assert!(tokens(None).ends_with(&format!(
+            "WHERE \"machine_token\".\"workspace_id\" = {nil} AND \"machine_token\".\"revoked_at\" IS NULL"
+        )));
+        let sessions = |owner| {
+            sql(&revoke_sessions_stmt(
+                now,
+                "r",
+                workspace_sessions_filter(id, owner),
+            ))
+        };
         assert_eq!(
-            REVOKE_MACHINE_TOKENS_BY_WORKSPACE_AND_USER_SQL,
-            "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL AND user_id = $3"
+            sessions(Some(id)),
+            format!("UPDATE \"runner_session\" SET \"revoked_at\" = '2026-11-05 10:00:00.000000 +00:00', \"revoked_reason\" = 'r' WHERE \"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" IN (SELECT \"id\" FROM \"runner\" WHERE \"runner\".\"workspace_id\" = {nil} AND \"runner\".\"owner_id\" = {nil})")
         );
-        assert_eq!(
-            REVOKE_MACHINE_TOKENS_BY_WORKSPACE_SQL,
-            "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL"
-        );
-        assert_eq!(
-            REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_AND_OWNER_SQL,
-            "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3 AND owner_id = $4)"
-        );
-        assert_eq!(
-            REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_SQL,
-            "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3)"
-        );
+        assert!(sessions(None).ends_with(&format!(
+            "IN (SELECT \"id\" FROM \"runner\" WHERE \"runner\".\"workspace_id\" = {nil})"
+        )));
     }
 
     /// Live-db half: insert two rows (machine + legacy shapes),
@@ -1478,7 +1433,7 @@ mod tests {
         let machine_row = Uuid::new_v4();
         let legacy_row = Uuid::new_v4();
         insert_machine_token(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             &NewMachineToken {
                 id: machine_row,
                 user_id,
@@ -1495,7 +1450,7 @@ mod tests {
         .await
         .expect("insert machine row");
         insert_machine_token(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             &NewMachineToken {
                 id: legacy_row,
                 user_id,
@@ -1511,13 +1466,24 @@ mod tests {
         )
         .await
         .expect("insert legacy row");
-        revoke_tokens_for_machine_in_workspace(&mut *tx, machine_id, workspace_id, now)
-            .await
-            .expect("revoke machine row");
-        revoke_tokens_legacy_host(&mut *tx, "legacy-host", user_id, workspace_id, now)
-            .await
-            .expect("revoke legacy row");
-        clear_token_dev_machines(&mut *tx, machine_id)
+        revoke_tokens_for_machine_in_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            machine_id,
+            workspace_id,
+            now,
+        )
+        .await
+        .expect("revoke machine row");
+        revoke_tokens_legacy_host(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            "legacy-host",
+            user_id,
+            workspace_id,
+            now,
+        )
+        .await
+        .expect("revoke legacy row");
+        clear_token_dev_machines(&pidash_db::orm_tx::TxConn::new(&mut tx), machine_id)
             .await
             .expect("clear machine link");
         let rows: Vec<(Uuid, Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
@@ -1728,7 +1694,7 @@ mod tests {
     ) -> Uuid {
         let id = Uuid::new_v4();
         insert_machine_token(
-            &mut *ex,
+            &pidash_db::orm_tx::TxConn::new(&mut *ex),
             &NewMachineToken {
                 id,
                 user_id: user,
@@ -1750,7 +1716,7 @@ mod tests {
     /// One live session row for the workspace-revoke roundtrip.
     async fn seed_wsrev_session(ex: &mut sqlx::PgConnection, runner: Uuid) -> Uuid {
         let id = Uuid::new_v4();
-        open_runner_session(&mut *ex, id, runner, 4)
+        open_runner_session(&pidash_db::orm_tx::TxConn::new(&mut *ex), id, runner, 4)
             .await
             .expect("seed session");
         id
@@ -1786,25 +1752,41 @@ mod tests {
         let t2 = seed_wsrev_token(&mut tx, tag, "t2", ws1, u2, old).await;
         let t3 = seed_wsrev_token(&mut tx, tag, "t3", ws2, u1, old).await;
         let t4 = seed_wsrev_token(&mut tx, tag, "t4", ws1, u1, old).await;
-        revoke_machine_token_by_id(&mut *tx, t4, old)
+        revoke_machine_token_by_id(&pidash_db::orm_tx::TxConn::new(&mut tx), t4, old)
             .await
             .expect("pre-revoke token");
         // The pre-revoked session goes first: only one live session
         // per runner (`runner_session_one_active_per_runner`).
         let sa2 = seed_wsrev_session(&mut tx, ra).await;
-        revoke_runner_session(&mut *tx, sa2, old, "old-reason")
-            .await
-            .expect("pre-revoke session");
+        revoke_runner_session(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            sa2,
+            old,
+            "old-reason",
+        )
+        .await
+        .expect("pre-revoke session");
         let sa = seed_wsrev_session(&mut tx, ra).await;
         let sb = seed_wsrev_session(&mut tx, rb).await;
         let sc = seed_wsrev_session(&mut tx, rc).await;
 
-        revoke_machine_tokens_by_workspace(&mut *tx, ws1, Some(u1), now1)
-            .await
-            .expect("revoke tokens scoped");
-        revoke_runner_sessions_by_workspace(&mut *tx, ws1, Some(u1), now1, "membership_revoked")
-            .await
-            .expect("revoke sessions scoped");
+        revoke_machine_tokens_by_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            ws1,
+            Some(u1),
+            now1,
+        )
+        .await
+        .expect("revoke tokens scoped");
+        revoke_runner_sessions_by_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            ws1,
+            Some(u1),
+            now1,
+            "membership_revoked",
+        )
+        .await
+        .expect("revoke sessions scoped");
         let tokens: Vec<(Uuid, Option<DateTime<Utc>>)> =
             sqlx::query_as("SELECT id, revoked_at FROM machine_token WHERE id IN ($1, $2, $3, $4)")
                 .bind(t1)
@@ -1855,12 +1837,23 @@ mod tests {
             "owner arm keeps prior stamp and reason"
         );
 
-        revoke_machine_tokens_by_workspace(&mut *tx, ws1, None, now2)
-            .await
-            .expect("revoke tokens sweep");
-        revoke_runner_sessions_by_workspace(&mut *tx, ws1, None, now2, "membership_revoked")
-            .await
-            .expect("revoke sessions sweep");
+        revoke_machine_tokens_by_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            ws1,
+            None,
+            now2,
+        )
+        .await
+        .expect("revoke tokens sweep");
+        revoke_runner_sessions_by_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            ws1,
+            None,
+            now2,
+            "membership_revoked",
+        )
+        .await
+        .expect("revoke sessions sweep");
         let tokens: Vec<(Uuid, Option<DateTime<Utc>>)> =
             sqlx::query_as("SELECT id, revoked_at FROM machine_token WHERE id IN ($1, $2, $3, $4)")
                 .bind(t1)
@@ -1977,7 +1970,7 @@ mod tests {
         let stamper = seed_user(&pool, "cb-stamp").await;
         // Cookieless POST: `created_by_id` stays NULL.
         let anonymous = issue_token(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &NewApiToken {
                 label: "MCP client".to_owned(),
                 description: String::new(),
@@ -1992,7 +1985,7 @@ mod tests {
         assert!(anonymous.token.starts_with("pi_dash_api_"));
         // Session user differs from the grant user.
         let stamped = issue_token(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &NewApiToken {
                 label: "MCP client".to_owned(),
                 description: String::new(),
@@ -2056,7 +2049,7 @@ mod tests {
             .expect("connect to scratch DATABASE_URL");
         let user_id = seed_user(&pool, "live").await;
         let issued = issue_token(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &NewApiToken {
                 label: "domain-tokens-live".to_owned(),
                 description: "live roundtrip".to_owned(),
@@ -2076,9 +2069,12 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(created_by, Some(user_id));
-        touch_api_token_last_used_by_token(&pool, &issued.token)
-            .await
-            .expect("touch by token");
+        touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            &issued.token,
+        )
+        .await
+        .expect("touch by token");
         let (last_used,): (Option<DateTime<Utc>>,) =
             sqlx::query_as("SELECT last_used FROM api_tokens WHERE id = $1")
                 .bind(issued.id)
@@ -2087,7 +2083,7 @@ mod tests {
                 .expect("read back");
         assert!(last_used.is_some());
         update_token(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             issued.id,
             user_id,
             Utc::now(),
@@ -2102,9 +2098,13 @@ mod tests {
         )
         .await
         .expect("patch");
-        deactivate_api_token_by_id(&pool, issued.id, Utc::now())
-            .await
-            .expect("deactivate");
+        deactivate_api_token_by_id(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            issued.id,
+            Utc::now(),
+        )
+        .await
+        .expect("deactivate");
         let (is_active,): (bool,) =
             sqlx::query_as("SELECT is_active FROM api_tokens WHERE id = $1")
                 .bind(issued.id)
@@ -2112,9 +2112,13 @@ mod tests {
                 .await
                 .expect("read back");
         assert!(!is_active);
-        soft_delete_token(&pool, issued.id, user_id)
-            .await
-            .expect("soft delete");
+        soft_delete_token(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            issued.id,
+            user_id,
+        )
+        .await
+        .expect("soft delete");
         let (deleted_at,): (Option<DateTime<Utc>>,) =
             sqlx::query_as("SELECT deleted_at FROM api_tokens WHERE id = $1")
                 .bind(issued.id)

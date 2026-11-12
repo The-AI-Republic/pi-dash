@@ -3,25 +3,25 @@
 //! Module-issue handlers (D-28, stage 5, PIDASHCONV-397).
 //!
 //! Ports `ModuleIssueViewSet` from
-//! `apps/api/pi_dash/app/views/module/issue.py:45-337`:
+//! `apps/api/pi_dash/app/views/module/issue.py:46-353`:
 //!
-//! - `list` (`:94-207`): the issue-list pipeline scoped to one module —
-//!   legacy `issue_filters(params, 'GET')` (`:97`),
-//!   `ComplexFilterBackend` + `IssueFilterSet` (`:50-51, :101`), the
-//!   `apply_annotations` columns (`:53-82`), `order_issue_queryset`
-//!   (`:112-117`), the grouped / sub-grouped / plain paginators
-//!   (`:126-207`) with `issue_on_results` shaping.
-//! - `create_module_issues` (`:209-246`): `issues` required (`:212-214`),
-//!   `bulk_create(ignore_conflicts)` (`:216-230`, batches of 10),
-//!   one `issue_activity` publish per input issue (`:232-245`),
-//!   201 `{"message": "success"}` (`:246`).
-//! - `create_issue_modules` (`:248-315`): `modules` adds (`:255-285`) +
+//! - `list` (`:95-223`): the issue-list pipeline scoped to one module —
+//!   legacy `issue_filters(params, 'GET')` (`:98`),
+//!   `ComplexFilterBackend` + `IssueFilterSet` (`:51-52, :102`), the
+//!   `apply_annotations` columns (`:54-83`), `order_issue_queryset`
+//!   (`:113-118`), the grouped / sub-grouped / plain paginators
+//!   (`:142-223`) with `issue_on_results` shaping.
+//! - `create_module_issues` (`:225-262`): `issues` required (`:228-230`),
+//!   `bulk_create(ignore_conflicts)` (`:232-246`, batches of 10),
+//!   one `issue_activity` publish per input issue (`:248-261`),
+//!   201 `{"message": "success"}` (`:262`).
+//! - `create_issue_modules` (`:264-331`): `modules` adds (`:271-301`) +
 //!   `removed_modules` removals with per-removal `activity.deleted`
-//!   publish then delete (`:287-313`), 201 `{"message": "success"}`
-//!   (`:315`).
-//! - `destroy` (`:317-337`): the `activity.deleted` publish fires before
-//!   the delete and unconditionally (`:325-335`); the bridge
-//!   `filter().delete()` is a soft delete (`:336`); 204 (`:337`).
+//!   publish then delete (`:303-329`), 201 `{"message": "success"}`
+//!   (`:331`).
+//! - `destroy` (`:333-353`): the `activity.deleted` publish fires before
+//!   the delete and unconditionally (`:341-351`); the bridge
+//!   `filter().delete()` is a soft delete (`:352`); 204 (`:353`).
 //!
 //! Fixture ids: FX-MOD-06
 //! (`rust-api/fixtures/app_modules/handlers/module_issues_links.golden.json`);
@@ -34,7 +34,7 @@
 //! `crate::app_issues` list helpers, `pidash_services::app_issues`
 //! ordering/params/shape, and `crate::paginator` — exactly like the
 //! cycle-issue port (`app_cycles::handlers_cycle_issues`, PIDASHCONV-323),
-//! whose `apply_annotations` is line-identical to this view's (`:53-82`)
+//! whose `apply_annotations` is line-identical to this view's (`:54-83`)
 //! once the `SoftDeletionManager` (`db/mixins.py:56-58`, automatic
 //! `deleted_at IS NULL` on the `IssueLink` / `FileAsset` `.objects`
 //! managers) is accounted for. Module-specific SQL (bridge scope, the
@@ -50,8 +50,8 @@
 //!   `test_detail_get_put_patch_are_server_errors`). Those methods proxy
 //!   to Django, which reproduces the 500 itself (cycle-issue precedent).
 //! * `destroy` of a missing bridge answers 500: `None.module`
-//!   (`AttributeError`) at `:331` (no `None` guard there — unlike the
-//!   removal path at `:304`, which falls back to a null module name and
+//!   (`AttributeError`) at `:347` (no `None` guard there — unlike the
+//!   removal path at `:320`, which falls back to a null module name and
 //!   answers 201).
 //! * Detaching from a soft-deleted module still publishes its name: the
 //!   forward-FK fetch sees soft-deleted rows (verified live).
@@ -66,9 +66,9 @@
 //!   there is no `""→None` rule, so `null`/in-range ints simply match no
 //!   bridge → 201 with a null name.
 //! * `create_issue_modules` serializes the *raw* `modules` item into
-//!   `requested_data` (`json.dumps({"module_id": module})` at `:275` —
+//!   `requested_data` (`json.dumps({"module_id": module})` at `:291` —
 //!   non-string items render unstringified), while the removal payload
-//!   uses `str(module_id)` (`:296`) and the destroy payload `str()` of the
+//!   uses `str(module_id)` (`:312`) and the destroy payload `str()` of the
 //!   URL kwarg (canonical).
 //! * Non-UUID path segments: Django's `<uuid:>` converter rejects them at
 //!   URL resolve (HTML 404, unreachable through the JSON edge); here they
@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -94,6 +94,14 @@ use crate::app_issues::{
     multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
     FilteredSet, QueryMap,
 };
+use pidash_db::entity::{module_issues, modules, project_members, projects, workspaces};
+use sea_orm::sea_query::{Expr, Query as SeaQuery};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
+
+use super::handlers_modules::{is_noncanonical_uuid, proxy_segment};
+pub(crate) use crate::paginator::unquote_sort_order;
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
@@ -145,11 +153,11 @@ pub const ISSUE_MODULES_PATH: &str =
 pub const MODULE_ISSUE_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/issues/{issue_id}/";
 
-/// 400 `{"error": "Issues are required"}` (`issue.py:213-214`).
+/// 400 `{"error": "Issues are required"}` (`issue.py:229-230`).
 pub const ISSUES_REQUIRED_BODY: &str = r#"{"error":"Issues are required"}"#;
-/// 201 success envelope (`issue.py:246,315`).
+/// 201 success envelope (`issue.py:262,331`).
 pub const MODULE_ISSUE_CREATE_BODY: &str = r#"{"message":"success"}"#;
-/// Group-clash message (`issue.py:129-133`).
+/// Group-clash message (`issue.py:145-149`).
 pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have same parameters";
 
 // ---------------------------------------------------------------------------
@@ -181,12 +189,17 @@ pub(crate) fn actor_user_id(
 /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
 /// `str.strip` against `char::is_whitespace` over all code points —
 /// those four are the only differences).
+/// Delegated resolve lives in `handlers_modules`; kept here with the
+/// exhaustive property test below (same-batch duplicate).
+#[allow(dead_code)]
 fn is_py_strip_ws(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
 
 /// Normalize a non-UUID identifier for the equality lookup
 /// (`db/models/project.py:210`): `str(value).strip().upper()`.
+/// Delegated resolve lives in `handlers_modules`; kept for the unit test.
+#[allow(dead_code)]
 fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
@@ -194,26 +207,14 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
 /// callers only (anonymous already 401'd); UUIDs pass through unchecked;
 /// other identifiers resolve `UPPER(identifier)` in the workspace, else
-/// `Http404` (detail 404).
+/// `Http404` (detail 404). Delegates to the SeaORM implementation in
+/// `handlers_modules` (same batch, identical predicates).
 pub(crate) async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
     raw: &str,
 ) -> Result<uuid::Uuid, Denial> {
-    if let Ok(id) = raw.parse::<uuid::Uuid>() {
-        return Ok(id);
-    }
-    let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    super::handlers_modules::resolve_project_id(pool, slug, raw).await
 }
 
 /// Badly-formed UUIDs in paths render the `ValidationError` branch
@@ -228,55 +229,17 @@ pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
 
 /// Membership facts for one `(user, slug, project)` over the same rows the
 /// decorator reads (`app/permissions/base.py:19-86`): active project and
-/// workspace memberships scoped by slug/project, soft-deleted rows excluded.
-/// The module-issue gates are all `ADMIN, MEMBER`.
+/// workspace memberships scoped by slug/project, soft-deleted rows excluded,
+/// with the allowed-role flags computed against the calling gate's roles.
+/// Delegates to the SeaORM implementation in `handlers_modules` (same batch).
 pub(crate) async fn fetch_allow_facts(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
+    allowed: &[i32],
 ) -> Result<AllowFacts, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
-    let allowed = [ROLE_ADMIN, ROLE_MEMBER];
-    Ok(AllowFacts {
-        workspace: pidash_types::WorkspaceId::from(slug),
-        authenticated: true,
-        is_workspace_member: workspace_role.is_some(),
-        has_allowed_workspace_role: workspace_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
-        is_creator: false,
-        has_allowed_project_role: project_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
-        is_project_member: project_role.is_some(),
-        is_workspace_admin: workspace_role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
-            .unwrap_or(false),
-    })
+    super::handlers_modules::fetch_allow_facts(pool, slug, project_id, user_id, allowed).await
 }
 
 /// Run one `super::gates` row: anonymous already 401'd; `Allow` runs the
@@ -311,7 +274,7 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 }
 
 /// Common preamble for the module-issue actions: session auth, project
-/// rewrite, the route's ADMIN/MEMBER gate. Returns `(pool, user_id,
+/// rewrite, the route's role gate. Returns `(pool, user_id,
 /// project_id)`.
 async fn module_issue_context(
     state: &AppState,
@@ -323,9 +286,154 @@ async fn module_issue_context(
     let pool = pool_of(state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
-    let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id).await?;
+    let facts = fetch_allow_facts(
+        &pool,
+        slug,
+        &project_id,
+        &user_id,
+        super::handlers_modules::gate_roles(gate),
+    )
+    .await?;
     check_gate(gate, slug, &facts)?;
     Ok((pool, user_id, project_id))
+}
+
+/// The guest half of `ModuleIssueViewSet.list` (`issue.py:127-141`,
+/// NEWFRONT-334): an active GUEST project membership on a project
+/// without `guest_view_all_features` sees only the work items it
+/// created — the same issue-list rule the cycle-issue list ports
+/// (`app_cycles::handlers_cycle_issues::guest_creator_scope`). Returns
+/// the creator to scope to.
+/// The fused single-statement form of the guest scope (one round trip):
+/// `EXISTS` active guest membership `AND NOT EXISTS` the view-all flag,
+/// decoded by name (`list_engine::query_built` precedent).
+#[derive(Debug, FromQueryResult)]
+struct GuestScopeRow {
+    scoped: bool,
+}
+
+/// The guest-scope predicate as one statement: an active role-5
+/// membership without the project `guest_view_all_features` flag.
+fn guest_scope_statement(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    let guest_membership = SeaQuery::select()
+        .from(project_members::Entity)
+        .columns([project_members::Column::Id])
+        .and_where(project_members::Column::MemberId.eq(*user_id))
+        .and_where(project_members::Column::ProjectId.eq(*project_id))
+        .and_where(project_members::Column::Role.eq(5))
+        .and_where(project_members::Column::IsActive.eq(true))
+        .and_where(project_members::Column::DeletedAt.is_null())
+        .and_where(
+            Expr::col((
+                project_members::Entity,
+                project_members::Column::WorkspaceId,
+            ))
+            .in_subquery(
+                SeaQuery::select()
+                    .from(workspaces::Entity)
+                    .columns([workspaces::Column::Id])
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    let view_all_flag = SeaQuery::select()
+        .from(projects::Entity)
+        .columns([projects::Column::Id])
+        .and_where(projects::Column::Id.eq(*project_id))
+        .and_where(projects::Column::GuestViewAllFeatures.eq(true))
+        .and_where(projects::Column::DeletedAt.is_null())
+        .and_where(
+            Expr::col((projects::Entity, projects::Column::WorkspaceId)).in_subquery(
+                SeaQuery::select()
+                    .from(workspaces::Entity)
+                    .columns([workspaces::Column::Id])
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(
+        Expr::exists(guest_membership).and(Expr::exists(view_all_flag).not()),
+        "scoped",
+    );
+    stmt
+}
+
+/// SeaORM twin of the bridge writes' 23503-only mapping: a dangling
+/// issue/module id violates the FK → 400; anything else 500s (the
+/// `ON CONFLICT DO NOTHING` insert cannot reach its own 23505).
+fn orm_fk_denial(error: sea_orm::DbErr) -> Denial {
+    match error {
+        sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db_error)))
+        | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db_error)))
+            if db_error.code().as_deref() == Some("23503") =>
+        {
+            Denial::BadError("The payload is not valid".to_owned())
+        }
+        _ => Denial::ServerError,
+    }
+}
+
+/// One multi-row `INSERT ... ON CONFLICT DO NOTHING` over a values list
+/// (the old `gen_random_uuid()` + `unnest($N::uuid[])` twin, still one
+/// statement; `replace_members` precedent).
+async fn insert_bridge_rows(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+    workspace_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    module_ids: &[uuid::Uuid],
+    issue_ids: &[uuid::Uuid],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), Denial> {
+    let models: Vec<module_issues::ActiveModel> = issue_ids
+        .iter()
+        .zip(module_ids.iter())
+        .map(|(issue_id, module_id)| module_issues::ActiveModel {
+            id: sea_orm::Set(uuid::Uuid::new_v4()),
+            project_id: sea_orm::Set(*project_id),
+            workspace_id: sea_orm::Set(*workspace_id),
+            created_by_id: sea_orm::Set(Some(*user_id)),
+            updated_by_id: sea_orm::Set(Some(*user_id)),
+            module_id: sea_orm::Set(*module_id),
+            issue_id: sea_orm::Set(*issue_id),
+            created_at: sea_orm::Set(now.fixed_offset()),
+            updated_at: sea_orm::Set(now.fixed_offset()),
+            deleted_at: sea_orm::Set(None),
+        })
+        .collect();
+    module_issues::Entity::insert_many(models)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(orm_fk_denial)?;
+    Ok(())
+}
+
+async fn guest_creator_scope(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<GuestScopeRow>(
+        &db,
+        &guest_scope_statement(slug, project_id, user_id),
+    )
+    .await?;
+    let scoped = rows.into_iter().next().is_some_and(|row| row.scoped);
+    Ok(scoped.then_some(*user_id))
 }
 
 fn gate_for_list() -> &'static gates::Gate {
@@ -447,7 +555,7 @@ fn wire_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<St
     fields
 }
 
-/// Scalar selects for the list rows: `apply_annotations` (`issue.py:53-82`)
+/// Scalar selects for the list rows: `apply_annotations` (`issue.py:54-83`)
 /// as re-annotated by `issue_queryset_grouper` (`utils/grouper.py:30-92`,
 /// which runs after and owns the three array columns).
 ///
@@ -548,8 +656,11 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// M2M group keys LEFT-join their bridge with an
+/// `alias."deleted_at" IS NULL` guard (`GROUP_FILTER_MAPPER` in
+/// `utils/grouper.py:41-49` is Django's LEFT OUTER JOIN + `isnull`
+/// filter, so linkless rows keep the NULL group key that feeds the
+/// "None" bucket — NEWPIDASH-151).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -604,13 +715,14 @@ fn bind_values<'a>(
     pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
-/// Filtered `FROM … WHERE` for the module-issue list (`issue.py:97-107`):
+/// Filtered `FROM … WHERE` for the module-issue list (`issue.py:98-108`):
 /// the `Issue.issue_objects` manager (`deleted_at`, triage-state,
 /// archived, project-archived, draft exclusions) + the module bridge scope
-/// (`issue_module__module_id`, bridge live, `get_queryset` `:84-92`) +
+/// (`issue_module__module_id`, bridge live, `get_queryset` `:85-93`) +
 /// tenant (workspace slug, project, active membership) + the
 /// `ComplexFilterBackend` tree + the legacy `issue_filters(params, 'GET')`
-/// predicates.
+/// predicates + the guest `created_by` scoping (`:139-140`) when
+/// `creator_scope` is `Some`.
 #[allow(clippy::too_many_arguments)]
 fn module_filtered_set(
     slug: &str,
@@ -621,6 +733,7 @@ fn module_filtered_set(
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
     tz: &chrono_tz::Tz,
+    creator_scope: Option<uuid::Uuid>,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
     let slug_holder = binder.bind_string(slug.to_owned());
@@ -663,9 +776,19 @@ fn module_filtered_set(
     if !legacy_sql_text.is_empty() {
         fragments.push(legacy_sql_text);
     }
-    // M2M group filters scope their relation to live bridges
-    // (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`, applied by
-    // `issue_queryset_grouper` for the grouped paths).
+    // Guest creator scoping (`issue.py:139-140`): one `WHERE` fragment
+    // covers the rows and every total (flat and grouped), like Django's
+    // `.filter(created_by=…)` on both the issue and total querysets.
+    if let Some(creator) = creator_scope {
+        let holder = binder.bind_uuid(creator);
+        fragments.push(format!("issue.created_by_id = {holder}"));
+    }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`. The
+    // predicate sits in WHERE over the LEFT join, so issues whose links
+    // are all soft-deleted drop out while linkless issues stay NULL (the
+    // short aliases carry no guard). Quoted so the nullable scan below
+    // sees the `IS NULL` test (cycle-handler precedent).
     for group in [group_by, sub_group_by].into_iter().flatten() {
         let alias = match group {
             "assignees__id" => "issue_assignee",
@@ -673,7 +796,7 @@ fn module_filtered_set(
             "issue_module__module_id" => "issue_module",
             _ => continue,
         };
-        fragments.push(format!("{alias}.deleted_at IS NULL"));
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
     // The scope bridge always joins (one live row per issue in scope: the
@@ -694,7 +817,7 @@ fn module_filtered_set(
             continue;
         }
         referenced.push(*alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+        let inner = used && !nullable_only;
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
@@ -734,18 +857,25 @@ fn module_filtered_set(
     })
 }
 
-/// `ModuleIssueViewSet.list` (`issue.py:94-207`).
+/// `ModuleIssueViewSet.list` (`issue.py:95-223`).
 async fn module_issue_list(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
     // Group clash is checked in-view before `paginate` parses per_page
-    // (`issue.py:126-133`): 400 `{"error": "Group by and sub group by
+    // (`issue.py:142-149`): 400 `{"error": "Group by and sub group by
     // cannot have same parameters"}`.
     if let (Some(group), Some(sub)) = (
         query_last(&query, "group_by"),
@@ -775,6 +905,7 @@ async fn module_issue_list(
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
     let timezone = filters_timezone(&pool, &user_id, &query).await?;
+    let creator_scope = guest_creator_scope(&pool, &slug, &project_id, &user_id).await?;
     let filtered = module_filtered_set(
         &slug,
         &project_id,
@@ -784,9 +915,10 @@ async fn module_issue_list(
         group_by,
         sub_group_by,
         &timezone,
+        creator_scope,
     )?;
-    // `order_issue_queryset` (`:112-117`), default `created_at`
-    // (`request.GET.get("order_by", "created_at")` at `:112`): unlike the
+    // `order_issue_queryset` (`:113-118`), default `created_at`
+    // (`request.GET.get("order_by", "created_at")` at `:113`): unlike the
     // cycle/project lists, an absent `order_by` sorts oldest-first, so the
     // shared `-created_at` default in `params.rs` must not apply here.
     // The module list annotates the plain `Func(Count)` form (empty counts
@@ -803,7 +935,7 @@ async fn module_issue_list(
         crate::app_issues::has_issue_cycle_join(&filtered.from_where).then_some("issue_cycle");
     let key = order_key(&order_spec.out_param, &order_by, cycle_bridge, false)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
-    // Total count over the pre-annotation set (the `deepcopy` at `:107`).
+    // Total count over the pre-annotation set (the `deepcopy` at `:108`).
     // The flat branch keeps the distinct-issue count; the grouped branch
     // counts `queryset.count()` over the order-joined rows (pinned live:
     // fan-out links count).
@@ -841,7 +973,7 @@ async fn module_issue_list(
     .await
 }
 
-/// Plain `paginate` branch (`issue.py:199-207`): distinct rows, the
+/// Plain `paginate` branch (`issue.py:215-223`): distinct rows, the
 /// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
 async fn module_flat_response(
     pool: &sqlx::PgPool,
@@ -979,35 +1111,6 @@ fn module_shape_map(row: &Map<String, Value>, fields: &[String]) -> Map<String, 
     out
 }
 
-/// Unquote `sort_order` in serialized grouped rows: Django renders the
-/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
-/// a string for the grouping kernels (which never do math on it). The
-/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
-/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
-/// splicing the quotes is exact.
-fn unquote_sort_order(results_json: &str) -> String {
-    let mut out = String::with_capacity(results_json.len());
-    let mut rest = results_json;
-    let marker = "\"sort_order\":\"";
-    while let Some(start) = rest.find(marker) {
-        let (head, tail) = rest.split_at(start + marker.len());
-        out.push_str(&head[..head.len() - 1]);
-        match tail.find('"') {
-            Some(end) => {
-                out.push_str(&tail[..end]);
-                rest = &tail[end + 1..];
-            }
-            None => {
-                out.push_str(tail);
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// DRF UTC (`Z`) rendering for one stored datetime string, passthrough
 /// otherwise (null stays null).
 fn module_render_datetime(value: &Value) -> Value {
@@ -1043,7 +1146,7 @@ fn module_shape_json_value(field: &str, value: &Value, timezone: &chrono_tz::Tz)
     }
 }
 
-/// Grouped / sub-grouped branch (`issue.py:126-198`): window-function
+/// Grouped / sub-grouped branch (`issue.py:142-214`): window-function
 /// pagination over the group partition, totals with the intake /
 /// archived / draft `count_filter`, buckets from `issue_group_values`.
 #[allow(clippy::too_many_arguments)]
@@ -1115,7 +1218,7 @@ async fn module_grouped_response(
         })
         .collect();
     let window_empty = page.is_empty();
-    // `count_filter` for grouped pagination (`issue.py:161-168`).
+    // `count_filter` for grouped pagination (`issue.py:177-184`).
     let count_filter =
         "((issue_intake.status = ANY('{1,-1,2}')) OR issue_intake.id IS NULL) AND issue.archived_at IS NULL AND issue.is_draft = FALSE";
     let group_totals = module_group_total_pairs(pool, filtered, &group_expr, count_filter).await?;
@@ -1212,7 +1315,7 @@ async fn module_grouped_response(
 // ---------------------------------------------------------------------------
 
 /// Python truthiness over a decoded JSON value for `if not issues:` /
-/// `if modules:` (`issue.py:212,255`): `null`, `false`, `0`/`0.0`, `""`,
+/// `if modules:` (`issue.py:229,271`): `null`, `false`, `0`/`0.0`, `""`,
 /// `[]` and `{}` are falsy; every other value — non-empty strings/arrays/
 /// objects, non-zero numbers, `true` — is truthy.
 fn is_falsy_json(value: &Value) -> bool {
@@ -1227,7 +1330,7 @@ fn is_falsy_json(value: &Value) -> bool {
 }
 
 /// `str(item)` over one decoded JSON item (`issue_id=str(issue)` at
-/// `issue.py:219`, `str(module_id)` at `:296`): strings pass through,
+/// `issue.py:235`, `str(module_id)` at `:312`): strings pass through,
 /// `true`/`false` render `True`/`False`, `null` renders `None`, numbers
 /// render in shortest form. The text feeds the UUID prep (`prep_coerced_str`
 /// / `prep_raw_item`), which decides 400-payload vs 400-detail vs proceed.
@@ -1243,7 +1346,7 @@ fn py_str_item(item: &Value) -> String {
 }
 
 /// Classify the decoded `issues` member for `create_module_issues`
-/// (`issue.py:211-219`).
+/// (`issue.py:227-235`).
 ///
 /// Falsy values answer 400 `{"error": "Issues are required"}`. Of the
 /// truthy values, arrays yield their `str()` items and non-empty strings
@@ -1262,27 +1365,32 @@ fn extract_create_strings(value: &Value) -> Result<Vec<String>, Denial> {
     }
 }
 
-/// `Project.objects.get(pk=project_id)` (`issue.py:215,253`): the workspace
+/// `Project.objects.get(pk=project_id)` (`issue.py:231,269`): the workspace
 /// id for the new bridge rows. A missing project is `DoesNotExist` → 404.
 async fn project_workspace_id(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    // By id alone — no slug or soft-delete filter, exactly as the old
+    // statement (a miss is the `DoesNotExist` 404).
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// One `issue_activity.delay(...)` kwargs map for a module membership
-/// change: `type="module.activity.created"` (`issue.py:232-245,272-285`).
+/// change: `type="module.activity.created"` (`issue.py:248-261,288-301`).
 /// `requested_data` carries the module side verbatim — `str(module_id)`
-/// on the `create_module_issues` path (`:234`), the *raw* item on the
+/// on the `create_module_issues` path (`:250`), the *raw* item on the
 /// `create_issue_modules` path (`json.dumps({"module_id": module})`,
-/// `:275`).
+/// `:291`).
 fn activity_created_kwargs(
     module_wire: Value,
     actor_id: &uuid::Uuid,
@@ -1331,8 +1439,8 @@ enum Prep {
 }
 
 /// Coerce one *raw* JSON item through the UUID prep (`create_issue_modules`
-/// adds with `save=true`, removals with `save=false`; `issue.py:257-259`
-/// vs `:288-296`):
+/// adds with `save=true`, removals with `save=false`; `issue.py:273-275`
+/// vs `:304-312`):
 ///
 /// - `null` → `None`: on the save path the `NOT NULL` column dies with
 ///   `IntegrityError` (400 payload); on the lookup path it queries
@@ -1389,7 +1497,7 @@ fn prep_raw_item(item: &Value, save: bool) -> Prep {
 }
 
 /// Coerce one `str()`-coerced item (`create_module_issues`,
-/// `issue_id=str(issue)`, `issue.py:219`): `""` inserts `NULL` (400
+/// `issue_id=str(issue)`, `issue.py:235`): `""` inserts `NULL` (400
 /// payload); a parseable spelling proceeds; anything else is
 /// `ValidationError` (400 detail).
 fn prep_coerced_str(raw: &str) -> Prep {
@@ -1410,13 +1518,20 @@ fn denial_for_prep(prep: Prep) -> Denial {
     }
 }
 
-/// `ModuleIssueViewSet.create_module_issues` (`issue.py:209-246`).
+/// `ModuleIssueViewSet.create_module_issues` (`issue.py:225-262`).
 async fn create_module_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1426,7 +1541,7 @@ async fn create_module_issues(
     )
     .await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
-    // `request.data.get("issues", [])` (`:211`): a non-object body has no
+    // `request.data.get("issues", [])` (`:227`): a non-object body has no
     // `.get` (AttributeError → 500); objects fall through to the
     // truthiness check below.
     let issues_value = match body.0.as_object() {
@@ -1436,7 +1551,7 @@ async fn create_module_issues(
     let issue_strings = extract_create_strings(&issues_value)?;
     let workspace_id = project_workspace_id(&pool, &project_id).await?;
     // UUID coercion happens at the `UUIDField` prep inside `bulk_create`
-    // (`:216-230`): `""` inserts `NULL` → 400 payload, an unparseable
+    // (`:232-246`): `""` inserts `NULL` → 400 payload, an unparseable
     // spelling dies with `ValidationError` → 400 detail (there is no
     // `__in` filter here, unlike the cycle create).
     let mut issue_ids = Vec::with_capacity(issue_strings.len());
@@ -1446,36 +1561,27 @@ async fn create_module_issues(
             prep => return Err(denial_for_prep(prep)),
         }
     }
-    // `bulk_create(..., batch_size=10, ignore_conflicts=True)` (`:216-230`);
+    // `bulk_create(..., batch_size=10, ignore_conflicts=True)` (`:232-246`);
     // batching is unobservable, one multi-row `INSERT ... ON CONFLICT DO
     // NOTHING` (the partial unique on `(issue_id, module_id)` where
     // `deleted_at IS NULL`). A dangling issue id violates the FK →
     // `IntegrityError` → 400 `The payload is not valid`.
     if !issue_ids.is_empty() {
         let now = chrono::Utc::now();
-        sqlx::query(
-            r#"INSERT INTO module_issues
-                   (id, project_id, workspace_id, created_by_id, updated_by_id, module_id, issue_id, created_at, updated_at)
-                   SELECT gen_random_uuid(), $1, $2, $3, $3, $4, unnest($5::uuid[]), $6, $6
-                   ON CONFLICT DO NOTHING"#,
+        let modules = vec![module_id; issue_ids.len()];
+        insert_bridge_rows(
+            &pool,
+            &project_id,
+            &workspace_id,
+            &user_id,
+            &modules,
+            &issue_ids,
+            now,
         )
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(module_id)
-        .bind(&issue_ids)
-        .bind(now)
-        .execute(&pool)
-        .await
-        .map_err(|error| match error {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
-                Denial::BadError("The payload is not valid".to_owned())
-            }
-            _ => Denial::ServerError,
-        })?;
+        .await?;
     }
     // Bulk activity: one publish per *input* issue, even for already-linked
-    // rows (`:232-245` iterates `issues`, not the created records).
+    // rows (`:248-261` iterates `issues`, not the created records).
     let origin = request_origin(&state)?;
     for issue_id in &issue_ids {
         super::handlers_modules::enqueue_task(
@@ -1497,13 +1603,20 @@ async fn create_module_issues(
     ))
 }
 
-/// `ModuleIssueViewSet.create_issue_modules` (`issue.py:248-315`).
+/// `ModuleIssueViewSet.create_issue_modules` (`issue.py:264-331`).
 async fn create_issue_modules(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:issue_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1513,7 +1626,7 @@ async fn create_issue_modules(
     )
     .await?;
     let issue_id = parse_uuid_or_invalid(&issue_raw)?;
-    // `request.data.get(...)` (`:251-252`): a non-object body has no `.get`
+    // `request.data.get(...)` (`:267-268`): a non-object body has no `.get`
     // (AttributeError → 500).
     let body_map = match body.0.as_object() {
         Some(map) => map.clone(),
@@ -1521,10 +1634,10 @@ async fn create_issue_modules(
     };
     let workspace_id = project_workspace_id(&pool, &project_id).await?;
     let origin = request_origin(&state)?;
-    // Adds (`:255-285`): only when `modules` is truthy — a missing, null,
+    // Adds (`:271-301`): only when `modules` is truthy — a missing, null,
     // empty or falsy member skips the block with no 400. Each iteration
     // unit carries its `str()` coercion (for the bridge row) alongside its
-    // raw wire value (for `requested_data`, `:275`). Truthy non-arrays
+    // raw wire value (for `requested_data`, `:291`). Truthy non-arrays
     // iterate too: strings yield chars, objects yield keys (`for module
     // in modules`); truthy numbers/bools are not iterable → `TypeError`
     // → 500.
@@ -1540,7 +1653,7 @@ async fn create_issue_modules(
                 _ => return Err(Denial::ServerError),
             };
             // UUID coercion at the `UUIDField` prep inside `bulk_create`
-            // (`:256-270`): `null`/`""`/ints die at the `NOT NULL` column
+            // (`:272-286`): `null`/`""`/ints die at the `NOT NULL` column
             // or the FK (400 payload); unparseable spellings and
             // floats/containers die with `ValidationError` (400 detail).
             let mut ids = Vec::with_capacity(raws.len());
@@ -1580,7 +1693,7 @@ async fn create_issue_modules(
     .await
 }
 
-/// Shared tail of `create_issue_modules`: removals (`:287-313`) + 201.
+/// Shared tail of `create_issue_modules`: removals (`:303-329`) + 201.
 async fn finish_issue_modules(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -1590,7 +1703,7 @@ async fn finish_issue_modules(
     body_map: &Map<String, Value>,
     origin: &str,
 ) -> HandlerResult {
-    // `removed_modules` defaults to `[]` when absent (`:252`); an explicit
+    // `removed_modules` defaults to `[]` when absent (`:268`); an explicit
     // non-list iterates too (strings yield chars, objects yield keys;
     // truthy numbers/bools/`null` are not iterable → `TypeError` → 500 —
     // note an explicit `null` member *inside* the list is fine, it just
@@ -1609,12 +1722,12 @@ async fn finish_issue_modules(
         _ => return Err(Denial::ServerError),
     };
     for item in &removed_items {
-        // `ModuleIssue.objects.filter(...)` (`:288-293`): the UUID lookup
+        // `ModuleIssue.objects.filter(...)` (`:304-309`): the UUID lookup
         // prep renders `ValidationError` → 400 for unparseable spellings
         // (`""`, bad strings, floats, containers, out-of-range ints);
         // `null`/in-range ints coerce and match nothing (201 with a null
         // name). `requested_data` carries `str()` of the *raw* item
-        // (`:296`), not the normalized UUID.
+        // (`:312`), not the normalized UUID.
         let wire = py_str_item(item);
         match prep_raw_item(item, false) {
             Prep::Uuid(module_id) => {
@@ -1658,31 +1771,22 @@ async fn insert_module_bridges(
         return Ok(());
     }
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"INSERT INTO module_issues
-               (id, project_id, workspace_id, created_by_id, updated_by_id, module_id, issue_id, created_at, updated_at)
-               SELECT gen_random_uuid(), $1, $2, $3, $3, unnest($4::uuid[]), $5, $6, $6
-               ON CONFLICT DO NOTHING"#,
+    let issues = vec![*issue_id; module_ids.len()];
+    insert_bridge_rows(
+        pool,
+        project_id,
+        workspace_id,
+        user_id,
+        module_ids,
+        &issues,
+        now,
     )
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(module_ids)
-    .bind(issue_id)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|error| match error {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
-            Denial::BadError("The payload is not valid".to_owned())
-        }
-        _ => Denial::ServerError,
-    })?;
+    .await?;
     Ok(())
 }
 
 /// The live bridge's module name for a detachment, if the bridge exists.
-/// `module_issue.first().module.name` (`:302-307, :331`): the forward-FK
+/// `module_issue.first().module.name` (`:318-323, :347`): the forward-FK
 /// fetch sees soft-deleted modules too (verified live: detaching from a
 /// soft-deleted module still publishes its name with 204/201). A missing
 /// module row is unreachable (the FK), surfaced as 404.
@@ -1693,40 +1797,48 @@ async fn bridge_module_name(
     module_id: &uuid::Uuid,
     issue_id: &uuid::Uuid,
 ) -> Result<Option<Value>, Denial> {
-    let bridge: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT mi.id FROM module_issues mi
-           JOIN workspaces w ON w.id = mi.workspace_id
-           WHERE w.slug = $1 AND mi.project_id = $2 AND mi.module_id = $3 AND mi.issue_id = $4
-           AND mi.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(module_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let bridge: Option<uuid::Uuid> = module_issues::Entity::find()
+        .select_only()
+        .column(module_issues::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            module_issues::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(module_issues::Column::ProjectId.eq(*project_id))
+        .filter(module_issues::Column::ModuleId.eq(*module_id))
+        .filter(module_issues::Column::IssueId.eq(*issue_id))
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if bridge.is_none() {
         return Ok(None);
     }
-    let module_row: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT m.name FROM modules m WHERE m.id = $1"#)
-            .bind(module_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    // No soft-delete filter: the forward-FK fetch sees soft-deleted
+    // modules (documented above).
+    let module_row: Option<Option<String>> = modules::Entity::find()
+        .select_only()
+        .column(modules::Column::Name)
+        .filter(modules::Column::Id.eq(*module_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match module_row {
-        Some((name,)) => Ok(Some(name.map(Value::String).unwrap_or(Value::Null))),
+        Some(name) => Ok(Some(name.map(Value::String).unwrap_or(Value::Null))),
         None => Err(Denial::NotFound),
     }
 }
 
 /// One detachment: the `activity.deleted` publish fires before the bridge
-/// soft delete (`issue.py:287-313` removals, `:325-336` destroy).
-/// `module_wire` is `str()` of the raw item (`:296`); `module_id=None`
+/// soft delete (`issue.py:303-329` removals, `:341-352` destroy).
+/// `module_wire` is `str()` of the raw item (`:312`); `module_id=None`
 /// matches no bridge (the `null`-item removal); `module_name=None` is the
 /// missing-bridge publish (removals only — `destroy` 500s before this on
-/// a missing bridge, `:331` has no `None` guard).
+/// a missing bridge, `:347` has no `None` guard).
 #[allow(clippy::too_many_arguments)]
 async fn detach_module_bridge(
     pool: &sqlx::PgPool,
@@ -1771,19 +1883,30 @@ async fn detach_module_bridge(
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     super::handlers_modules::enqueue_task(pool, tasks::ISSUE_ACTIVITY_TASK, kwargs).await;
-    sqlx::query(
-        r#"UPDATE module_issues SET deleted_at = now()
-           WHERE project_id = $1 AND module_id = $2 AND issue_id = $3
-             AND workspace_id IN (SELECT id FROM workspaces WHERE slug = $4)
-             AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(module_id)
-    .bind(issue_id)
-    .bind(slug)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `module_id` is `Option` (`None` on the null-item removal): binding
+    // NULL matches nothing under `= NULL`, and the `NOT NULL` column
+    // cannot match `IS NULL` either — either spelling answers the same.
+    let workspace_scope = SeaQuery::select()
+        .from(workspaces::Entity)
+        .columns([workspaces::Column::Id])
+        .and_where(workspaces::Column::Slug.eq(slug))
+        .to_owned();
+    module_issues::Entity::update_many()
+        .col_expr(
+            module_issues::Column::DeletedAt,
+            Expr::value(chrono::Utc::now().fixed_offset()),
+        )
+        .filter(module_issues::Column::ProjectId.eq(*project_id))
+        .filter(module_issues::Column::ModuleId.eq(module_id))
+        .filter(module_issues::Column::IssueId.eq(*issue_id))
+        .filter(
+            Expr::col((module_issues::Entity, module_issues::Column::WorkspaceId))
+                .in_subquery(workspace_scope),
+        )
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1791,7 +1914,7 @@ async fn detach_module_bridge(
 // Destroy
 // ---------------------------------------------------------------------------
 
-/// `ModuleIssueViewSet.destroy` (`issue.py:317-337`): the activity publish
+/// `ModuleIssueViewSet.destroy` (`issue.py:333-353`): the activity publish
 /// fires before the delete and unconditionally; the bridge
 /// `filter().delete()` is a soft delete; a missing bridge still 500s on
 /// the `.first().module` dereference; 204 on success.
@@ -1799,13 +1922,20 @@ async fn module_issue_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:issue_id>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
     let issue_id = parse_uuid_or_invalid(&issue_raw)?;
     let origin = request_origin(&state)?;
-    // `:331` has no `None` guard: a missing bridge is `None.module`
+    // `:347` has no `None` guard: a missing bridge is `None.module`
     // (`AttributeError`) → 500 before anything is published.
     if bridge_module_name(&pool, &slug, &project_id, &module_id, &issue_id)
         .await?
@@ -1825,6 +1955,39 @@ async fn module_issue_destroy(
     )
     .await?;
     Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+#[cfg(test)]
+mod module_issues1_seaorm_tests {
+    use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn guest_scope_statement_pins_fused_exists() {
+        let pid = uuid::Uuid::nil();
+        let uid = uuid::Uuid::nil();
+        let (sql, _values) = guest_scope_statement("acme", &pid, &uid).build(PostgresQueryBuilder);
+        assert!(sql.contains("EXISTS"), "{sql}");
+        assert!(sql.contains(r#""project_members""#), "{sql}");
+        // sea-query binds values as placeholders in this rendering.
+        assert!(sql.contains(r#""project_members"."role" = $"#), "{sql}");
+        assert!(
+            sql.contains(r#""project_members"."is_active" = $"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""projects""#), "{sql}");
+        assert!(
+            sql.contains(r#""projects"."guest_view_all_features" = $"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains("NOT EXISTS"), "{sql}");
+        assert!(sql.contains(r#"AS "scoped""#), "{sql}");
+    }
 }
 
 #[cfg(test)]
@@ -1872,7 +2035,10 @@ mod tests {
             "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/",
         )
         .expect("list gate");
-        assert_eq!(list.source, "issue.py:95 (ModuleIssueViewSet.list)");
+        assert_eq!(
+            list.source,
+            "issue.py:96 (ModuleIssueViewSet.list; NEWFRONT-334 adds GUEST)"
+        );
         let create = gates::gate_for(
             "POST",
             "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/",
@@ -1880,7 +2046,7 @@ mod tests {
         .expect("create gate");
         assert_eq!(
             create.source,
-            "issue.py:209 (ModuleIssueViewSet.create_module_issues)"
+            "issue.py:225 (ModuleIssueViewSet.create_module_issues)"
         );
         let reverse = gates::gate_for(
             "POST",
@@ -1889,14 +2055,14 @@ mod tests {
         .expect("reverse create gate");
         assert_eq!(
             reverse.source,
-            "issue.py:248 (ModuleIssueViewSet.create_issue_modules)"
+            "issue.py:264 (ModuleIssueViewSet.create_issue_modules)"
         );
         let destroy = gates::gate_for(
             "DELETE",
             "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/<issue_id>/",
         )
         .expect("destroy gate");
-        assert_eq!(destroy.source, "issue.py:317 (ModuleIssueViewSet.destroy)");
+        assert_eq!(destroy.source, "issue.py:333 (ModuleIssueViewSet.destroy)");
         for row in [list, create, reverse, destroy] {
             assert!(matches!(row.gate, gates::Gate::Project { .. }));
         }
@@ -1951,7 +2117,7 @@ mod tests {
 
     #[test]
     fn falsy_issues_answer_400() {
-        // `if not issues:` (`issue.py:212-214`).
+        // `if not issues:` (`issue.py:228-230`).
         for raw in [
             serde_json::json!(null),
             serde_json::json!(false),

@@ -42,6 +42,18 @@ def clean_db(db):
             cur.execute("UPDATE workspaces SET logo_asset_id = NULL")
             cur.execute("UPDATE users SET avatar_asset_id = NULL")
             cur.execute("DELETE FROM file_assets")
+            # Runner rows seeded directly by the engine-credential
+            # deactivate test (dev_machine/machine_token/
+            # engine_credential/machine_session reference users and
+            # workspaces): wipe them before the reset's own user/
+            # workspace deletes, which raw SQL cannot cascade.
+            for runner_table in (
+                "engine_credential",
+                "machine_session",
+                "machine_token",
+                "dev_machine",
+            ):
+                cur.execute(f"DELETE FROM {runner_table}")
             for table in (
                 "issue_sequences",
                 "issue_assignees",
@@ -52,6 +64,14 @@ def clean_db(db):
                 # Labels carry a project FK; the duplicate-rows suite
                 # (PIDASHCONV-1372) seeds them directly.
                 "labels",
+                # Modules carry workspace/project FKs and module_issues
+                # references issues; the grouped-m2m None-bucket suite
+                # (NEWPIDASH-152) seeds them directly.
+                "module_issues",
+                "module_members",
+                "module_links",
+                "module_user_properties",
+                "modules",
                 "user_favorites",
                 "issues",
                 "draft_issue_assignees",

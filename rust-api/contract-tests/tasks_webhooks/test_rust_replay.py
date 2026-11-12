@@ -245,6 +245,56 @@ def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
     assert len(_log_diff_rows(db_conn, before)) == 1
 
 
+#: PIDASHCONV-1673: same bound as the oracle
+#: ``test_webhook_send_chunked_streaming_completes_within_bound`` — the
+#: sink streams 64 MiB in 8k paced 8 KiB chunks (~2 s of pacing).
+#: The old client, which re-decoded the whole buffered body after every
+#: socket read, took 142 s here (debug worker); the incremental
+#: decoder finishes in ~9 s end to end.
+STREAM_DELIVERY_BOUND_SECONDS = 60.0
+
+
+def test_rust_webhook_send_chunked_streaming_completes_within_bound(
+    db_conn, chunked_stream_sink
+):
+    """Rust side: streamed chunked body decodes in linear time.
+
+    Replays ``test_webhook_send_chunked_streaming_completes_within_bound``:
+    the delivery must complete inside the bound with the full 64 MiB body
+    logged, no retry, no requeue.
+    """
+    hook = _seed_hook_at(db_conn, chunked_stream_sink.url)
+    chunked_stream_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    started = time.monotonic()
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-chunked-stream")
+    )
+    deliveries = chunked_stream_sink.wait_for_count(1, what="streamed webhook POST")
+    assert len(deliveries) == 1
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="streamed webhook_logs row",
+        timeout=STREAM_DELIVERY_BOUND_SECONDS,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < STREAM_DELIVERY_BOUND_SECONDS, (
+        f"streamed delivery took {elapsed:.1f}s "
+        f"(bound {STREAM_DELIVERY_BOUND_SECONDS:.0f}s)"
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+    assert len(row["response_body"]) == chunked_stream_sink.total_bytes
+    assert set(row["response_body"]) == {"x"}
+    rust_queue.wait_for_settled(celery_id, what="streamed send acked")
+    rust_queue.wait_for_queue_drain(baseline=baseline, what="streamed queue drained")
+    time.sleep(1)
+    assert len(chunked_stream_sink.snapshot()) == 1, "event was redelivered"
+    assert not rust_queue.row_present(celery_id), "streamed send was requeued"
+    assert len(_log_diff_rows(db_conn, before)) == 1
+
+
 def test_rust_webhook_failure_executes_locally(db_conn, webhook_sink):
     """First-attempt failure, Rust side: same 500 row, no retry (PIDASHCONV-1105).
 
@@ -1931,4 +1981,162 @@ def test_rust_crawl_link_skips_soft_deleted_link(db_conn):
     )
     after = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
     assert after == before
+
+
+def test_rust_crawl_link_resolves_idna_hostname(db_conn):
+    """Crawl, Rust side: a non-ASCII hostname resolves via IDNA (PIDASHCONV-1672).
+
+    Mirrors ``test_crawl_link_resolves_idna_hostname`` (same payload):
+    the unicode URL and its punycode twin must crawl the same page —
+    both titles non-empty and equal. Pre-fix Rust fails DNS for the
+    unicode host ("Hostname could not be resolved") and stores a null
+    title, so this fails on pre-fix rust-dev. Settlement plus the
+    metadata diff is the proof: with the Django worker stopped, a
+    forward could never produce a local row change.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawlidna")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    urls = ["https://münchen.de/", "https://xn--mnchen-3ya.de/"]
+    links = [
+        insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": f"IDNA probe {i}",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        for i, url in enumerate(urls)
+    ]
+    celery_ids = [
+        rust_queue.publish(
+            CRAWL_LINK_TITLE,
+            args=[str(link["id"]), url],
+        )
+        for link, url in zip(links, urls)
+    ]
+    for celery_id in celery_ids:
+        rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+    def _crawled(link_id):
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link_id))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = [
+        wait_for(
+            lambda lid=str(link["id"]): _crawled(lid),
+            what=f"IDNA issue_links metadata for {url}",
+        )
+        for link, url in zip(links, urls)
+    ]
+    for row, url in zip(crawled, urls):
+        assert row["metadata"]["url"] == url
+    titles = [row["metadata"]["title"] for row in crawled]
+    assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
+    assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
+
+
+def test_rust_issue_activity_deleted_writes_row(db_conn):
+    """Issue deleted, Rust side: one ``deleted the issue`` row (NEWPIDASH-134).
+
+    Mirrors ``test_issue_activity_deleted_writes_row`` (same payload, the
+    app destroy's ``current_instance={}`` dict). Settlement plus the row
+    diff is the proof. Pre-fix the binder rejects the dict with
+    ``'current_instance' must be a string or null`` and no row is written.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrdeletedactivity")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.deleted",
+            "requested_data": json.dumps({"issue_id": str(issue["id"])}),
+            "current_instance": {},
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="deleted issue_activities row",
+    )
+    assert row["comment"] == "deleted the issue"
+    assert row["verb"] == "deleted"
+    assert row["field"] == "issue"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+
+def test_rust_issue_activity_assignee_subscribes_and_writes_row(db_conn):
+    """Added assignee, Rust side: EXECUTE locally (NEWPIDASH-133).
+
+    Mirrors ``test_issue_activity_assignee_subscribes_and_writes_row``
+    (same payload): settlement plus the row diffs is the proof — with
+    the Django worker stopped, a forward could never produce local
+    rows. Pre-fix the subscriber insert omits ``id``/``created_at``/
+    ``updated_at``, Postgres rejects it, and neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrassignee")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    assignee = seed_helpers.user(db_conn, "rrassignee-assignee")
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "issue_subscribers"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"assignee_ids": [str(assignee["id"])]}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="assignee issue_activities row",
+    )
+    assert row["field"] == "assignees"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "added assignee "
+    assert row["old_value"] == ""
+    assert row["new_value"] == assignee["display_name"]
+    assert row["new_identifier"] == str(assignee["id"])
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+    (sub,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_subscribers", before) or None,
+        what="assignee issue_subscribers row",
+    )
+    assert sub["subscriber_id"] == str(assignee["id"])
+    assert sub["issue_id"] == str(issue["id"])
+    assert sub["project_id"] == str(project["id"])
+    assert sub["workspace_id"] == str(chain["workspace"]["id"])
+    assert sub["created_by_id"] == str(assignee["id"])
+    assert sub["updated_by_id"] == str(assignee["id"])
+    assert sub["deleted_at"] is None
+    assert sub["id"] is not None
+    assert sub["created_at"] is not None
+    assert sub["updated_at"] is not None
 

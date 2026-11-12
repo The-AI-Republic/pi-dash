@@ -128,10 +128,20 @@ fn python_str(value: &Value) -> String {
                 i.to_string()
             } else if let Some(u) = n.as_u64() {
                 u.to_string()
-            } else if let Some(f) = n.as_f64() {
-                super::render_float_py(f, false)
             } else {
-                n.to_string()
+                // Beyond i64/u64: an integer literal keeps its exact digits
+                // (`arbitrary_precision` is unified from pidash-api) and
+                // Python `str(int)` echoes them — never route them through
+                // `f64`. Only float-syntax literals take the `repr` path.
+                let token = n.to_string();
+                if token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                    match n.as_f64() {
+                        Some(f) => super::render_float_py(f, false),
+                        None => token,
+                    }
+                } else {
+                    token
+                }
             }
         }
         Value::String(s) => s.clone(),
@@ -909,6 +919,20 @@ mod tests {
         let old = parsed["old_sid"].as_str();
         let new = parsed["new_sid"].as_str().expect("new_sid");
         assert_eq!(eviction_body(old, new), body);
+    }
+
+    #[test]
+    fn python_str_echoes_big_integers() {
+        // Python `str(int)` echoes exact digits past u64/i64 (the
+        // `str(message.get("mid") ...)` positions); only float-syntax
+        // literals take the `repr` path. Needs the workspace-unified
+        // `arbitrary_precision` (PIDASHCONV-1332).
+        let big: Value = serde_json::from_str("18446744073709551616").expect("int");
+        assert_eq!(python_str(&big), "18446744073709551616");
+        let neg: Value = serde_json::from_str("-9223372036854775809").expect("int");
+        assert_eq!(python_str(&neg), "-9223372036854775809");
+        let float: Value = serde_json::from_str("1e19").expect("float");
+        assert_eq!(python_str(&float), "1e+19");
     }
 
     #[test]

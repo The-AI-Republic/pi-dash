@@ -29,8 +29,10 @@
 //! `csrf_rotate_cookie` (thin adapters over the `pidash_auth` kernels
 //! and the local `CsrfDenial` / `CookieCtx` types); the divergent
 //! `csrf_request_token`, `bearer_token`, `header_value` and `urljoin`
-//! pairs; the `origin_allowed` / `split_origin` / `origin_verified` /
-//! `urlparse` singletons; the `query_last` shapes over raw pairs,
+//! pairs; the `origin_allowed` / `split_origin` singletons
+//! (`origin_verified` / `urlparse` moved to [`crate::csrf_origin`] with
+//! the rest of `process_view`'s Origin/Referer port, NEWPIDASH-12); the
+//! `query_last` shapes over raw pairs,
 //! `HashMap<String, String>` and raw query strings; the
 //! `handlers_user` `normalize_email` (`py_strip`, intentional: it
 //! strips `\x1c`-`\x1f`, `trim` does not); the webhook

@@ -17,9 +17,7 @@ use tauri::{AppHandle, Manager};
 /// A licence or notice file the build writes into `licenses/`.
 struct NoticeFile {
     file: &'static str,
-    /// What the text covers, as the About dialog titles it. Apache-2.0 §6
-    /// grants no trademark rights, so the engine is not named after its
-    /// upstream here; the notice file carries that attribution.
+    /// What the text covers, as the About dialog titles it.
     component: &'static str,
     /// SPDX identifier.
     license: &'static str,
@@ -28,23 +26,11 @@ struct NoticeFile {
 /// Every file `scripts/prepare-agent.sh` and the release pipelines write.
 /// A file missing from this list ships in the bundle without ever being
 /// shown — `tests::every_file_the_build_stages_is_rendered` guards that.
-const NOTICE_FILES: &[NoticeFile] = &[
-    NoticeFile {
-        file: "pidash-LICENSE.txt",
-        component: "Pi Dash",
-        license: "AGPL-3.0-only",
-    },
-    NoticeFile {
-        file: "agent-engine-LICENSE.txt",
-        component: "Agent engine",
-        license: "Apache-2.0",
-    },
-    NoticeFile {
-        file: "agent-engine-NOTICE.txt",
-        component: "Agent engine notice",
-        license: "Apache-2.0",
-    },
-];
+const NOTICE_FILES: &[NoticeFile] = &[NoticeFile {
+    file: "pidash-LICENSE.txt",
+    component: "Pi Dash",
+    license: "AGPL-3.0-only",
+}];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,12 +117,6 @@ mod tests {
         let dir = resources.path().join("licenses");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("pidash-LICENSE.txt"), "GNU AFFERO").unwrap();
-        std::fs::write(dir.join("agent-engine-LICENSE.txt"), "Apache License").unwrap();
-        std::fs::write(
-            dir.join("agent-engine-NOTICE.txt"),
-            "renamed to pidash-agent-engine",
-        )
-        .unwrap();
         // The directory also carries its README; that is not a licence.
         std::fs::write(dir.join("README.md"), "# Third-party binaries").unwrap();
 
@@ -145,14 +125,7 @@ mod tests {
             .iter()
             .map(|n| (n.license, n.text.as_deref()))
             .collect();
-        assert_eq!(
-            shown,
-            [
-                ("AGPL-3.0-only", Some("GNU AFFERO")),
-                ("Apache-2.0", Some("Apache License")),
-                ("Apache-2.0", Some("renamed to pidash-agent-engine")),
-            ]
-        );
+        assert_eq!(shown, [("AGPL-3.0-only", Some("GNU AFFERO"))]);
     }
 
     #[test]
