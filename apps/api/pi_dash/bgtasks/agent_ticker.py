@@ -289,7 +289,7 @@ def fire_tick(ticker_id: str) -> bool:
     # it is created as the person who asked, with their trigger, exactly as
     # if it had dispatched immediately — so per-user overrides, LLM config
     # and runner eligibility resolve the same way — and it does not count.
-    run = dispatch_continuation_run(issue, triggered_by=claim_trigger, actor=claim_actor)
+    run = dispatch_continuation_run(issue, triggered_by=claim_trigger, actor=claim_actor, held_entry=free_claim)
     if run is None:
         # Dispatch failed post-claim — restore the ticker so the budget
         # isn't wasted and any cap-disarm we just applied is undone.

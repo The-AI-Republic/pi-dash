@@ -1,0 +1,64 @@
+[package]
+name = "pidash-compat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# OVL-04 (PIDASHCONV-1542): the public home of the Python/DRF parity
+# plumbing every api module used to keep privately. A leaf crate: only
+# third-party deps, so api/services/jobs/db can all depend on it.
+# sqlx features mirror pidash-db (locked sqlx 0.8.x, no lock churn);
+# sea-query features match the union the workspace builds with
+# (ORM-01 enables with-json and postgres-array via sea-orm), so the
+# exhaustive binder compiles standalone exactly as it does in the
+# full workspace.
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "postgres-array", "with-uuid", "with-chrono", "with-json"] }
+# Response envelopes (OVL-04 part 2): axum Response builders plus the
+# serde/serde_json the Serialize generics need. All already in
+# rust-api/Cargo.lock via pidash-api (no lock churn).
+axum = "0.8"
+http = "1"
+serde = "1"
+# `preserve_order`: every workspace crate builds serde_json with it, so
+# `Map` iteration is insertion-ordered in-workspace; without it the
+# standalone compat build would sort keys (BTreeMap) and `python_dumps`
+# vectors would fail standalone while passing in-workspace. Feature-only,
+# same locked serde_json 1.x (no lock churn).
+# `arbitrary_precision` (PIDASHCONV-1623): api/services already build
+# with it, so the workspace unifies it everywhere; without it the
+# standalone compat build would parse big ints as lossy f64 and the
+# `render_number` exact-digit vectors would fail standalone while
+# passing in-workspace. Feature-only, same locked serde_json 1.x.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+# Datetime validators (OVL-04 part 3) return `DateTime<Utc>`.
+# Same locked chrono 0.4.x as the workspace (no lock churn).
+# `clock` is for test vectors (`from_timestamp`); the workspace
+# builds chrono with default features, so no lock churn.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# Datetime/UUID rendering (OVL-04 part 4): zones and uuids.
+# Same locked chrono-tz 0.10.x / uuid 1.x as the workspace.
+chrono-tz = "0.10"
+uuid = "1"
+# Session auth hash (OVL-04 part 6): HMAC-SHA256 keyed by
+# SHA256(salt || secret_key). Same locked hmac 0.12.x / sha2 0.10.x
+# as pidash-api (no lock churn, edge-only).
+hmac = "0.12.1"
+sha2 = "0.10.9"
+# Printability table for `py_printable` (PIDASHCONV-1624): CPython
+# `str.isprintable` is a general-category rule (C*/Z* except U+0020),
+# which needs real Unicode tables for unassigned/private-use.
+# Same locked icu_properties 2.3.x the workspace builds via
+# idna_adapter (no lock churn); default features (`compiled_data`).
+icu_properties = "2"
+# Single urlencoded field reads (PIDASHCONV-1626): `serde_urlencoded`
+# parses through the same `form_urlencoded::parse` iterator as the
+# `url` crate, so the OSS and overlay twins read byte-identical
+# pairs. Same locked serde_urlencoded 0.7.1 as pidash-api.
+serde_urlencoded = "0.7.1"
+
+[dev-dependencies]
+# Envelope tests read bodies back with `axum::body::to_bytes`
+# (async); the current-thread runtime is enough.
+# Already in rust-api/Cargo.lock.
+tokio = { version = "1", features = ["macros", "rt"] }

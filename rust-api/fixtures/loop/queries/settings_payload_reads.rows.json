@@ -1,0 +1,16 @@
+{
+ "method": "Ran _settings_payload() on scratch DB pidash_loop_fx with CaptureQueriesContext.",
+ "payload": {
+  "enabled": true,
+  "jobs": [
+   {
+    "description": "desc",
+    "enabled": true,
+    "interval_label": "daily",
+    "name": "Pub name",
+    "slug": "fxloop-job"
+   }
+  ]
+ },
+ "source": "apps/api/pi_dash/loop/views.py:43-49"
+}
