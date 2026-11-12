@@ -16,7 +16,7 @@ describe("runtime sign-out hooks", () => {
 
   it("registers and unregisters", () => {
     const hooks = {
-      confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false })),
+      confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false, signOutComputer: false })),
       disposeRuntimeForSignOut: vi.fn(async () => undefined),
     };
     const unregister = registerRuntimeSignOutHooks(hooks);
@@ -27,7 +27,7 @@ describe("runtime sign-out hooks", () => {
 
   it("replaces the previous registration", () => {
     const first = {
-      confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false })),
+      confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false, signOutComputer: false })),
       disposeRuntimeForSignOut: vi.fn(async () => undefined),
     };
     const second = {

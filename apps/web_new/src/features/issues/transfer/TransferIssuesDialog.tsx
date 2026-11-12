@@ -34,6 +34,11 @@ export function TransferIssuesDialog({
   onClose,
 }: TransferIssuesDialogProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
+  // The search box takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close
+  // button, and on a busy host it can land after the reader has clicked
+  // into the field, swallowing their keystrokes (NEWFRONT-1055, 1058).
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
   const cycles = usePickerCycles(workspaceSlug, projectId, open);
   const transfer = useTransferCycleIssues(workspaceSlug, projectId, cycleId);
   const options = transferTargetOptions(cycles.data ?? [], cycleId, query);
@@ -50,6 +55,7 @@ export function TransferIssuesDialog({
     <Dialog
       title="Move unfinished work"
       open={open}
+      initialFocus={searchRef}
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
@@ -62,6 +68,7 @@ export function TransferIssuesDialog({
     >
       <div className="flex flex-col gap-(--space-4)">
         <input
+          ref={searchRef}
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}

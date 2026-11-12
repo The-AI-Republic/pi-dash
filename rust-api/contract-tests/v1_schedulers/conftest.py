@@ -106,6 +106,7 @@ def _seed_run(
             "phase_kind": phase_kind,
             "agent_metadata": {},
             "usage": {"input": 1, "output": 1, "total": 2},
+            "pin_kind": "locality",
             "started_at": started_at,
             "scheduler_binding_id": binding_id,
             "created_at": created_at,

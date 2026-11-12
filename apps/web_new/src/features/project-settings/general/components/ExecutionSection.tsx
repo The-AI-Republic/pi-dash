@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution target and automated-run policy
-// (parity/specs/project-settings-general.md §PSET-009). The target picker
-// disables families the instance cannot run and affects new runs only. The
-// master switch leaves the budget and cadence visible but inert while off.
+// (parity/specs/project-settings-general.md §PSET-009). There is no
+// executor picker: projects run on runners and the default pod decides who
+// runs the work (built-in engine design §6), so the section only says so.
+// The master switch leaves the budget and cadence visible but inert while off.
 // The budget keeps whole numbers with a native floor of one and a no-cap
 // toggle that remembers the typed cap; the cadence picker lists the presets
 // and marks an out-of-band rhythm as custom.
@@ -17,7 +18,7 @@ import {
   CADENCE_OPTIONS,
   cadenceLabel,
   CUSTOM_CADENCE_VALUE,
-  executorChoices,
+  EXECUTION_TARGET_NOTE,
   type GeneralFieldErrors,
   type GeneralFormValues,
   shapeBudget,
@@ -27,8 +28,6 @@ export interface ExecutionSectionProps {
   values: GeneralFormValues;
   errors: GeneralFieldErrors;
   disabled: boolean;
-  /** Per-family availability arriving with the project row. */
-  executorOptions: ReadonlyArray<{ kind: string; available: boolean }>;
   onChange: (patch: Partial<GeneralFormValues>) => void;
 }
 
@@ -41,45 +40,14 @@ export function cadenceChoices(): Array<{ id: string; label: string }> {
   return CADENCE_OPTIONS.map((option) => ({ id: String(option.seconds), label: option.label }));
 }
 
-export function ExecutionSection({
-  values,
-  errors,
-  disabled,
-  executorOptions,
-  onChange,
-}: ExecutionSectionProps): React.ReactElement {
-  const executors = executorChoices(executorOptions);
+export function ExecutionSection({ values, errors, disabled, onChange }: ExecutionSectionProps): React.ReactElement {
   const controlsDisabled = disabled || !values.ticking;
   return (
     <section aria-label="Execution" data-testid="general-execution" className="flex flex-col gap-(--space-6)">
-      <div className="flex flex-col gap-(--space-2)">
-        <span className="text-body font-medium text-(--text)">Default execution target</span>
-        <Combobox
-          trigger={
-            <Button
-              variant="secondary"
-              disabled={disabled}
-              data-testid="general-executor-trigger"
-              className="w-full justify-between"
-            >
-              <span data-testid="general-executor">{executorLabel(executors, values.executor)}</span>
-              <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
-            </Button>
-          }
-          options={executors.map((executor) => ({
-            id: executor.kind,
-            label: executor.label,
-            disabled: executor.disabled,
-          }))}
-          value={values.executor}
-          onSelect={(kind) => onChange({ executor: kind })}
-          listLabel="Default execution target"
-          searchEnabled={false}
-          emptyText="No execution targets"
-          disabled={disabled}
-        />
-        <p className="text-meta text-(--text-muted)">
-          Changing the target affects new runs only. Queued and running work keeps its original executor.
+      <div className="flex flex-col gap-(--space-1)">
+        <span className="text-body font-medium text-(--text)">Runs on</span>
+        <p className="text-meta text-(--text-muted)" data-testid="general-execution-target-note">
+          {EXECUTION_TARGET_NOTE}
         </p>
       </div>
 
@@ -169,8 +137,4 @@ export function ExecutionSection({
       </div>
     </section>
   );
-}
-
-function executorLabel(executors: ReadonlyArray<{ kind: string; label: string }>, kind: string): string {
-  return executors.find((executor) => executor.kind === kind)?.label ?? kind;
 }

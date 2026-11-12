@@ -123,6 +123,22 @@ describe("RunnersRail", () => {
     expect(screen.queryByTestId("runners-rail-local-contact")).toBeNull();
   });
 
+  // NEWPIDASH-3: the rail is a column that stretches to its row; a long
+  // list scrolls inside the rail below a fixed header.
+  it("scrolls a long runner list inside the rail below a fixed header", () => {
+    const many = Array.from({ length: 40 }, (_, index) => runner(`r-${index}`, `runner ${index}`));
+    render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={many} isProjectScope={false} />);
+    const rail = screen.getByTestId("runners-rail");
+    expect(rail).toHaveClass("flex", "min-h-0", "flex-col");
+    const [header, scroll] = Array.from(rail.children);
+    expect(header).toHaveTextContent(RAIL_HEADER);
+    expect(header).toHaveClass("shrink-0");
+    expect(scroll).toBe(screen.getByTestId("runners-rail-scroll"));
+    expect(scroll).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(screen.getAllByTestId("runners-rail-contact")).toHaveLength(40);
+    for (const contact of screen.getAllByTestId("runners-rail-contact")) expect(scroll).toContainElement(contact);
+  });
+
   it("shows the workspace empty sentence", () => {
     render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={[]} isProjectScope={false} />);
     expect(screen.getByTestId("runners-rail-empty")).toHaveTextContent("No runners connected yet.");

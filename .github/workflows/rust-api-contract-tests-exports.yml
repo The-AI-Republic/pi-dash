@@ -21,7 +21,7 @@ concurrency:
 jobs:
   exports-oracle:
     name: exports Django oracle
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:

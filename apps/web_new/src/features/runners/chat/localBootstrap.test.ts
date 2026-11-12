@@ -8,7 +8,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const platformState = vi.hoisted(() => ({ localChat: undefined as unknown }));
-const runtimeState = vi.hoisted(() => ({ account: "u-1", ensure: vi.fn(async () => undefined) }));
+const runtimeState = vi.hoisted(() => ({
+  account: "u-1",
+  ensure: vi.fn(async () => undefined),
+  refresh: vi.fn(async () => undefined),
+  topUpUrl: "",
+}));
 
 vi.mock("../../../core/platform/index.js", () => ({
   get platform() {
@@ -18,6 +23,8 @@ vi.mock("../../../core/platform/index.js", () => ({
 vi.mock("../runtime/service.js", () => ({
   getRuntimeAccount: () => runtimeState.account,
   ensureChatRuntime: runtimeState.ensure,
+  refreshModelCredential: runtimeState.refresh,
+  getModelTopUpUrl: () => runtimeState.topUpUrl,
 }));
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ baseUrl: "https://api.test" }) }));
 

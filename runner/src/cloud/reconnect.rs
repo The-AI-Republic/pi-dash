@@ -409,7 +409,10 @@ mod tests {
             assert_eq!(verdict, GoneVerdict::Confirming(shown));
         }
         assert_eq!(g.count(), GONE_CONFIRMATIONS, "count is capped for display");
-        assert_eq!(g.record(t0 + mins(5)), GoneVerdict::Purge(GONE_CONFIRMATIONS));
+        assert_eq!(
+            g.record(t0 + mins(5)),
+            GoneVerdict::Purge(GONE_CONFIRMATIONS)
+        );
     }
 
     #[test]

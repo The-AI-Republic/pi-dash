@@ -11,6 +11,7 @@ import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption }
 import { Repeat } from "lucide-react";
 import * as React from "react";
 
+import { PropertyChip } from "./PropertyChip.js";
 import { selectCycleOptions, type CycleOption } from "./cycles.js";
 import { usePickerCycles } from "./reference.js";
 
@@ -30,6 +31,10 @@ export interface CyclePickerProps {
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the name. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "Cycle: Sprint 4" when set. */
+  label?: string | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
@@ -67,6 +72,8 @@ export function CyclePicker({
   disabled = false,
   variant = "secondary",
   iconOnly = false,
+  chip = false,
+  label = "Cycle",
   trigger,
   placeholder = "No cycle",
   tabIndex,
@@ -98,6 +105,20 @@ export function CyclePicker({
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
     const current = value === null ? undefined : options.find((option) => option.id === value);
     const text = current?.name ?? placeholder;
+    if (chip) {
+      const filled = current !== undefined;
+      return (
+        <PropertyChip
+          label={filled ? `${label}: ${text}` : label}
+          icon={<CycleGlyph />}
+          text={text}
+          placeholder={!filled}
+          {...(filled ? { title: text } : {})}
+          {...(triggerId === undefined ? {} : { id: triggerId })}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        />
+      );
+    }
     if (iconOnly) {
       return (
         <IconButton label={text} variant={variant}>

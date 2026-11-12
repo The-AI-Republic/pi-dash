@@ -142,10 +142,11 @@ WHERE "owner_id" = $1 AND "pod_id" = $2 AND "workspace_id" = $3
   AND "provisioning" = 'desktop_bundled' AND "status" <> 'revoked';
 -- count >= settings.MANAGED_RUNNER_MAX_PER_USER_PROJECT (default 1)
 --   -> 409 {"error": "managed_runner_limit", ...} (tx rolls back).
--- Insert (:726-735):
+-- Insert (:726-735; pod_dispatch per #2903 — engines pinned_only,
+-- own-agent runners pod_member):
 INSERT INTO "runner"
     ("id", "owner_id", "workspace_id", "dev_machine_id", "pod_id", "name",
-     "host_label", "provisioning", "visibility",
+     "host_label", "provisioning", "pod_dispatch", "visibility",
      "refresh_token_hash", "refresh_token_fingerprint",
      "refresh_token_generation", "previous_refresh_token_hash",
      "access_token_signing_key_version",
@@ -154,7 +155,7 @@ INSERT INTO "runner"
      "runner_version", "dev_metadata", "protocol_version",
      "last_heartbeat_at",
      "created_at", "updated_at", "revoked_at", "revoked_reason")
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0,
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0,
         '', '', 0, '', 1, '', '', now(), '[]', 'offline', '', '',
         '', '{}', 1, NULL, now(), now(), NULL, '');
 -- IntegrityError (pod,name unique) -> explicit name: 409 runner_name_taken;

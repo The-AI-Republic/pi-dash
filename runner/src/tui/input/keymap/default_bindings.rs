@@ -52,15 +52,42 @@ pub fn defaults() -> KeymapRegistry {
                 (k(KeyCode::Char(',')), Action::RunnerPickerPrev),
                 (k(KeyCode::Char('>')), Action::RunnerPickerNext),
                 (k(KeyCode::Char('.')), Action::RunnerPickerNext),
-                (km(KeyCode::Char('1'), KeyModifiers::ALT), Action::RunnerPickerJump(0)),
-                (km(KeyCode::Char('2'), KeyModifiers::ALT), Action::RunnerPickerJump(1)),
-                (km(KeyCode::Char('3'), KeyModifiers::ALT), Action::RunnerPickerJump(2)),
-                (km(KeyCode::Char('4'), KeyModifiers::ALT), Action::RunnerPickerJump(3)),
-                (km(KeyCode::Char('5'), KeyModifiers::ALT), Action::RunnerPickerJump(4)),
-                (km(KeyCode::Char('6'), KeyModifiers::ALT), Action::RunnerPickerJump(5)),
-                (km(KeyCode::Char('7'), KeyModifiers::ALT), Action::RunnerPickerJump(6)),
-                (km(KeyCode::Char('8'), KeyModifiers::ALT), Action::RunnerPickerJump(7)),
-                (km(KeyCode::Char('9'), KeyModifiers::ALT), Action::RunnerPickerJump(8)),
+                (
+                    km(KeyCode::Char('1'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(0),
+                ),
+                (
+                    km(KeyCode::Char('2'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(1),
+                ),
+                (
+                    km(KeyCode::Char('3'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(2),
+                ),
+                (
+                    km(KeyCode::Char('4'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(3),
+                ),
+                (
+                    km(KeyCode::Char('5'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(4),
+                ),
+                (
+                    km(KeyCode::Char('6'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(5),
+                ),
+                (
+                    km(KeyCode::Char('7'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(6),
+                ),
+                (
+                    km(KeyCode::Char('8'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(7),
+                ),
+                (
+                    km(KeyCode::Char('9'), KeyModifiers::ALT),
+                    Action::RunnerPickerJump(8),
+                ),
             ],
         ),
         (

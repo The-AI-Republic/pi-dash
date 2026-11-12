@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-122): pod / execution-target dropdown — the
-// "Runs on" row lists pods with a DEFAULT tag plus cloud/managed agent
-// rows that disable with a reason when unavailable; picking a pod pins
-// the executor and the pod on the server.
-// Rows: ISS-218 (pod / execution-target dropdown).
+// "Runs on" row lists pods with a DEFAULT tag and no executor rows (the
+// Cloud Agent and built-in agent entries are deprecated and hidden,
+// built-in engine design §6); picking a pod pins the local executor and
+// the pod on the server.
+// Rows: ISS-218 (pod / execution-target dropdown), ISS-117 (the create
+// modal starts on the project's default pod, NEWPIDASH-23).
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
@@ -15,19 +17,20 @@ import {
   serverCleanupIssueWithSession,
   serverCleanupProject,
   serverIssue,
+  serverIssues,
   serverProjectPods,
   signInSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 test(
-  specTitle(["ISS-218"], "runs-on dropdown lists pods and agents, pins pod on pick"),
+  specTitle(["ISS-218"], "runs-on dropdown lists pods without executor rows, pins pod on pick"),
   { tag: specTags(["ISS-218"]) },
   async ({ driver, seed, page }) => {
     const tag = `NF122 pods ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
     // Fresh projects auto-create one default pod; the scenario adds a tier
-    // pod so the picker has two pods plus the agent rows.
+    // pod so the picker has two pods.
     const projectId = await serverCreateProjectWithFlags(
       seed.workspaceSlug,
       `${tag} project`,
@@ -56,12 +59,15 @@ test(
         await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 15_000 }).toContain(auto?.name ?? "");
       });
 
-      await test.step("the picker lists agents (disabled, with reasons) and pods", async () => {
+      await test.step("the picker lists pods and no executor rows", async () => {
         await driver.propertyOpenPicker("Runs on");
         expect(await driver.pickerHasSearch()).toBe(true);
         const options = await driver.pickerOptionTexts();
-        expect(options.some((o) => o.includes("Pi Dash Cloud Agent"))).toBe(true);
-        expect(options.some((o) => o.includes("Pi Dash Agent (desktop)"))).toBe(true);
+        // Runner is the only executor (built-in engine design §6): the server
+        // still returns the Cloud Agent and built-in agent entries for older
+        // clients, marked deprecated, and both apps hide them.
+        expect(options.some((o) => o.includes("Pi Dash Cloud Agent"))).toBe(false);
+        expect(options.some((o) => o.includes("Pi Dash Agent (desktop)"))).toBe(false);
         expect(options.some((o) => o.includes(tier.name) && !/default/i.test(o))).toBe(true);
         const defaults = await serverProjectPods(projectId, session);
         const auto = defaults.find((p) => p.isDefault);
@@ -75,21 +81,6 @@ test(
           await expect(autoOption.getByText("DEFAULT")).toBeVisible();
         } else {
           expect(options.some((o) => o.includes(auto?.name ?? "") && /default/i.test(o))).toBe(true);
-        }
-        // Neither agent is offered on this stack, so both rows disable with
-        // a human-readable reason rendered inline.
-        expect(await driver.pickerOptionDisabled("Pi Dash Cloud Agent")).toBe(true);
-        expect(await driver.pickerOptionDisabled("Pi Dash Agent (desktop)")).toBe(true);
-        // The old app folds the unavailability reason into the option text;
-        // the rebuild renders it as trailing pill text the option-text read
-        // skips by design, so the new leg reads the whole option (spec §10
-        // gate alignment).
-        if (driver.target === "web_new") {
-          const cloudOption = page.getByRole("listbox").getByRole("option", { name: "Pi Dash Cloud Agent" });
-          const cloudText = ((await cloudOption.innerText()) ?? "").trim();
-          expect(cloudText.length).toBeGreaterThan("Pi Dash Cloud Agent".length);
-        } else {
-          expect(options.some((o) => /cloud agent/i.test(o) && o.length > "Pi Dash Cloud Agent".length)).toBe(true);
         }
         await driver.pickerClickOutside();
       });
@@ -118,6 +109,62 @@ test(
       });
     } finally {
       await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, issue.id, session);
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-117", "ISS-218"], "create modal starts on the default pod and stores it"),
+  { tag: specTags(["ISS-117", "ISS-218"]) },
+  async ({ driver, seed }) => {
+    const tag = `NP23 create pod ${Date.now()}`;
+    const name = `${tag} issue`;
+    const session = await signInSession(seed.email, seed.password);
+    // A fresh project carries exactly one auto-created default pod and the
+    // local executor default; a second, non-default pod proves the modal
+    // picks the default rather than the first row it lists.
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("NP23"),
+      {},
+      session
+    );
+    await serverCreatePod(projectId, `Tier${Date.now().toString(36)}`, session);
+    let createdId: string | null = null;
+    try {
+      const pods = await serverProjectPods(projectId, session);
+      const auto = pods.find((p) => p.isDefault);
+      expect(auto).toBeDefined();
+      await driver.openEntry();
+      await driver.signInWithPasswordRetry(seed.email, seed.password);
+      await driver.openProjectIssuesSettled(seed.workspaceSlug, projectId);
+      await driver.dismissWelcomeDialog();
+
+      await test.step("the untouched form already names the default pod", async () => {
+        await driver.openCreateModal();
+        await expect.poll(() => driver.modalTextContains(auto?.name ?? "<none>"), { timeout: 15_000 }).toBe(true);
+      });
+
+      await test.step("a title-only create stores the pod and the local executor", async () => {
+        await driver.fillCreateTitle(name);
+        await driver.submitCreateModal();
+        await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+        await expect
+          .poll(
+            async () => (await serverIssues(seed.workspaceSlug, projectId, session)).find((i) => i.name === name)?.id,
+            { timeout: 30_000 }
+          )
+          .toBeTruthy();
+        const row = (await serverIssues(seed.workspaceSlug, projectId, session)).find((i) => i.name === name);
+        createdId = row?.id ?? null;
+        const detail = await serverIssue(seed.workspaceSlug, projectId, createdId ?? "", session);
+        expect(detail.assigned_pod_id).toBe(auto?.id);
+        expect(detail.agent_executor).toBe("local_runner");
+      });
+    } finally {
+      if (createdId !== null) await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, createdId, session);
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }
   }

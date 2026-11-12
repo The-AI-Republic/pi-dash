@@ -31,15 +31,27 @@ pub struct Outcome {
     pub status: u16,
     /// The pre-rendered response body text.
     pub body: String,
+    /// A pod whose queued re-pointed run must drain on commit (design
+    /// §13.2). `None` on every operation except an issue update that
+    /// re-pointed a QUEUED run.
+    pub drain_pod: Option<uuid::Uuid>,
 }
 
 impl Outcome {
     pub fn ok(body: String) -> Self {
-        Self { status: 200, body }
+        Self {
+            status: 200,
+            body,
+            drain_pod: None,
+        }
     }
 
     pub fn created(body: String) -> Self {
-        Self { status: 201, body }
+        Self {
+            status: 201,
+            body,
+            drain_pod: None,
+        }
     }
 }
 

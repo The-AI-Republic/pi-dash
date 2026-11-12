@@ -18,6 +18,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { platform } from "../../../core/platform/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import {
   boardFormDirty,
@@ -125,7 +126,10 @@ function wrapper(): WrapperComponent {
 }
 
 beforeEach(() => vi.clearAllMocks());
-afterEach(() => resetAppClient());
+afterEach(() => {
+  resetAppClient();
+  vi.restoreAllMocks();
+});
 
 describe("publish form math", () => {
   it("detects a published board by its anchor", () => {
@@ -174,6 +178,25 @@ describe("publish form math", () => {
     vi.stubEnv("VITE_SPACE_BASE_URL", "https://space.test");
     vi.stubEnv("VITE_SPACE_BASE_PATH", "/public");
     expect(publishedBoardLink("abc")).toBe("https://space.test/public/issues/abc");
+    vi.unstubAllEnvs();
+  });
+
+  it("falls back to the hosted origin when no spaces base is configured", () => {
+    vi.stubEnv("VITE_SPACE_BASE_URL", "");
+    vi.stubEnv("VITE_SPACE_BASE_PATH", "");
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    expect(publishedBoardLink("abc")).toBe("https://app.example.test/issues/abc");
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("refuses instead of building a tauri link when the platform refuses", () => {
+    vi.stubEnv("VITE_SPACE_BASE_URL", "");
+    vi.stubEnv("VITE_SPACE_BASE_PATH", "");
+    vi.spyOn(platform, "shareableUrl").mockImplementation(() => {
+      throw new Error("A hosted web origin is required to create a shareable link.");
+    });
+    expect(() => publishedBoardLink("abc")).toThrow("hosted web origin");
     vi.unstubAllEnvs();
   });
 });

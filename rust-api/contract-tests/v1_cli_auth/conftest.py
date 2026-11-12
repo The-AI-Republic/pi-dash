@@ -87,7 +87,18 @@ def _sweep_started_codes():
 
 
 def device_start(api, **json_body):
-    r = api.post("/api/v1/auth/device/start/", json=json_body or {})
+    # Isolate each start call in its own throttle bucket (unique
+    # X-Forwarded-For per call): the engine suite makes 40+ starts in
+    # one run, over the 20/minute per-IP cap, so sharing the bare
+    # bucket would 429 the later tests. The throttle contract itself is
+    # pinned separately by auth_device/test_device_throttle.py.
+    import uuid
+
+    r = api.post(
+        "/api/v1/auth/device/start/",
+        json=json_body or {},
+        headers={"X-Forwarded-For": f"device-start-{uuid.uuid4().hex}"},
+    )
     if r.status_code == 200:
         code = (r.json() or {}).get("device_code")
         if code:
@@ -107,6 +118,12 @@ def approve(api, cookies, user_code):
 
 
 def poll_token(api, device_code):
+    # Same per-call throttle isolation as device_start (anon token-poll
+    # cap is 30/minute): sharing the bare bucket 429s the later tests.
+    import uuid
+
     return api.post(
-        "/api/v1/auth/device/token/", json={"device_code": device_code}
+        "/api/v1/auth/device/token/",
+        json={"device_code": device_code},
+        headers={"X-Forwarded-For": f"device-token-{uuid.uuid4().hex}"},
     )

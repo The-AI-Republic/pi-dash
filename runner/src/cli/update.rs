@@ -9,6 +9,12 @@
 //!
 //! `--check` reports whether an update is available without performing one.
 //!
+//! Before the swap, the new release's built-in engine is installed as a new
+//! `engine/<version>/` directory beside the current one
+//! (`crate::engine::install`); the running daemon keeps the engine path it
+//! resolved at start, and older engine versions are left for the daemon to
+//! delete once no run uses them.
+//!
 //! The daemon's auto-update path calls [`check_or_swap`] so the manual
 //! CLI and the daemon-driven swap share one code path.
 //!
@@ -136,15 +142,34 @@ pub async fn check_or_swap(check: bool, paths: &Paths) -> Result<SwapOutcome> {
         return Ok(SwapOutcome::AlreadyLatest);
     }
 
+    let new_version = updater
+        .query_new_version()
+        .await
+        .context("querying latest pidash version")?
+        .map(|v| v.to_string());
+
     if check {
-        let v = updater
-            .query_new_version()
-            .await
-            .context("querying latest pidash version")?
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "(unknown)".to_string());
+        let v = new_version.unwrap_or_else(|| "(unknown)".to_string());
         return Ok(SwapOutcome::UpdateAvailable { new_version: v });
     }
+
+    // Install the new release's engine version directory beside the one in
+    // use *before* replacing `pidash`: the new binary looks only for its
+    // own engine version, and a running daemon keeps the path it resolved
+    // at start. Older versions are left for the daemon to clean up
+    // (`crate::engine::cleanup`). Without the engine the new `pidash` would
+    // start without an agent, so a failure here aborts the update.
+    let new_version =
+        new_version.context("the release service reported an update but no version for it")?;
+    install_engine_for(&new_version).await?;
+
+    // Install exactly the release whose engine was just placed. `run` reuses
+    // the release `query_new_version` fetched, but pinning the version keeps
+    // that true if axoupdater ever re-queries "latest" (a release published
+    // in between would otherwise get a `pidash` without its engine).
+    updater.configure_version_specifier(axoupdater::UpdateRequest::SpecificVersion(
+        new_version.clone(),
+    ));
 
     let result = updater
         .run()
@@ -159,6 +184,25 @@ pub async fn check_or_swap(check: bool, paths: &Paths) -> Result<SwapOutcome> {
         // brought us up to date. Treat as already-latest.
         None => Ok(SwapOutcome::AlreadyLatest),
     }
+}
+
+async fn install_engine_for(new_version: &str) -> Result<()> {
+    let root = crate::engine::install::install_root_for_current_exe()?;
+    let outcome = crate::engine::install::install_release(new_version, &root)
+        .await
+        .with_context(|| {
+            format!(
+                "installing the built-in engine of v{new_version} into {} (pidash was not updated)",
+                root.display()
+            )
+        })?;
+    for v in &outcome.installed {
+        tracing::info!(version = %v, root = %root.display(), "installed built-in engine for update");
+    }
+    for v in &outcome.already_present {
+        tracing::info!(version = %v, root = %root.display(), "built-in engine for update already installed");
+    }
+    Ok(())
 }
 
 struct UpdateLock {

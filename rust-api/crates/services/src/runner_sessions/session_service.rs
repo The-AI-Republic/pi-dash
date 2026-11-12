@@ -635,7 +635,7 @@ pub fn parse_in_flight_id(in_flight: Option<&Value>) -> Option<String> {
 /// truthiness of the raw value, so any truthy value (even an
 /// unparseable id) skips the release. When it passes, the open
 /// transaction runs
-/// [`RELEASE_RUNNER_IF_IDLE_SQL`](super::drain::RELEASE_RUNNER_IF_IDLE_SQL)
+/// [`release_runner_if_idle_stmt`](super::drain::release_runner_if_idle_stmt)
 /// after the reaper and logs [`release_on_open_log`] when a row
 /// flipped. No drain is scheduled: dispatch still waits for the
 /// session's first poll.
