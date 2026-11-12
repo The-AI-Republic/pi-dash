@@ -7,21 +7,25 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-type Choice = { deleteChatHistory: boolean } | null;
+type Choice = { deleteChatHistory: boolean; signOutComputer?: boolean } | null;
 type Prompt = (resolve: (choice: Choice) => void) => void;
 
-const mocks = vi.hoisted(() => ({ prompt: null as Prompt | null }));
+const mocks = vi.hoisted(() => ({ prompt: null as Prompt | null, computer: false }));
 
 vi.mock("@pi-dash/i18n", () => ({ useTranslation: () => ({ t: (text: string) => text }) }));
 vi.mock("@/services/agent-runtime", () => ({
   registerSignOutPrompt: (prompt: Prompt | null) => {
     mocks.prompt = prompt;
   },
+  canSignOutComputer: () => mocks.computer,
 }));
 
 import { DesktopSignOutDialog } from "../../core/components/desktop-sign-out-dialog";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  mocks.computer = false;
+});
 
 /** Open the dialog the way `confirmSignOut` does and return what it resolves. */
 async function ask() {
@@ -38,13 +42,17 @@ describe("desktop sign-out confirmation", () => {
     expect(screen.queryByText("Are you sure you want to sign out?")).toBeNull();
   });
 
-  it("signs out without deleting history by default", async () => {
+  it("signs out only the app, keeping history, by default", async () => {
+    mocks.computer = true;
     render(<DesktopSignOutDialog />);
     const answer = ask();
     await screen.findByText("Are you sure you want to sign out?");
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "Delete chat history" }).checked).toBe(false);
+    expect(
+      screen.getByRole<HTMLInputElement>("checkbox", { name: "Also sign out Pi Dash on this computer" }).checked
+    ).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-    await expect(answer).resolves.toEqual({ deleteChatHistory: false });
+    await expect(answer).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 
   it("deletes history only when the box is ticked, and starts unticked next time", async () => {
@@ -52,7 +60,7 @@ describe("desktop sign-out confirmation", () => {
     const first = ask();
     fireEvent.click(await screen.findByRole("checkbox", { name: "Delete chat history" }));
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-    await expect(first).resolves.toEqual({ deleteChatHistory: true });
+    await expect(first).resolves.toEqual({ deleteChatHistory: true, signOutComputer: false });
 
     const second = ask();
     expect((await screen.findByRole<HTMLInputElement>("checkbox", { name: "Delete chat history" })).checked).toBe(
@@ -60,6 +68,21 @@ describe("desktop sign-out confirmation", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await expect(second).resolves.toBeNull();
+  });
+
+  it("signs out the computer too only when asked, and only offers it with a daemon of this account", async () => {
+    render(<DesktopSignOutDialog />);
+    const without = ask();
+    await screen.findByText("Are you sure you want to sign out?");
+    expect(screen.queryByRole("checkbox", { name: "Also sign out Pi Dash on this computer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await expect(without).resolves.toBeNull();
+
+    mocks.computer = true;
+    const withComputer = ask();
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Also sign out Pi Dash on this computer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await expect(withComputer).resolves.toEqual({ deleteChatHistory: false, signOutComputer: true });
   });
 
   it("cancels a pending request when it unmounts", async () => {

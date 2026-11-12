@@ -156,8 +156,9 @@ function normalizeSuffix(suffix: string): string {
  * Resolve the settings suffix of a pathname below the workspace root.
  * Returns the tab when the address names one, or undefined when it names
  * no known tab. Both slash forms resolve to the same tab, so a typed
- * address and a sidebar link render identical content (PSET-003; the
- * highlight is a separate, slash-sensitive marker — NEWFRONT-396).
+ * address and a sidebar link render identical content (PSET-003) and
+ * carry the same highlight (fixed by NEWFRONT-396; the old app marks
+ * only the slash form).
  */
 export function resolveSettingsAddress(
   pathname: string,
@@ -176,11 +177,11 @@ export function resolveSettingsAddress(
 }
 
 /**
- * Address patterns on which a tab carries the "selected" marker (PSET-001,
- * PSET-062): the canonical slash form only. The no-slash form renders the
- * same content and marks nothing, pinned as bug NEWFRONT-396 (same for the
- * root, where General reads `.../{id}/`). Addresses below the tab's own
- * address are not part of any tab.
+ * Addresses on which a tab carries the "selected" marker (PSET-001,
+ * PSET-062): the tab's own address in either slash form, so a typed
+ * no-slash deep link highlights the same entry as the sidebar link
+ * (NEWFRONT-396; the old app marks only the slash form). Addresses below
+ * the tab's own address are not part of any tab.
  */
 export function isTabActive(
   pathname: string,
@@ -188,7 +189,8 @@ export function isTabActive(
   projectId: string,
   tab: ProjectSettingsTabDef
 ): boolean {
-  return pathname === `${projectSettingsRoot(workspaceSlug, projectId)}${tab.suffix}/`;
+  const own = `${projectSettingsRoot(workspaceSlug, projectId)}${tab.suffix}`;
+  return pathname === own || pathname === `${own}/`;
 }
 
 /** Sidebar entry for a role, or undefined when the sidebar hides it. */

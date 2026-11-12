@@ -80,9 +80,11 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
   const { allowPermissions } = useUserPermissions();
   // derived values
   const projectDetails = getProjectById(projectId);
-  // The execution target spans two form fields — the pod and the executor
-  // override — so the dropdown writes both from one selection.
+  // The execution target spans the pod, the dedicated runner and the executor
+  // override — so the dropdown writes them from one selection (§14.4).
   const { field: executorField } = useController({ control, name: "agent_executor" });
+  // Watch assigned_runner_id via control watch so the tagged value round-trips.
+  const runnerField = useController({ control, name: "assigned_runner_id" });
 
   const { getIndex } = getTabIndex(ETabIndices.ISSUE_FORM, isMobile);
 
@@ -123,13 +125,19 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
           <div className="h-7">
             <PodDropdown
               value={executionTargetValue(
-                { agent_executor: executorField.value, assigned_pod_id: value },
+                {
+                  agent_executor: executorField.value,
+                  assigned_pod_id: value,
+                  assigned_runner_id: runnerField.field.value ?? null,
+                },
                 projectDetails
               )}
               onChange={(target) => {
                 const patch = executionTargetPatch(target);
                 executorField.onChange(patch.agent_executor ?? null);
                 if (patch.assigned_pod_id !== undefined) onChange(patch.assigned_pod_id);
+                // Runner id lives in its own form field; sync it from the same pick.
+                if (patch.assigned_runner_id !== undefined) runnerField.field.onChange(patch.assigned_runner_id);
                 handleFormChange();
               }}
               cloudAgent={cloudAgentOption(projectDetails)}

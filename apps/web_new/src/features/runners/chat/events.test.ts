@@ -16,6 +16,9 @@ import {
   isTerminalEvent,
   lastSequence,
   refreshesHistory,
+  RUNNER_BUSY_LABEL,
+  RUNNER_CHAT_BUSY_MESSAGE,
+  runnerBusyMessage,
 } from "./events.js";
 
 const STAMP = "2026-10-19T10:00:00Z";
@@ -85,6 +88,28 @@ describe("event classification", () => {
       expect(refreshesHistory(kind)).toBe(true);
     }
     expect(refreshesHistory("assistant_delta")).toBe(false);
+  });
+});
+
+describe("runnerBusyMessage", () => {
+  it("names a runner refusing chat because an issue run holds its folder", () => {
+    const busy = { kind: "chat_failed", payload: { code: "runner_busy", detail: "" } };
+    expect(runnerBusyMessage(busy)).toBe(RUNNER_CHAT_BUSY_MESSAGE);
+    expect(activityLabel(busy)).toBe(RUNNER_BUSY_LABEL);
+    expect(activityLabel(busy)).not.toBe("Failed");
+  });
+
+  it("keeps other chat failures as plain failures", () => {
+    expect(runnerBusyMessage({ kind: "chat_failed", payload: { code: "dispatch_failed" } })).toBeNull();
+    expect(runnerBusyMessage({ kind: "chat_failed", payload: {} })).toBeNull();
+    expect(runnerBusyMessage({ kind: "chat_failed", payload: { code: 42 } })).toBeNull();
+    expect(activityLabel({ kind: "chat_failed", payload: { code: "dispatch_failed" } })).toBe("Failed");
+    expect(activityLabel({ kind: "chat_failed", payload: {} })).toBe("Failed");
+  });
+
+  it("ignores a busy code on a non-failure frame", () => {
+    expect(runnerBusyMessage({ kind: "turn_completed", payload: { code: "runner_busy" } })).toBeNull();
+    expect(runnerBusyMessage({ kind: "raw", payload: { code: "runner_busy" } })).toBeNull();
   });
 });
 

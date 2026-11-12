@@ -150,6 +150,56 @@ describe("row rendering", () => {
     expect(screen.getByRole("link", { name: /Child one/ })).toHaveAttribute("href", `/acme/browse/ATL-7`);
   });
 
+  it("shows state and priority on the row, editable inline (NEWPIDASH-119)", async () => {
+    const STATE_ID = "523e4567-e89b-12d3-a456-426614174005";
+    const state = {
+      id: STATE_ID,
+      project_id: PROJECT,
+      workspace_id: PARENT,
+      name: "In progress",
+      group: "started",
+      color: "#d9912b",
+      default: false,
+      description: "",
+      sequence: 1,
+    };
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, { csrf_token: "csrf" });
+      if (url.includes("/states/")) return ok(url, [state]);
+      if (!url.includes("/sub-issues/")) return ok(url, NONE_JSON);
+      return ok(url, page([]));
+    }) as never);
+    renderRow({ row: row({ state_id: STATE_ID, priority: "high" }) });
+    expect(await screen.findByRole("button", { name: "In progress" }, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Priority: high" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "In progress" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Priority: high" })).toBeEnabled();
+  });
+
+  it("reads state and priority for a guest through disabled triggers (NEWPIDASH-119)", async () => {
+    const STATE_ID = "523e4567-e89b-12d3-a456-426614174005";
+    const state = {
+      id: STATE_ID,
+      project_id: PROJECT,
+      workspace_id: PARENT,
+      name: "In progress",
+      group: "started",
+      color: "#d9912b",
+      default: false,
+      description: "",
+      sequence: 1,
+    };
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, { csrf_token: "csrf" });
+      if (url.includes("/states/")) return ok(url, [state]);
+      if (!url.includes("/sub-issues/")) return ok(url, NONE_JSON);
+      return ok(url, page([]));
+    }) as never);
+    renderRow({ row: row({ state_id: STATE_ID, priority: "high" }), editable: false });
+    expect(await screen.findByRole("button", { name: "In progress" }, { timeout: 5000 })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Priority: high" })).toBeDisabled();
+  });
+
   it("opens the child in place on a plain click and leaves modified clicks to the browser", async () => {
     const user = userEvent.setup();
     const onOpen = vi.fn();

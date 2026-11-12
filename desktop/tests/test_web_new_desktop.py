@@ -35,6 +35,9 @@ echo "pnpm $*" >> "$FAKE_LOG"
 if [[ "${1:-}" == "install" ]]; then
     exit 0
 fi
+if [[ "$*" == *"--filter @pidash/kit build"* ]] || [[ "$*" == *"--filter @pidash/api-client build"* ]]; then
+    exit 0
+fi
 if [[ "$*" == *"--filter web_new build:desktop"* ]]; then
     out="apps/web_new/dist/desktop"
     mkdir -p "$out/assets"
@@ -62,13 +65,14 @@ if [[ "${1:-}" == "exec" ]]; then
     out="$dev/apps/web/build/client"
     mkdir -p "$out/assets"
     api="${VITE_API_BASE_URL:-http://localhost:8000}"
+    web="${VITE_WEB_BASE_URL:-http://localhost:8000}"
     {
         echo '<!doctype html><html><head><title>legacy web</title></head>'
         echo "<body>$api<div id=root></div>"
         printf 'y%.0s' $(seq 1 5000)
         echo '</body></html>'
     } > "$out/index.html"
-    echo "// $api" > "$out/assets/app.js"
+    echo "// $api $web" > "$out/assets/app.js"
     exit 0
 fi
 echo "fake pnpm: unexpected arguments: $*" >&2
@@ -159,6 +163,18 @@ class WebNewDesktopTests(unittest.TestCase):
         self.assertIn("desktop_api_request", (self.dist / "assets/app.js").read_text())
         self.assertIn("frontend=web_new", self.bake_info())
         self.assertIn(API_BASE, self.bake_info())
+
+        # Workspace deps build first: @pidash/kit's dist/kit.css (imported
+        # by apps/web_new/src/styles/app.css) and @pidash/api-client must
+        # be built before web_new, or Vite fails on a clean checkout.
+        log = self.fake_log.read_text()
+        kit_index = log.find("pnpm --filter @pidash/kit build")
+        api_client_index = log.find("pnpm --filter @pidash/api-client build")
+        desktop_index = log.find("pnpm --filter web_new build:desktop")
+        self.assertGreaterEqual(kit_index, 0, log)
+        self.assertGreaterEqual(api_client_index, 0, log)
+        self.assertLess(kit_index, desktop_index, log)
+        self.assertLess(api_client_index, desktop_index, log)
 
         # The overlay path never ran: no merge, no merged tree.
         self.assertFalse(self.merge_args.exists())

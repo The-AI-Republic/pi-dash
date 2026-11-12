@@ -35,12 +35,12 @@ import { Button, FieldScaffold, Input } from "@pidash/kit";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
+import { shareableAddress } from "../../../shared/shell/shareLink.js";
 import { useCreateInstanceWorkspace } from "../hooks.js";
 import { useWorkspaceCreateDraftStore } from "../stores.js";
 import {
   buildWorkspaceCreateInput,
   deriveWorkspaceSlug,
-  formatWorkspaceSlugPrefix,
   isWorkspaceCreateSubmittable,
   ORGANIZATION_SIZE_BANDS,
   shouldShowInvalidSlugHint,
@@ -90,6 +90,13 @@ export function WorkspaceCreateForm(): React.ReactElement {
     });
   };
 
+  let prefix = "/";
+  try {
+    prefix = shareableAddress("/");
+  } catch {
+    // No hosted origin: prefix the slug with the site root, never the bundle origin.
+  }
+
   return (
     <form data-testid="admin-workspace-create-form" onSubmit={onSubmit} className="flex flex-col gap-(--space-6)">
       <Input
@@ -115,7 +122,7 @@ export function WorkspaceCreateForm(): React.ReactElement {
               data-testid="admin-workspace-create-slug-prefix"
               className="shrink-0 whitespace-nowrap text-(--text-muted)"
             >
-              {formatWorkspaceSlugPrefix(window.location.origin)}
+              {prefix}
             </span>
             <input
               id="workspace-create-slug"

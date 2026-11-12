@@ -26,6 +26,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 import {
   DASH,
+  ENGINE_RENAME_HINT,
   RUNNER_DETAIL_BACK,
   RUNNER_DETAIL_CHAT,
   RUNNER_DETAIL_FAILED,
@@ -157,6 +158,22 @@ describe("RunnerDetailScreen", () => {
     expect(rows["Enrolled at"]).toBe("Pending enrollment");
     expect(rows["Revoked at"]).not.toBe(DASH);
     expect(rows["Revoked reason"]).toBe("parity-probe-revoke");
+  });
+
+  it("names a built-in engine by its machine, badges it and explains renaming", () => {
+    setup({ runner: runner({ provisioning: "desktop_bundled", pod_dispatch: "pinned_only", name: "builtin-x" }) });
+    expect(screen.getByRole("heading", { name: "Built-in engine · build box" })).toBeInTheDocument();
+    expect(screen.getByTestId("runner-built-in-badge")).toHaveTextContent("Built-in");
+    expect(screen.getByText(ENGINE_RENAME_HINT)).toBeInTheDocument();
+    expect(meta()["Pod work"]).toBe("Off");
+    expect(meta()["Working directory"]).toBe("/tmp/wd");
+  });
+
+  it("shows no built-in marks on an own-agent runner", () => {
+    setup({ runner: runner({ pod_dispatch: "pod_member" }) });
+    expect(screen.queryByTestId("runner-built-in-badge")).toBeNull();
+    expect(screen.queryByText(ENGINE_RENAME_HINT)).toBeNull();
+    expect(meta()["Pod work"]).toBe("On");
   });
 
   it("links back to the workspace list and into chat", () => {

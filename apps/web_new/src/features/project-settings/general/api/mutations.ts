@@ -19,7 +19,7 @@ import {
   type ProjectUpdateInput,
 } from "@pidash/api-client";
 
-import { getAppClient } from "../../../../core/api/client.js";
+import { getAppClient, getProviderWriteClient } from "../../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../../shared/shell/index.js";
 import { generalKeys, seedProjectRow } from "./queries.js";
 
@@ -56,14 +56,16 @@ export interface BindRepositoryInput {
 /**
  * Bind the repository (PSET-008): the bind answer carries the canonical
  * URL, which is then written onto the project row and re-read as status.
- * A refusal surfaces its own message; a provider-less stack answers 401,
- * which the global session middleware handles exactly as the oracle pins
- * it (NEWFRONT-395).
+ * The bind POST goes through the provider-write client: a provider-less
+ * stack answers 401, and that credential is not the signed-in session,
+ * so the refusal must surface as a bind failure instead of expiring it
+ * (NEWFRONT-395, same class as NEWFRONT-421).
  */
 export function useBindRepository(slug: string, projectId: string) {
   const queryClient = useQueryClient();
   return useMutation<ProjectRepositoryBound, Error, BindRepositoryInput>({
-    mutationFn: ({ repoUrl }) => bindProjectRepository(getAppClient(), slug, projectId, { repo_url: repoUrl }),
+    mutationFn: ({ repoUrl }) =>
+      bindProjectRepository(getProviderWriteClient(), slug, projectId, { repo_url: repoUrl }),
     onSuccess: async (bound) => {
       const client = getAppClient();
       const detail = queryClient.getQueryData<ProjectSettingsDetail>(generalKeys.detail(slug, projectId));

@@ -46,12 +46,17 @@ export function RunnersRail({
     <aside
       aria-label="AI Workers navigation"
       data-testid="runners-rail"
-      className="flex w-64 shrink-0 flex-col border-r border-(--border) bg-(--surface)"
+      className="flex min-h-0 w-64 shrink-0 flex-col border-r border-(--border) bg-(--surface)"
     >
-      <div className="text-emphasis flex h-12 items-center border-b border-(--border) px-(--space-4) font-semibold text-(--text)">
+      <div className="text-emphasis flex h-12 shrink-0 items-center border-b border-(--border) px-(--space-4) font-semibold text-(--text)">
         {RAIL_HEADER}
       </div>
-      <nav className="flex flex-col gap-(--space-1) p-(--space-2)">
+      {/* The rail's own scroll region: a long runner list scrolls here while
+          the header stays put and the content pane keeps its position. */}
+      <nav
+        data-testid="runners-rail-scroll"
+        className="flex min-h-0 flex-1 flex-col gap-(--space-1) overflow-y-auto p-(--space-2)"
+      >
         <Link
           to={base}
           activeOptions={{ exact: true }}

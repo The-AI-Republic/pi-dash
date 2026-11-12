@@ -2041,7 +2041,7 @@ describe("dev machines and runner detail (NEWFRONT-555, RUN-037–043)", () => {
     await driver.devMachinesOpenRotate("build box");
     await driver.devMachinesOpenRevoke("build box");
     await driver.devMachinesOpenDelete("build box");
-    expect(clicked).toEqual(["Rotate", "Revoke", "Delete"]);
+    expect(clicked).toEqual(["Rotate", "Revoke", "Remove this computer"]);
 
     await driver.devMachinesModalConfirm();
     expect(clicked).toContain("confirm");

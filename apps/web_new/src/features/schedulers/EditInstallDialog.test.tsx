@@ -31,6 +31,10 @@ import { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from
 import { bindingKeys, invalidateInstalls } from "./installData.js";
 import { DEFAULT_TZID, isoToLocalStart } from "./schedule.js";
 
+// Pin the zone so the repeated-hour case below runs the same wherever the
+// suite runs. The other cases convert symmetrically and hold in any zone.
+process.env.TZ = "America/Los_Angeles";
+
 const SLUG = "acme";
 const PROJECT = "p1";
 
@@ -117,8 +121,8 @@ describe("installDraftFromBinding", () => {
   });
 
   it("keeps a rule it cannot read exactly as stored", () => {
-    const draft = installDraftFromBinding(binding({ rrule: "FREQ=HOURLY" }));
-    expect(draft.schedule.rrule).toBe("FREQ=HOURLY");
+    const draft = installDraftFromBinding(binding({ rrule: "FREQ=HOURLY;BYHOUR=9" }));
+    expect(draft.schedule.rrule).toBe("FREQ=HOURLY;BYHOUR=9");
   });
 });
 
@@ -139,6 +143,15 @@ describe("installUpdatePayload", () => {
   it("trims the context but hands the rule over untouched", () => {
     const draft = installDraftFromBinding(binding({ extra_context: "  padded  ", rrule: " FREQ=DAILY " }));
     expect(installUpdatePayload(draft)).toMatchObject({ extra_context: "padded", rrule: " FREQ=DAILY " });
+  });
+
+  it("keeps the stored start when the wall time is untouched in a repeated hour", () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles; the edit form passes the binding's dtstart as
+    // the original so saving without touching Starts at keeps the instant.
+    const draft = installDraftFromBinding(binding({ dtstart: "2026-11-01T09:15:00Z" }));
+    expect(draft.schedule.startsAt).toBe("2026-11-01T01:15");
+    expect(installUpdatePayload(draft, "2026-11-01T09:15:00Z").dtstart).toBe("2026-11-01T09:15:00.000Z");
   });
 });
 
@@ -166,10 +179,10 @@ describe("EditInstallDialog", () => {
   it("opens an inexpressible stored rule raw and submits it byte-identical", async () => {
     const user = userEvent.setup();
     const onSaved = vi.fn();
-    setup({ binding: binding({ rrule: "FREQ=HOURLY" }), onSaved });
+    setup({ binding: binding({ rrule: "FREQ=HOURLY;BYHOUR=9" }), onSaved });
     const raw = screen.getByLabelText("Recurrence (RRULE)");
     expect(raw).toBeVisible();
-    expect(raw).toHaveValue("FREQ=HOURLY");
+    expect(raw).toHaveValue("FREQ=HOURLY;BYHOUR=9");
     expect(screen.queryByRole("button", { name: "Advanced: rule text" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
@@ -178,18 +191,39 @@ describe("EditInstallDialog", () => {
       SLUG,
       PROJECT,
       "b1",
-      expect.objectContaining({ rrule: "FREQ=HOURLY" })
+      expect.objectContaining({ rrule: "FREQ=HOURLY;BYHOUR=9" })
     );
   });
 
   it("keeps a stored rule byte-identical, padding included, when only other fields change", async () => {
     const user = userEvent.setup();
-    setup({ binding: binding({ rrule: "FREQ=HOURLY " }) });
-    expect(screen.getByLabelText("Recurrence (RRULE)")).toHaveValue("FREQ=HOURLY ");
+    setup({ binding: binding({ rrule: "FREQ=HOURLY;BYHOUR=9 " }) });
+    expect(screen.getByLabelText("Recurrence (RRULE)")).toHaveValue("FREQ=HOURLY;BYHOUR=9 ");
     await user.click(screen.getByRole("radio", { name: "Apply fix" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
-    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ rrule: "FREQ=HOURLY " });
+    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ rrule: "FREQ=HOURLY;BYHOUR=9 " });
+  });
+
+  it("saves an untouched repeated-hour start back unchanged when only other fields change", async () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles; the dialog must hand the stored instant to the
+    // payload so the save does not move it to the first occurrence.
+    const user = userEvent.setup();
+    setup({ binding: binding({ dtstart: "2026-11-01T09:15:00Z" }) });
+    expect(screen.getByLabelText("Starts at")).toHaveValue("2026-11-01T01:15");
+    await user.click(screen.getByRole("radio", { name: "Apply fix" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
+    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ dtstart: "2026-11-01T09:15:00.000Z" });
+  });
+
+  it("opens a stored hourly rule in the builder with Hour selected", () => {
+    setup({ binding: binding({ rrule: "FREQ=HOURLY;INTERVAL=2" }) });
+    expect(screen.getByLabelText("Repeat unit")).toHaveValue("hour");
+    expect(screen.getByLabelText("Repeat interval")).toHaveValue(2);
+    expect(screen.getByText("Runs every 2 hours from the start time")).toBeInTheDocument();
+    expect(screen.getByLabelText("Recurrence (RRULE)")).not.toBeVisible();
   });
 
   it("saves the full field set and settles the caller", async () => {

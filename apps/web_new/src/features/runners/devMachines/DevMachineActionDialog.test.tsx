@@ -29,7 +29,7 @@ describe("DevMachineActionDialog", () => {
   it("confirms and cancels when idle", () => {
     const { onCancel, onConfirm } = setup();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove this computer" }));
     expect(onCancel).toHaveBeenCalled();
     expect(onConfirm).toHaveBeenCalled();
   });
@@ -37,7 +37,7 @@ describe("DevMachineActionDialog", () => {
   it("is inert while a write is in flight", () => {
     const { onCancel, onConfirm } = setup({ pending: true });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove this computer" }));
     expect(onCancel).not.toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Close dialog" })).not.toBeInTheDocument();
@@ -57,6 +57,6 @@ describe("DevMachineActionDialog", () => {
 
   it("renders nothing when closed", () => {
     setup({ open: false });
-    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove this computer" })).not.toBeInTheDocument();
   });
 });

@@ -156,12 +156,21 @@ fn content_length(head: &[u8]) -> Option<usize> {
 }
 
 fn paths(root: &std::path::Path) -> Paths {
-    Paths {
+    let paths = Paths {
         config_dir: root.join("config"),
         data_dir: root.join("data"),
         runtime_dir: root.join("runtime"),
         machine_context_dir: root.join("config"),
-    }
+    };
+    // A login moves credentials into the OS keychain when one answers
+    // (`credentials_store = "auto"`). Never touch the developer's real
+    // keychain from a test: behave like a headless host with none, so the
+    // tokens stay in config.toml where these tests read them.
+    pidash::config::secrets::use_backend_for(
+        &paths.config_dir,
+        pidash::config::secrets::MemoryKeyring::unavailable(),
+    );
+    paths
 }
 
 fn write_config_with_runner_count(paths: &Paths, cloud_url: &str, runner_count: usize) {

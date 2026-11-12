@@ -1,0 +1,16 @@
+[project]
+name = "pidash-contract-tests"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8",
+    "httpx>=0.27",
+    "psycopg[binary]>=3.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+markers = [
+    "contract: HTTP contract tests against a live backend (Django or Rust via proxy)",
+]

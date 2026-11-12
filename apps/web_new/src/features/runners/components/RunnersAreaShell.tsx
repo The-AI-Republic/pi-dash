@@ -57,10 +57,16 @@ export function RunnersAreaShell({
       </>
     );
   }
+  // The area is its own full-height column (NEWPIDASH-3): the workspace
+  // content main it mounts into is a plain scroll box, not a flex column,
+  // so without a definite height here the row would stop at its content
+  // and the rail's border and background with it. The row takes what the
+  // chrome leaves; the rail and the content pane stretch to its bottom and
+  // each scrolls on its own.
   return (
-    <>
-      {chrome}
-      <div className="flex min-h-0 w-full flex-1 overflow-hidden">
+    <div data-testid="runners-area" className="flex h-full min-h-0 flex-col">
+      {chrome === undefined ? null : <div className="shrink-0">{chrome}</div>}
+      <div data-testid="runners-area-row" className="flex min-h-0 w-full flex-1 overflow-hidden">
         <RunnersRail
           scope={scope}
           runners={runners}
@@ -72,6 +78,6 @@ export function RunnersAreaShell({
           {children}
         </main>
       </div>
-    </>
+    </div>
   );
 }
