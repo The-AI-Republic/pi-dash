@@ -497,12 +497,7 @@ pub fn validate_row(
 /// The best-effort swallow (`except Exception` + `print` when `verbosity`)
 /// owns to the DB edge, which must never fail a migration on a seed error.
 pub fn migrate_seed_enabled(app_label: Option<&str>, skip_seed_env: bool) -> bool {
-    if let Some(label) = app_label {
-        if label != "prompting" {
-            return false;
-        }
-    }
-    !skip_seed_env
+    !(app_label.is_some_and(|label| label != "prompting") || skip_seed_env)
 }
 
 #[cfg(test)]

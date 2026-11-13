@@ -44,7 +44,7 @@ pub fn guest_may_comment(
     created_by_id: &str,
     user_id: &str,
 ) -> bool {
-    workspace_role > ROLE_GUEST || guest_view_all_features || created_by_id == user_id
+    !(workspace_role <= ROLE_GUEST && !guest_view_all_features && created_by_id != user_id)
 }
 
 /// Guest-gate denial as the Python `raise` produces it.
