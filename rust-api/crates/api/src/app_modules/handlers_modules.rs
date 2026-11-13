@@ -1546,11 +1546,12 @@ fn validate_string_field(
             None
         }
         Ok(text) => {
-            if text.is_empty() && !allow_blank {
+            let trimmed = text.trim().to_owned();
+            if trimmed.is_empty() && !allow_blank {
                 push_error(errors, field, "This field may not be blank.".to_owned());
                 return None;
             }
-            if text.chars().count() > max_length {
+            if trimmed.chars().count() > max_length {
                 push_error(
                     errors,
                     field,
@@ -1558,7 +1559,7 @@ fn validate_string_field(
                 );
                 return None;
             }
-            Some(text)
+            Some(trimmed)
         }
     }
 }
@@ -1811,7 +1812,7 @@ async fn validate_write(
         }
         // `TextField`: no max length; numbers coerce like `CharField`.
         Some(value) => match coerce_string(value) {
-            Ok(text) => Some(text),
+            Ok(text) => Some(text.trim().to_owned()),
             Err(()) => {
                 push_error(&mut errors, "description", "Not a valid string.".to_owned());
                 None
@@ -1840,16 +1841,18 @@ async fn validate_write(
             );
             None
         }
-        Some(Value::String(text)) if MODULE_STATUS_CHOICES.contains(&text.as_str()) => {
-            Some(text.clone())
-        }
         Some(Value::String(text)) => {
-            push_error(
-                &mut errors,
-                "status",
-                format!("\"{text}\" is not a valid choice."),
-            );
-            None
+            let trimmed = text.trim();
+            if MODULE_STATUS_CHOICES.contains(&trimmed) {
+                Some(trimmed.to_owned())
+            } else {
+                push_error(
+                    &mut errors,
+                    "status",
+                    format!("\"{trimmed}\" is not a valid choice."),
+                );
+                None
+            }
         }
         Some(other) => {
             push_error(&mut errors, "status", invalid_choice_message(other));
