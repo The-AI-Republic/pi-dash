@@ -326,6 +326,7 @@ def handle_issue_state_transition(
         run_creator=creator,
         pod=pod,
         triggered_by=AgentRunTrigger.STATE_TRANSITION.value,
+        preserve_state=(moved_by_run is None),
     ):
         return TransitionOutcome(reason="no-eligible-runner")
 
