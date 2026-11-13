@@ -10,7 +10,7 @@
 //! * `get_default_agent_executor` (`:48-55`) → [`get_default_agent_executor`].
 //!
 //! Only this slice is ported here; the rest of `agent_execution.py`
-//! (`cloud_agent_is_configured`, `managed_runner_is_enabled`,
+//! (`cloud_agent_is_configured`, `pidash_agent_is_enabled`,
 //! `effective_executor_for_issue`, `user_has_llm_config`,
 //! `agent_executor_options`) belongs to the policy layers (FX-DISP-03).
 //!
@@ -38,8 +38,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecutorKind {
     LocalRunner,
-    CloudAgent,
-    ManagedRunner,
+    /// The retired cloud executor (section 5.4, decision 7): historical
+    /// rows only. Pinned (P6): the serialized value stays
+    /// `cloud_agent` (section 8); only the Rust name changed.
+    #[serde(rename = "cloud_agent")]
+    RetiredCloudRun,
+    /// Pinned (P6): the serialized value stays `managed_runner`
+    /// (section 8); only the Rust name changed.
+    #[serde(rename = "managed_runner")]
+    PidashAgent,
 }
 
 impl AgentExecutorKind {
@@ -47,8 +54,8 @@ impl AgentExecutorKind {
     pub fn value(&self) -> &'static str {
         match self {
             AgentExecutorKind::LocalRunner => "local_runner",
-            AgentExecutorKind::CloudAgent => "cloud_agent",
-            AgentExecutorKind::ManagedRunner => "managed_runner",
+            AgentExecutorKind::RetiredCloudRun => "cloud_agent",
+            AgentExecutorKind::PidashAgent => "managed_runner",
         }
     }
 
@@ -56,8 +63,8 @@ impl AgentExecutorKind {
     pub fn label(&self) -> &'static str {
         match self {
             AgentExecutorKind::LocalRunner => "Local Runner",
-            AgentExecutorKind::CloudAgent => "Pi Dash Cloud Agent",
-            AgentExecutorKind::ManagedRunner => "Pi Dash Agent",
+            AgentExecutorKind::RetiredCloudRun => "Pi Dash Cloud Agent",
+            AgentExecutorKind::PidashAgent => "Pi Dash Agent",
         }
     }
 
@@ -65,8 +72,8 @@ impl AgentExecutorKind {
     pub fn from_value(value: &str) -> Option<Self> {
         match value {
             "local_runner" => Some(AgentExecutorKind::LocalRunner),
-            "cloud_agent" => Some(AgentExecutorKind::CloudAgent),
-            "managed_runner" => Some(AgentExecutorKind::ManagedRunner),
+            "cloud_agent" => Some(AgentExecutorKind::RetiredCloudRun),
+            "managed_runner" => Some(AgentExecutorKind::PidashAgent),
             _ => None,
         }
     }
@@ -91,15 +98,15 @@ impl std::fmt::Display for AgentExecutorKind {
 /// (`agent_execution.py:23`), in tuple order.
 pub const MACHINE_EXECUTORS: [AgentExecutorKind; 2] = [
     AgentExecutorKind::LocalRunner,
-    AgentExecutorKind::ManagedRunner,
+    AgentExecutorKind::PidashAgent,
 ];
 
 /// Executor values no longer offered for issues and projects
 /// (`agent_execution.py:36`), in tuple order. Still accepted on write
 /// from older clients and translated to `local_runner`.
 pub const DEPRECATED_EXECUTORS: [AgentExecutorKind; 2] = [
-    AgentExecutorKind::CloudAgent,
-    AgentExecutorKind::ManagedRunner,
+    AgentExecutorKind::RetiredCloudRun,
+    AgentExecutorKind::PidashAgent,
 ];
 
 /// The stored value for an executor written by a client
@@ -147,8 +154,8 @@ mod tests {
         );
         let kinds = [
             AgentExecutorKind::LocalRunner,
-            AgentExecutorKind::CloudAgent,
-            AgentExecutorKind::ManagedRunner,
+            AgentExecutorKind::RetiredCloudRun,
+            AgentExecutorKind::PidashAgent,
         ];
         let values: Vec<&str> = kinds.iter().map(AgentExecutorKind::value).collect();
         assert_eq!(serde_json::json!(values), golden["values"]);
@@ -169,20 +176,20 @@ mod tests {
             MACHINE_EXECUTORS,
             [
                 AgentExecutorKind::LocalRunner,
-                AgentExecutorKind::ManagedRunner
+                AgentExecutorKind::PidashAgent
             ]
         );
         assert!(AgentExecutorKind::LocalRunner.is_machine_executor());
-        assert!(!AgentExecutorKind::CloudAgent.is_machine_executor());
-        assert!(AgentExecutorKind::ManagedRunner.is_machine_executor());
+        assert!(!AgentExecutorKind::RetiredCloudRun.is_machine_executor());
+        assert!(AgentExecutorKind::PidashAgent.is_machine_executor());
     }
 
     #[test]
     fn serde_round_trips_values_and_rejects_unknown() {
         for kind in [
             AgentExecutorKind::LocalRunner,
-            AgentExecutorKind::CloudAgent,
-            AgentExecutorKind::ManagedRunner,
+            AgentExecutorKind::RetiredCloudRun,
+            AgentExecutorKind::PidashAgent,
         ] {
             let rendered = serde_json::to_string(&kind).expect("serializes");
             assert_eq!(rendered, format!("\"{}\"", kind.value()));
@@ -192,7 +199,7 @@ mod tests {
         }
         assert_eq!(AgentExecutorKind::from_value("bogus"), None);
         assert!(serde_json::from_str::<AgentExecutorKind>("\"bogus\"").is_err());
-        assert_eq!(AgentExecutorKind::CloudAgent.to_string(), "cloud_agent");
+        assert_eq!(AgentExecutorKind::RetiredCloudRun.to_string(), "cloud_agent");
     }
 
     #[test]
@@ -222,8 +229,8 @@ mod tests {
         assert_eq!(
             DEPRECATED_EXECUTORS,
             [
-                AgentExecutorKind::CloudAgent,
-                AgentExecutorKind::ManagedRunner
+                AgentExecutorKind::RetiredCloudRun,
+                AgentExecutorKind::PidashAgent
             ]
         );
     }

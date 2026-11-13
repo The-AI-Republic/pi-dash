@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(follow_up.id, run_id);
         assert_eq!(follow_up.status, AgentRunStatus::Queued);
         assert_eq!(follow_up.trigger, "scheduler");
-        assert_eq!(follow_up.executor_kind, AgentExecutorKind::CloudAgent);
+        assert_eq!(follow_up.executor_kind, AgentExecutorKind::RetiredCloudRun);
 
         let ticker = store
             .lock_ticker(issue_id)
@@ -1125,7 +1125,7 @@ mod tests {
             pod_id,
             pinned_runner_id: None,
             binding_id,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: serde_json::json!({}),
             tool_plan: serde_json::json!([]),
             now,

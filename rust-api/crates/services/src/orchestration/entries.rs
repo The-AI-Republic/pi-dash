@@ -1170,7 +1170,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
     let project = seam.project(project_id).await?;
     let workspace = seam.workspace(binding.workspace_id).await?;
     let (creator, creator_valid): (Option<Uuid>, bool) =
-        if project.default_agent_executor == AgentExecutorKind::CloudAgent.value() {
+        if project.default_agent_executor == AgentExecutorKind::RetiredCloudRun.value() {
             // Cloud runs execute against the creator's BYOK LLM config, so
             // the execution principal must also have a usable provider key.
             let mut creator = None;
@@ -3204,7 +3204,7 @@ mod tests {
         seam.projects
             .get_mut(&uid(0x20))
             .expect("project")
-            .default_agent_executor = AgentExecutorKind::CloudAgent.value().to_owned();
+            .default_agent_executor = AgentExecutorKind::RetiredCloudRun.value().to_owned();
     }
 
     #[tokio::test]

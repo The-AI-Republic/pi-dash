@@ -3397,7 +3397,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: uid(0x02),
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: json!({}),
             tool_plan: json!({}),
             trigger: "direct".to_owned(),
@@ -4697,7 +4697,7 @@ mod tests {
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             tool_plan: json!({"tools": []}),
             pinned_runner_entry: Some(None),
             error_code: None,

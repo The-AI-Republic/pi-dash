@@ -648,7 +648,7 @@ pub async fn execute_finalize_terminal(
     finalize_kernel::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
+    if locked.executor_kind == AgentExecutorKind::RetiredCloudRun.value() {
         finalize_kernel::append_terminal_event_once(
             &conn,
             run_id,
