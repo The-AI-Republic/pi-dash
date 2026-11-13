@@ -36,10 +36,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use chrono_tz::Tz;
 use pidash_db::entity::{
-    cycle_issues, cycles, estimate_points, file_assets, git_issue_syncs, github_issue_syncs,
-    intake_issues, issue_assignees, issue_labels, issue_links, issue_mentions, issue_subscribers,
-    issue_types, issues, labels, module_issues, modules, project_members, projects, states, users,
-    workspaces,
+    cycle_issues, cycles, estimate_points, file_assets, git_issue_syncs, intake_issues,
+    issue_assignees, issue_labels, issue_links, issue_mentions, issue_subscribers, issue_types,
+    issues, labels, module_issues, modules, project_members, projects, states, users, workspaces,
 };
 use pidash_db::filterset::{FilterKind, ISSUE_FILTERSET};
 use pidash_db::issue_filters::FilterValue;
@@ -815,13 +814,15 @@ fn legacy_text_expr(name: &str, raw: &str, tz: &Tz) -> Result<SimpleExpr, Denial
         return Err(Denial::ServerError);
     }
     let left = date_term(term, tz).ok_or(Denial::ServerError)?;
+    if operator == "contains" {
+        // Bare token: Django `__contains` is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates).
+        return Ok(left.cast_as(a("text")).like(like_pattern(raw)));
+    }
     // Explicit bounds must parse as dates: Django's `get_prep_value`
     // raises `ValidationError` (400 invalid detail) on garbage.
     if raw.parse::<chrono::NaiveDate>().is_err() && super::parse_datetime_param(raw).is_none() {
         return Err(Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()));
-    }
-    if operator == "contains" {
-        return Ok(left.cast_as(a("text")).like(like_pattern(raw)));
     }
     date_bound(left, operator, raw.to_owned()).ok_or(Denial::ServerError)
 }
@@ -1026,7 +1027,7 @@ pub fn annotate(stmt: &mut SelectStatement, ann: Annotations) {
 
 /// The flat `fields=`/`expand=` branch's `IssueSerializer` columns, with
 /// `is_synced` (empty `external_source` short-circuits false; otherwise a
-/// live git or GitHub sync row).
+/// live git sync row — git-only after PDASHOSS01-354).
 pub fn serializer_columns(stmt: &mut SelectStatement) {
     let synced = |table: SelectStatement| Expr::exists(table);
     let mut git = select_one_from(git_issue_syncs::Entity, "g");
@@ -1034,12 +1035,6 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
         col("g", git_issue_syncs::Column::IssueId).equals((a("issue"), issues::Column::Id)),
     )
     .and_where(col("g", git_issue_syncs::Column::DeletedAt).is_null());
-    let mut github = select_one_from(github_issue_syncs::Entity, "gh");
-    github
-        .and_where(
-            col("gh", github_issue_syncs::Column::IssueId).equals((a("issue"), issues::Column::Id)),
-        )
-        .and_where(col("gh", github_issue_syncs::Column::DeletedAt).is_null());
     let is_synced = CaseStatement::new()
         .case(
             issue(issues::Column::ExternalSource)
@@ -1047,7 +1042,7 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
                 .or(issue(issues::Column::ExternalSource).eq("")),
             Expr::val(false),
         )
-        .finally(synced(git).or(synced(github)));
+        .finally(synced(git));
     stmt.column((a("issue"), issues::Column::Id))
         .column((a("issue"), issues::Column::WorkspaceId))
         .column((a("issue"), issues::Column::Name))
@@ -2275,6 +2270,27 @@ mod tests {
             render(legacy_expr("state__in", &FilterValue::Uuids(vec![]), &tz).expect("expr")),
             "SELECT 1 WHERE FALSE"
         );
+        // NEWPIDASH-196: __contains is text LIKE without date validation.
+        for token in ["2026-11", "garbage"] {
+            let text = render(
+                legacy_expr(
+                    "target_date__contains",
+                    &FilterValue::Text(token.to_owned()),
+                    &tz,
+                )
+                .expect("contains must not validate"),
+            );
+            assert!(text.contains("LIKE"), "{text}");
+        }
+        // Explicit bound with garbage is BadError.
+        assert!(matches!(
+            legacy_expr(
+                "target_date__gte",
+                &FilterValue::Text("garbage".to_owned()),
+                &tz
+            ),
+            Err(Denial::BadError(_))
+        ));
     }
 
     #[test]
