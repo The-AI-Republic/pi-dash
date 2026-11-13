@@ -6,12 +6,12 @@
 // filtered detail. The active tab persists per cycle; every tab shows
 // its own empty view.
 
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Avatar } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { heroAnalyticsQueryOptions, heroIssuesQueryOptions } from "../api/heroQueries.js";
+import { heroAnalyticsQueryOptions, heroIssuesQueryOptions, heroIssuesRows } from "../api/heroQueries.js";
 import type { BreakdownDimension } from "../lib/cycleBreakdownFilter.js";
 import {
   HERO_BREAKDOWN_TABS,
@@ -61,6 +61,24 @@ function entryClass(disabled: boolean): string {
   return `text-body flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left text-(--text) hover:bg-(--subtle)${disabled ? " cursor-wait opacity-60" : ""}`;
 }
 
+/** Priority-tab sentinel that loads the next filtered page when scrolled into view. */
+function useHeroPrioritySentinel(onIntersect: () => void, enabled: boolean): React.RefObject<HTMLDivElement | null> {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (!enabled || ref.current === null || typeof IntersectionObserver === "undefined") return;
+    const node = ref.current;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onIntersect();
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [enabled, onIntersect]);
+  return ref;
+}
+
 export function HeroBreakdownCard({
   workspaceSlug,
   projectId,
@@ -72,13 +90,22 @@ export function HeroBreakdownCard({
   const client = getAppClient();
   const [tab, setTab] = React.useState<HeroBreakdownTab>(() => readStoredHeroTab(cycleId));
   const analytics = useQuery(heroAnalyticsQueryOptions(client, workspaceSlug, projectId, cycleId, measure));
-  const issues = useQuery(heroIssuesQueryOptions(client, workspaceSlug, projectId, cycleId));
+  const issues = useInfiniteQuery(heroIssuesQueryOptions(client, workspaceSlug, projectId, cycleId));
   const distribution = analytics.isError ? undefined : analytics.data;
 
   function select(next: HeroBreakdownTab): void {
     setTab(next);
     storeHeroTab(cycleId, next);
   }
+
+  const loadMore = React.useCallback(() => {
+    if (tab !== "priority" || !issues.hasNextPage || issues.isFetchingNextPage) return;
+    void issues.fetchNextPage();
+  }, [tab, issues.hasNextPage, issues.isFetchingNextPage, issues.fetchNextPage]);
+  const prioritySentinelRef = useHeroPrioritySentinel(
+    loadMore,
+    tab === "priority" && issues.hasNextPage && !issues.isFetchingNextPage
+  );
 
   let panel: React.ReactNode;
   if (analytics.isPending || (tab === "priority" && issues.isPending)) {
@@ -88,7 +115,8 @@ export function HeroBreakdownCard({
       </p>
     );
   } else if (tab === "priority") {
-    const entries = issues.isError || issues.data === undefined ? [] : heroPriorityEntries(issues.data.results);
+    const entries =
+      issues.isError || issues.data === undefined ? [] : heroPriorityEntries(heroIssuesRows(issues.data.pages));
     panel =
       entries.length === 0 ? (
         <div className="text-center">
@@ -111,6 +139,14 @@ export function HeroBreakdownCard({
               <span className="text-meta shrink-0 text-(--text-muted) capitalize">{entry.priority}</span>
             </button>
           ))}
+          {issues.hasNextPage ? (
+            <div ref={prioritySentinelRef} data-testid="hero-breakdown-load-more" className="h-1" aria-hidden="true" />
+          ) : null}
+          {issues.isFetchingNextPage ? (
+            <p data-testid="hero-breakdown-loading-more" className="text-meta p-(--space-2) text-(--text-muted)">
+              Loading more…
+            </p>
+          ) : null}
         </div>
       );
   } else if (tab === "assignees") {
