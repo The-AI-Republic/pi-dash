@@ -10338,9 +10338,7 @@ const OPERATIONS_JSON: &str = r##"{
                     "updated_at": "2024-01-10T15:45:00Z",
                     "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
                     "description_stripped": "Release checklistTag the release first.",
-                    "description_markdown": "# Release checklist
-
-Tag the release **first**."
+                    "description_markdown": "# Release checklist\n\nTag the release **first**."
                   },
                   "summary": "Page detail"
                 }
@@ -10492,9 +10490,7 @@ Tag the release **first**."
                     "updated_at": "2024-01-10T15:45:00Z",
                     "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
                     "description_stripped": "Release checklistTag the release first.",
-                    "description_markdown": "# Release checklist
-
-Tag the release **first**."
+                    "description_markdown": "# Release checklist\n\nTag the release **first**."
                   },
                   "summary": "Page detail"
                 }
@@ -10595,9 +10591,7 @@ Tag the release **first**."
                     "updated_at": "2024-01-10T15:45:00Z",
                     "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
                     "description_stripped": "Release checklistTag the release first.",
-                    "description_markdown": "# Release checklist
-
-Tag the release **first**."
+                    "description_markdown": "# Release checklist\n\nTag the release **first**."
                   },
                   "summary": "Page detail"
                 }
@@ -17313,7 +17307,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 209);
+        assert_eq!(ops, 210);
     }
 
     #[test]

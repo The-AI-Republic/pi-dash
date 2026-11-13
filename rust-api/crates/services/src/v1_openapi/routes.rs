@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! D-23 golden route table: the 135 served `/api/v1/` paths (stage 5).
+//! D-23 golden route table: the 136 served `/api/v1/` paths (stage 5).
 //!
 //! Static data sourced from `FX-OPENAPI-06` (byte copy of
 //! `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81,
@@ -162,7 +162,7 @@ pub const ROUTES: &[(&str, &[&str])] = &[
 ];
 
 /// Number of paths in [`ROUTES`]. Pinned to the golden file by the tests.
-pub const ROUTE_COUNT: usize = 135;
+pub const ROUTE_COUNT: usize = 136;
 
 /// `{path: sorted methods}` in the `test_routes_golden.route_map` shape,
 /// for golden comparison.
@@ -224,6 +224,6 @@ mod tests {
             }
         }
         let ops: usize = ROUTES.iter().map(|(_, methods)| methods.len()).sum();
-        assert_eq!(ops, 209);
+        assert_eq!(ops, 210);
     }
 }
