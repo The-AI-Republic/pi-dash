@@ -708,13 +708,14 @@ def test_backfill_migration_classifies_existing_failed_rows(
 
 @pytest.mark.unit
 def test_clock_stop_notifies_issue_creator_and_runner_owner(
-    db, create_user, workspace, pod, issue
+    db, create_user, workspace, project, pod, issue
 ):
     """A needs-human failure raises an in-app notification to the people
     who can act. Creator and runner owner are the same user here, so the
     fan-out dedupes to one row."""
     from pi_dash.db.models.notification import Notification
 
+    _arm_clock(issue, project)
     runner = _make_runner(create_user, workspace, pod)
     run = _make_run(create_user, workspace, pod, runner, issue)
 
@@ -733,6 +734,27 @@ def test_clock_stop_notifies_issue_creator_and_runner_owner(
     assert note.sender == "in_app:agent_runs:clock_stopped"
     assert note.data["agent_run"]["failure_reason"] == "agent_error.provider_auth_or_access"
     assert "paused" in note.message_html
+
+
+@pytest.mark.unit
+def test_needs_human_failure_without_a_running_clock_does_not_notify(
+    db, create_user, workspace, pod, issue
+):
+    """No armed clock means nothing was paused — no "runs are paused"
+    notification (the failure comment still names the fix)."""
+    from pi_dash.db.models.notification import Notification
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+    assert Notification.objects.filter(entity_identifier=issue.id).count() == 0
+    assert IssueComment.objects.filter(issue=issue).count() == 1
 
 
 @pytest.mark.unit
