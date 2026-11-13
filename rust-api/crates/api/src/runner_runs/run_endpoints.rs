@@ -835,6 +835,20 @@ pub async fn execute_assign_rejected_busy(
     execute_requeue(tx, locked).await
 }
 
+/// `apply_agent_auth_missing` (`run_lifecycle.py` recent): same DB effect as
+/// `execute_assign_rejected_busy` (BUSY flip + requeue) for
+/// `agent_auth_missing` NACKs, distinguished by wire name only.
+pub async fn execute_agent_auth_missing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    locked: &LockedRun,
+) -> Result<Vec<LifecycleEffect>, Response> {
+    lifecycle_kernel::runner_busy_update(&TxConn::new(tx), runner_id)
+        .await
+        .map_err(|_| server_error())?;
+    execute_requeue(tx, locked).await
+}
+
 // ---------------------------------------------------------------------------
 // Terminal effects (`apply_terminal_effects`) + post-commit drain
 // ---------------------------------------------------------------------------
@@ -2181,6 +2195,9 @@ async fn run_failed_inner(
         return run_failed_requeue(&pool, &ports, tx, runner, run.id, false).await;
     }
     if reason_is(&preamble.data, "assign_rejected_busy") {
+        return run_failed_requeue(&pool, &ports, tx, runner, run.id, true).await;
+    }
+    if reason_is(&preamble.data, "agent_auth_missing") {
         return run_failed_requeue(&pool, &ports, tx, runner, run.id, true).await;
     }
     let detail = preamble.data.get("detail").cloned().unwrap_or(Value::Null);
