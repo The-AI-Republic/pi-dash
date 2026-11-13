@@ -125,12 +125,11 @@ pub fn dispatch_after_commit(on_commit: &mut dyn FnMut(Uuid), run_id: Uuid) {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     use serde_json::Value;
 
     use pidash_services::issuing::WORKSPACE_LOCK_SQL;
-
-    use super::*;
-    use serde_json::Value;
 
     static FIXTURE: &str =
         include_str!("../../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");

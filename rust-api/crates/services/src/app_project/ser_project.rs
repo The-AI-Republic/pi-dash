@@ -1839,8 +1839,8 @@ mod tests {
         panic!("key {key} not found at top level");
     }
 
-    fn managed_disabled() -> ManagedAvailability {
-        ManagedAvailability {
+    fn managed_disabled() -> PidashAgentAvailability {
+        PidashAgentAvailability {
             available: false,
             reason_code: "managed_runner_disabled".to_string(),
         }
