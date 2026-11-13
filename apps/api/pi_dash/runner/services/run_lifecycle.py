@@ -333,21 +333,26 @@ def apply_agent_auth_missing(
     run_id: UUID | str,
     *,
     locked_run: Optional[AgentRun] = None,
+    detail: str = "",
 ) -> None:
-    """Re-queue an Assign the runner NACKed because Muse credentials are missing.
+    """Re-queue an Assign the runner NACKed because agent credentials are missing.
 
     The runner reports ``reason=agent_auth_missing`` before ``Accept`` when
-    neither ``META_API_KEY`` nor a non-empty ``~/.config/muse/auth.json`` is
-    present, so ``muse exec`` never starts and the run does not burn the
-    issue's tick budget. Same DB effect as
+    the agent's credentials are missing (for Muse: neither ``META_API_KEY``
+    nor a non-empty ``~/.config/muse/auth.json``; for Claude: no
+    ``ANTHROPIC_API_KEY`` nor saved login, etc.), so the agent never starts
+    and the run does not burn the issue's tick budget. Same DB effect as
     :func:`apply_assign_rejected_busy` (BUSY flip + requeue) so the pod drain
     cannot instantly re-assign it to the same credential-less runner, but
-    with a distinct wire name for telemetry.
+    with a distinct wire name for telemetry. Also posts the failure comment
+    with agent/runner/machine/fix so a credential-less pod is not silent.
 
     Must be called inside ``transaction.atomic()``.
     """
     Runner.objects.filter(pk=runner.pk).update(status=RunnerStatus.BUSY)
     apply_run_resume_unavailable(runner, run_id, locked_run=locked_run)
+    if detail:
+        _post_failure_comment(run_id, detail)
 
 
 # Detail-string prefixes for failures that aren't actionable by the user

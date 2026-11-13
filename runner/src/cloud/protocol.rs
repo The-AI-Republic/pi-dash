@@ -536,14 +536,14 @@ pub enum FailureReason {
     /// re-queue the run for a fresh dispatch; older clouds fail it — either
     /// way it is not silently stuck.
     AssignRejectedBusy,
-    /// The runner rejected an `Assign` before sending `Accept` because Muse
-    /// credentials are missing (neither `META_API_KEY` nor a non-empty
-    /// `~/.config/muse/auth.json`) and starting `muse exec` would fail at
-    /// `run.lifecycle.started` and burn a tick. The cloud re-queues the run
-    /// for another runner without charging the issue's tick budget, matching
-    /// `AssignRejectedBusy`'s requeue semantics but with a distinct wire
-    /// name (`agent_auth_missing`) so the case is distinguishable in
-    /// telemetry.
+    /// The runner rejected an `Assign` before sending `Accept` because the
+    /// agent's credentials are missing (for example Muse's `META_API_KEY` or
+    /// `~/.config/muse/auth.json`, Claude's `ANTHROPIC_API_KEY`, etc.)
+    /// and starting the agent would fail at `run.lifecycle.started` and burn
+    /// a tick. The cloud re-queues the run for another runner without
+    /// charging the issue's tick budget, matching `AssignRejectedBusy`'s
+    /// requeue semantics but with a distinct wire name (`agent_auth_missing`)
+    /// so the case is distinguishable in telemetry.
     AgentAuthMissing,
 }
 

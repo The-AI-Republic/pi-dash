@@ -85,17 +85,16 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
-        // Muse credential presence at startup: surface the same warning the
+        // Credential presence at startup: surface the same warning the
         // pre-pickup gate uses, so an operator sees it without waiting for an
         // Assign to be rejected. Presence-only; never validated.
         for runner_cfg in &config.runners {
-            if runner_cfg.agent.kind == AgentKind::MuseCode
-                && !crate::muse_code::auth::has_muse_credentials()
-            {
+            if !crate::agent::auth::has_credentials(runner_cfg.agent.kind) {
                 tracing::warn!(
                     runner = %runner_cfg.name,
-                    "Muse credentials missing on this runner; Muse runs will be refused at pickup until fixed: {}",
-                    crate::muse_code::auth::FIX_HINT
+                    agent = %runner_cfg.agent.kind.display_name(),
+                    "credentials missing on this runner; runs will be refused at pickup until fixed: {}",
+                    crate::agent::auth::fix_hint(runner_cfg.agent.kind)
                 );
             }
         }
@@ -1875,29 +1874,53 @@ enum ChatCommand {
 
 impl RunnerLoop {
     /// Decide whether an `Assign` to this runner should be NACKed before
-    /// `Accept` for a Muse credential reason. Returns `Some(reason)` when the
-    /// assign must be turned down without starting `muse`.
+    /// `Accept` for a credential reason. Returns `Some(reason)` when the
+    /// assign must be turned down without starting the agent.
     ///
     /// Pure helper so the Assign-reject decision is unit-testable without
     /// driving the whole loop. The production call site passes
-    /// `crate::muse_code::auth::has_muse_credentials()`.
+    /// `crate::agent::auth::has_credentials(kind)`.
+    fn agent_auth_missing_rejection(
+        agent_kind: AgentKind,
+        has_credentials: bool,
+    ) -> Option<FailureReason> {
+        match agent_kind {
+            AgentKind::OpenClaw | AgentKind::Engine => None,
+            _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
+            _ => None,
+        }
+    }
+
+    /// Backwards-compatible alias for the Muse-only name.
+    #[allow(dead_code)]
     fn muse_assign_rejection(
         agent_kind: AgentKind,
         has_credentials: bool,
     ) -> Option<FailureReason> {
-        if agent_kind == AgentKind::MuseCode && !has_credentials {
-            Some(FailureReason::AgentAuthMissing)
-        } else {
-            None
-        }
+        Self::agent_auth_missing_rejection(agent_kind, has_credentials)
     }
 
     /// The detail string and warning fix hint for an auth-missing NACK.
-    fn muse_auth_missing_detail(runner_name: &str) -> String {
+    /// Names the agent, runner, machine (`hostname`), and exact fix per
+    /// the issue example: “Claude Code on runner X (machine Y) has no
+    /// credentials: …”.
+    fn agent_auth_missing_detail(
+        agent_kind: AgentKind,
+        runner_name: &str,
+        machine: &str,
+    ) -> String {
         format!(
-            "assign rejected: Muse credentials missing on runner {runner_name}: {}",
-            crate::muse_code::auth::FIX_HINT
+            "assign rejected: {} credentials missing on runner {runner_name} (machine {machine}): {}",
+            agent_kind.display_name(),
+            crate::agent::auth::fix_hint(agent_kind)
         )
+    }
+
+    /// Backwards-compatible wrapper for the Muse-only call site.
+    #[allow(dead_code)]
+    fn muse_auth_missing_detail(runner_name: &str) -> String {
+        let machine = hostname().unwrap_or_else(|| "unknown".to_string());
+        Self::agent_auth_missing_detail(AgentKind::MuseCode, runner_name, &machine)
     }
 
     /// NACK an `Assign` this runner cannot take right now. The cloud frees a
@@ -2143,21 +2166,28 @@ impl RunnerLoop {
                         );
                         continue;
                     }
-                    // Pre-pickup Muse credential check: without `META_API_KEY`
-                    // or a non-empty `~/.config/muse/auth.json`, `muse exec`
-                    // would fail at `run.lifecycle.started` before any work,
-                    // and the failure would burn the issue's tick budget.
-                    // Reject the Assign before `Accept` (and before spawning
-                    // `muse`) so the cloud re-queues it for another runner.
-                    if let Some(reason) = Self::muse_assign_rejection(
+                    // Pre-pickup credential check: without the agent's
+                    // credentials the agent would fail at
+                    // `run.lifecycle.started` before any work, and the failure
+                    // would burn the issue's tick budget. Reject the Assign
+                    // before `Accept` (and before spawning the agent) so the
+                    // cloud re-queues it for another runner.
+                    if let Some(reason) = Self::agent_auth_missing_rejection(
                         self.runner_config.agent.kind,
-                        crate::muse_code::auth::has_muse_credentials(),
+                        crate::agent::auth::has_credentials(self.runner_config.agent.kind),
                     ) {
-                        let detail = Self::muse_auth_missing_detail(&self.runner_config.name);
+                        let machine = hostname().unwrap_or_else(|| "unknown".to_string());
+                        let detail = Self::agent_auth_missing_detail(
+                            self.runner_config.agent.kind,
+                            &self.runner_config.name,
+                            &machine,
+                        );
                         tracing::warn!(
                             %run_id,
                             runner = %self.runner_config.name,
-                            "assign rejected: Muse credentials missing on this runner; refusing pickup before Accept (not starting muse)",
+                            agent = %self.runner_config.agent.kind.display_name(),
+                            "assign rejected: {} credentials missing on this runner; refusing pickup before Accept (not starting agent)",
+                            self.runner_config.agent.kind.display_name(),
                         );
                         self.nack_assign_with(run_id, detail, reason);
                         continue;
@@ -6806,31 +6836,44 @@ mod tests {
 
     #[test]
     fn muse_assign_with_missing_credentials_is_rejected_with_agent_auth_missing() {
-        // The pre-pickup gate: Muse + no creds → reject; Muse + creds → accept;
-        // non-Muse kinds are never rejected for credential reasons.
+        // The pre-pickup gate: every supported kind + no creds → reject;
+        // with creds → accept; OpenClaw/Engine never blocked.
         assert_eq!(
-            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, false),
             Some(FailureReason::AgentAuthMissing)
         );
         assert_eq!(
-            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, true),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, true),
             None
         );
         assert_eq!(
-            RunnerLoop::muse_assign_rejection(AgentKind::Codex, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::ClaudeCode, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::CursorAgent, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::OpenClaw, false),
             None
         );
         assert_eq!(
-            RunnerLoop::muse_assign_rejection(AgentKind::ClaudeCode, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Engine, false),
             None
         );
+        // Backwards-compatible alias still works for Muse.
         assert_eq!(
-            RunnerLoop::muse_assign_rejection(AgentKind::Grok, false),
-            None
-        );
-        assert_eq!(
-            RunnerLoop::muse_assign_rejection(AgentKind::Engine, false),
-            None
+            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, false),
+            Some(FailureReason::AgentAuthMissing)
         );
     }
 
@@ -6843,5 +6886,17 @@ mod tests {
         );
         assert!(detail.contains("muse login"), "detail has fix: {detail}");
         assert!(detail.contains("META_API_KEY"), "detail has fix: {detail}");
+        // Machine is included for the issue example format.
+        assert!(detail.contains("machine"), "detail names machine: {detail}");
+    }
+
+    #[test]
+    fn agent_auth_missing_detail_names_agent_runner_machine_and_fix() {
+        let detail =
+            RunnerLoop::agent_auth_missing_detail(AgentKind::ClaudeCode, "build-box", "my-machine");
+        assert!(detail.contains("Claude Code"), "names agent: {detail}");
+        assert!(detail.contains("build-box"), "names runner: {detail}");
+        assert!(detail.contains("my-machine"), "names machine: {detail}");
+        assert!(detail.contains("ANTHROPIC_API_KEY"), "names fix: {detail}");
     }
 }
