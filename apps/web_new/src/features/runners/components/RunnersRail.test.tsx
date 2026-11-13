@@ -21,7 +21,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   };
 });
 
-import { BUILTIN_SECTION_HEADER, RunnersRail, chatHref, RAIL_HEADER } from "./RunnersRail.js";
+import { PIDASH_AGENT_SECTION_HEADER, RunnersRail, chatHref, RAIL_HEADER } from "./RunnersRail.js";
 
 const runner = (id: string, name: string, status: Runner["status"] = "online"): Runner =>
   ({ id, name, status, enrolled_at: "2024-01-01T00:00:00Z" }) as Runner;
@@ -75,26 +75,28 @@ describe("RunnersRail", () => {
     expect(screen.queryAllByTestId("runners-rail-contact")).toEqual([]);
   });
 
-  it("links an available built-in contact above the runner contacts", () => {
+  it("links an available Pi Dash Agent contact above the runner contacts", () => {
     render(
       <RunnersRail
         scope={{ workspaceSlug: "acme" }}
         runners={[runner("r-1", "alpha")]}
         isProjectScope={false}
-        localContacts={[{ id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: null }]}
+        localContacts={[{ id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: null }]}
       />
     );
-    expect(screen.getByText(BUILTIN_SECTION_HEADER)).toBeInTheDocument();
+    expect(screen.getAllByText(PIDASH_AGENT_SECTION_HEADER)[0]).toBeInTheDocument();
     expect(screen.getByTestId("runners-rail-local-contact")).toHaveAttribute(
       "href",
       "/acme/runners/chat/pidash-builtin"
     );
-    expect(screen.getByText("Built-in agent")).toBeInTheDocument();
+    expect(screen.getAllByText("Pi Dash Agent").length).toBeGreaterThan(0);
     expect(screen.getAllByTestId("runners-rail-contact")).toHaveLength(1);
     expect(screen.queryByTestId("runners-rail-local-reason")).toBeNull();
-    // The built-in section reads before the runner section.
-    const sections = screen.getAllByText(/^(Built-in|Runners)$/).map((node) => node.textContent);
-    expect(sections).toEqual([BUILTIN_SECTION_HEADER, "Runners"]);
+    // The Pi Dash Agent section reads before the runner section.
+    const sections = screen.getAllByText(/^(Pi Dash Agent|Runners)$/).map((node) => node.textContent);
+    expect(sections[0]).toBe(PIDASH_AGENT_SECTION_HEADER);
+    expect(sections).toContain("Runners");
+    expect(sections.indexOf("Runners") > 0).toBe(true);
   });
 
   it("shows an unavailable built-in contact disabled with the server's reason", () => {
@@ -104,7 +106,7 @@ describe("RunnersRail", () => {
         runners={[]}
         isProjectScope
         localContacts={[
-          { id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: "Turned off here." },
+          { id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: "Turned off here." },
         ]}
       />
     );
@@ -119,7 +121,7 @@ describe("RunnersRail", () => {
 
   it("renders no built-in section on a build without the local contact", () => {
     render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={[runner("r-1", "alpha")]} isProjectScope={false} />);
-    expect(screen.queryByText(BUILTIN_SECTION_HEADER)).toBeNull();
+    expect(screen.queryByText(PIDASH_AGENT_SECTION_HEADER)).toBeNull();
     expect(screen.queryByTestId("runners-rail-local-contact")).toBeNull();
   });
 

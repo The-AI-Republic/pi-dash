@@ -234,7 +234,7 @@ export function localMessageRow(record: {
 }
 
 /** The runner row the header renders for the bundled engine. */
-export function builtinRunnerRow(): Runner {
+export function pidashAgentRunnerRow(): Runner {
   const status: RunnerStatus = "online";
   return {
     id: BUILTIN_CHAT_ID,
@@ -327,7 +327,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
 
   const account = (): string => {
     const value = deps.account();
-    if (value === "") throw new Error("Sign in to use the built-in agent.");
+    if (value === "") throw new Error("Sign in to use the Pi Dash Agent.");
     return value;
   };
 
@@ -511,7 +511,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     setApprovalMode: (sessionId, mode) => sessionModes.set(sessionId, mode),
     getApprovalMode: (sessionId) => sessionModes.get(sessionId) ?? DEFAULT_APPROVAL_MODE,
     setRunnerApprovalMode: (runnerId, mode) => runnerModes.set(runnerId, mode),
-    chatRunner: (runnerId) => Promise.resolve(runnerId === BUILTIN_CHAT_ID ? builtinRunnerRow() : null),
+    chatRunner: (runnerId) => Promise.resolve(runnerId === BUILTIN_CHAT_ID ? pidashAgentRunnerRow() : null),
 
     listChatSessions: async (workspaceId, runnerId) => {
       // Only the bundled engine is served from this machine; the history
@@ -663,7 +663,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
       // The id, not the route slug: the machine resolved the chat's own
       // directory from it at create time, and the native read creates a
       // different directory for any other value.
-      if (workspaceId === "") throw new Error("Open a workspace to see the built-in agent's working copy.");
+      if (workspaceId === "") throw new Error("Open a workspace to see the Pi Dash Agent's working copy.");
       return api.workingDir(owner, workspaceId, runnerId);
     },
 

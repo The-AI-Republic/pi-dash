@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Wording for the built-in engine's approvals and availability
+// Wording for the Pi Dash Agent's approvals and availability
 // (NEWFRONT-553, RUN-033-035). Kept in one pure module so the prompt, the
 // mode control and the contact entry all speak with the same voice.
 

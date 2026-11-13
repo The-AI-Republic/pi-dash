@@ -10,7 +10,7 @@
 import type { DevMachine, Runner } from "@pidash/api-client";
 import type { BadgeTone } from "@pidash/kit";
 
-import { ENGINE_AUTO_PAUSE_TEXT, isEngineRunner } from "../../../shared/lib/runnerIdentity.js";
+import { PIDASH_AGENT_AUTO_PAUSE_TEXT, isPidashAgentRunner } from "../../../shared/lib/runnerIdentity.js";
 
 export const DEV_MACHINE_STATUSES = ["active", "offline", "registered", "revoked"] as const;
 export type DevMachineStatus = (typeof DEV_MACHINE_STATUSES)[number];
@@ -104,25 +104,25 @@ export const MACHINE_ACTION_COPY: Record<MachineAction, MachineActionCopy> = {
   },
   delete: {
     title: "Remove this computer?",
-    body: "This revokes both of the computer's credentials (Pi Dash and the built-in engine) and every runner on it, built-in engine included, and removes the computer from this list. Pi Dash on that computer shows as signed out. Nothing is uninstalled from the computer itself.",
+    body: "This revokes both of the computer's credentials (Pi Dash and the Pi Dash Agent) and every runner on it, Pi Dash Agent included, and removes the computer from this list. Pi Dash on that computer shows as signed out. Nothing is uninstalled from the computer itself.",
     confirm: "Remove this computer",
   },
 };
 
-// --- Built-in engine state (built-in engine design §4.3, §4.11, §8) ---
+// --- Pi Dash Agent state (Pi Dash Agent design §4.3, §4.11, §8) ---
 
-export { ENGINE_AUTO_PAUSE_TEXT };
+export { PIDASH_AGENT_AUTO_PAUSE_TEXT };
 
 /** The engine state a machine row shows, or null when there is none to show. */
-export interface EngineStateView {
+export interface PidashAgentStateView {
   label: string;
   tone: BadgeTone;
 }
 
 /** What a machine row knows about the machine's engine runners. */
-export interface MachineEngineContext {
+export interface MachinePidashAgentContext {
   /** True when the machine has at least one live (not revoked) engine runner. */
-  hasEngine: boolean;
+  hasPidashAgent: boolean;
 }
 
 /**
@@ -133,7 +133,7 @@ export interface MachineEngineContext {
  * daemon is not connected reads "unavailable"; then expiring, then
  * available.
  */
-export function engineState(
+export function pidashAgentState(
   machine: Pick<
     DevMachine,
     | "revoked_at"
@@ -145,14 +145,14 @@ export function engineState(
     | "engine_sign_in_state"
     | "engine_credential_expires_at"
   >,
-  context: MachineEngineContext,
+  context: MachinePidashAgentContext,
   formatDate: (iso: string) => string = (iso) => new Date(iso).toLocaleDateString()
-): EngineStateView | null {
-  if (machine.revoked_at !== null || !context.hasEngine) return null;
+): PidashAgentStateView | null {
+  if (machine.revoked_at !== null || !context.hasPidashAgent) return null;
   if (machine.engine_paused_by_owner === true) return { label: "Engine paused by you", tone: "warning" };
   const reason = machine.engine_auto_pause_reason ?? "";
   if (reason !== "") {
-    return { label: `Engine paused: ${ENGINE_AUTO_PAUSE_TEXT[reason] ?? reason}`, tone: "warning" };
+    return { label: `Engine paused: ${PIDASH_AGENT_AUTO_PAUSE_TEXT[reason] ?? reason}`, tone: "warning" };
   }
   // Legacy desktops use the app's session, not an engine credential. Their
   // migrated sign-in state is `never` even while the engine is working.
@@ -190,7 +190,7 @@ export interface MachineSettings {
   rename: boolean;
   pause: boolean;
   teamRuns: boolean;
-  signOutEngine: boolean;
+  signOutPidashAgent: boolean;
 }
 
 /**
@@ -203,15 +203,15 @@ export interface MachineSettings {
  */
 export function machineSettings(
   machine: Pick<DevMachine, "revoked_at" | "engine_paused_by_owner" | "engine_team_runs" | "engine_sign_in_state">,
-  context: MachineEngineContext
+  context: MachinePidashAgentContext
 ): MachineSettings {
   const live = machine.revoked_at === null;
-  const engine = live && context.hasEngine;
+  const engine = live && context.hasPidashAgent;
   return {
     rename: live,
     pause: engine && machine.engine_paused_by_owner !== undefined,
     teamRuns: engine && machine.engine_team_runs !== undefined,
-    signOutEngine:
+    signOutPidashAgent:
       live && machine.engine_sign_in_state !== undefined && SIGNED_IN_STATES.has(machine.engine_sign_in_state),
   };
 }
@@ -273,7 +273,7 @@ export function runnersByMachine(runners: readonly Runner[]): Map<string, Machin
       entry = { engines: [], ownAgents: [] };
       out.set(runner.dev_machine, entry);
     }
-    (isEngineRunner(runner) ? entry.engines : entry.ownAgents).push(runner);
+    (isPidashAgentRunner(runner) ? entry.engines : entry.ownAgents).push(runner);
   }
   return out;
 }

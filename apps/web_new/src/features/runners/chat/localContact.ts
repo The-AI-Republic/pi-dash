@@ -10,7 +10,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { getAgentProfile } from "@pidash/api-client";
+import { getPidashAgentProfile } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
@@ -20,7 +20,7 @@ import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 /** The availability answer changes only with the server flag or account. */
 export const LOCAL_AGENT_POLL_INTERVAL_MS = 5 * 60_000;
 
-export interface LocalContact {
+export interface PidashAgentContact {
   id: string;
   name: string;
   /** Short tag beside the name. */
@@ -30,11 +30,11 @@ export interface LocalContact {
 }
 
 /** Name shown for the bundled engine in the rail and the chat header. */
-export const LOCAL_CONTACT_NAME = "Built-in agent";
+export const PIDASH_AGENT_NAME = "Pi Dash Agent";
 export const LOCAL_CONTACT_LABEL = "Local";
 
 /** Map the server's profile answer onto what the contact shows. */
-export function localContactAvailability(profile: { available: boolean; reason_code: string }): {
+export function pidashAgentContactAvailability(profile: { available: boolean; reason_code: string }): {
   unavailableReason: string | null;
 } {
   return { unavailableReason: profile.available ? null : agentReasonMessage(profile.reason_code) };
@@ -54,11 +54,11 @@ export function localChatQueryKey() {
  * engine. Availability is read once per mount and re-checked slowly; a
  * failure reads as unavailable with the error's own words.
  */
-export function useLocalContact(): LocalContact[] {
+export function usePidashAgentContact(): PidashAgentContact[] {
   const enabled = hasLocalChat();
   const availability = useQuery({
     queryKey: localChatQueryKey(),
-    queryFn: () => getAgentProfile(getAppClient()),
+    queryFn: () => getPidashAgentProfile(getAppClient()),
     enabled,
     staleTime: LOCAL_AGENT_POLL_INTERVAL_MS,
     refetchInterval: LOCAL_AGENT_POLL_INTERVAL_MS,
@@ -72,12 +72,12 @@ export function useLocalContact(): LocalContact[] {
     unavailableReason =
       error instanceof Error && error.message !== "" ? error.message : "The built-in agent is unavailable.";
   } else if (availability.data !== undefined) {
-    unavailableReason = localContactAvailability(availability.data).unavailableReason;
+    unavailableReason = pidashAgentContactAvailability(availability.data).unavailableReason;
   }
   return [
     {
       id: BUILTIN_CHAT_ID,
-      name: LOCAL_CONTACT_NAME,
+      name: PIDASH_AGENT_NAME,
       label: LOCAL_CONTACT_LABEL,
       unavailableReason,
     },

@@ -142,7 +142,7 @@ export interface DaemonLocalRunner {
   workspace_slug: string | null;
   project_slug: string | null;
   working_dir: string;
-  /** `agent.kind` of the block: `engine` for the built-in engine. */
+  /** `agent.kind` of the block: `engine` for the Pi Dash Agent. */
   agent: string;
 }
 
@@ -209,7 +209,7 @@ export interface AgentRuntimeApi {
   discover(identity: AgentAppIdentity): Promise<DaemonDiscovery>;
   /** The daemon's runners (engine and own-agent). */
   localRunners(): Promise<DaemonLocalRunner[]>;
-  /** Turn the built-in engine on for a project on this computer (enrol on use). */
+  /** Turn the Pi Dash Agent on for a project on this computer (enrol on use). */
   addEngineRunner(input: {
     workspace: string;
     project: string;
@@ -217,7 +217,7 @@ export interface AgentRuntimeApi {
   }): Promise<DaemonEngineRunner>;
   /** Install and start the daemon's user service through the CLI (`pidash install` + `pidash start`). */
   installService(): Promise<void>;
-  /** Install the built-in engine through the CLI when it is not there. */
+  /** Install the Pi Dash Agent through the CLI when it is not there. */
   ensureEngine(): Promise<void>;
   /** Hand an engine-only device grant the app approved to the CLI (stdin, never argv). */
   engineLogin(deviceCode: string): Promise<void>;

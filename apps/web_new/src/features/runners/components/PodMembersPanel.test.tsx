@@ -49,7 +49,7 @@ describe("PodMembersPanel", () => {
     const onUpdate = setup([elsewhere]);
     expect(screen.getByText(POD_MEMBERS_EMPTY)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: POD_ADD_RUNNER_LABEL }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: /Built-in engine · Work laptop/ }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Pi Dash Agent · Work laptop/ }));
     expect(onUpdate).toHaveBeenCalledWith("r-engine", { pod: "pod-a", pod_dispatch: "pod_member" });
   });
 

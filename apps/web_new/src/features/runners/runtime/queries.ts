@@ -9,7 +9,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { getProject, type ApiClient, type ProjectDetail } from "@pidash/api-client";
 
 import { workspaceScope } from "../../../core/query/client.js";
-import { MANAGED_RUNNER_KIND } from "./service.js";
+import { PIDASH_AGENT_EXECUTOR_KIND } from "./service.js";
 
 export const runtimeKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "runners", "runtime"] as const,
@@ -29,6 +29,7 @@ export function projectAvailabilityQueryOptions(client: ApiClient, workspaceSlug
 /** True when the server reports the Pi Dash Agent available on this project. */
 export function isPidashAgentAvailable(project: ProjectDetail | undefined): boolean {
   return (
-    project?.agent_executor_options.some((option) => option.kind === MANAGED_RUNNER_KIND && option.available) ?? false
+    project?.agent_executor_options.some((option) => option.kind === PIDASH_AGENT_EXECUTOR_KIND && option.available) ??
+    false
   );
 }

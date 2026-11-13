@@ -341,10 +341,10 @@ test(
           .toEqual(expect.arrayContaining([runner.name]));
         const links = await driver.desktopRuntimeRailChatLinks();
         expect(links.map((link) => link.href).join("\n")).not.toContain(BUILTIN_CHAT_ID);
-        expect(await driver.desktopRuntimeRailSectionHeaders()).not.toContain("Built-in");
+        expect(await driver.desktopRuntimeRailSectionHeaders()).not.toContain("Pi Dash Agent");
       });
 
-      await test.step("the built-in chat address renders no local-mode UI", async () => {
+      await test.step("the Pi Dash Agent chat address renders no local-mode UI", async () => {
         await driver.desktopRuntimeOpenChat(seed.workspaceSlug, BUILTIN_CHAT_ID);
         expect(await driver.desktopRuntimeIsTauriPresent()).toBe(false);
         expect(await driver.desktopRuntimeApprovalModeVisible()).toBe(false);
@@ -1024,7 +1024,7 @@ async function desk005Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   try {
     await test.step("the runners rail lists the built-in contact beside cloud runners", async () => {
       await driver.desktopRuntimeOpenRunners(seed.workspaceSlug);
-      await expect.poll(() => driver.desktopRuntimeRailSectionHeaders(), RUNTIME_POLL).toContain("BUILT-IN");
+      await expect.poll(() => driver.desktopRuntimeRailSectionHeaders(), RUNTIME_POLL).toContain("Pi Dash Agent");
       // The rail headers can render before the runner list populates, so poll
       // the links rather than reading them once.
       await expect

@@ -118,17 +118,17 @@ export function errorText(error: unknown): string {
   return String(error);
 }
 
-interface MovedEngine {
+interface MovedPidashAgent {
   workspace: string;
   project: string;
 }
 
 /** Which moved runners are engines, and in which workspace and project. */
-async function movedEngines(moved: string[], deps: ReplaceDeps): Promise<MovedEngine[]> {
+async function movedPidashAgents(moved: string[], deps: ReplaceDeps): Promise<MovedPidashAgent[]> {
   if (!moved.length) return [];
   const wanted = new Set(moved);
   const workspaces = await listWorkspaces(deps.client);
-  const engines: MovedEngine[] = [];
+  const engines: MovedPidashAgent[] = [];
   for (const workspace of workspaces ?? []) {
     if (!wanted.size) break;
     // eslint-disable-next-line no-await-in-loop -- stops as soon as every moved runner is found
@@ -168,7 +168,7 @@ export async function replaceMachine(prompt: ReplacePrompt, deps: ReplaceDeps): 
   }
   const merge = await mergeDevMachineInto(deps.client, prompt.candidate.id, prompt.machineId);
   const moved = merge.moved_runner_ids ?? [];
-  const engines = await movedEngines(moved, deps);
+  const engines = await movedPidashAgents(moved, deps);
   const restored: string[] = [];
   const failed: { project: string; error: string }[] = [];
   let signedIn = new Set(hello.workspaces.filter((w) => w.signed_in).map((w) => w.slug));
