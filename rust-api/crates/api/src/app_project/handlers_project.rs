@@ -7739,7 +7739,7 @@ mod live_tests {
 
     fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> AppState {
         let mut settings = pidash_db::config::Settings::test_defaults();
-        settings.managed_runner.enabled = true;
+        settings.pidash_agent.enabled = true;
         let mut state = AppState::with_settings("test", settings);
         if let Some(seam) = seam {
             state = state.with_assistant_seam(seam);

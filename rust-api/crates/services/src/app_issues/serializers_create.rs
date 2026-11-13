@@ -82,8 +82,8 @@ use std::borrow::Cow;
 use base64::Engine as _;
 use serde::Serialize;
 
-use pidash_db::config::ManagedRunnerSettings;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_db::config::PidashAgentSettings;
+use pidash_types::issuing::AgentExecutorKind;
 use pidash_types::v1_assets::sticky as sticky_kernel;
 
 use super::serializers_engage::issue_is_actively_synced;
@@ -630,7 +630,7 @@ pub struct ValidateInstance<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExecutorPolicy<'a> {
     /// `MANAGED_RUNNER_ENABLED` for [`managed_runner_availability`].
-    pub managed: &'a ManagedRunnerSettings,
+    pub managed: &'a PidashAgentSettings,
     /// `request.user` flags (`None` = anonymous / absent request).
     pub viewer: Option<&'a UserFlags>,
 }

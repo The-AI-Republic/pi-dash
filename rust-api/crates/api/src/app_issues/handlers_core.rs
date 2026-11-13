@@ -2888,7 +2888,7 @@ async fn run_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: Some(&viewer),
     };
     let probes = ValidateProbes {

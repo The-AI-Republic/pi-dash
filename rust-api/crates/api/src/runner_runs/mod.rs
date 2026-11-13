@@ -1363,7 +1363,7 @@ impl RunnerPorts for LivePorts {
         let settings = self.state.settings();
         pidash_jobs::orchestration::post_run_orchestration(
             &self.pool,
-            &settings.managed_runner,
+            &settings.pidash_agent,
             run_id,
         )
         .await;
@@ -1381,7 +1381,7 @@ impl RunnerPorts for LivePorts {
         let tx = pidash_jobs::orchestration::post_run_orchestration_in_tx(
             tx,
             pool,
-            &settings.managed_runner,
+            &settings.pidash_agent,
             run_id,
         )
         .await;

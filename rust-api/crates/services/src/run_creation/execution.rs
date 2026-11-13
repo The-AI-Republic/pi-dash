@@ -10,13 +10,13 @@
 //! shared with the dispatch engine.
 
 use serde_json::{Map, Value};
-use pidash_types::agent_runs::AgentExecutorKind;
+use pidash_types::issuing::AgentExecutorKind;
 use uuid::Uuid;
 
 
-use super::executor_policy::resolve_executor_kind;
-use super::executor_policy::ResolveExecutorError;
-use super::executor_policy::UserFlags;
+use super::resolution::resolve_executor_kind;
+use super::resolution::ResolveExecutorError;
+use super::resolution::UserFlags;
 
 /// The captured quota shape (`creation.py:70,175`): `{code, detail}` — the
 /// `retry_after_seconds` the raised error carries is dropped on capture.

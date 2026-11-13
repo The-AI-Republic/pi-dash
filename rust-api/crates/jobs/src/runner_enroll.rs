@@ -71,7 +71,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
 use pidash_db::runner_sessions::outbox as runner_outbox;
@@ -346,7 +346,7 @@ where
 /// `on_commit` sweep.
 #[allow(clippy::type_complexity)]
 pub fn overlay_store_deps(
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
 ) -> crate::orchestration::StoreDeps<
     fn(Uuid) -> bool,
     fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile,
@@ -375,7 +375,7 @@ pub fn overlay_store_deps(
 #[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_for_revoke(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
     jitter_secs: f64,
     issue_id: Uuid,
@@ -409,7 +409,7 @@ pub async fn bounce_issue_for_revoke(
 #[allow(clippy::too_many_arguments)]
 pub async fn recreate_issue_for_revoke(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
     issue_id: Uuid,
     pod_id: Uuid,

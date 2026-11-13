@@ -880,7 +880,7 @@ impl LiveTurnSeam {
             PgToolStore::new(
                 pool.clone(),
                 redis.clone(),
-                settings.managed_runner.clone(),
+                settings.pidash_agent.clone(),
             )
             .map_err(|error| SeamError(error.message()))?,
         );

@@ -24,7 +24,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::issuing::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_types::issuing::AgentExecutorKind;
 

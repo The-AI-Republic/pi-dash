@@ -719,7 +719,7 @@ pub struct PgToolStore {
     redis: Option<RedisClient>,
     http: reqwest::Client,
     keyring: pidash_db::config::encryption::Keyring,
-    managed: pidash_db::config::ManagedRunnerSettings,
+    managed: pidash_db::config::PidashAgentSettings,
 }
 
 impl PgToolStore {
@@ -824,7 +824,7 @@ impl PgToolStore {
     pub fn new(
         pool: PgPool,
         redis: Option<RedisClient>,
-        managed: pidash_db::config::ManagedRunnerSettings,
+        managed: pidash_db::config::PidashAgentSettings,
     ) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
@@ -2792,7 +2792,7 @@ impl ToolStore for PgToolStore {
                 drain_finalized_run(&self.pool, *run_id).await;
             }
             for run_id in dispatches {
-                pidash_jobs::dispatch::dispatch_agent_run(&self.pool, run_id, *now)
+                pidash_jobs::issuing::dispatch_agent_run(&self.pool, run_id, *now)
                     .await
                     .map_err(StoreError::from)?;
             }
@@ -2900,7 +2900,7 @@ impl ToolStore for PgToolStore {
         // `on_commit`, outside the signal `try`, so its tool fails
         // there too (the save stands either way).
         for run_id in dispatches {
-            pidash_jobs::dispatch::dispatch_agent_run(pool, run_id, *now)
+            pidash_jobs::issuing::dispatch_agent_run(pool, run_id, *now)
                 .await
                 .map_err(StoreError::from)?;
         }
@@ -3129,7 +3129,7 @@ impl ToolStore for PgToolStore {
                 // from `on_commit`, outside the signal `try`, so its
                 // tool fails there too (the save stands either way).
                 for run_id in dispatches {
-                    pidash_jobs::dispatch::dispatch_agent_run(pool, run_id, *now)
+                    pidash_jobs::issuing::dispatch_agent_run(pool, run_id, *now)
                         .await
                         .map_err(StoreError::from)?;
                 }
