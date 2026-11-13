@@ -1075,6 +1075,7 @@ pub async fn delete_runner(
                         &triggered_by,
                         &reason,
                         &name,
+                        false,
                     )
                     .await
                     {

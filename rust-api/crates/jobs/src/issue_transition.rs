@@ -323,6 +323,7 @@ where
         creator_id: Uuid,
         pod_id: Uuid,
         triggered_by: &str,
+        preserve_state: bool,
     ) -> Result<bool, CreationError> {
         let Some(deps) = self.deps.take() else {
             return Err(CreationError::Db(
@@ -339,6 +340,7 @@ where
             Some(creator_id),
             pod_id,
             triggered_by,
+            preserve_state,
         )
         .await
         .map_err(|error| CreationError::Db(error.to_string()))?;

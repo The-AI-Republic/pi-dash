@@ -1016,6 +1016,7 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
     matcher: &dyn PodRunnerMatcher,
     now: DateTime<Utc>,
     jitter_secs: f64,
+    preserve_state: bool,
 ) -> Result<PreflightOutcome, DispatchError> {
     let issue = CreationSeam::issue(seam, issue_id)
         .await
@@ -1041,6 +1042,7 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
             "",
             now,
             jitter_secs,
+            preserve_state,
         )
         .await?;
         return Ok(PreflightOutcome {
@@ -1089,6 +1091,7 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
         &reason_name,
         now,
         jitter_secs,
+        preserve_state,
     )
     .await?;
     Ok(PreflightOutcome {
@@ -1105,6 +1108,7 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
 /// only when it is not itself ticking; else the issue stays and the
 /// ticker is disarmed explicitly. The state move's signal is an
 /// explicit `left_bucket` reconcile on the seam (no L7 edge).
+#[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     seam: &mut S,
     issue_id: Uuid,
@@ -1113,6 +1117,7 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     reason_name: &str,
     now: DateTime<Utc>,
     jitter_secs: f64,
+    preserve_state: bool,
 ) -> Result<BounceOutcome, DispatchError> {
     let mut logs = Vec::new();
     logs.push(bounce_log_line(issue_id, reason, triggered_by));
@@ -1128,7 +1133,16 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     let current_group = current_state.as_ref().map(|state| state.group.as_str());
     let mut moved_to = None;
 
-    if current_group != Some("backlog") {
+    if preserve_state {
+        // PDASHOSS01-366: explicit human state change — keep the requested
+        // state; the notice below posts and the still-ticking disarm below
+        // keeps the next tick calm (mirrors the un-bounceable path).
+        if current_group == Some("backlog") {
+            // Already in Backlog — nothing to keep, same as the normal path.
+            // Fall through to the disarm/comment below.
+        }
+        // Skip the Backlog move entirely.
+    } else if current_group != Some("backlog") {
         let mut target = seam.backlog_target_for_project(project_id).await?;
         if target.is_none() {
             let fallback_id = seam.default_state_id_for_project(project_id).await?;
@@ -1239,6 +1253,7 @@ async fn bounce_no_creator<S: DispatchSeam>(
             "",
             now,
             jitter_secs,
+            false,
         )
         .await?;
         logs.extend(bounced.logs);
@@ -1386,6 +1401,7 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
             matcher,
             now,
             jitter_secs,
+            false,
         )
         .await?;
         if !preflight.proceed {
@@ -1570,6 +1586,7 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
             matcher,
             now,
             jitter_secs,
+            false,
         )
         .await?;
         if !preflight.proceed {
@@ -3120,6 +3137,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3146,6 +3164,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3178,6 +3197,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3201,6 +3221,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3223,6 +3244,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3245,6 +3267,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3271,6 +3294,7 @@ mod tests {
             &matcher,
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("preflight");
@@ -3299,6 +3323,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3328,6 +3353,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3350,6 +3376,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3374,6 +3401,7 @@ mod tests {
                 "",
                 now(),
                 JITTER,
+                false,
             )
             .await
             .expect("bounce");
@@ -3404,6 +3432,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3429,6 +3458,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3456,6 +3486,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3483,6 +3514,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");
@@ -3491,6 +3523,38 @@ mod tests {
         assert!(seam.issue_states.is_empty());
         // The comment still posts so the user sees *why*.
         assert_eq!(seam.comments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bounce_preserve_keeps_requested_state() {
+        // PDASHOSS01-366: human state move with no eligible runner keeps
+        // the requested ticking state, posts the same notice, and
+        // disarms the ticker so the next tick does not re-bounce.
+        let mut seam = bounce_case("8120");
+        seam.ticker.as_mut().expect("ticker").used = 2;
+        seam.backlog_target = Some(backlog_hi());
+        // Issue is already in a ticking state (stocked In Progress).
+        let out = bounce_issue_no_eligible_runner(
+            &mut seam,
+            fxid("8120"),
+            "state_transition",
+            REASON_NO_ELIGIBLE_RUNNER,
+            "",
+            now(),
+            JITTER,
+            true,
+        )
+        .await
+        .expect("bounce");
+        // No Backlog move; the clock is explicitly disarmed.
+        assert_eq!(out.moved_to, None);
+        assert!(seam.issue_states.is_empty());
+        assert_eq!(seam.comments.len(), 1);
+        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
+        let saved = seam.saved_clocks.last().expect("explicit disarm saved");
+        assert!(!saved.enabled);
+        assert_eq!(saved.disarm_reason, "left_ticking_state");
+        assert_eq!(saved.next_run_at, None);
     }
 
     #[tokio::test]
@@ -3506,6 +3570,7 @@ mod tests {
             "",
             now(),
             JITTER,
+            false,
         )
         .await
         .expect("bounce");

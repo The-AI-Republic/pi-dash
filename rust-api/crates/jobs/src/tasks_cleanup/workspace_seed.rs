@@ -1285,6 +1285,7 @@ impl PreflightSeam for FixedPreflight {
         _creator_id: uuid::Uuid,
         _pod_id: uuid::Uuid,
         _triggered_by: &str,
+        _preserve_state: bool,
     ) -> Result<bool, CreationError> {
         self.consulted = true;
         Ok(self.proceed)
@@ -2018,6 +2019,7 @@ impl SeedStore for PgSeedStore {
                             &matcher,
                             now,
                             0.0,
+                            false,
                         )
                         .await
                         .map_err(|error| error.to_string())?;
@@ -2112,6 +2114,7 @@ impl SeedStore for PgSeedStore {
                         &matcher,
                         now,
                         0.0,
+                        false,
                     )
                     .await
                     .map_err(|error| error.to_string())?;
