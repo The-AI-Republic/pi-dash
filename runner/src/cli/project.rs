@@ -40,6 +40,12 @@ pub struct RunnersArgs {
     #[arg(long)]
     pub project: Option<String>,
 
+    /// Project identifier (slug like `ENG`) or project UUID as a
+    /// positional (`pidash project runners PDASHOSS01`).
+    /// Conflicts with `--project`.
+    #[arg(value_name = "PROJECT", conflicts_with = "project")]
+    pub project_positional: Option<String>,
+
     /// Narrow to a single pod (UUID).
     #[arg(long)]
     pub pod: Option<String>,
@@ -148,9 +154,14 @@ async fn cmd_runners(
     paths: &crate::util::paths::Paths,
     args: RunnersArgs,
 ) -> Result<(), CliError> {
-    // Resolve project: prefer explicit --project, fall back to resolve_project_ref
-    // which handles --project via config/default.
-    let project_ref = resolve_project_ref(client, paths, args.project.as_deref()).await?;
+    // Resolve project: explicit --project or positional, else the
+    // config/default chain in resolve_project_ref.
+    let project_ref = resolve_project_ref(
+        client,
+        paths,
+        args.project.as_deref().or(args.project_positional.as_deref()),
+    )
+    .await?;
 
     // `--assignable-for` accepts an issue identifier (`ENG-42`) as well as
     // a UUID or `new`; resolve identifiers to UUIDs the same way `issue`
@@ -232,10 +243,37 @@ mod test {
         // Just ensure the struct can be constructed; CLI parsing is tested via integration.
         let args = RunnersArgs {
             project: Some("PDASHOSS01".to_string()),
+            project_positional: None,
             pod: None,
             include_bundled: false,
             assignable_for: None,
         };
         assert_eq!(args.project.as_deref(), Some("PDASHOSS01"));
+    }
+
+    /// Parse `pidash project runners` args in isolation. `RunnersArgs`
+    /// derives `Args`, not `Parser`, so wrap it in a throwaway `Parser` to
+    /// exercise the positional / `--project` relationship the way clap
+    /// enforces it at runtime (PDASHOSS01-245).
+    #[derive(Debug, clap::Parser)]
+    struct RunnersArgsHarness {
+        #[command(flatten)]
+        args: RunnersArgs,
+    }
+
+    #[test]
+    fn runners_positional_project_parses() {
+        use clap::Parser;
+        let parsed = RunnersArgsHarness::try_parse_from(["runners", "PDASHOSS01"]).unwrap();
+        assert_eq!(parsed.args.project_positional.as_deref(), Some("PDASHOSS01"));
+        assert_eq!(parsed.args.project, None);
+    }
+
+    #[test]
+    fn runners_positional_and_project_flag_conflict() {
+        use clap::Parser;
+        let err = RunnersArgsHarness::try_parse_from(["runners", "PDASHOSS01", "--project", "ENG"])
+            .expect_err("positional project and --project are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

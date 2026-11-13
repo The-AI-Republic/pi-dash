@@ -29,7 +29,6 @@ from pi_dash.runner.services.permissions import (
     can_view_runner,
     runner_visible_to_user_q,
 )
->>>>>>> origin/main
 from pi_dash.runner.services.runner_delete import (
     delete_runner as delete_runner_svc,
     parse_purge_local,
