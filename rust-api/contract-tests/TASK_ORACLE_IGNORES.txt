@@ -144,3 +144,9 @@ orchestration/test_review_parent_payload_rust.py
 # worker-plane oracle job runs Django-on-rust-dev, which predates the
 # truncation behavior until PIDASHCONV-1055 merges main).
 assistant/test_turn_truncated_rust_replay.py
+
+# PIDASHCONV-1735: the assistant update_issue pod-guard oracle. It drives
+# a turn through the message POST and waits for a worker to execute the
+# scripted tool call, so the HTTP matrix cannot run it on either backend;
+# its coverage is local against main-Django + Rust (see the issue PR).
+assistant/test_update_issue_pod_guard.py
