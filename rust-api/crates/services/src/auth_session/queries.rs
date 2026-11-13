@@ -70,8 +70,6 @@ pub const USER_SELECT_COLUMNS: &[&str] = &[
     "last_name",
     "avatar",
     "avatar_asset_id",
-    "cover_image",
-    "cover_image_asset_id",
     "date_joined",
     "created_at",
     "updated_at",

@@ -10,7 +10,6 @@ ME_KEYS = {
     "id",
     "avatar",
     "avatar_url",
-    "cover_image",
     "date_joined",
     "display_name",
     "email",

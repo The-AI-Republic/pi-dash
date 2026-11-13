@@ -809,13 +809,11 @@ struct WorkspaceLite {
     logo_url: Option<String>,
 }
 
-/// One nested project lite row, resolved (cover precedence applied).
+/// One nested project lite row.
 struct ProjectLite {
     id: String,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
     logo_props: Value,
     description: String,
     is_default: bool,
@@ -888,8 +886,6 @@ struct FullRow {
     p_id: uuid::Uuid,
     p_identifier: String,
     p_name: String,
-    p_cover: Option<String>,
-    p_cover_asset: Option<uuid::Uuid>,
     p_logo_props: Value,
     p_description: String,
     p_is_default: bool,
@@ -935,8 +931,6 @@ fn full_select() -> sea_orm::Select<pm_entity::Entity> {
         .column_as(proj_entity::Column::Id, "p_id")
         .column_as(proj_entity::Column::Identifier, "p_identifier")
         .column_as(proj_entity::Column::Name, "p_name")
-        .column_as(proj_entity::Column::CoverImage, "p_cover")
-        .column_as(proj_entity::Column::CoverImageAssetId, "p_cover_asset")
         .column_as(proj_entity::Column::LogoProps, "p_logo_props")
         .column_as(proj_entity::Column::Description, "p_description")
         .column_as(proj_entity::Column::IsDefault, "p_is_default")
@@ -966,7 +960,6 @@ fn decode_full(
         crate::serializer::render_datetime_in(&value.with_timezone(&chrono::Utc), tz)
     };
     let w_logo_asset = row.w_logo_asset;
-    let p_cover_asset = row.p_cover_asset;
     let u_avatar_asset = row.u_avatar_asset;
 
     let logo_url = ser_member::resolve_workspace_logo_url(
@@ -975,14 +968,6 @@ fn decode_full(
             .as_ref()
             .and_then(|id| assets.get(id).map(String::as_str)),
         row.w_logo.as_deref(),
-    )
-    .map(str::to_owned);
-    let cover_image_url = ser_member::resolve_project_cover_image_url(
-        p_cover_asset.is_some(),
-        p_cover_asset
-            .as_ref()
-            .and_then(|id| assets.get(id).map(String::as_str)),
-        row.p_cover.as_deref(),
     )
     .map(str::to_owned);
     let avatar_url = match row.u_id {
@@ -1007,8 +992,6 @@ fn decode_full(
         id: row.p_id.to_string(),
         identifier: row.p_identifier.clone(),
         name: row.p_name.clone(),
-        cover_image: row.p_cover.clone(),
-        cover_image_url,
         logo_props: row.p_logo_props.clone(),
         description: row.p_description.clone(),
         is_default: row.p_is_default,
@@ -1055,7 +1038,7 @@ async fn fetch_assets(
 ) -> Result<HashMap<uuid::Uuid, String>, Denial> {
     let mut ids: Vec<uuid::Uuid> = rows
         .iter()
-        .flat_map(|row| [row.w_logo_asset, row.p_cover_asset, row.u_avatar_asset])
+        .flat_map(|row| [row.w_logo_asset, row.u_avatar_asset])
         .flatten()
         .collect();
     ids.sort();
@@ -1129,8 +1112,6 @@ fn render_full(member: &FullMember) -> String {
         id: &member.project.id,
         identifier: &member.project.identifier,
         name: &member.project.name,
-        cover_image: member.project.cover_image.as_deref(),
-        cover_image_url: member.project.cover_image_url.as_deref(),
         logo_props: &member.project.logo_props,
         description: &member.project.description,
         is_default: member.project.is_default,
@@ -1191,8 +1172,6 @@ fn render_full_admin(member: &FullMember) -> String {
         id: &member.project.id,
         identifier: &member.project.identifier,
         name: &member.project.name,
-        cover_image: member.project.cover_image.as_deref(),
-        cover_image_url: member.project.cover_image_url.as_deref(),
         logo_props: &member.project.logo_props,
         description: &member.project.description,
         is_default: member.project.is_default,

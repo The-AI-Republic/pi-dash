@@ -50,10 +50,9 @@
 //! * M2M id arrays (`members`, `assignees`, `labels`) render in caller query
 //!   order (probed `[u2, u1]`, the through-models' `-created_at`); the port
 //!   preserves `Vec` order verbatim.
-//! * `avatar_url` / `cover_image_url` are model `@property`s (asset URL, else
-//!   the raw text when truthy, else `None`) resolved by the caller
-//!   (`db/models/user.py:143-151`, `db/models/project.py:176-185`); the
-//!   views pass them through verbatim. Empty-string `avatar` yields a null
+//! * `avatar_url` is a model `@property` (asset URL, else the raw text when
+//!   truthy, else `None`) resolved by the caller
+//!   (`db/models/user.py:143-151`); the views pass it through verbatim. Empty-string `avatar` yields a null
 //!   `avatar_url` (probed).
 //!
 //! Shape-only no-ops preserved as documentation, not code:
@@ -125,31 +124,25 @@ pub fn state_lite_to_representation<'a>(row: &'a StateLiteRow<'a>) -> StateLiteV
 
 /// App `ProjectLiteSerializer` wire keys (`project.py:120-133`), in
 /// `Meta.fields` order: the `project_detail` nest. This is the app twin —
-/// it differs from the space `ProjectLiteSerializer` (`cover_image_url` /
-/// `logo_props` / `is_default` vs `icon_prop` / `emoji`).
-pub const PROJECT_LITE_FIELDS: [&str; 8] = [
+/// it differs from the space `ProjectLiteSerializer` (`logo_props` /
+/// `is_default` vs `icon_prop` / `emoji`).
+pub const PROJECT_LITE_FIELDS: [&str; 6] = [
     "id",
     "identifier",
     "name",
-    "cover_image",
-    "cover_image_url",
     "logo_props",
     "description",
     "is_default",
 ];
 
 /// A `Project` row for nested lite rendering (`db/models/project.py:72+`):
-/// `id` UUID string, `identifier`, `name`, nullable `cover_image` text
-/// (`project.py:107`, `null=True`), the resolved `cover_image_url`
-/// (property, `project.py:176-185`), non-null `logo_props` JSON,
+/// `id` UUID string, `identifier`, `name`, non-null `logo_props` JSON,
 /// non-null `description` text, `is_default` flag.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectLiteRow<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
     pub description: &'a str,
     pub is_default: bool,
@@ -162,8 +155,6 @@ pub struct ProjectLiteView<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
     pub description: &'a str,
     pub is_default: bool,
@@ -175,8 +166,6 @@ pub fn project_lite_to_representation<'a>(row: &'a ProjectLiteRow<'a>) -> Projec
         id: row.id,
         identifier: row.identifier,
         name: row.name,
-        cover_image: row.cover_image,
-        cover_image_url: row.cover_image_url,
         logo_props: row.logo_props,
         description: row.description,
         is_default: row.is_default,
@@ -848,8 +837,6 @@ mod tests {
             id: PROJ,
             identifier: "PRB",
             name: "Probe Proj",
-            cover_image: Some("https://cdn/x/cover.png"),
-            cover_image_url: Some("https://cdn/x/cover.png"),
             logo_props,
             description: "probe project",
             is_default: true,
@@ -966,19 +953,15 @@ mod tests {
             serde_json::to_string(&view).expect("serializes"),
             "{\"id\":\"22e00942-19b1-45b1-b388-438f37942205\",\
              \"identifier\":\"PRB\",\"name\":\"Probe Proj\",\
-             \"cover_image\":\"https://cdn/x/cover.png\",\
-             \"cover_image_url\":\"https://cdn/x/cover.png\",\
              \"logo_props\":{\"theme\":\"dark\"},\"description\":\"probe project\",\
              \"is_default\":true}",
         );
-        // Null cover arms.
+        // Empty logo / description arms.
         let empty = serde_json::json!({});
         let row = ProjectLiteRow {
             id: "1a96c4ce-d6d2-4de4-b22d-8afd282a09d6",
             identifier: "NC",
             name: "NoCover",
-            cover_image: None,
-            cover_image_url: None,
             logo_props: &empty,
             description: "",
             is_default: false,
@@ -988,7 +971,6 @@ mod tests {
             serde_json::to_string(&view).expect("serializes"),
             "{\"id\":\"1a96c4ce-d6d2-4de4-b22d-8afd282a09d6\",\
              \"identifier\":\"NC\",\"name\":\"NoCover\",\
-             \"cover_image\":null,\"cover_image_url\":null,\
              \"logo_props\":{},\"description\":\"\",\"is_default\":false}",
         );
     }
@@ -1326,8 +1308,6 @@ mod tests {
              \"name\":\"In Progress\",\"color\":\"#ff0000\",\"group\":\"started\"},\
              \"project_detail\":{\"id\":\"22e00942-19b1-45b1-b388-438f37942205\",\
              \"identifier\":\"PRB\",\"name\":\"Probe Proj\",\
-             \"cover_image\":\"https://cdn/x/cover.png\",\
-             \"cover_image_url\":\"https://cdn/x/cover.png\",\
              \"logo_props\":{\"theme\":\"dark\"},\"description\":\"probe project\",\
              \"is_default\":true},\
              \"assignee_details\":[{\"id\":\"7a62ed71-155e-4e65-a7eb-6853cf7b6261\",\
@@ -1421,8 +1401,6 @@ mod tests {
              \"name\":\"In Progress\",\"color\":\"#ff0000\",\"group\":\"started\"},\
              \"project_detail\":{\"id\":\"22e00942-19b1-45b1-b388-438f37942205\",\
              \"identifier\":\"PRB\",\"name\":\"Probe Proj\",\
-             \"cover_image\":\"https://cdn/x/cover.png\",\
-             \"cover_image_url\":\"https://cdn/x/cover.png\",\
              \"logo_props\":{\"theme\":\"dark\"},\"description\":\"probe project\",\
              \"is_default\":true},\"assignee_details\":[],\
              \"created_at\":\"2026-10-03T01:19:05.068552Z\",\
@@ -1531,8 +1509,6 @@ mod tests {
              \"label_details\":[],\"state_detail\":null,\
              \"project_detail\":{\"id\":\"22e00942-19b1-45b1-b388-438f37942205\",\
              \"identifier\":\"PRB\",\"name\":\"Probe Proj\",\
-             \"cover_image\":\"https://cdn/x/cover.png\",\
-             \"cover_image_url\":\"https://cdn/x/cover.png\",\
              \"logo_props\":{\"theme\":\"dark\"},\"description\":\"probe project\",\
              \"is_default\":true},\"assignee_details\":[],\
              \"created_at\":\"2026-10-03T01:20:41.330105Z\",\

@@ -1,14 +1,14 @@
 //! D-33 permission gates (stage 5, PIDASHCONV-436).
 //!
-//! Ports the `allow_permission` gates on all 24 D-33 routes (27 fixture
-//! entries, one [`RouteGate`] per method+path: 33 rows), the two `AllowAny`
+//! Ports the `allow_permission` gates on all 23 D-33 routes (26 fixture
+//! entries, one [`RouteGate`] per method+path: 32 rows), the two `AllowAny`
 //! endpoints, and
 //! the manual admin checks in:
 //!
 //! - `apps/api/pi_dash/app/views/integration/git.py:51-158`
 //! - `apps/api/pi_dash/app/views/integration/github.py:429-1174`
 //! - `apps/api/pi_dash/app/views/webhook/base.py:21-122`
-//! - `apps/api/pi_dash/app/views/external/base.py:149-215`
+//! - `apps/api/pi_dash/app/views/external/base.py:149-185`
 //!
 //! Fixture ids: FX-PERM-01
 //! (`rust-api/fixtures/app_integrations/fx-perm-01-permission-matrix.json`),
@@ -61,16 +61,13 @@
 //!   `IsAuthenticated` denies first (401/403 per the DRF/session default,
 //!   fixture `anonymous` legend).
 //!
-//! Ported bugs (translate, don't redesign — both live outside this
-//! module's scope and are recorded here only because the gate table walks
-//! past them):
+//! Ported bugs (translate, don't redesign — this lives outside this
+//! module's scope and is recorded here only because the gate table walks
+//! past it):
 //!
 //! - BUG webhook PATCH context (`webhook/base.py:84`): the update path
 //!   passes `context={request: request}` (the request object as the key),
 //!   so the request-host domain is never appended on update. Fixture B2.
-//! - BUG unsplash page param (`external/base.py:235`): the search URL
-//!   renders `page=${page}` with a stray `$`; port byte-for-byte.
-//!   Fixture B3.
 
 use pidash_auth::permissions::allow::{
     decide_allow, AllowFacts, AllowLevel, AllowSpec, CreatorGate,
@@ -102,8 +99,7 @@ pub enum Gate {
     /// `BaseAPIView` default (`IsAuthenticated`) with no decorator: any
     /// logged-in user reaches the handler body, which enforces its own
     /// rule (manual `_is_workspace_admin` re-check on install-start and
-    /// refresh; ADMIN-membership filter on app-status; no check at all on
-    /// unsplash).
+    /// refresh; ADMIN-membership filter on app-status).
     Authenticated,
     /// `@allow_permission(..., level="WORKSPACE")`: active workspace
     /// membership with a listed role (`base.py:44-51`).
@@ -127,7 +123,7 @@ const ADMIN: &[i32] = &[ROLE_ADMIN];
 const ADMIN_MEMBER: &[i32] = &[ROLE_ADMIN, ROLE_MEMBER];
 const ADMIN_MEMBER_GUEST: &[i32] = &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST];
 
-/// All 24 D-33 routes, one entry per method, in FX-PERM-01 order.
+/// All 23 D-33 routes, one entry per method, in FX-PERM-01 order.
 pub static GATES: &[RouteGate] = &[
     RouteGate {
         method: "POST",
@@ -341,12 +337,6 @@ pub static GATES: &[RouteGate] = &[
         },
         source: "external/base.py:185",
     },
-    RouteGate {
-        method: "GET",
-        path: "unsplash/",
-        gate: Gate::Authenticated,
-        source: "external/base.py:215 (no decorator; BaseAPIView IsAuthenticated only)",
-    },
 ];
 
 /// Outcome of a gate check, before denial rendering.
@@ -473,7 +463,7 @@ mod tests {
 
     #[test]
     fn table_covers_every_fixture_row() {
-        assert_eq!(GATES.len(), 33, "24 routes, one row per method+path");
+        assert_eq!(GATES.len(), 32, "23 routes, one row per method+path");
         assert!(gate_for("GET", "nope/").is_none());
     }
 
@@ -668,7 +658,6 @@ mod tests {
             false,
         ),
         ("POST", "workspaces/<slug>/ai-assistant/", true, true, false),
-        ("GET", "unsplash/", true, true, true),
     ];
 
     #[test]

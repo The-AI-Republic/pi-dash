@@ -83,8 +83,9 @@
 //! * BUG-logo-delete-get (`v2.py:289-291`): the workspace-logo delete
 //!   branch reads through `.get(...)` then checks `if workspace is None` —
 //!   dead code; a missing row raises (404), it never returns silently.
-//! * BUG-avatar-cover-clear (`v2.py:45,63,257,279`): the avatar/logo clear
-//!   writes `""` while the cover clear writes `None`. Ported as-is.
+//! * `USER_COVER` / `PROJECT_COVER` were removed from `EntityTypeContext`
+//!   (PDASHOSS01-237): the posts answer the entity-type 400 for them and
+//!   legacy cover rows take the no-op save/delete arm.
 //! * BUG-size-no-max (`v2.py:113,317`): `size` has no upper check; only
 //!   `min()` against the limit.
 
@@ -101,7 +102,7 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::scope::TenantScope;
-use pidash_db::entity::{file_assets, projects, users, workspace_members, workspaces};
+use pidash_db::entity::{file_assets, users, workspace_members, workspaces};
 use pidash_services::app_assets::queries_v2_user_workspace as q;
 use pidash_services::ops::users as user_save;
 use pidash_types::WorkspaceId;
@@ -443,7 +444,6 @@ struct AssetRow {
     attributes: Option<Value>,
     asset_key: String,
     workspace_id: Option<Uuid>,
-    project_id: Option<Uuid>,
 }
 
 /// The ORM query shape the scoped reads in this file share: the seven
@@ -499,8 +499,8 @@ fn static_asset_lookup(id: &Uuid) -> Select<file_assets::Entity> {
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`) for the entity types
-/// the user post mints: always the static branch (`USER_AVATAR` /
-/// `USER_COVER`, `asset.py:81-87`).
+/// the user post mints: always the static branch (`USER_AVATAR`,
+/// `asset.py:79-83`).
 fn static_asset_url(asset_id: &Uuid) -> Value {
     Value::String(format!("/api/assets/v2/static/{asset_id}/"))
 }
@@ -508,9 +508,8 @@ fn static_asset_url(asset_id: &Uuid) -> Value {
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`) for the entity types
 /// the workspace post mints. The issue/project branches dereference
 /// `self.workspace.slug` — the slug is already resolved here —
-/// `project_id` is always unset on this path (the create never passes it
-/// except through the `PROJECT_COVER` spread, which takes the static
-/// branch), so it renders as `None` exactly like the f-string; `issue_id`
+/// `project_id` is always unset on this path (the create never passes
+/// it), so it renders as `None` exactly like the f-string; `issue_id`
 /// is the spread identifier for the two issue entity types (already
 /// validated as a storable uuid by the INSERT reaching this line) and
 /// `None` otherwise. `DRAFT_ISSUE_ATTACHMENT` falls through every branch
@@ -522,7 +521,7 @@ fn workspace_asset_url(
     asset_id: &Uuid,
 ) -> Value {
     match entity_type {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+        "WORKSPACE_LOGO" | "USER_AVATAR" => {
             static_asset_url(asset_id)
         }
         "ISSUE_ATTACHMENT" => Value::String(format!(
@@ -700,10 +699,9 @@ fn asset_insert_query(
     stmt
 }
 
-/// `user_entity_save` user-row read: the previous link FK plus the
-/// `User.save()` input fields (`db/models/user.py:169-187`). The link FK
-/// column differs per arm (avatar vs cover); both selects alias it to
-/// `prev_link_id` so one row struct decodes either.
+/// `user_entity_save` user-row read: the previous avatar link FK plus the
+/// `User.save()` input fields (`db/models/user.py:169-187`). The select
+/// aliases the FK to `prev_link_id` so one row struct decodes it.
 #[derive(FromQueryResult)]
 struct UserLinkRow {
     prev_link_id: Option<Uuid>,
@@ -726,19 +724,14 @@ struct UserUnlinkRow {
     token_updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
 }
 
-/// The avatar/cover link row read (`:41-44`): previous link FK plus the
+/// The avatar link row read (`:41-44`): previous link FK plus the
 /// `User.save()` input fields, selected narrowly (the whole row was
 /// fetched only to read seven columns).
-fn user_link_lookup(owner_id: &Uuid, cover: bool) -> Select<users::Entity> {
-    let mut select = users::Entity::find()
+fn user_link_lookup(owner_id: &Uuid) -> Select<users::Entity> {
+    users::Entity::find()
         .filter(users::Column::Id.eq(*owner_id))
-        .select_only();
-    select = if cover {
-        select.column_as(users::Column::CoverImageAssetId, "prev_link_id")
-    } else {
-        select.column_as(users::Column::AvatarAssetId, "prev_link_id")
-    };
-    select
+        .select_only()
+        .column_as(users::Column::AvatarAssetId, "prev_link_id")
         .columns([
             users::Column::Email,
             users::Column::DisplayName,
@@ -770,17 +763,6 @@ fn workspace_exists_lookup(workspace_id: &Uuid) -> Select<workspaces::Entity> {
         .filter(workspaces::Column::DeletedAt.is_null())
         .select_only()
         .column(workspaces::Column::Id)
-        .limit(1u64)
-}
-
-/// Project cover previous link (the `SetCover` arm): same shape as the
-/// workspace logo read, on projects.
-fn project_cover_lookup(project_id: &Uuid) -> Select<projects::Entity> {
-    projects::Entity::find()
-        .filter(projects::Column::Id.eq(*project_id))
-        .filter(projects::Column::DeletedAt.is_null())
-        .select_only()
-        .column(projects::Column::CoverImageAssetId)
         .limit(1u64)
 }
 
@@ -829,8 +811,8 @@ fn user_unlink_lookup(owner_id: &Uuid) -> Select<users::Entity> {
         .limit(1u64)
 }
 
-/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the avatar /
-/// cover link plus the full `user.save()` column effects
+/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the avatar
+/// link plus the full `user.save()` column effects
 /// (`db/models/user.py:169-187`) — normalized email, filled display
 /// name, staff sync, token rotation when a token is in use, and the
 /// `auto_now` `updated_at` (PIDASHCONV-1397).
@@ -846,7 +828,7 @@ async fn user_entity_save(
         q::UserSaveAction::SetAvatar => {
             // `User.objects.get(id=asset.user_id)` (miss raises → 404);
             // the row also feeds `user.save()` below.
-            let row: Option<UserLinkRow> = user_link_lookup(owner_id, false)
+            let row: Option<UserLinkRow> = user_link_lookup(owner_id)
                 .into_model()
                 .one(db)
                 .await
@@ -884,51 +866,12 @@ async fn user_entity_save(
             .map_err(|_| server_error())?;
             Ok(())
         }
-        q::UserSaveAction::SetCover => {
-            let row: Option<UserLinkRow> = user_link_lookup(owner_id, true)
-                .into_model()
-                .one(db)
-                .await
-                .map_err(|_| server_error())?;
-            let Some(row) = row else {
-                return Err(does_not_exist());
-            };
-            if let Some(prev_id) = row.prev_link_id {
-                asset_delete(db, &prev_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
-            // `user.cover_image = None` (asymmetry with avatar — ported).
-            let now = Utc::now();
-            let write = user_save::apply_user_save(
-                &user_save::UserSaveInput {
-                    email: row.email,
-                    display_name: row.display_name,
-                    is_staff: row.is_staff,
-                    is_superuser: row.is_superuser,
-                    token: row.token,
-                    token_updated_at: row.token_updated_at.map(|t| t.with_timezone(&Utc)),
-                },
-                &user_save::new_user_token(),
-                now,
-            );
-            pidash_services::domain::identity::link_cover_asset(
-                &pidash_db::pool::sea_orm_connection(pool),
-                *owner_id,
-                *asset_id,
-                &write,
-                now,
-            )
-            .await
-            .map_err(|_| server_error())?;
-            Ok(())
-        }
         q::UserSaveAction::Noop => Ok(()),
     }
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`): clears the
-/// link FK only (the `avatar`/`cover_image` strings are untouched here),
+/// link FK only (the `avatar` string is untouched here),
 /// plus the full `user.save()` column effects
 /// (`db/models/user.py:169-187`) — see `user_entity_save` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
@@ -962,38 +905,6 @@ async fn user_entity_delete(
                 now,
             );
             pidash_services::domain::identity::unlink_avatar_asset(
-                &pidash_db::pool::sea_orm_connection(pool),
-                *owner_id,
-                &write,
-                now,
-            )
-            .await
-            .map_err(|_| server_error())?;
-            Ok(())
-        }
-        q::UserDeleteAction::ClearCover => {
-            let row: Option<UserUnlinkRow> = user_unlink_lookup(owner_id)
-                .into_model()
-                .one(db)
-                .await
-                .map_err(|_| server_error())?;
-            let Some(row) = row else {
-                return Err(does_not_exist());
-            };
-            let now = Utc::now();
-            let write = user_save::apply_user_save(
-                &user_save::UserSaveInput {
-                    email: row.email,
-                    display_name: row.display_name,
-                    is_staff: row.is_staff,
-                    is_superuser: row.is_superuser,
-                    token: row.token,
-                    token_updated_at: row.token_updated_at.map(|t| t.with_timezone(&Utc)),
-                },
-                &user_save::new_user_token(),
-                now,
-            );
-            pidash_services::domain::identity::unlink_cover_asset(
                 &pidash_db::pool::sea_orm_connection(pool),
                 *owner_id,
                 &write,
@@ -1051,32 +962,6 @@ async fn workspace_entity_save(
             .map_err(|_| server_error())?;
             Ok(())
         }
-        q::WorkspaceSaveAction::SetCover => {
-            let Some(project_id) = asset.project_id else {
-                return Ok(());
-            };
-            let prev: Option<Option<Uuid>> = project_cover_lookup(&project_id)
-                .into_tuple::<Option<Uuid>>()
-                .one(db)
-                .await
-                .map_err(|_| server_error())?;
-            let Some(prev) = prev else { return Ok(()) };
-            if let Some(prev_id) = prev {
-                asset_delete(db, &prev_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
-            pidash_services::domain::projects::stamp_cover_image(
-                &pidash_db::pool::sea_orm_connection(pool),
-                project_id,
-                *asset_id,
-                now,
-                actor_id,
-            )
-            .await
-            .map_err(|_| server_error())?;
-            Ok(())
-        }
         q::WorkspaceSaveAction::Noop => Ok(()),
     }
 }
@@ -1113,26 +998,6 @@ async fn workspace_entity_delete(
             pidash_services::domain::workspaces::clear_logo_asset(
                 &pidash_db::pool::sea_orm_connection(pool),
                 workspace_id,
-                now,
-                actor_id,
-            )
-            .await
-            .map_err(|_| server_error())?;
-            Ok(())
-        }
-        q::WorkspaceDeleteAction::ClearCover => {
-            let Some(project_id) = asset.project_id else {
-                return Ok(());
-            };
-            let row: Option<Option<Uuid>> = project_cover_lookup(&project_id)
-                .into_tuple::<Option<Uuid>>()
-                .one(db)
-                .await
-                .map_err(|_| server_error())?;
-            let Some(_) = row else { return Ok(()) };
-            pidash_services::domain::projects::clear_cover_image_asset(
-                &pidash_db::pool::sea_orm_connection(pool),
-                project_id,
                 now,
                 actor_id,
             )
@@ -1756,13 +1621,8 @@ async fn workspace_get(
 // StaticFileAssetEndpoint
 // ---------------------------------------------------------------------------
 
-/// Entity types the static fetch serves (`v2.py:449-454`).
-const STATIC_ENTITY_TYPES: &[&str] = &[
-    "USER_AVATAR",
-    "USER_COVER",
-    "WORKSPACE_LOGO",
-    "PROJECT_COVER",
-];
+/// Entity types the static fetch serves (`v2.py:387-390`).
+const STATIC_ENTITY_TYPES: &[&str] = &["USER_AVATAR", "WORKSPACE_LOGO"];
 
 /// `StaticFileAssetEndpoint.get` (`v2.py:437-465`): the only `AllowAny`
 /// route in the domain — no auth of any kind.
@@ -2404,12 +2264,7 @@ mod tests {
             .parse()
             .expect("uuid");
         // Image types take the static branch.
-        for entity in [
-            "WORKSPACE_LOGO",
-            "USER_AVATAR",
-            "USER_COVER",
-            "PROJECT_COVER",
-        ] {
+        for entity in ["WORKSPACE_LOGO", "USER_AVATAR"] {
             assert_eq!(
                 workspace_asset_url(entity, "acme", "None", &id),
                 Value::String(format!("/api/assets/v2/static/{id}/")),
@@ -2443,11 +2298,14 @@ mod tests {
                 "{entity}"
             );
         }
-        // Anything else renders null.
-        assert_eq!(
-            workspace_asset_url("DRAFT_ISSUE_ATTACHMENT", "acme", "None", &id),
-            Value::Null
-        );
+        // Anything else (incl. the removed cover types) renders null.
+        for entity in ["DRAFT_ISSUE_ATTACHMENT", "USER_COVER", "PROJECT_COVER"] {
+            assert_eq!(
+                workspace_asset_url(entity, "acme", "None", &id),
+                Value::Null,
+                "{entity}"
+            );
+        }
     }
 
     #[test]
@@ -2464,16 +2322,8 @@ mod tests {
     }
 
     #[test]
-    fn static_allowlist_is_the_four_image_types() {
-        assert_eq!(
-            STATIC_ENTITY_TYPES,
-            &[
-                "USER_AVATAR",
-                "USER_COVER",
-                "WORKSPACE_LOGO",
-                "PROJECT_COVER"
-            ]
-        );
+    fn static_allowlist_is_the_two_image_types() {
+        assert_eq!(STATIC_ENTITY_TYPES, &["USER_AVATAR", "WORKSPACE_LOGO"]);
         // The static route is the one AllowAny gate in the domain.
         assert_eq!(
             guards::gate_for(guards::AssetEndpoint::StaticGet),
@@ -2889,20 +2739,15 @@ mod tests {
     #[test]
     fn user_link_lookup_shapes_pin_prev_alias() {
         let (owner_id, _) = test_ids();
-        let avatar = build_select(user_link_lookup(&owner_id, false));
+        let avatar = build_select(user_link_lookup(&owner_id));
         assert!(
             avatar.contains(r#""avatar_asset_id" AS "prev_link_id""#),
             "avatar arm: {avatar}"
         );
-        let cover = build_select(user_link_lookup(&owner_id, true));
+        assert!(avatar.contains(r#""email""#), "save fields: {avatar}");
         assert!(
-            cover.contains(r#""cover_image_asset_id" AS "prev_link_id""#),
-            "cover arm: {cover}"
-        );
-        assert!(cover.contains(r#""email""#), "save fields: {cover}");
-        assert!(
-            cover.contains(r#""token_updated_at""#),
-            "token stamp: {cover}"
+            avatar.contains(r#""token_updated_at""#),
+            "token stamp: {avatar}"
         );
     }
 
@@ -2916,16 +2761,11 @@ mod tests {
     }
 
     #[test]
-    fn logo_and_cover_lookups_pin_default_manager() {
-        let (workspace_id, project_id) = test_ids();
+    fn logo_lookup_pins_default_manager() {
+        let (workspace_id, _) = test_ids();
         let logo = build_select(workspace_logo_lookup(&workspace_id));
         assert!(logo.contains(r#""logo_asset_id""#), "logo column: {logo}");
         assert!(logo.contains(r#""deleted_at" IS NULL"#), "scope: {logo}");
-        let cover = build_select(project_cover_lookup(&project_id));
-        assert!(
-            cover.contains(r#""cover_image_asset_id""#),
-            "cover column: {cover}"
-        );
         let exists = build_select(workspace_exists_lookup(&workspace_id));
         assert!(
             exists.contains(r#""deleted_at" IS NULL"#),

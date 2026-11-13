@@ -4,8 +4,8 @@ Covers the D-33 surface: ``app/urls/integration.py`` (17 paths: GitHub PAT
 connect/disconnect/status/repos, GitHub App status/install/refresh/callback/
 webhook, project bind/status/toggle/unbind, generic git provider accounts and
 project repository bind/toggle/unbind), ``app/urls/webhook.py`` (4 paths:
-webhook CRUD, secret regenerate, logs) and ``app/urls/external.py`` (3 paths:
-unsplash, project + workspace AI assistant).
+webhook CRUD, secret regenerate, logs) and ``app/urls/external.py`` (2 paths:
+project + workspace AI assistant).
 
 Every test seeds its own world (unique tag per test) straight into Postgres
 and deletes only its own rows afterwards. HTTP goes through httpx with a

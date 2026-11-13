@@ -194,26 +194,6 @@
      "unique": false
     },
     {
-     "name": "cover_image",
-     "column": "cover_image",
-     "django_type": "URLField",
-     "max_length": 800,
-     "null": true,
-     "primary_key": false,
-     "db_index": false,
-     "unique": false
-    },
-    {
-     "name": "cover_image_asset",
-     "column": "cover_image_asset_id",
-     "django_type": "ForeignKey",
-     "max_length": null,
-     "null": true,
-     "primary_key": false,
-     "db_index": true,
-     "unique": false
-    },
-    {
      "name": "date_joined",
      "column": "date_joined",
      "django_type": "DateTimeField",

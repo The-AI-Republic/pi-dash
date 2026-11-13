@@ -136,7 +136,6 @@ def test_workspace_seed_before_after(db_conn, broker_url):
     assert project["identifier"] == expected_identifier
     assert project["description"] == seed_projects[0]["description"]
     assert project["network"] == seed_projects[0]["network"]
-    assert project["cover_image"] == seed_projects[0]["cover_image"]
     assert project["logo_props"] == seed_projects[0]["logo_props"]
     assert project["is_default"] is True
     assert project["timezone"] == workspace["timezone"]

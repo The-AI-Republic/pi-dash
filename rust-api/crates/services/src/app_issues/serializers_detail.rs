@@ -1793,8 +1793,6 @@ mod tests {
                 id: PROJ,
                 identifier: "P",
                 name: "Pi",
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: &logo,
                 description: "",
                 is_default: false,
@@ -1816,8 +1814,7 @@ mod tests {
              \"name\":\"Todo\",\"color\":\"#ccc\",\"group\":\"backlog\"},\
              \"project\":\"22222222-2222-2222-2222-222222222222\",\
              \"project_detail\":{\"id\":\"22222222-2222-2222-2222-222222222222\",\
-             \"identifier\":\"P\",\"name\":\"Pi\",\"cover_image\":null,\
-             \"cover_image_url\":null,\"logo_props\":{\"icon\":\"bug\"},\
+             \"identifier\":\"P\",\"name\":\"Pi\",\"logo_props\":{\"icon\":\"bug\"},\
              \"description\":\"\",\"is_default\":false},\
              \"workspace\":\"88888888-8888-8888-8888-888888888888\",\
              \"priority\":\"none\",\"target_date\":null,\"reactions\":[],\"votes\":[]}",
@@ -1841,8 +1838,6 @@ mod tests {
                 id: PROJ,
                 identifier: "P",
                 name: "Pi",
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: &logo,
                 description: "",
                 is_default: false,

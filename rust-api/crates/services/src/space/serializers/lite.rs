@@ -175,15 +175,13 @@ pub fn workspace_lite_to_representation<'a>(
 }
 
 /// A database row for `Project` lite rendering (`db/models/project.py:72+`):
-/// `id` UUID string, `identifier`, `name`, nullable `cover_image`,
-/// `icon_prop` JSON, nullable `emoji` (`project.py:95`, `null=True`),
-/// `description`.
+/// `id` UUID string, `identifier`, `name`, `icon_prop` JSON, nullable `emoji`
+/// (`project.py:95`, `null=True`), `description`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectLiteRow<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
     pub icon_prop: &'a serde_json::Value,
     pub emoji: Option<&'a str>,
     pub description: &'a str,
@@ -196,7 +194,6 @@ pub struct ProjectLiteView<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
     pub icon_prop: &'a serde_json::Value,
     pub emoji: Option<&'a str>,
     pub description: &'a str,
@@ -208,7 +205,6 @@ pub fn project_lite_to_representation<'a>(row: &'a ProjectLiteRow<'a>) -> Projec
         id: row.id,
         identifier: row.identifier,
         name: row.name,
-        cover_image: row.cover_image,
         icon_prop: row.icon_prop,
         emoji: row.emoji,
         description: row.description,
@@ -545,13 +541,11 @@ mod tests {
         let golden = fixture();
         let input = &case(&golden, "ProjectLiteSerializer")["input"];
         let output = &case(&golden, "ProjectLiteSerializer")["output"];
-        let cover_image = opt(input, "cover_image");
         let emoji = opt(input, "emoji");
         let row = ProjectLiteRow {
             id: req(input, "id"),
             identifier: req(input, "identifier"),
             name: req(input, "name"),
-            cover_image: cover_image.as_deref(),
             icon_prop: input.get("icon_prop").expect("icon_prop"),
             emoji: emoji.as_deref(),
             description: req(input, "description"),
@@ -563,7 +557,6 @@ mod tests {
                 "id",
                 "identifier",
                 "name",
-                "cover_image",
                 "icon_prop",
                 "emoji",
                 "description"
@@ -582,7 +575,6 @@ mod tests {
             id: "33333333-3333-3333-3333-333333333333",
             identifier: "WEB",
             name: "Web",
-            cover_image: None,
             icon_prop: &icon,
             emoji: None,
             description: "Ship it",

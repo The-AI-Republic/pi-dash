@@ -1688,7 +1688,6 @@ mod tests {
             id,
             identifier: "WEB",
             name: "Web",
-            cover_image: None,
             icon_prop: icon,
             emoji: Some("🚀"),
             description: "Ship it",
@@ -1777,7 +1776,6 @@ mod tests {
                 "id",
                 "identifier",
                 "name",
-                "cover_image",
                 "icon_prop",
                 "emoji",
                 "description"

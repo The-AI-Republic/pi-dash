@@ -118,8 +118,6 @@ pub struct NewProject<'a> {
     pub is_time_tracking_enabled: bool,
     pub is_issue_type_enabled: bool,
     pub guest_view_all_features: bool,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_asset: Option<Uuid>,
     pub estimate: Option<Uuid>,
     pub archive_in: i32,
     pub close_in: i32,
@@ -197,8 +195,6 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         is_time_tracking_enabled: Set(p.is_time_tracking_enabled),
         is_issue_type_enabled: Set(p.is_issue_type_enabled),
         guest_view_all_features: Set(p.guest_view_all_features),
-        cover_image: Set(p.cover_image.map(str::to_owned)),
-        cover_image_asset_id: Set(p.cover_image_asset),
         estimate_id: Set(p.estimate),
         archive_in: Set(p.archive_in),
         close_in: Set(p.close_in),
@@ -246,32 +242,6 @@ pub async fn create(pool: &sqlx::PgPool, project: &NewProject<'_>) -> Result<Uui
     }
     tx.commit().await?;
     Ok(id)
-}
-
-/// `save_project_cover` (`v2.py:631-634`): stamp
-/// `cover_image_asset_id` on the re-fetched project; the LAST row
-/// wins (the caller loops). The write is a FULL `project.save()`
-/// (`db/models/base.py:24-44`), so it also stamps `updated_by` (CRUM
-/// request user) and `updated_at`. Moved verbatim from
-/// `app_assets::queries_v2_project` (PIDASHCONV-1630). The caller owns
-/// the clock (`Utc::now()` at full precision — Postgres rounds to
-/// micros on store, as today).
-pub async fn save_project_cover(
-    db: &impl ConnectionTrait,
-    project_id: Uuid,
-    asset_id: Uuid,
-    updated_at: DateTime<Utc>,
-    updated_by: Uuid,
-) -> Result<(), sqlx::Error> {
-    projects::Entity::update_many()
-        .col_expr(projects::Column::CoverImageAssetId, Expr::value(asset_id))
-        .col_expr(projects::Column::UpdatedAt, Expr::value(updated_at))
-        .col_expr(projects::Column::UpdatedById, Expr::value(updated_by))
-        .filter(projects::Column::Id.eq(project_id))
-        .exec(db)
-        .await
-        .map(|_| ())
-        .map_err(into_sqlx)
 }
 
 // ---------------------------------------------------------------------------
@@ -535,8 +505,6 @@ pub struct ProjectUpdate<'a> {
     pub is_time_tracking_enabled: bool,
     pub is_issue_type_enabled: bool,
     pub guest_view_all_features: bool,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_asset: Option<Uuid>,
     pub estimate: Option<Uuid>,
     pub archive_in: i32,
     pub close_in: i32,
@@ -564,7 +532,7 @@ pub struct ProjectUpdate<'a> {
     pub created_by: Option<Uuid>,
 }
 
-/// The app PATCH/PUT statement: all 44 setter columns for one row.
+/// The app PATCH/PUT statement: all 43 setter columns for one row.
 fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<projects::Entity> {
     use projects::Column as C;
     projects::Entity::update_many()
@@ -601,8 +569,6 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
             C::GuestViewAllFeatures,
             Expr::value(upd.guest_view_all_features),
         )
-        .col_expr(C::CoverImage, Expr::value(upd.cover_image))
-        .col_expr(C::CoverImageAssetId, Expr::value(upd.cover_image_asset))
         .col_expr(C::EstimateId, Expr::value(upd.estimate))
         .col_expr(C::ArchiveIn, Expr::value(upd.archive_in))
         .col_expr(C::CloseIn, Expr::value(upd.close_in))
@@ -647,7 +613,7 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
 }
 
 /// The app project PATCH/PUT write (`ProjectSerializer.update()` +
-/// `save()`): all 44 setter columns for one row. Runs on the
+/// `save()`): all 43 setter columns for one row. Runs on the
 /// caller's connection (the update tx also holds the default-clear).
 pub async fn apply_update(
     db: &impl ConnectionTrait,
@@ -662,7 +628,7 @@ pub async fn apply_update(
 }
 
 // ---------------------------------------------------------------------------
-// soft delete / archive / cover-asset / text-field stamps
+// soft delete / archive / text-field stamps
 // ---------------------------------------------------------------------------
 
 /// `project.delete()`: the tombstone plus the `save()` stamps. The
@@ -729,53 +695,6 @@ pub async fn unarchive(
     stamp_archived_at(db, project_id, None, now, actor_id).await
 }
 
-/// `WorkspaceFileAssetEndpoint.entity_asset_save`
-/// (`v2.py:247-284`): the cover link plus the full
-/// `project.save()` stamps (`auto_now` `updated_at`, crum
-/// `updated_by`). The previous-asset delete stays at the caller.
-/// Writes `cover_image = ""` (the ported empty-string write).
-pub async fn stamp_cover_image(
-    db: &impl ConnectionTrait,
-    project_id: Uuid,
-    asset_id: Uuid,
-    now: DateTime<Utc>,
-    actor_id: &Uuid,
-) -> Result<(), sqlx::Error> {
-    projects::Entity::update_many()
-        .col_expr(projects::Column::CoverImage, Expr::value(""))
-        .col_expr(projects::Column::CoverImageAssetId, Expr::value(asset_id))
-        .col_expr(projects::Column::UpdatedAt, Expr::value(now))
-        .col_expr(projects::Column::UpdatedById, Expr::value(*actor_id))
-        .filter(projects::Column::Id.eq(project_id))
-        .exec(db)
-        .await
-        .map(|_| ())
-        .map_err(into_sqlx)
-}
-
-/// `WorkspaceFileAssetEndpoint.entity_asset_delete`
-/// (`v2.py:286-312`): clear the cover link FK plus the full
-/// `project.save()` stamps.
-pub async fn clear_cover_image_asset(
-    db: &impl ConnectionTrait,
-    project_id: Uuid,
-    now: DateTime<Utc>,
-    actor_id: &Uuid,
-) -> Result<(), sqlx::Error> {
-    projects::Entity::update_many()
-        .col_expr(
-            projects::Column::CoverImageAssetId,
-            Expr::value(None::<Uuid>),
-        )
-        .col_expr(projects::Column::UpdatedAt, Expr::value(now))
-        .col_expr(projects::Column::UpdatedById, Expr::value(*actor_id))
-        .filter(projects::Column::Id.eq(project_id))
-        .exec(db)
-        .await
-        .map(|_| ())
-        .map_err(into_sqlx)
-}
-
 /// The two `project.save(update_fields=[...])` single-column stamps
 /// the repo bindings emit: `repo_url` (git connect,
 /// `git/services.py:342-349`, and GitHub bind, `github.py:1058-1061`)
@@ -825,7 +744,6 @@ pub struct SeedProject<'a> {
     pub is_default: bool,
     pub description: &'a str,
     pub network: i16,
-    pub cover_image: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
     pub default_agent_executor: &'a str,
     pub created_by: Uuid,
@@ -863,8 +781,6 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         is_time_tracking_enabled: Set(false),
         is_issue_type_enabled: Set(false),
         guest_view_all_features: Set(false),
-        cover_image: Set(p.cover_image.map(str::to_owned)),
-        cover_image_asset_id: Set(None),
         estimate_id: Set(None),
         archive_in: Set(0),
         close_in: Set(0),
@@ -2711,8 +2627,8 @@ mod tests {
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 46,
-            "47 columns, 47 values"
+            2 * 44,
+            "45 columns, 45 values"
         );
     }
 
@@ -2796,8 +2712,6 @@ mod tests {
             is_time_tracking_enabled: true,
             is_issue_type_enabled: false,
             guest_view_all_features: false,
-            cover_image: None,
-            cover_image_asset: None,
             estimate: None,
             archive_in: 7,
             close_in: 8,
@@ -2827,8 +2741,8 @@ mod tests {
         let update = sql(&project_update_stmt(id, &upd));
         assert_eq!(
             update.matches(" = ").count(),
-            45 + 1,
-            "45 setters plus the id filter"
+            43 + 1,
+            "43 setters plus the id filter"
         );
         assert!(update.contains(&format!("\"created_by_id\" = '{actor}'")));
         assert!(update.contains("\"deleted_at\" = NULL"));
@@ -3242,8 +3156,7 @@ mod tests {
         cycle_view BOOLEAN NOT NULL, issue_views_view BOOLEAN NOT NULL,
         page_view BOOLEAN NOT NULL, intake_view BOOLEAN NOT NULL,
         is_time_tracking_enabled BOOLEAN NOT NULL, is_issue_type_enabled BOOLEAN NOT NULL,
-        guest_view_all_features BOOLEAN NOT NULL, cover_image TEXT,
-        cover_image_asset_id UUID, estimate_id UUID, archive_in INTEGER NOT NULL,
+        guest_view_all_features BOOLEAN NOT NULL, estimate_id UUID, archive_in INTEGER NOT NULL,
         close_in INTEGER NOT NULL, logo_props JSONB NOT NULL, default_state_id UUID,
         archived_at TIMESTAMPTZ, is_default BOOLEAN NOT NULL, timezone TEXT NOT NULL,
         external_source TEXT, external_id TEXT, repo_url TEXT NOT NULL,
@@ -3316,8 +3229,6 @@ mod tests {
             is_time_tracking_enabled: false,
             is_issue_type_enabled: false,
             guest_view_all_features: false,
-            cover_image: None,
-            cover_image_asset: None,
             estimate: None,
             archive_in: 0,
             close_in: 0,
@@ -3387,21 +3298,21 @@ mod tests {
         let v1_id = create(&pool, &new_project(ws, actor, now, &logo))
             .await
             .expect("v1 create");
-        let v1_row: (Option<serde_json::Value>, Option<Uuid>, i32, bool) = sqlx::query_as(
-            "SELECT description_text, cover_image_asset_id, agent_default_interval_seconds, \
+        let v1_row: (Option<serde_json::Value>, i32, bool) = sqlx::query_as(
+            "SELECT description_text, agent_default_interval_seconds, \
              agent_ticking_enabled FROM projects WHERE id = $1",
         )
         .bind(v1_id)
         .fetch_one(&pool)
         .await
         .expect("read back");
-        assert_eq!(v1_row, (None, None, 10800, true));
+        assert_eq!(v1_row, (None, 10800, true));
     }
 
     /// The update-path twins round-trip through the temp table with
     /// the same binds the handlers pass: self-excluding
     /// default-clear, full update, archive/unarchive, soft delete,
-    /// cover link/unlink, and both text-field stamps.
+    /// and both text-field stamps.
     #[tokio::test]
     async fn live_update_twins_round_trip() {
         let Some(pool) = scratch_pool().await else {
@@ -3447,8 +3358,6 @@ mod tests {
             is_time_tracking_enabled: true,
             is_issue_type_enabled: false,
             guest_view_all_features: false,
-            cover_image: None,
-            cover_image_asset: None,
             estimate: None,
             archive_in: 7,
             close_in: 8,
@@ -3504,39 +3413,6 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(cleared, None);
-        let asset = Uuid::new_v4();
-        stamp_cover_image(&db, id, asset, now, &actor)
-            .await
-            .expect("cover link");
-        let cover: (Option<String>, Option<Uuid>) =
-            sqlx::query_as("SELECT cover_image, cover_image_asset_id FROM projects WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .expect("read back");
-        assert_eq!(cover, (Some(String::new()), Some(asset)));
-        clear_cover_image_asset(&db, id, now, &actor)
-            .await
-            .expect("cover unlink");
-        let unlinked: Option<Uuid> =
-            sqlx::query_scalar("SELECT cover_image_asset_id FROM projects WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .expect("read back");
-        assert_eq!(unlinked, None);
-        let last = Uuid::new_v4();
-        save_project_cover(&db, id, last, now, actor)
-            .await
-            .expect("v2 cover save");
-        let saved: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
-            "SELECT cover_image_asset_id, updated_by_id FROM projects WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(&pool)
-        .await
-        .expect("read back");
-        assert_eq!(saved, (Some(last), Some(actor)));
         stamp_text_field(
             &db,
             ProjectTextField::RepoUrl,

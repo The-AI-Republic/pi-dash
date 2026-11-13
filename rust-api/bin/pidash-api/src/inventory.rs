@@ -103,8 +103,6 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "app", path: "/api/timezones/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
-    RouteRow { group: "app", path: "/api/unsplash/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/users/api-tokens/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/users/api-tokens/{pk}/",

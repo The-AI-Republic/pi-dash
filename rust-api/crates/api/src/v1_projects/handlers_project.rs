@@ -775,7 +775,6 @@ const READ_FIELD_ORDER: &[&str] = &[
     "sort_order",
     "member_role",
     "is_deployed",
-    "cover_image_url",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -797,7 +796,6 @@ const READ_FIELD_ORDER: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
     "archive_in",
     "close_in",
     "logo_props",
@@ -819,7 +817,6 @@ const READ_FIELD_ORDER: &[&str] = &[
     "workspace",
     "default_assignee",
     "project_lead",
-    "cover_image_asset",
     "estimate",
     "default_state",
 ];
@@ -867,25 +864,6 @@ fn row_i16_as_i32(row: &Row, col: &str) -> Result<i32, Denial> {
 fn row_json_opt(row: &Row, col: &str) -> Result<Value, Denial> {
     let value: Option<Value> = row.try_get("", col).map_err(|_| Denial::ServerError)?;
     Ok(value.unwrap_or(Value::Null))
-}
-
-/// `Project.cover_image_url` (`db/models/project.py:175-185`): the cover
-/// asset's URL when an asset is attached — used *verbatim*, so an unmapped
-/// entity type renders `null` and a NULL-workspace attachment/description
-/// omits the key — else the `cover_image` text when non-empty, else `None`.
-/// The asset branch applies `FileAsset.asset_url` (`db/models/asset.py:80-98`)
-/// through [`file_asset_url`].
-async fn cover_image_url(
-    pool: &PgPool,
-    asset_id: Option<uuid::Uuid>,
-    cover_image: Option<&str>,
-) -> Result<AssetUrl, Denial> {
-    if let Some(id) = asset_id {
-        return file_asset_url(pool, &id).await;
-    }
-    Ok(AssetUrl::Present(
-        cover_image.filter(|s| !s.is_empty()).map(str::to_owned),
-    ))
 }
 
 /// `FileAsset.asset_url` for one asset row, resolved unscoped (the forward-FK
@@ -997,18 +975,6 @@ pub async fn render_project(
         );
         put(&mut map, "is_deployed", Value::from(ann.is_deployed));
     }
-    let asset_id: Option<uuid::Uuid> = row_uuid_opt(row, "cover_image_asset_id")?;
-    let cover_text: Option<String> = row_string_opt(row, "cover_image")?;
-    match cover_image_url(pool, asset_id, cover_text.as_deref()).await? {
-        AssetUrl::Present(url) => put(
-            &mut map,
-            "cover_image_url",
-            url.map(Value::String).unwrap_or(Value::Null),
-        ),
-        // DRF `SkipField`: a read-only field whose source raises a plain
-        // `AttributeError` leaves its key out of the response entirely.
-        AssetUrl::Skip => {}
-    }
 
     let created_at: chrono::DateTime<chrono::Utc> = row
         .try_get("", "created_at")
@@ -1081,11 +1047,6 @@ pub async fn render_project(
     ] {
         put(&mut map, key, Value::from(row_bool(row, key)?));
     }
-    put(
-        &mut map,
-        "cover_image",
-        cover_text.map(Value::String).unwrap_or(Value::Null),
-    );
     put(
         &mut map,
         "archive_in",
@@ -1175,7 +1136,6 @@ pub async fn render_project(
         "project_lead",
         render_uuid_opt(&row_uuid_opt(row, "project_lead_id")?),
     );
-    put(&mut map, "cover_image_asset", render_uuid_opt(&asset_id));
     put(
         &mut map,
         "estimate",
@@ -1427,7 +1387,6 @@ const PROJECT_LIST_FIELDS: &[&str] = &[
     "identifier",
     "icon_prop",
     "emoji",
-    "cover_image",
     "module_view",
     "cycle_view",
     "issue_views_view",
@@ -1810,7 +1769,6 @@ pub const CREATE_FIELD_ORDER: &[&str] = &[
     "identifier",
     "icon_prop",
     "emoji",
-    "cover_image",
     "module_view",
     "cycle_view",
     "issue_views_view",
@@ -1856,7 +1814,7 @@ async fn coerce_field(
                 FieldValue::Fk(None)
             }
             "icon_prop" => FieldValue::Json(Value::Null),
-            "emoji" | "cover_image" | "external_source" | "external_id" => FieldValue::OptStr(None),
+            "emoji" | "external_source" | "external_id" => FieldValue::OptStr(None),
             _ => return Err(CoerceFail::Msg(NULL_MSG.to_owned())),
         }));
     }
@@ -1871,7 +1829,6 @@ async fn coerce_field(
         "emoji" | "external_source" | "external_id" => {
             FieldValue::OptStr(Some(coerce_char(value, true, Some(255))?))
         }
-        "cover_image" => FieldValue::OptStr(Some(coerce_char(value, true, None)?)),
         "module_view"
         | "cycle_view"
         | "issue_views_view"
@@ -3013,7 +2970,6 @@ pub async fn create_project_inner(
     let v1_name = name.clone().unwrap_or_default();
     let v1_icon = field_json(&data, "icon_prop").unwrap_or(Value::Null);
     let v1_emoji = field_opt_str(&data, "emoji").unwrap_or(None);
-    let v1_cover = field_opt_str(&data, "cover_image").unwrap_or(None);
     let v1_ext_source = field_opt_str(&data, "external_source").unwrap_or(None);
     let v1_ext_id = field_opt_str(&data, "external_id").unwrap_or(None);
     let v1_repo = field_str(&data, "repo_url").unwrap_or_default();
@@ -3044,8 +3000,6 @@ pub async fn create_project_inner(
                 .unwrap_or(false),
             is_issue_type_enabled: field_bool(&data, "is_issue_type_enabled").unwrap_or(false),
             guest_view_all_features: field_bool(&data, "guest_view_all_features").unwrap_or(false),
-            cover_image: v1_cover.as_deref(),
-            cover_image_asset: None,
             estimate: None,
             archive_in: field_int(&data, "archive_in").unwrap_or(0),
             close_in: field_int(&data, "close_in").unwrap_or(0),
@@ -3589,7 +3543,7 @@ pub async fn apply_project_update(
     if let Some(v) = field_json(data, "icon_prop") {
         push(&mut sets, "icon_prop", ProjectPatchBind::Json(v));
     }
-    for key in ["emoji", "cover_image", "external_source", "external_id"] {
+    for key in ["emoji", "external_source", "external_id"] {
         if let Some(v) = field_opt_str(data, key) {
             push(&mut sets, key, ProjectPatchBind::OptStr(v));
         }
@@ -4229,7 +4183,7 @@ mod tests {
     fn read_field_order_pins_wire_order() {
         // `[pk] + declared annotations + concrete fields + forward relations`.
         assert_eq!(
-            &READ_FIELD_ORDER[..9],
+            &READ_FIELD_ORDER[..8],
             &[
                 "id",
                 "total_members",
@@ -4239,22 +4193,20 @@ mod tests {
                 "sort_order",
                 "member_role",
                 "is_deployed",
-                "cover_image_url",
             ]
         );
         assert_eq!(
-            &READ_FIELD_ORDER[9..13],
+            &READ_FIELD_ORDER[8..12],
             &["created_at", "updated_at", "deleted_at", "name",]
         );
         assert_eq!(
-            &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 8..],
+            &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 7..],
             &[
                 "created_by",
                 "updated_by",
                 "workspace",
                 "default_assignee",
                 "project_lead",
-                "cover_image_asset",
                 "estimate",
                 "default_state",
             ]
@@ -4337,11 +4289,6 @@ mod live_tests {
         let at2 = chrono::DateTime::parse_from_rfc3339("2026-01-03T04:05:06Z").unwrap();
         let mut sel = Query::select();
         sel.expr_as(Expr::value(row_id), Alias::new("id"));
-        sel.expr_as(
-            Expr::value(None::<uuid::Uuid>),
-            Alias::new("cover_image_asset_id"),
-        );
-        sel.expr_as(Expr::value(None::<String>), Alias::new("cover_image"));
         sel.expr_as(Expr::value(at), Alias::new("created_at"));
         sel.expr_as(Expr::value(at2), Alias::new("updated_at"));
         sel.expr_as(
@@ -4443,14 +4390,12 @@ mod live_tests {
                 "sort_order",
                 "member_role",
                 "is_deployed",
-                "cover_image_url",
             ]
         );
         assert_eq!(obj["total_members"], serde_json::json!(7));
         assert_eq!(obj["is_member"], serde_json::Value::Bool(true));
         assert_eq!(obj["sort_order"], serde_json::json!(15000.0));
         assert_eq!(obj["member_role"], serde_json::json!(20));
-        assert_eq!(obj["cover_image_url"], serde_json::Value::Null);
         assert_eq!(obj["network"], serde_json::json!(2));
         assert_eq!(
             obj["workspace"],

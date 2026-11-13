@@ -91,9 +91,9 @@ def test_timezone_out_of_range_float_is_invalid_choice(world):
 
 
 def test_other_char_fields_out_of_range_float_are_inf(world, db):
-    # repo_url / external_id / cover_image / emoji / external_source all
-    # share the DRF `CharField` `str()` coercion.
-    for column in ("repo_url", "external_id", "cover_image", "emoji", "external_source"):
+    # repo_url / external_id / emoji / external_source all share the DRF
+    # `CharField` `str()` coercion.
+    for column in ("repo_url", "external_id", "emoji", "external_source"):
         client, _, ws, _ = world.full_stack()
         tag = _tag()
         body = (

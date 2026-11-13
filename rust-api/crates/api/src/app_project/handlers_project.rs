@@ -1168,8 +1168,6 @@ struct ProjectRow {
     is_time_tracking_enabled: bool,
     is_issue_type_enabled: bool,
     guest_view_all_features: bool,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<uuid::Uuid>,
     estimate_id: Option<uuid::Uuid>,
     archive_in: i32,
     close_in: i32,
@@ -1223,8 +1221,6 @@ struct ProjectRowOrm {
     is_time_tracking_enabled: bool,
     is_issue_type_enabled: bool,
     guest_view_all_features: bool,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<uuid::Uuid>,
     estimate_id: Option<uuid::Uuid>,
     archive_in: i32,
     close_in: i32,
@@ -1278,8 +1274,6 @@ fn project_row_from(orm: ProjectRowOrm) -> ProjectRow {
         is_time_tracking_enabled: orm.is_time_tracking_enabled,
         is_issue_type_enabled: orm.is_issue_type_enabled,
         guest_view_all_features: orm.guest_view_all_features,
-        cover_image: orm.cover_image,
-        cover_image_asset_id: orm.cover_image_asset_id,
         estimate_id: orm.estimate_id,
         archive_in: orm.archive_in,
         close_in: orm.close_in,
@@ -1358,8 +1352,6 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::IsTimeTrackingEnabled,
         proj_entity::Column::IsIssueTypeEnabled,
         proj_entity::Column::GuestViewAllFeatures,
-        proj_entity::Column::CoverImage,
-        proj_entity::Column::CoverImageAssetId,
         proj_entity::Column::EstimateId,
         proj_entity::Column::ArchiveIn,
         proj_entity::Column::CloseIn,
@@ -1637,13 +1629,13 @@ async fn next_sequence(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<i
 /// though `FileAsset.objects` is the filtering `SoftDeletionManager`:
 /// a soft-deleted asset still answers its URL (live-probed 200), and
 /// a dangling id raises `DoesNotExist` → unhandled 500 (unreachable —
-/// the `projects_cover_image_asset_id` FK forbids dangling ids).
+/// the `workspaces_logo_asset_id` FK forbids dangling ids).
 /// Static kinds answer the static path; `ISSUE_ATTACHMENT` and the four
 /// `*_DESCRIPTION` kinds answer workspace-scoped URLs (the workspace
 /// slug traverses the same unfiltered manager — a NULL workspace is
 /// the `AttributeError` 500); anything else (including a NULL or
 /// unrecognized entity type) is `None`.
-/// One `file_assets` cover row: entity type plus the nullable owner
+/// One `file_assets` row: entity type plus the nullable owner
 /// columns the entity-URL table reads.
 async fn file_asset_url(
     pool: &sqlx::PgPool,
@@ -1670,7 +1662,7 @@ async fn file_asset_url(
         return Err(Denial::ServerError);
     };
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -1721,24 +1713,6 @@ async fn asset_workspace_slug(
 fn opt_uuid_py(id: Option<uuid::Uuid>) -> String {
     id.map(|id| id.to_string())
         .unwrap_or_else(|| "None".to_owned())
-}
-
-/// `Project.cover_image_url` (`db/models/project.py:175-185`, L5
-/// `cover_image_url`): an attached asset answers its `asset_url` as-is —
-/// even `None` for an unrecognized entity, with NO fallback to the legacy
-/// text; otherwise the legacy `cover_image` text; else `None`.
-async fn cover_image_url(
-    pool: &sqlx::PgPool,
-    asset_id: Option<uuid::Uuid>,
-    cover_image: Option<&str>,
-) -> Result<Option<String>, Denial> {
-    use pidash_db::app_project::models::project::cover_image_url as pick;
-    let has_asset = asset_id.is_some();
-    let asset_url: Option<String> = match asset_id {
-        None => None,
-        Some(id) => file_asset_url(pool, &id).await?,
-    };
-    Ok(pick(has_asset, asset_url.as_deref(), cover_image).map(str::to_owned))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1986,7 +1960,7 @@ async fn executor_options(
 
 /// Render one `ProjectListSerializer` row (`serializers/project.py:189-270`)
 /// from its `get_queryset` row: members prefetch, next sequence, executor
-/// options and cover URL resolve per row exactly as the serializer method
+/// options resolve per row exactly as the serializer method
 /// fields do.
 async fn render_list_row(
     pool: &sqlx::PgPool,
@@ -2013,8 +1987,6 @@ async fn render_list_row(
         Some((&actor.id, user)),
     )
     .await?;
-    let cover_url =
-        cover_image_url(pool, row.cover_image_asset_id, row.cover_image.as_deref()).await?;
     let timezone = actor.timezone;
     let read = ProjectListRead {
         id: row.id.to_string(),
@@ -2025,7 +1997,6 @@ async fn render_list_row(
         name: row.name.clone(),
         inbox_view: row.intake_view,
         members: rendered_members,
-        cover_image_url: cover_url,
         deleted_at: render_dt_opt(row.deleted_at, timezone),
         timezone: row.timezone.clone(),
         created_at: render_dt(&row.created_at, timezone),
@@ -2051,8 +2022,6 @@ async fn render_list_row(
         workspace: row.workspace_id.to_string(),
         guest_view_all_features: row.guest_view_all_features,
         logo_props: row.logo_props.clone(),
-        cover_image_asset: row.cover_image_asset_id.map(|id| id.to_string()),
-        cover_image: row.cover_image.clone(),
         estimate: row.estimate_id.map(|id| id.to_string()),
         archive_in: i64::from(row.archive_in),
         close_in: i64::from(row.close_in),
@@ -2079,7 +2048,7 @@ async fn render_list_row(
 
 /// `Workspace.logo_url` (`db/models/workspace.py:261-269`): the attached
 /// asset's URL as-is (even `None`), else the legacy `logo` text, else
-/// `None` — the same pick rule as the project cover.
+/// `None`.
 async fn workspace_detail(pool: &sqlx::PgPool, workspace_id: &uuid::Uuid) -> Result<Value, Denial> {
     use pidash_services::app_workspace::ser_workspace::{
         workspace_lite_to_representation, WorkspaceLiteRow,
@@ -2164,8 +2133,6 @@ async fn render_current_instance(
         is_time_tracking_enabled: row.is_time_tracking_enabled,
         is_issue_type_enabled: row.is_issue_type_enabled,
         guest_view_all_features: row.guest_view_all_features,
-        cover_image: row.cover_image.clone(),
-        cover_image_asset: row.cover_image_asset_id.map(|id| id.to_string()),
         estimate: row.estimate_id.map(|id| id.to_string()),
         archive_in: i64::from(row.archive_in),
         close_in: i64::from(row.close_in),
@@ -3656,14 +3623,13 @@ async fn validate_fk(
 /// FK target tables with their default-manager filters. DRF builds auto
 /// `PrimaryKeyRelatedField` querysets from `_default_manager`
 /// (`field_mapping.py:256`): `AuditModel` inherits `SoftDeleteModel`
-/// (`db/mixins.py:85`), so `FileAsset`/`Estimate`/`Workspace` reject
+/// (`db/mixins.py:85`), so `Estimate`/`Workspace` reject
 /// soft-deleted ids with 400 (`State` additionally excludes triage via
 /// `StateManager`); only `User` (Django's plain `UserManager`) is
 /// unfiltered. (Forward-FK *reads* use the plain `_base_manager`
 /// instead — see [`file_asset_url`] — so the read path stays
 /// unfiltered. Both halves live-probed.)
 const FK_USERS_SQL: &str = "users";
-const FK_FILE_ASSETS_SQL: &str = "file_assets";
 const FK_ESTIMATES_SQL: &str = "estimates";
 /// `StateManager` excludes triage (`db/models/state.py:79-83`) as well as
 /// soft-deleted rows.
@@ -3711,8 +3677,6 @@ struct Validated {
     is_time_tracking_enabled: Option<bool>,
     is_issue_type_enabled: Option<bool>,
     guest_view_all_features: Option<bool>,
-    cover_image: Option<Option<String>>,
-    cover_image_asset: Option<Option<uuid::Uuid>>,
     estimate: Option<Option<uuid::Uuid>>,
     archive_in: Option<i64>,
     close_in: Option<i64>,
@@ -3790,7 +3754,6 @@ const WRITE_FIELDS: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
     "archive_in",
     "close_in",
     "logo_props",
@@ -3812,7 +3775,6 @@ const WRITE_FIELDS: &[&str] = &[
     "workspace",
     "default_assignee",
     "project_lead",
-    "cover_image_asset",
     "estimate",
     "default_state",
 ];
@@ -4028,14 +3990,6 @@ async fn validate_one_field(
         "guest_view_all_features" => match validate_bool(value) {
             Ok(flag) => out.guest_view_all_features = Some(flag),
             Err(message) => return fail(message),
-        },
-        "cover_image" => match opt_char(value, None, true) {
-            Ok(text) => out.cover_image = Some(text),
-            Err(messages) => return fail_many(messages),
-        },
-        "cover_image_asset" => match validate_fk(pool, value, true, FK_FILE_ASSETS_SQL).await {
-            Ok(id) => out.cover_image_asset = Some(id),
-            Err(error) => return fail_fk(error),
         },
         "estimate" => match validate_fk(pool, value, true, FK_ESTIMATES_SQL).await {
             Ok(id) => out.estimate = Some(id),
@@ -4710,11 +4664,6 @@ async fn insert_project(
             is_time_tracking_enabled: validated.is_time_tracking_enabled.unwrap_or(false),
             is_issue_type_enabled: validated.is_issue_type_enabled.unwrap_or(false),
             guest_view_all_features: validated.guest_view_all_features.unwrap_or(false),
-            cover_image: validated
-                .cover_image
-                .as_ref()
-                .and_then(|value| value.as_deref()),
-            cover_image_asset: validated.cover_image_asset.unwrap_or(None),
             estimate: validated.estimate.unwrap_or(None),
             archive_in,
             close_in,
@@ -5012,13 +4961,6 @@ async fn apply_update(
         guest_view_all_features: validated
             .guest_view_all_features
             .unwrap_or(instance.guest_view_all_features),
-        cover_image: validated
-            .cover_image
-            .as_ref()
-            .map_or(instance.cover_image.as_deref(), |v| v.as_deref()),
-        cover_image_asset: validated
-            .cover_image_asset
-            .unwrap_or(instance.cover_image_asset_id),
         estimate: validated.estimate.unwrap_or(instance.estimate_id),
         archive_in,
         close_in,
@@ -5659,8 +5601,6 @@ fn paginate_order_column(key: &str) -> Result<proj_entity::Column, Denial> {
         "is_default" => proj_entity::Column::IsDefault,
         "guest_view_all_features" => proj_entity::Column::GuestViewAllFeatures,
         "members_can_edit_states" => proj_entity::Column::MembersCanEditStates,
-        "cover_image" => proj_entity::Column::CoverImage,
-        "cover_image_asset" => proj_entity::Column::CoverImageAssetId,
         "estimate" => proj_entity::Column::EstimateId,
         "archive_in" => proj_entity::Column::ArchiveIn,
         "close_in" => proj_entity::Column::CloseIn,
@@ -5891,8 +5831,6 @@ fn order_column(key: &str) -> Result<&'static str, Denial> {
         "is_default" => Ok("p.is_default"),
         "guest_view_all_features" => Ok("p.guest_view_all_features"),
         "members_can_edit_states" => Ok("p.members_can_edit_states"),
-        "cover_image" => Ok("p.cover_image"),
-        "cover_image_asset" => Ok("p.cover_image_asset_id"),
         "estimate" => Ok("p.estimate_id"),
         "archive_in" => Ok("p.archive_in"),
         "close_in" => Ok("p.close_in"),
@@ -7460,8 +7398,8 @@ mod tests {
         assert!(position("name") < position("identifier"));
         assert!(position("identifier") < position("workspace"));
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
-        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 44);
+        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 5], "workspace");
+        assert_eq!(WRITE_FIELDS.len(), 42);
     }
 
     #[test]

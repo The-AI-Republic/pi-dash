@@ -17,8 +17,8 @@ PORTED BUGS (translate as-is; listed for the record):
 - B2 `app/views/webhook/base.py:84` — PATCH passes `context={request:
   request}` (request object as key), so the request-host domain is never
   appended on update.
-- B3 `app/views/external/base.py:235` — Unsplash search URL has stray
-  `page=${page}`; port byte-for-byte.
+- B3 (retired) — the Unsplash endpoint was removed with the cover-image
+  feature (PDASHOSS01-237); its stray `page=${page}` bug went with it.
 - B4 `bgtasks/webhook_task.py:313-321` — HMAC over `json.dumps` default
   separators, not the wire bytes (also recorded in D-08 FX-WEB-03).
 - B5 `app/views/external/base.py:159,163` — `task`/`prompt` default to
@@ -124,7 +124,7 @@ PORTED BUGS (translate as-is; listed for the record):
 
 - `fx-ext-01-llm.json` — provider tables `app/views/external/base.py:42-73`;
   `get_llm_config` `:76-120`; `get_llm_response` `:123-145`;
-  project/workspace GPT endpoints `:148-212`; Unsplash `:215-243`
+  project/workspace GPT endpoints `:148-212`
   (transcribed; network shapes recorded, not executed).
 
 ## FX-TSK-01 webhook-dispatch
@@ -135,10 +135,10 @@ PORTED BUGS (translate as-is; listed for the record):
   `get_model_data` `:143-187`; HMAC wire quirk `:313-321` (EXECUTED,
   shared with D-08 `tasks_webhooks/fx-web-03-webhook-send-task.json`).
 
-## FX-PERM-01 permission matrix (24 paths / 27 method rows)
+## FX-PERM-01 permission matrix (23 paths / 26 method rows)
 
 - `fx-perm-01-permission-matrix.json` — routes
   `app/urls/integration.py:30-119` (17), `app/urls/webhook.py:14-31` (4),
-  `app/urls/external.py:12-24` (3); roles
+  `app/urls/external.py:11-22` (2); roles
   `app/permissions/base.py:13-64`; view defaults
   `app/views/base.py:189-194`.

@@ -14,7 +14,7 @@
     "workspace_seed_task.py:504-570 workspace_seed orchestration protocol"
   ],
   "read_seed_file": {
-    "projects_first_keys": ["cover_image", "description", "id", "identifier", "logo_props", "name", "network"],
+    "projects_first_keys": ["description", "id", "identifier", "logo_props", "name", "network"],
     "missing_file_returns_none": true,
     "bad_json_returns_none": "json.JSONDecodeError -> error log + None (code path).",
     "path": "os.path.join(settings.SEED_DIR, 'data', filename)."
@@ -22,7 +22,7 @@
   "seed_inventory": {
     "projects.json": {
       "count": 1,
-      "first_keys": ["cover_image", "description", "id", "identifier", "logo_props", "name", "network"]
+      "first_keys": ["description", "id", "identifier", "logo_props", "name", "network"]
     },
     "states.json": {
       "count": 8,

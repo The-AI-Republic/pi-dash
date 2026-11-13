@@ -31,6 +31,9 @@ ROW_KEYS = frozenset(
     ]
 )
 
+# App ProjectLiteSerializer after PDASHOSS01-237 (cover keys dropped).
+PROJECT_DETAIL_KEYS = ["id", "identifier", "name", "logo_props", "description", "is_default"]
+
 
 def _list_url(world, intake_id):
     return f"{BASE}/anchor/{world['anchor']}/intakes/{intake_id}/intake-issues/"
@@ -59,14 +62,6 @@ def test_list_fifty_rows_body(user_client, world, seeder, db):
         world["workspace"]["id"], world["project"]["id"], name="In progress", group="started"
     )
     label2 = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="ui")
-    cover = seeder.create_asset(
-        world["workspace"]["id"], world["project"]["id"], world["owner"]["id"],
-        entity_type="PROJECT_COVER",
-    )
-    db.execute(
-        "UPDATE projects SET cover_image_asset_id=%s WHERE id=%s",
-        (cover["id"], world["project"]["id"]),
-    )
     avatar = seeder.create_asset(
         world["workspace"]["id"], world["project"]["id"], world["owner"]["id"],
         entity_type="USER_AVATAR",
@@ -111,14 +106,14 @@ def test_list_fifty_rows_body(user_client, world, seeder, db):
     assert response.status_code == 200
     rows = response.json()
     assert [row["id"] for row in rows] == issue_ids
-    cover_url = f"/api/assets/v2/static/{cover['id']}/"
     avatar_url = f"/api/assets/v2/static/{avatar['id']}/"
     for n, row in enumerate(rows):
         assert set(row.keys()) == ROW_KEYS, f"row {n} keys changed"
         assert row["name"] == f"Scale idea {n:02d}"
         assert row["state_detail"]["id"] == states[n]
         assert row["project_detail"]["id"] == world["project"]["id"]
-        assert row["project_detail"]["cover_image_url"] == cover_url
+        # PDASHOSS01-237: the app project nest carries no cover keys.
+        assert list(row["project_detail"]) == PROJECT_DETAIL_KEYS
         assert row["sub_issues_count"] == 0
         assert row["issue_intake"][0]["status"] == (-2 if n < 40 else n)
         want_label = world["label"]["id"] if n % 3 != 0 else label2["id"]
@@ -142,8 +137,8 @@ def _is_bridge_refetch(query):
 
 def test_list_query_count_constant_in_rows(user_client, world, seeder, db):
     """5-row and 50-row lists issue the same queries: no lookup may run
-    per row. Plain rows (labels + assignees, no cover/avatar assets) so
-    the bound holds on Django too — Django resolves cover/avatar assets
+    per row. Plain rows (labels + assignees, no avatar assets) so
+    the bound holds on Django too — Django resolves avatar assets
     per row, a Django-side quirk outside this issue's scope."""
     if not dbstats.available(db):
         pytest.skip("pg_stat_statements not preloaded: statement counting impossible")

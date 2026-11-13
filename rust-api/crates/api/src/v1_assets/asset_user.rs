@@ -159,8 +159,9 @@ pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"
 /// `app_workspace`/`runner_sessions` resolver-404 constants).
 pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
-/// POST entity guard allowlist (`asset.py:126`).
-pub const USER_ENTITY_TYPES: &[&str] = &["USER_AVATAR", "USER_COVER"];
+/// POST entity guard allowlist (`asset.py:110`,
+/// `entity_type != USER_AVATAR`).
+pub const USER_ENTITY_TYPES: &[&str] = &["USER_AVATAR"];
 /// POST MIME allowlist (`asset.py:133-139`), source order.
 pub const USER_MIME_TYPES: &[&str] = &[
     "image/jpeg",
@@ -737,8 +738,8 @@ async fn user_scoped_get(
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-87`) for the POST 200.
-/// The entity guard admits only `USER_AVATAR` / `USER_COVER`, both of
-/// which take the static branch — the only reachable rendering here.
+/// The entity guard admits only `USER_AVATAR`, which takes the static
+/// branch — the only reachable rendering here.
 fn user_asset_url(asset_id: &Uuid) -> Value {
     Value::String(format!("/api/assets/v2/static/{asset_id}/"))
 }
@@ -789,9 +790,9 @@ enum EntityDeleteOutcome {
     UserMissing,
 }
 
-/// `entity_asset_delete` (`asset.py:60-73`): `USER_AVATAR` clears
-/// `avatar_asset_id`, `USER_COVER` clears `cover_image_asset_id`, anything
-/// else returns without touching the profile. The clear is a full-row
+/// `entity_asset_delete` (`asset.py:60-67`): `USER_AVATAR` clears
+/// `avatar_asset_id`, anything else returns without touching the
+/// profile. The clear is a full-row
 /// `user.save()` — every non-pk column in `_meta` order via
 /// [`pidash_services::domain::identity::entity_user_save_sql`] — after the
 /// `User.save()`
@@ -847,7 +848,7 @@ fn is_null_email_error(error: &sqlx::Error) -> bool {
 /// One `users` row in [`asset_queries::USER_COLUMNS`] order, for the
 /// full-row `user.save()` rebind. Nullable decodings follow
 /// `db/models/user.py:56-133` (`null=True` only on `last_login`,
-/// `mobile_number`, `email`, `cover_image`, `last_active`,
+/// `mobile_number`, `email`, `last_active`,
 /// `last_login_time`, `last_logout_time`, `token_updated_at`, `bot_type`,
 /// `masked_at` — everything else is `NOT NULL`).
 struct UserRow {
@@ -862,8 +863,6 @@ struct UserRow {
     last_name: String,
     avatar: String,
     avatar_asset_id: Option<Uuid>,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<Uuid>,
     date_joined: DateTime<Utc>,
     created_at: DateTime<Utc>,
     // `updated_at` is decoded nowhere: the full-row `save()` always
@@ -908,8 +907,6 @@ impl UserRow {
             last_name: model.last_name.clone(),
             avatar: model.avatar.clone(),
             avatar_asset_id: model.avatar_asset_id,
-            cover_image: model.cover_image.clone(),
-            cover_image_asset_id: model.cover_image_asset_id,
             date_joined: model.date_joined.with_timezone(&Utc),
             created_at: model.created_at.with_timezone(&Utc),
             last_location: model.last_location.clone(),
@@ -945,7 +942,6 @@ impl UserRow {
         use asset_queries::EntityClearTarget as Target;
         match target {
             Target::AvatarAssetId => self.avatar_asset_id = None,
-            Target::CoverImageAssetId => self.cover_image_asset_id = None,
             Target::NoOp => {}
         }
         let email = self.email.as_deref()?.to_lowercase();
@@ -1007,8 +1003,6 @@ impl ShapedUserRow {
             .bind(&row.last_name)
             .bind(&row.avatar)
             .bind(row.avatar_asset_id)
-            .bind(&row.cover_image)
-            .bind(row.cover_image_asset_id)
             .bind(row.date_joined)
             .bind(row.created_at)
             .bind(self.updated_at)
@@ -1758,12 +1752,14 @@ mod tests {
         assert_eq!(entity["status"], Value::Bool(false));
     }
 
-    // The POST guards: exactly the two entity strings and the 5-mime
-    // allowlist (`asset.py:126,133-139`) — `image/jpg` passes despite the
+    // The POST guards: exactly the avatar entity string and the 5-mime
+    // allowlist (`asset.py:110,117-123`) — `image/jpg` passes despite the
     // message claiming JPEG-and-PNG-only (BUG-mime-message).
     #[test]
     fn guard_allowlists_match_python() {
-        assert_eq!(USER_ENTITY_TYPES, &["USER_AVATAR", "USER_COVER"]);
+        assert_eq!(USER_ENTITY_TYPES, &["USER_AVATAR"]);
+        // The removed cover type is rejected like any unknown value.
+        assert!(!USER_ENTITY_TYPES.contains(&"USER_COVER"));
         assert_eq!(
             USER_MIME_TYPES,
             &[
@@ -1890,8 +1886,8 @@ mod tests {
         assert!(!sql.contains("\"is_deleted\" ="), "{sql}");
     }
 
-    // `entity_clear_target` branches (`asset.py:60-73`): avatar clears
-    // the avatar FK, cover clears the cover FK, anything else no-ops.
+    // `entity_clear_target` branches (`asset.py:60-67`): avatar clears
+    // the avatar FK, anything else (including legacy cover rows) no-ops.
     #[test]
     fn entity_clear_branches_like_python() {
         use asset_queries::{entity_clear_target, EntityClearTarget as Target};
@@ -1899,12 +1895,9 @@ mod tests {
             entity_clear_target(Some("USER_AVATAR")),
             Target::AvatarAssetId
         );
-        assert_eq!(
-            entity_clear_target(Some("USER_COVER")),
-            Target::CoverImageAssetId
-        );
         for other in [
             None,
+            Some("USER_COVER"),
             Some("ISSUE_ATTACHMENT"),
             Some(""),
             Some("USER_AVATAR "),
@@ -1913,17 +1906,17 @@ mod tests {
         }
     }
 
-    // The full-row user save binds all 39 non-pk columns plus the pk
-    // (`$1`–`$40`); the soft-delete helper binds id + two fields.
+    // The full-row user save binds all 37 non-pk columns plus the pk
+    // (`$1`–`$38`); the soft-delete helper binds id + two fields.
     #[test]
     fn helper_builders_carry_their_binds() {
         use sea_query::PostgresQueryBuilder;
         let save = pidash_services::domain::identity::entity_user_save_sql();
         assert!(
-            save.contains("$1") && save.contains("$39") && save.contains("$40"),
+            save.contains("$1") && save.contains("$37") && save.contains("$38"),
             "{save}"
         );
-        assert_eq!(asset_queries::USER_COLUMNS.len(), 40);
+        assert_eq!(asset_queries::USER_COLUMNS.len(), 38);
         let select = asset_queries::soft_delete_select(
             Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
         )

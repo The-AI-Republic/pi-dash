@@ -7,7 +7,7 @@
 //! decide here.
 //!
 //! [`handlers_external`] owns the external-integration HTTP shell
-//! (PIDASHCONV-454): the two AI-assistant POSTs and the Unsplash GET.
+//! (PIDASHCONV-454): the two AI-assistant POSTs.
 //! [`handlers_github_app`] serves the five GitHub App install-flow
 //! endpoints (PIDASHCONV-443); [`handlers_github_proj`] owns the
 //! project-level GitHub HTTP shell (PIDASHCONV-450): bind POST plus

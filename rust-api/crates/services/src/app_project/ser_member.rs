@@ -144,12 +144,10 @@ pub const USER_ADMIN_LITE_WIRE_FIELDS: [&str; 9] = [
 ///
 /// Nested copy for `member.project` / `invite.project`; the canonical port
 /// is L1's (PIDASHCONV-563) — review picks the single owner.
-pub const PROJECT_LITE_WIRE_FIELDS: [&str; 8] = [
+pub const PROJECT_LITE_WIRE_FIELDS: [&str; 6] = [
     "id",
     "identifier",
     "name",
-    "cover_image",
-    "cover_image_url",
     "logo_props",
     "description",
     "is_default",
@@ -171,26 +169,6 @@ pub fn resolve_workspace_logo_url<'a>(
         return logo_asset_url;
     }
     match logo {
-        Some(url) if !url.is_empty() => Some(url),
-        _ => None,
-    }
-}
-
-/// Port of `Project.cover_image_url` (`db/models/project.py:176-184`):
-/// same precedence as [`resolve_workspace_logo_url`] over
-/// `cover_image_asset` / `cover_image` (`TextField(null=True)`).
-///
-/// Expected canonical home is L1 (PIDASHCONV-563, `ProjectLiteSerializer`);
-/// defined here so the nested project renders without re-deriving it.
-pub fn resolve_project_cover_image_url<'a>(
-    cover_image_asset_attached: bool,
-    cover_image_asset_url: Option<&'a str>,
-    cover_image: Option<&'a str>,
-) -> Option<&'a str> {
-    if cover_image_asset_attached {
-        return cover_image_asset_url;
-    }
-    match cover_image {
         Some(url) if !url.is_empty() => Some(url),
         _ => None,
     }
@@ -277,17 +255,13 @@ pub fn user_admin_lite_to_representation<'a>(
 }
 
 /// A `Project` row for lite rendering (`project.py:120-133`):
-/// `cover_image` is nullable (`db/models/project.py:107`), `description`
-/// is non-null blankable text (`:75`), `logo_props` is a JSON object
-/// (`JSONField(default=dict)`, `:118`), and `cover_image_url` is the
-/// resolved [`resolve_project_cover_image_url`] value.
+/// `description` is non-null blankable text (`:75`) and `logo_props` is a
+/// JSON object (`JSONField(default=dict)`, `:118`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectLiteRow<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
     pub description: &'a str,
     pub is_default: bool,
@@ -300,8 +274,6 @@ pub struct ProjectLiteView<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub logo_props: &'a serde_json::Value,
     pub description: &'a str,
     pub is_default: bool,
@@ -314,8 +286,6 @@ pub fn project_lite_to_representation<'a>(row: &'a ProjectLiteRow<'a>) -> Projec
         id: row.id,
         identifier: row.identifier,
         name: row.name,
-        cover_image: row.cover_image,
-        cover_image_url: row.cover_image_url,
         logo_props: row.logo_props,
         description: row.description,
         is_default: row.is_default,
@@ -755,8 +725,6 @@ mod tests {
             id: req_str(value, "id"),
             identifier: req_str(value, "identifier"),
             name: req_str(value, "name"),
-            cover_image: value["cover_image"].as_str(),
-            cover_image_url: value["cover_image_url"].as_str(),
             logo_props: &value["logo_props"],
             description: req_str(value, "description"),
             is_default: value["is_default"].as_bool().expect("is_default bool"),
@@ -818,8 +786,6 @@ mod tests {
                 "id",
                 "identifier",
                 "name",
-                "cover_image",
-                "cover_image_url",
                 "logo_props",
                 "description",
                 "is_default",
@@ -1071,17 +1037,6 @@ mod tests {
         );
         assert_eq!(
             resolve_workspace_logo_url(true, None, Some("https://logo")),
-            None,
-            "attached asset with no URL does not fall through"
-        );
-        assert_eq!(resolve_project_cover_image_url(false, None, None), None);
-        assert_eq!(resolve_project_cover_image_url(false, None, Some("")), None);
-        assert_eq!(
-            resolve_project_cover_image_url(false, None, Some("https://cover")),
-            Some("https://cover")
-        );
-        assert_eq!(
-            resolve_project_cover_image_url(true, None, Some("https://cover")),
             None,
             "attached asset with no URL does not fall through"
         );

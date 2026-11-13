@@ -27,7 +27,6 @@ SELECT "deploy_boards"."id", "deploy_boards"."created_at", "deploy_boards"."upda
 -- 500s via the dispatch `return exc` bug (views/base.py:199-200). Intended SQL:
 SELECT "projects"."id", "projects"."identifier", "projects"."name",
   "projects"."description", "projects"."emoji", "projects"."icon_prop",
-  "projects"."cover_image",
   EXISTS(SELECT 1 FROM "deploy_boards" U1 WHERE (U1."deleted_at" IS NULL
     AND U1."anchor" = %(anchor)s AND U1."project_id" = ("projects"."id")
     AND U1."entity_name" = 'project')) AS "is_public"

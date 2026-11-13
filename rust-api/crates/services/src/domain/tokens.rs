@@ -1920,8 +1920,8 @@ mod tests {
         let email = format!("domain-tokens-{tag}@example.test");
         sqlx::query_scalar(
             "INSERT INTO users (password, last_login, id, username, mobile_number, email,
-               display_name, first_name, last_name, avatar, avatar_asset_id, cover_image,
-               cover_image_asset_id, date_joined, created_at, updated_at, last_location,
+               display_name, first_name, last_name, avatar, avatar_asset_id,
+               date_joined, created_at, updated_at, last_location,
                created_location, is_superuser, is_managed, is_password_expired, is_active,
                is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
                token, user_timezone,
@@ -1929,8 +1929,8 @@ mod tests {
                last_login_medium, last_login_uagent, token_updated_at, is_bot, bot_type,
                is_email_valid, masked_at)
              VALUES ('!', NULL, $1, $3, NULL, $4,
-               'Live', 'Live', '', '', NULL, NULL,
-               NULL, $2, $2, $2, '',
+               'Live', 'Live', '', '', NULL,
+               $2, $2, $2, '',
                '', false, false, false, true,
                false, false, true, false, '', 'UTC',
                $2, NULL, NULL, '', '',

@@ -130,9 +130,8 @@ use pidash_db::entity::{
     workspaces as ws_entity,
 };
 use pidash_services::app_project::ser_member::{
-    invite_to_representation, project_lite_to_representation, resolve_project_cover_image_url,
-    resolve_workspace_logo_url, workspace_lite_to_representation, ProjectLiteRow,
-    ProjectMemberInviteRow, WorkspaceLiteRow,
+    invite_to_representation, project_lite_to_representation, resolve_workspace_logo_url,
+    workspace_lite_to_representation, ProjectLiteRow, ProjectMemberInviteRow, WorkspaceLiteRow,
 };
 use pidash_services::app_project::ser_project::{DeployBoardRead, DEPLOY_BOARD_INITIAL_BODY};
 use pidash_services::app_project::tasks::{
@@ -805,10 +804,9 @@ struct AssetRef {
 /// port's transcription).
 fn render_asset_url(asset: &AssetRef) -> Option<String> {
     match asset.entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Some(format!("/api/assets/v2/static/{}/", asset.id)),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Some(format!("/api/assets/v2/static/{}/", asset.id))
+        }
         Some("ISSUE_ATTACHMENT") => Some(format!(
             "/api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{}/",
             asset.workspace_slug.as_deref().unwrap_or(""),
@@ -917,8 +915,6 @@ struct InviteRow {
     project_id: uuid::Uuid,
     project_identifier: String,
     project_name: String,
-    project_cover_image: Option<String>,
-    project_cover_asset_id: Option<uuid::Uuid>,
     project_logo_props: Value,
     project_description: String,
     project_is_default: bool,
@@ -949,11 +945,6 @@ fn invite_select() -> sea_orm::Select<pmi_entity::Entity> {
         .column_as(proj_entity::Column::Id, "project_id")
         .column_as(proj_entity::Column::Identifier, "project_identifier")
         .column_as(proj_entity::Column::Name, "project_name")
-        .column_as(proj_entity::Column::CoverImage, "project_cover_image")
-        .column_as(
-            proj_entity::Column::CoverImageAssetId,
-            "project_cover_asset_id",
-        )
         .column_as(proj_entity::Column::LogoProps, "project_logo_props")
         .column_as(proj_entity::Column::Description, "project_description")
         .column_as(proj_entity::Column::IsDefault, "project_is_default")
@@ -1064,7 +1055,6 @@ struct RenderedInvite {
     responded_at: Option<String>,
     created_by: Option<String>,
     updated_by: Option<String>,
-    cover_image_url: Option<String>,
     logo_url: Option<String>,
 }
 
@@ -1086,13 +1076,6 @@ fn render_invite(
         responded_at: row.responded_at.as_ref().map(render_dt),
         created_by: row.created_by_id.map(|id| id.to_string()),
         updated_by: row.updated_by_id.map(|id| id.to_string()),
-        cover_image_url: resolve_project_cover_image_url(
-            row.project_cover_asset_id.is_some(),
-            row.project_cover_asset_id
-                .and_then(|id| assets.get(&id).map(String::as_str)),
-            row.project_cover_image.as_deref(),
-        )
-        .map(str::to_owned),
         logo_url: resolve_workspace_logo_url(
             row.workspace_logo_asset_id.is_some(),
             row.workspace_logo_asset_id
@@ -1107,8 +1090,6 @@ fn render_invite(
             id: &rendered.project_id,
             identifier: &row.project_identifier,
             name: &row.project_name,
-            cover_image: row.project_cover_image.as_deref(),
-            cover_image_url: rendered.cover_image_url.as_deref(),
             logo_props: &row.project_logo_props,
             description: &row.project_description,
             is_default: row.project_is_default,
@@ -1138,7 +1119,6 @@ fn render_invite(
 
 /// Collect the asset ids one invite row references.
 fn invite_asset_ids(row: &InviteRow, out: &mut Vec<uuid::Uuid>) {
-    out.extend(row.project_cover_asset_id);
     out.extend(row.workspace_logo_asset_id);
 }
 
@@ -1172,8 +1152,6 @@ struct BoardRow {
     workspace_logo_asset_id: Option<uuid::Uuid>,
     project_identifier: Option<String>,
     project_name: Option<String>,
-    project_cover_image: Option<String>,
-    project_cover_asset_id: Option<uuid::Uuid>,
     project_logo_props: Option<Value>,
     project_description: Option<String>,
     project_is_default: Option<bool>,
@@ -1203,8 +1181,6 @@ struct BoardFull {
     workspace_logo_asset_id: Option<uuid::Uuid>,
     project_identifier: Option<String>,
     project_name: Option<String>,
-    project_cover_image: Option<String>,
-    project_cover_asset_id: Option<uuid::Uuid>,
     project_logo_props: Option<Value>,
     project_description: Option<String>,
     project_is_default: Option<bool>,
@@ -1239,11 +1215,6 @@ fn board_select() -> sea_orm::Select<db_entity::Entity> {
         .column_as(ws_entity::Column::LogoAssetId, "workspace_logo_asset_id")
         .column_as(proj_entity::Column::Identifier, "project_identifier")
         .column_as(proj_entity::Column::Name, "project_name")
-        .column_as(proj_entity::Column::CoverImage, "project_cover_image")
-        .column_as(
-            proj_entity::Column::CoverImageAssetId,
-            "project_cover_asset_id",
-        )
         .column_as(proj_entity::Column::LogoProps, "project_logo_props")
         .column_as(proj_entity::Column::Description, "project_description")
         .column_as(proj_entity::Column::IsDefault, "project_is_default")
@@ -1277,8 +1248,6 @@ fn board_from_full(full: BoardFull) -> BoardRow {
         workspace_logo_asset_id: full.workspace_logo_asset_id,
         project_identifier: full.project_identifier,
         project_name: full.project_name,
-        project_cover_image: full.project_cover_image,
-        project_cover_asset_id: full.project_cover_asset_id,
         project_logo_props: full.project_logo_props,
         project_description: full.project_description,
         project_is_default: full.project_is_default,
@@ -1379,19 +1348,11 @@ fn render_board(
             Some(description),
             Some(is_default),
         ) => {
-            let cover_image_url = resolve_project_cover_image_url(
-                row.project_cover_asset_id.is_some(),
-                row.project_cover_asset_id
-                    .and_then(|id| assets.get(&id).map(String::as_str)),
-                row.project_cover_image.as_deref(),
-            );
             let id = id.to_string();
             serde_json::to_value(project_lite_to_representation(&ProjectLiteRow {
                 id: &id,
                 identifier,
                 name,
-                cover_image: row.project_cover_image.as_deref(),
-                cover_image_url,
                 logo_props,
                 description,
                 is_default,
@@ -1451,7 +1412,6 @@ fn render_board(
 
 /// Collect the asset ids one board row references.
 fn board_asset_ids(row: &BoardRow, out: &mut Vec<uuid::Uuid>) {
-    out.extend(row.project_cover_asset_id);
     out.extend(row.workspace_logo_asset_id);
 }
 
@@ -4978,8 +4938,6 @@ mod tests {
                 id: "p",
                 identifier: "I",
                 name: "n",
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: &logo_props,
                 description: "",
                 is_default: true,

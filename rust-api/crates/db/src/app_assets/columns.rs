@@ -153,10 +153,8 @@ pub const ENTITY_TYPES: &[&str] = &[
     "ISSUE_DESCRIPTION",
     "COMMENT_DESCRIPTION",
     "PAGE_DESCRIPTION",
-    "USER_COVER",
     "USER_AVATAR",
     "WORKSPACE_LOGO",
-    "PROJECT_COVER",
     "DRAFT_ISSUE_ATTACHMENT",
     "DRAFT_ISSUE_DESCRIPTION",
 ];
@@ -197,10 +195,7 @@ pub fn validate_file_size(size: u64, limit: u64) -> Result<(), &'static str> {
 /// Entity types served from the static endpoint (`asset_url` first branch,
 /// `asset.py:81-87`).
 pub fn is_static_asset_type(entity_type: &str) -> bool {
-    matches!(
-        entity_type,
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER"
-    )
+    matches!(entity_type, "WORKSPACE_LOGO" | "USER_AVATAR")
 }
 
 /// Mirrors the `asset_url` property (`asset.py:79-100`).
@@ -335,7 +330,7 @@ mod tests {
         let mut const_values = owned(ENTITY_TYPES);
         const_values.sort();
         assert_eq!(const_values, fixture_values);
-        assert_eq!(ENTITY_TYPES.len(), 10, "EntityTypeContext holds 10 values");
+        assert_eq!(ENTITY_TYPES.len(), 8, "EntityTypeContext holds 8 values");
     }
 
     #[test]

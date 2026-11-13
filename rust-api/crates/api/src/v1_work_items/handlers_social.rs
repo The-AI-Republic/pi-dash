@@ -1285,10 +1285,9 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
             })
     }
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
+        }
         Some("ISSUE_ATTACHMENT") => {
             let slug = workspace_slug(pool, workspace_id).await?;
             Ok(slug.map(|s| {
@@ -1424,8 +1423,8 @@ async fn expand_parent_comment(pool: &PgPool, parent_id: &Uuid) -> Result<Option
 }
 
 /// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`): `id`,
-/// `identifier`, `name`, `cover_image`, `icon_prop`, `emoji`,
-/// `description`, `is_default`, `cover_image_url` in field order. A
+/// `identifier`, `name`, `icon_prop`, `emoji`,
+/// `description`, `is_default` in field order. A
 /// missing row renders null.
 async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denial> {
     /// The `ProjectLiteSerializer` columns, decoded by name.
@@ -1434,12 +1433,10 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
         id: Uuid,
         identifier: String,
         name: String,
-        cover_image: Option<String>,
         icon_prop: Option<Value>,
         emoji: Option<String>,
         description: String,
         is_default: bool,
-        cover_image_asset_id: Option<Uuid>,
     }
     let row = projects::Entity::find_by_id(*project_id)
         .select_only()
@@ -1447,12 +1444,10 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
             projects::Column::IconProp,
             projects::Column::Emoji,
             projects::Column::Description,
             projects::Column::IsDefault,
-            projects::Column::CoverImageAssetId,
         ])
         .into_model::<ProjectLite>()
         .one(&orm(pool))
@@ -1461,22 +1456,10 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let cover_text = row.cover_image;
-    // `Project.cover_image_url` (`db/models/project.py:176-185`): the
-    // asset URL wins, then the stored text, else null.
-    let cover_url = match row.cover_image_asset_id {
-        Some(id) => file_asset_url(pool, &id).await?,
-        None => None,
-    };
-    let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
-    let mut map = Map::with_capacity(9);
+    let mut map = Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(row.id.to_string()));
     map.insert("identifier".to_owned(), Value::String(row.identifier));
     map.insert("name".to_owned(), Value::String(row.name));
-    map.insert(
-        "cover_image".to_owned(),
-        cover_text.map(Value::String).unwrap_or(Value::Null),
-    );
     map.insert("icon_prop".to_owned(), row.icon_prop.unwrap_or(Value::Null));
     map.insert(
         "emoji".to_owned(),
@@ -1484,10 +1467,6 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
     );
     map.insert("description".to_owned(), Value::String(row.description));
     map.insert("is_default".to_owned(), Value::Bool(row.is_default));
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
-    );
     Ok(Value::Object(map))
 }
 
@@ -6257,9 +6236,9 @@ mod orm_tests {
         for sql in [
             format!("INSERT INTO workspaces (id, name, slug) VALUES ('{ws}', 'Acme', 'acme')"),
             format!(
-                "INSERT INTO projects (id, workspace_id, identifier, name, description, is_default, archived_at, cover_image, emoji) VALUES \
-                 ('{project}', '{ws}', 'ACME', 'Acme Project', 'desc', false, NULL, 'https://cover', NULL), \
-                 ('{archived_project}', '{ws}', 'OLD', 'Old', '', false, now(), NULL, NULL)"
+                "INSERT INTO projects (id, workspace_id, identifier, name, description, is_default, archived_at, emoji) VALUES \
+                 ('{project}', '{ws}', 'ACME', 'Acme Project', 'desc', false, NULL, NULL), \
+                 ('{archived_project}', '{ws}', 'OLD', 'Old', '', false, now(), NULL)"
             ),
             format!(
                 "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES \
@@ -6459,7 +6438,6 @@ mod orm_tests {
         );
         let project_lite = expand_project(&pool, &project).await.expect("project");
         assert_eq!(project_lite["identifier"], "ACME");
-        assert_eq!(project_lite["cover_image_url"], "https://cover");
         assert_eq!(project_lite["icon_prop"], Value::Null);
         assert_eq!(project_lite["is_default"], false);
         let actor = expand_actor(&pool, &user).await.expect("actor");

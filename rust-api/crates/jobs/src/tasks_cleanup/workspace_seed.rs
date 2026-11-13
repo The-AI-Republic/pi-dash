@@ -117,7 +117,6 @@ pub struct ProjectInsert {
     pub is_default: bool,
     pub description: String,
     pub network: i16,
-    pub cover_image: Option<String>,
     pub logo_props: Value,
     pub default_agent_executor: String,
 }
@@ -659,7 +658,6 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
                         is_default: !store.default_project_exists(workspace_id).await?,
                         description: seed_str(row, "description").unwrap_or("").to_owned(),
                         network: row.get("network").and_then(Value::as_i64).unwrap_or(2) as i16,
-                        cover_image: seed_str(row, "cover_image").map(str::to_owned),
                         logo_props: row
                             .get("logo_props")
                             .cloned()
@@ -1617,7 +1615,6 @@ impl SeedStore for PgSeedStore {
                 is_default: project.is_default,
                 description: &project.description,
                 network: project.network,
-                cover_image: project.cover_image.as_deref(),
                 logo_props: &project.logo_props,
                 default_agent_executor: &project.default_agent_executor,
                 created_by: actor,
@@ -2921,7 +2918,7 @@ mod tests {
         vec![
             (
                 "projects.json",
-                r##"[{"id": 1, "description": "", "network": 2, "cover_image": null, "logo_props": {}}]"##,
+                r##"[{"id": 1, "description": "", "network": 2, "logo_props": {}}]"##,
             ),
             (
                 "states.json",

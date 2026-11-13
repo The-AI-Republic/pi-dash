@@ -1277,7 +1277,7 @@ mod tests {
             owned(merged_file_asset::ENTITY_TYPES),
             string_list(&v, "file_asset", "entity_types")
         );
-        assert_eq!(merged_file_asset::ENTITY_TYPES.len(), 10);
+        assert_eq!(merged_file_asset::ENTITY_TYPES.len(), 8);
         assert_eq!(
             app_asset_columns::DEFAULTS.len(),
             app_asset_columns::COLUMNS.len()

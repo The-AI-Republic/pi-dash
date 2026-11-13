@@ -15,8 +15,6 @@ import uuid
 ME_KEYS = {
     "avatar",
     "avatar_url",
-    "cover_image",
-    "cover_image_url",
     "date_joined",
     "display_name",
     "email",
@@ -38,8 +36,6 @@ ME_UPDATE_KEYS = {
     "avatar",
     "avatar_asset",
     "bot_type",
-    "cover_image",
-    "cover_image_asset",
     "created_at",
     "created_location",
     "date_joined",

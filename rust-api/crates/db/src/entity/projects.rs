@@ -28,8 +28,6 @@ pub struct Model {
     pub emoji: Option<String>,
     pub cycle_view: bool,
     pub module_view: bool,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub cover_image: Option<String>,
     pub issue_views_view: bool,
     pub page_view: bool,
     pub estimate_id: Option<Uuid>,
@@ -47,7 +45,6 @@ pub struct Model {
     pub deleted_at: Option<DateTimeWithTimeZone>,
     pub guest_view_all_features: bool,
     pub timezone: String,
-    pub cover_image_asset_id: Option<Uuid>,
     pub external_id: Option<String>,
     pub external_source: Option<String>,
     pub members_can_edit_states: bool,

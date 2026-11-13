@@ -23,7 +23,6 @@ CONFIG_KEYS = {
     "slack_client_id",
     "posthog_api_key",
     "posthog_host",
-    "has_unsplash_configured",
     "has_llm_configured",
     "file_size_limit",
     "is_smtp_configured",

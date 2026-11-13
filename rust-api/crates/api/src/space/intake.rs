@@ -32,7 +32,7 @@
 //! app serializer never declares it), `sub_issues_count` on list rows
 //! only (detail/create/patch instances carry no such annotation, so DRF
 //! skips the read-only field), and the app `ProjectLite` nest
-//! (`cover_image_url`/`logo_props`/`is_default` instead of the space
+//! (`logo_props`/`is_default` instead of the space
 //! `icon_prop`/`emoji`). The identical nests (state/label/user/
 //! intake-lite) reuse `pidash_services::space::serializers` views.
 //!
@@ -512,8 +512,6 @@ struct ProjectRow {
     id: Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<Uuid>,
     logo_props: serde_json::Value,
     description: String,
     is_default: bool,
@@ -532,30 +530,14 @@ async fn fetch_project(
         id: m.id,
         identifier: m.identifier,
         name: m.name,
-        cover_image: m.cover_image,
-        cover_image_asset_id: m.cover_image_asset_id,
         logo_props: m.logo_props,
         description: m.description,
         is_default: m.is_default,
     }))
 }
 
-/// `cover_image_url` (`db/models/project.py:176-185`): the cover asset's
-/// URL, else the raw `cover_image` text, else null.
-async fn cover_image_url(
-    pool: &PgPool,
-    project: &ProjectRow,
-) -> Result<Option<String>, sqlx::Error> {
-    if let Some(asset_id) = project.cover_image_asset_id {
-        if let Some(url) = asset_url(pool, &asset_id).await? {
-            return Ok(Some(url));
-        }
-    }
-    Ok(project.cover_image.clone())
-}
-
-/// `FileAsset.asset_url` (`db/models/asset.py:80-99`). Cover assets are
-/// `PROJECT_COVER` (`/api/assets/v2/static/<id>/`); the sibling branches
+/// `FileAsset.asset_url` (`db/models/asset.py:76-95`). Avatar assets are
+/// `USER_AVATAR` (`/api/assets/v2/static/<id>/`); the sibling branches
 /// are ported so any asset kind resolves exactly.
 async fn asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, sqlx::Error> {
     let db = pidash_db::pool::sea_orm_connection(pool);
@@ -568,9 +550,7 @@ async fn asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, sql
     };
     let entity_type = asset.entity_type.unwrap_or_default();
     match entity_type.as_str() {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
-        }
+        "WORKSPACE_LOGO" | "USER_AVATAR" => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
         "ISSUE_ATTACHMENT" => {
             let workspace_id = asset.workspace_id;
             let project_id = asset.project_id;
@@ -829,8 +809,6 @@ async fn fetch_projects(
                 id: m.id,
                 identifier: m.identifier,
                 name: m.name,
-                cover_image: m.cover_image,
-                cover_image_asset_id: m.cover_image_asset_id,
                 logo_props: m.logo_props,
                 description: m.description,
                 is_default: m.is_default,
@@ -918,7 +896,7 @@ async fn fetch_asset_urls(
         // above, like `asset_url`); other kinds never reach for a slug.
         let slug = asset.workspace_id.as_ref().and_then(|id| slugs.get(id));
         let url = match asset.entity_type.as_str() {
-            "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+            "WORKSPACE_LOGO" | "USER_AVATAR" => {
                 Some(format!("/api/assets/v2/static/{asset_id}/"))
             }
             "ISSUE_ATTACHMENT" => {
@@ -1075,20 +1053,6 @@ async fn fetch_assignee_rows(
     Ok(map)
 }
 
-/// Pure [`cover_image_url`] over a pre-resolved asset map: the cover
-/// asset's URL, else the raw `cover_image` text, else null.
-fn cover_image_url_from_map(
-    project: &ProjectRow,
-    urls: &HashMap<Uuid, Option<String>>,
-) -> Option<String> {
-    if let Some(asset_id) = project.cover_image_asset_id {
-        if let Some(url) = urls.get(&asset_id).and_then(|url| url.clone()) {
-            return Some(url);
-        }
-    }
-    project.cover_image.clone()
-}
-
 /// Pure per-assignee `avatar_url` over a pre-resolved asset map: the
 /// avatar asset's URL, else the raw `avatar` text when non-empty, else
 /// null (the [`fetch_assignees`] fallback).
@@ -1141,7 +1105,6 @@ struct Detail {
     issue: IssueRow,
     state: Option<StateLite>,
     project: ProjectRow,
-    cover_url: Option<String>,
     label_ids: Vec<Uuid>,
     labels: Vec<LabelRow>,
     assignee_ids: Vec<Uuid>,
@@ -1167,20 +1130,16 @@ async fn load_detail(
             id: issue.project_id,
             identifier: String::new(),
             name: String::new(),
-            cover_image: None,
-            cover_image_asset_id: None,
             logo_props: serde_json::Value::Object(Default::default()),
             description: String::new(),
             is_default: false,
         });
-    let cover_url = cover_image_url(pool, &project).await?;
     let (label_ids, labels) = fetch_labels(pool, &issue.id).await?;
     let (assignee_ids, assignees) = fetch_assignees(pool, &issue.id).await?;
     Ok(Detail {
         issue,
         state,
         project,
-        cover_url,
         label_ids,
         labels,
         assignee_ids,
@@ -1190,10 +1149,9 @@ async fn load_detail(
 }
 
 /// App `ProjectLiteSerializer` (`app/serializers/project.py:120-133`):
-/// `cover_image_url`/`logo_props`/`is_default` where the space twin has
-/// `icon_prop`/`emoji`.
-fn render_app_project(project: &ProjectRow, cover_url: &Option<String>) -> serde_json::Value {
-    let mut map = serde_json::Map::with_capacity(8);
+/// `logo_props`/`is_default` where the space twin has `icon_prop`/`emoji`.
+fn render_app_project(project: &ProjectRow) -> serde_json::Value {
+    let mut map = serde_json::Map::with_capacity(6);
     map.insert("id".to_string(), uuid_string(&project.id));
     map.insert(
         "identifier".to_string(),
@@ -1203,8 +1161,6 @@ fn render_app_project(project: &ProjectRow, cover_url: &Option<String>) -> serde
         "name".to_string(),
         serde_json::Value::String(project.name.clone()),
     );
-    map.insert("cover_image".to_string(), opt_string(&project.cover_image));
-    map.insert("cover_image_url".to_string(), opt_string(cover_url));
     map.insert("logo_props".to_string(), project.logo_props.clone());
     map.insert(
         "description".to_string(),
@@ -1307,7 +1263,7 @@ fn render_app_detail(
     );
     map.insert(
         "project_detail".to_string(),
-        render_app_project(&detail.project, &detail.cover_url),
+        render_app_project(&detail.project),
     );
     map.insert(
         "label_details".to_string(),
@@ -2021,15 +1977,10 @@ async fn collection_list(
         Err(_) => return Denial::ServerError.into_response(),
     };
     let asset_ids = dedup_sorted(
-        projects
+        assignee_map
             .values()
-            .filter_map(|project| project.cover_image_asset_id)
-            .chain(
-                assignee_map
-                    .values()
-                    .flatten()
-                    .filter_map(|assignee| assignee.avatar_asset_id),
-            ),
+            .flatten()
+            .filter_map(|assignee| assignee.avatar_asset_id),
     );
     let asset_urls = match fetch_asset_urls(pool, &asset_ids).await {
         Ok(urls) => urls,
@@ -2045,7 +1996,6 @@ async fn collection_list(
             .get(&issue.project_id)
             .cloned()
             .unwrap_or_else(|| missing_project(issue.project_id));
-        let cover_url = cover_image_url_from_map(&project, &asset_urls);
         let (label_ids, labels) = labels_map.get(&issue.id).cloned().unwrap_or_default();
         let mut assignee_ids = Vec::new();
         let mut assignees = Vec::new();
@@ -2073,7 +2023,6 @@ async fn collection_list(
             issue,
             state,
             project,
-            cover_url,
             label_ids,
             labels,
             assignee_ids,
@@ -2095,8 +2044,6 @@ fn missing_project(project_id: Uuid) -> ProjectRow {
         id: project_id,
         identifier: String::new(),
         name: String::new(),
-        cover_image: None,
-        cover_image_asset_id: None,
         logo_props: serde_json::Value::Object(Default::default()),
         description: String::new(),
         is_default: false,
@@ -2952,13 +2899,10 @@ mod tests {
                 id: Uuid::nil(),
                 identifier: String::new(),
                 name: String::new(),
-                cover_image: None,
-                cover_image_asset_id: None,
                 logo_props: serde_json::Value::Object(Default::default()),
                 description: String::new(),
                 is_default: false,
             },
-            cover_url: None,
             label_ids: Vec::new(),
             labels: Vec::new(),
             assignee_ids: Vec::new(),

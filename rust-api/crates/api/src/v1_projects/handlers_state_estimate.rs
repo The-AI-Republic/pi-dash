@@ -133,18 +133,16 @@ struct MachineTokenLookup {
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// One project lite row for `expand=project` (direct columns + cover asset FK).
+/// One project lite row for `expand=project` (direct columns).
 #[derive(Debug, FromQueryResult)]
 struct ProjectLiteLookup {
     id: Uuid,
     identifier: Option<String>,
     name: Option<String>,
-    cover_image: Option<String>,
     icon_prop: Option<serde_json::Value>,
     emoji: Option<String>,
     description: Option<String>,
     is_default: bool,
-    cover_image_asset_id: Option<Uuid>,
 }
 
 /// One user lite row for `expand=created_by/updated_by` (+ avatar asset FK).
@@ -991,8 +989,8 @@ async fn render_state(
 }
 
 /// `ProjectLiteSerializer` (`serializers/project.py:354-377`): wire order is the
-/// `Meta.fields` list order (probed: `id, identifier, name, cover_image, icon_prop,
-/// emoji, description, is_default, cover_image_url`).
+/// `Meta.fields` list order (`id, identifier, name, icon_prop, emoji,
+/// description, is_default`).
 async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value, HandlerError> {
     let row = projects::Entity::find()
         .select_only()
@@ -1000,12 +998,10 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
             projects::Column::IconProp,
             projects::Column::Emoji,
             projects::Column::Description,
             projects::Column::IsDefault,
-            projects::Column::CoverImageAssetId,
         ])
         .filter(projects::Column::Id.eq(*project_id))
         .into_model::<ProjectLiteLookup>()
@@ -1016,25 +1012,15 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
         id,
         identifier,
         name,
-        cover_image,
         icon_prop,
         emoji,
         description,
         is_default,
-        cover_image_asset_id: cover_asset,
     }) = row
     else {
         return Ok(Value::Null);
     };
-    // `cover_image_url` (`db/models/project.py:176-185`): the asset URL when a
-    // cover asset exists — used verbatim, so an unmapped entity type renders
-    // null and a NULL-workspace attachment/description omits the key — else
-    // the raw value when truthy; else null.
-    let cover_url = match cover_asset {
-        Some(aid) => file_asset_url(pool, &aid).await?,
-        None => AssetUrl::Present(cover_image.clone().filter(|raw| !raw.is_empty())),
-    };
-    let mut map = serde_json::Map::with_capacity(9);
+    let mut map = serde_json::Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(id.to_string()));
     map.insert(
         "identifier".to_owned(),
@@ -1043,10 +1029,6 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
     map.insert(
         "name".to_owned(),
         name.map(Value::String).unwrap_or(Value::Null),
-    );
-    map.insert(
-        "cover_image".to_owned(),
-        cover_image.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
     map.insert(
@@ -1058,14 +1040,6 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
         description.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("is_default".to_owned(), Value::Bool(is_default));
-    // DRF `SkipField`: a read-only field whose source raises a plain
-    // `AttributeError` leaves its key out of the response entirely.
-    if let AssetUrl::Present(url) = cover_url {
-        map.insert(
-            "cover_image_url".to_owned(),
-            url.map(Value::String).unwrap_or(Value::Null),
-        );
-    }
     Ok(Value::Object(map))
 }
 

@@ -486,7 +486,6 @@ fn render_me(user: &UserShape, tz: &Tz) -> Result<Value, Denial> {
         id: &owned_id,
         avatar: user.avatar.as_deref().unwrap_or(""),
         avatar_url: owned_avatar_url.as_deref(),
-        cover_image: user.cover_image.as_deref(),
         date_joined: &owned_date_joined,
         display_name: user.display_name.as_deref().unwrap_or(""),
         email: user.email.as_deref().unwrap_or(""),
@@ -1104,7 +1103,6 @@ async fn list_admins(
                     avatar_asset_project: asset.and_then(|a| a.project_id),
                     avatar_asset_issue: asset.and_then(|a| a.issue_id),
                     avatar_asset_workspace_slug: slug,
-                    cover_image: None,
                     date_joined: None,
                     display_name: Some(u.display_name.clone()),
                     email: Some(u.email.clone().unwrap_or_default()),
@@ -2660,7 +2658,6 @@ mod tests {
             avatar_asset_project: None,
             avatar_asset_issue: None,
             avatar_asset_workspace_slug: None,
-            cover_image: None,
             date_joined: Some(
                 DateTime::parse_from_rfc3339("2026-01-15T12:30:45Z")
                     .expect("fixture datetime")
@@ -2679,7 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn me_shape_carries_the_sixteen_meta_keys() {
+    fn me_shape_carries_the_fifteen_meta_keys() {
         let user = shape_fixture();
         let body = render_me(&user, &chrono_tz::UTC).expect("renders");
         let keys: std::collections::BTreeSet<&str> = body
@@ -2692,7 +2689,6 @@ mod tests {
             "id",
             "avatar",
             "avatar_url",
-            "cover_image",
             "date_joined",
             "display_name",
             "email",

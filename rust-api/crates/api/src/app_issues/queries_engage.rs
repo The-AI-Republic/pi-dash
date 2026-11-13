@@ -146,12 +146,10 @@ pub const ISSUE_PREFIX: &str = "i_";
 pub const USER_PREFIX: &str = "u_";
 
 /// `ProjectLiteSerializer` inputs (`project.py:120-133`).
-const PROJECT_LITE: [projects::Column; 8] = [
+const PROJECT_LITE: [projects::Column; 6] = [
     projects::Column::Id,
     projects::Column::Identifier,
     projects::Column::Name,
-    projects::Column::CoverImage,
-    projects::Column::CoverImageAssetId,
     projects::Column::LogoProps,
     projects::Column::Description,
     projects::Column::IsDefault,
