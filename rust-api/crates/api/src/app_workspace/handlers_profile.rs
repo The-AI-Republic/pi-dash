@@ -2237,11 +2237,11 @@ fn s_legacy_expr_i(name: &str, value: &FilterValue) -> Result<SimpleExpr, Denial
                 return Err(Denial::ServerError);
             }
             let left = s_date_term_i(term).ok_or(Denial::ServerError)?;
-            if raw.parse::<chrono::NaiveDate>().is_err() && p_parse_datetime_param(raw).is_none() {
-                return Err(Denial::BadError("Please provide valid detail".to_owned()));
-            }
             if operator == "contains" {
                 return Ok(left.cast_as(p_a("text")).like(s_like_pattern(raw)));
+            }
+            if raw.parse::<chrono::NaiveDate>().is_err() && p_parse_datetime_param(raw).is_none() {
+                return Err(Denial::BadError("Please provide valid detail".to_owned()));
             }
             s_date_bound_i(left, operator, raw.to_owned()).ok_or(Denial::ServerError)
         }
@@ -2475,16 +2475,16 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
                 "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
                 _ => return Err(Denial::ServerError),
             };
-            if text.parse::<chrono::NaiveDate>().is_err()
-                && chrono::DateTime::parse_from_rfc3339(text).is_err()
-            {
-                return Err(Denial::BadError(INVALID.to_owned()));
-            }
             match operator {
                 "contains" => Ok(p_col("sub", column)
                     .cast_as(p_a("text"))
                     .like(s_like_pattern(text))),
                 "gte" | "lte" => {
+                    if text.parse::<chrono::NaiveDate>().is_err()
+                        && chrono::DateTime::parse_from_rfc3339(text).is_err()
+                    {
+                        return Err(Denial::BadError(INVALID.to_owned()));
+                    }
                     let right = Expr::val(text.clone()).cast_as(p_a("date"));
                     let left = p_col("sub", column).cast_as(p_a("date"));
                     Ok(if operator == "gte" {

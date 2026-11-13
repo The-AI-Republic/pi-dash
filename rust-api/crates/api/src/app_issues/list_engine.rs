@@ -814,13 +814,15 @@ fn legacy_text_expr(name: &str, raw: &str, tz: &Tz) -> Result<SimpleExpr, Denial
         return Err(Denial::ServerError);
     }
     let left = date_term(term, tz).ok_or(Denial::ServerError)?;
+    if operator == "contains" {
+        // Bare token: Django `__contains` is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates).
+        return Ok(left.cast_as(a("text")).like(like_pattern(raw)));
+    }
     // Explicit bounds must parse as dates: Django's `get_prep_value`
     // raises `ValidationError` (400 invalid detail) on garbage.
     if raw.parse::<chrono::NaiveDate>().is_err() && super::parse_datetime_param(raw).is_none() {
         return Err(Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()));
-    }
-    if operator == "contains" {
-        return Ok(left.cast_as(a("text")).like(like_pattern(raw)));
     }
     date_bound(left, operator, raw.to_owned()).ok_or(Denial::ServerError)
 }
@@ -2268,6 +2270,27 @@ mod tests {
             render(legacy_expr("state__in", &FilterValue::Uuids(vec![]), &tz).expect("expr")),
             "SELECT 1 WHERE FALSE"
         );
+        // NEWPIDASH-196: __contains is text LIKE without date validation.
+        for token in ["2026-11", "garbage"] {
+            let text = render(
+                legacy_expr(
+                    "target_date__contains",
+                    &FilterValue::Text(token.to_owned()),
+                    &tz,
+                )
+                .expect("contains must not validate"),
+            );
+            assert!(text.contains("LIKE"), "{text}");
+        }
+        // Explicit bound with garbage is BadError.
+        assert!(matches!(
+            legacy_expr(
+                "target_date__gte",
+                &FilterValue::Text("garbage".to_owned()),
+                &tz
+            ),
+            Err(Denial::BadError(_))
+        ));
     }
 
     #[test]

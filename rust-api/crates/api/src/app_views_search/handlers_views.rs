@@ -3535,7 +3535,12 @@ async fn view_issues_list(
         // UTC keeps this slice's current truncation; its own actor-zone
         // fix follows the app_issues pattern separately.
         let fragment = crate::app_issues::legacy_sql(&mut binder, name, value, &chrono_tz::UTC)
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(|e| match e {
+                crate::app_issues::Denial::BadError(msg) => Denial::BadError(msg),
+                crate::app_issues::Denial::BadDetail(msg) => Denial::BadDetail(msg),
+                crate::app_issues::Denial::BadFilter(msg, code) => Denial::BadFilter(msg, code),
+                _ => Denial::ServerError,
+            })?;
         legacy_parts.push(fragment);
     }
     let legacy_where = if legacy_parts.is_empty() {

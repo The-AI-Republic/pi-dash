@@ -1143,15 +1143,13 @@ fn legacy_text_sql(
             "target_date" => "issue.target_date".to_owned(),
             _ => return Err(Denial::ServerError),
         };
-        // Explicit bounds must parse as dates: Django's `get_prep_value`
-        // raises `ValidationError` (400 invalid detail) on garbage.
-        if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-            return Err(Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()));
-        }
-        let holder = binder.bind_string(text.to_owned());
         if operator == "=" {
             // Single-value form on a date term: Django's `contains`
-            // lookup, i.e. LIKE with metacharacters escaped.
+            // lookup, i.e. LIKE with metacharacters escaped. No date
+            // validation: Django stores `<term>__contains=<token>` for a
+            // bare token and the ORM renders a text LIKE (Django 200),
+            // so garbage and partial dates such as `2026-11` match as
+            // text, not as a date.
             let escaped = text
                 .replace('\\', "\\\\")
                 .replace('%', "\\%")
@@ -1159,6 +1157,12 @@ fn legacy_text_sql(
             let holder = binder.bind_string(format!("%{escaped}%"));
             return Ok(format!("{column}::text LIKE {holder}"));
         }
+        // Explicit bounds must parse as dates: Django's `get_prep_value`
+        // raises `ValidationError` (400 invalid detail) on garbage.
+        if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+            return Err(Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()));
+        }
+        let holder = binder.bind_string(text.to_owned());
         let operator = if operator == ">=" { ">=" } else { "<=" };
         Ok(format!("{column} {operator} {holder}::date"))
     }
@@ -2926,8 +2930,45 @@ mod tests {
         .expect("sql");
         assert_eq!(
             sql,
-            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $3"
+            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $2"
         );
+    }
+
+    #[test]
+    fn legacy_contains_bare_token_is_text_like_not_validated() {
+        // NEWPIDASH-196: bare tokens (no `;`) are `<term>__contains` and
+        // Django renders them as text LIKE (200), even for garbage or
+        // partial dates. Only explicit bounds validate.
+        for token in ["2026-11", "garbage", "2026", ""] {
+            let mut binder = Binder::new();
+            let sql = legacy_sql(
+                &mut binder,
+                "target_date__contains",
+                &FilterValue::Text(token.to_owned()),
+                &chrono_tz::UTC,
+            )
+            .expect("contains must not validate");
+            assert!(sql.contains("::text LIKE"), "contains should LIKE: {sql}");
+        }
+        // Explicit bounds still validate.
+        let mut binder = Binder::new();
+        let denial = legacy_sql(
+            &mut binder,
+            "target_date__gte",
+            &FilterValue::Text("garbage".to_owned()),
+            &chrono_tz::UTC,
+        )
+        .unwrap_err();
+        assert!(matches!(denial, Denial::BadError(_)));
+        let mut binder = Binder::new();
+        let denial = legacy_sql(
+            &mut binder,
+            "target_date__gte",
+            &FilterValue::Text("".to_owned()),
+            &chrono_tz::UTC,
+        )
+        .unwrap_err();
+        assert!(matches!(denial, Denial::BadError(_)));
     }
 
     #[test]

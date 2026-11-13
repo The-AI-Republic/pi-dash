@@ -524,3 +524,44 @@ def test_global_patch_trims_description(api, seed, tenant_a, auth_a):
     g = api.get(f"{_global_url(tenant_a)}{view_id}/", headers=auth_a)
     assert g.status_code == 200, g.text
     assert g.json()["description"] == "d"
+
+
+def test_view_issues_invalid_target_date_after_400(api, seed, tenant_a, project_a, auth_a):
+    """NEWPIDASH-196: explicit date bounds with garbage answer 400,
+    not 500. Django validates via DateField.get_prep_value."""
+    url = f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/"
+    for param in ("garbage;after", ";after", "2026-13-45;after"):
+        r = api.get(url, headers=auth_a, params={"target_date": param})
+        assert r.status_code == 400, (param, r.status_code, r.text)
+        assert r.json() == {"error": "Please provide valid detail"}, (param, r.json())
+
+
+def test_view_issues_partial_target_date_contains_200(api, seed, db, tenant_a, project_a, auth_a):
+    """NEWPIDASH-196: bare tokens are text LIKE on the date column (Django 200),
+    not a validation error. ``2026-11`` matches every November target date."""
+    ws = tenant_a["workspace"]["id"]
+    nov_issue = seed.issue(ws, project_a, name="Nov target")
+    dec_issue = seed.issue(ws, project_a, name="Dec target")
+    with db.cursor() as cur:
+        cur.execute("UPDATE issues SET target_date = '2026-11-15' WHERE id = %s", (nov_issue,))
+        cur.execute("UPDATE issues SET target_date = '2026-12-01' WHERE id = %s", (dec_issue,))
+    url = f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/"
+    r = api.get(url, headers=auth_a, params={"target_date": "2026-11"})
+    assert r.status_code == 200, r.text
+    ids = {e["id"] for e in r.json()["results"]}
+    assert nov_issue in ids, r.json()
+    assert dec_issue not in ids, r.json()
+    # garbage bare -> empty page 200
+    r = api.get(url, headers=auth_a, params={"target_date": "garbage"})
+    assert r.status_code == 200, r.text
+    assert r.json()["results"] == []
+    assert r.json()["total_count"] == 0
+    # updated_at / created_at bare -> 200 (text LIKE may match some rows or none)
+    r = api.get(url, headers=auth_a, params={"updated_at": "2026"})
+    assert r.status_code == 200, r.text
+    r = api.get(url, headers=auth_a, params={"created_at": "garbage"})
+    assert r.status_code == 200, r.text
+    # full ISO date still 200 via contains
+    r = api.get(url, headers=auth_a, params={"target_date": "2026-11-15"})
+    assert r.status_code == 200, r.text
+    assert nov_issue in {e["id"] for e in r.json()["results"]}
