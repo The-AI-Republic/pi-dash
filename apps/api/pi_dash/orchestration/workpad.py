@@ -29,7 +29,7 @@ from pi_dash.db.models.user import User
 AGENT_USERNAME = "pi_dash_agent"
 AGENT_USER_EMAIL = "agent@example.com"
 AGENT_USER_FIRST_NAME = "Pi Dash"
-AGENT_USER_LAST_NAME = "Agent"
+AGENT_USER_LAST_NAME = "Bot"
 
 
 class AgentUserCollisionError(RuntimeError):

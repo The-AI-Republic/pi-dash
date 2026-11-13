@@ -673,10 +673,11 @@ pub async fn update_user_fields(
 pub const AGENT_USERNAME: &str = "pi_dash_agent";
 /// Bot email (`workpad.py:30`).
 pub const AGENT_USER_EMAIL: &str = "agent@example.com";
-/// Bot first name (`workpad.py:31`).
+/// Bot first name (`workpad.py:31`). Unchanged by P6a: the pair is
+/// "Pi Dash" / "Bot" (full "Pi Dash Bot").
 pub const AGENT_USER_FIRST_NAME: &str = "Pi Dash";
-/// Bot last name (`workpad.py:32`).
-pub const AGENT_USER_LAST_NAME: &str = "Agent";
+/// Bot last name (`workpad.py:32`, P6a: "Agent" → "Bot").
+pub const AGENT_USER_LAST_NAME: &str = "Bot";
 /// `display_name` the `User.save()` override derives when the field
 /// is blank (`db/models/user.py:176-182`): the email prefix.
 pub const AGENT_DISPLAY_NAME: &str = "agent";
