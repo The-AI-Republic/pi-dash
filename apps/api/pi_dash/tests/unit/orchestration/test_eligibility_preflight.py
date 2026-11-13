@@ -81,6 +81,12 @@ def states(project, create_user):
             "in_progress": State.objects.create(
                 name="In Progress", project=project, group="started"
             ),
+            "in_review": State.objects.create(
+                name="In Review", project=project, group="review"
+            ),
+            "in_test": State.objects.create(
+                name="In Test", project=project, group="test"
+            ),
         }
 
 
@@ -549,13 +555,14 @@ def test_dispatch_continuation_run_tick_bounces_when_no_runner(
 
 
 @pytest.mark.unit
-def test_state_transition_to_in_progress_bounces_when_no_runner(
+def test_state_transition_to_in_progress_preserves_when_no_runner(
     db, issue, pod, user_a, user_b, states
 ):
     """Full integration through ``handle_issue_state_transition``: A moves
-    issue Todo → In Progress, only B has a runner → end state is Backlog
-    with the comment posted, no AgentRun created."""
-    Issue.all_objects.filter(pk=issue.pk).update(state=states["todo"])
+    issue Todo → In Progress, only B has a runner → PDASHOSS01-366 keeps
+    In Progress (saved row) with the skipped-run notice, no AgentRun."""
+    # Caller already saved the requested state (signal model).
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     _make_runner(user_b, issue.workspace, pod)
 
@@ -569,6 +576,79 @@ def test_state_transition_to_in_progress_bounces_when_no_runner(
     assert outcome.reason == "no-eligible-runner"
     assert AgentRun.objects.filter(work_item=issue).count() == 0
 
+    issue.refresh_from_db()
+    # PDASHOSS01-366: explicit human state change keeps the requested
+    # state (saved row re-read, not just the response) and posts the
+    # skipped-run notice with no run created.
+    assert issue.state.group == "started"
+    assert issue.state.name == "In Progress"
+    assert IssueComment.objects.filter(issue=issue).count() == 1
+    comment = IssueComment.objects.get(issue=issue)
+    assert "no eligible runner" in comment.comment_html.lower()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("target_key,target_group,target_name", [
+    ("in_progress", "started", "In Progress"),
+    ("in_review", "review", "In Review"),
+    ("in_test", "test", "In Test"),
+])
+def test_state_transition_preserves_ticking_state_when_no_runner(
+    db, issue, pod, user_a, user_b, states, target_key, target_group, target_name
+):
+    """PDASHOSS01-366: human move to any ticking state with no eligible
+    runner preserves the requested state, posts a skipped-run notice,
+    creates no run, and disarms the ticker so the next tick does not
+    re-bounce."""
+    # Caller already saved the requested state (signal model).
+    Issue.all_objects.filter(pk=issue.pk).update(state=states[target_key])
+    issue.refresh_from_db()
+    _make_runner(user_b, issue.workspace, pod)
+
+    outcome = orchestration_service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states[target_key],
+        actor=user_a,
+    )
+    assert outcome.created_run is None
+    assert outcome.reason == "no-eligible-runner"
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+
+    issue.refresh_from_db()
+    assert issue.state.group == target_group
+    assert issue.state.name == target_name
+    # Saved state is the requested one, not Backlog.
+    assert issue.state_id == states[target_key].id
+    assert IssueComment.objects.filter(issue=issue).count() == 1
+    comment = IssueComment.objects.get(issue=issue)
+    assert "no eligible runner" in comment.comment_html.lower()
+    # Ticker armed by reconcile is disarmed so a later tick cannot
+    # re-bounce and spam a comment per tick.
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.enabled is False
+
+
+@pytest.mark.unit
+def test_agent_state_transition_still_bounces_when_no_runner(
+    db, issue, pod, user_a, user_b, states
+):
+    """Automatic agent moves (moved_by_run set) retain the bounce:
+    an agent's move with no eligible runner still lands in Backlog."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["todo"])
+    issue.refresh_from_db()
+    _make_runner(user_b, issue.workspace, pod)
+
+    # The agent-move path queues rather than dispatch-now, so drive it
+    # through the preflight directly as the tick would (preserve=False).
+    result = scheduling.preflight_eligibility_or_bounce(
+        issue,
+        run_creator=user_a,
+        pod=pod,
+        triggered_by=AgentRunTrigger.STATE_TRANSITION.value,
+        preserve_state=False,
+    )
+    assert result is False
     issue.refresh_from_db()
     assert issue.state.group == "backlog"
     assert IssueComment.objects.filter(issue=issue).count() == 1

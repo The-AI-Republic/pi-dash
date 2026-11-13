@@ -945,7 +945,9 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
     return None
 
 
-def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered_by: str) -> bool:
+def preflight_eligibility_or_bounce(
+    issue: Issue, *, run_creator, pod, triggered_by: str, preserve_state: bool = False
+) -> bool:
     """Return True if dispatch can proceed; False if the issue was bounced.
 
     Companion preflight to the four issue-run dispatch paths. When no
@@ -954,6 +956,12 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     created by ``run_creator``, this moves the issue back to its
     project's Backlog state and posts a system comment explaining why.
     The caller must NOT create the ``AgentRun`` when this returns False.
+
+    When ``preserve_state`` is True (explicit human state change,
+    PDASHOSS01-366) the issue stays in the requested state; the same
+    skipped-run notice posts and the ticker is disarmed so the next
+    tick does not re-bounce. Automatic/tick/scheduler paths use the
+    default bounce behavior.
 
     See ``.ai_design/issue_runner/design.md`` §6.6.
     """
@@ -974,7 +982,9 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     if effective == AgentExecutorKind.CLOUD_AGENT:
         if run_creator is not None and user_has_llm_config(run_creator):
             return True
-        _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
+        _bounce_issue_no_eligible_runner(
+            issue, triggered_by=triggered_by, reason="no-llm-config", preserve_state=preserve_state
+        )
         return False
 
     # Every other executor value is a runner (design ``built_engine_as_runner``
@@ -994,9 +1004,16 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     # §9.4: a dedicated issue bounced for usage-rule exclusion reports
     # dedicated-runner-not-eligible and names the runner + failing rule.
     if getattr(issue, "assigned_runner_id", None) is not None:
-        _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="dedicated-runner-not-eligible")
+        _bounce_issue_no_eligible_runner(
+            issue,
+            triggered_by=triggered_by,
+            reason="dedicated-runner-not-eligible",
+            preserve_state=preserve_state,
+        )
     else:
-        _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by)
+        _bounce_issue_no_eligible_runner(
+            issue, triggered_by=triggered_by, preserve_state=preserve_state
+        )
     return False
 
 
@@ -1119,7 +1136,12 @@ def _post_dedicated_waiting_comment(issue: Issue, *, run, runner) -> None:
 
 
 def _bounce_issue_no_eligible_runner(
-    issue: Issue, *, triggered_by: str, reason: str = "no-eligible-runner", reason_name: str = ""
+    issue: Issue,
+    *,
+    triggered_by: str,
+    reason: str = "no-eligible-runner",
+    reason_name: str = "",
+    preserve_state: bool = False,
 ) -> None:
     """Move ``issue`` back to Backlog and post the no-eligible-runner notice.
 
@@ -1141,6 +1163,12 @@ def _bounce_issue_no_eligible_runner(
     so a partial bounce (state changed, no comment) can't survive a
     crash mid-write — the user would otherwise be staring at an issue
     that silently jumped back to Backlog with no explanation.
+
+    When ``preserve_state`` is True (explicit human state change,
+    PDASHOSS01-366) the Backlog move is skipped; the issue stays in the
+    requested state, the same skipped-run notice posts, and the ticker
+    is disarmed explicitly when still ticking so a later tick does not
+    re-enter the bounce.
     """
     from django.utils.html import format_html
 
@@ -1189,7 +1217,12 @@ def _bounce_issue_no_eligible_runner(
 
     with transaction.atomic():
         current_state_group = issue.state.group if issue.state_id else None
-        if current_state_group != StateGroup.BACKLOG.value:
+        if preserve_state:
+            # PDASHOSS01-366: explicit human state change — keep the
+            # requested state; the notice below posts and the ticker
+            # disarm below (still ticking) keeps the next tick calm.
+            pass
+        elif current_state_group != StateGroup.BACKLOG.value:
             target_state = (
                 State.objects.filter(
                     project_id=issue.project_id,
