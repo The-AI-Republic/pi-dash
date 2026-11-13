@@ -2166,7 +2166,7 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
-    /// `Some("engine")` creates a built-in engine runner (design §5); the
+    /// `Some("engine")` creates a Pi Dash Agent runner (design §5); the
     /// server then assigns the name and requires a live engine credential.
     /// `None` keeps the request byte-identical to before.
     pub agent_kind: Option<&'a str>,

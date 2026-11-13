@@ -11,7 +11,7 @@
 //!
 //! Before the swap, the new release's built-in engine is installed as a new
 //! `engine/<version>/` directory beside the current one
-//! (`crate::engine::install`); the running daemon keeps the engine path it
+//! (`crate::pidash_agent::install`); the running daemon keeps the engine path it
 //! resolved at start, and older engine versions are left for the daemon to
 //! delete once no run uses them.
 //!
@@ -157,7 +157,7 @@ pub async fn check_or_swap(check: bool, paths: &Paths) -> Result<SwapOutcome> {
     // use *before* replacing `pidash`: the new binary looks only for its
     // own engine version, and a running daemon keeps the path it resolved
     // at start. Older versions are left for the daemon to clean up
-    // (`crate::engine::cleanup`). Without the engine the new `pidash` would
+    // (`crate::pidash_agent::cleanup`). Without the engine the new `pidash` would
     // start without an agent, so a failure here aborts the update.
     let new_version =
         new_version.context("the release service reported an update but no version for it")?;
@@ -187,20 +187,20 @@ pub async fn check_or_swap(check: bool, paths: &Paths) -> Result<SwapOutcome> {
 }
 
 async fn install_engine_for(new_version: &str) -> Result<()> {
-    let root = crate::engine::install::install_root_for_current_exe()?;
-    let outcome = crate::engine::install::install_release(new_version, &root)
+    let root = crate::pidash_agent::install::install_root_for_current_exe()?;
+    let outcome = crate::pidash_agent::install::install_release(new_version, &root)
         .await
         .with_context(|| {
             format!(
-                "installing the built-in engine of v{new_version} into {} (pidash was not updated)",
+                "installing the Pi Dash Agent of v{new_version} into {} (pidash was not updated)",
                 root.display()
             )
         })?;
     for v in &outcome.installed {
-        tracing::info!(version = %v, root = %root.display(), "installed built-in engine for update");
+        tracing::info!(version = %v, root = %root.display(), "installed Pi Dash Agent for update");
     }
     for v in &outcome.already_present {
-        tracing::info!(version = %v, root = %root.display(), "built-in engine for update already installed");
+        tracing::info!(version = %v, root = %root.display(), "Pi Dash Agent for update already installed");
     }
     Ok(())
 }

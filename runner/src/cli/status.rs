@@ -66,7 +66,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             (Some(s), _) => {
                 s.print_compact();
                 if let Some(engine) = &engine {
-                    println!("{}", crate::cli::engine_cmd::describe_status(engine));
+                    println!("{}", crate::cli::pidash_agent_cmd::describe_status(engine));
                 }
                 if let Some(legacy) = &legacy_socket {
                     eprintln!(

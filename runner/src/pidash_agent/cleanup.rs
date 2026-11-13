@@ -4,7 +4,7 @@
 //! (a daemon that resolved it at start may still be running it). Once the
 //! daemon runs a newer engine and no run uses the older directories, they
 //! can go. The daemon calls [`cleanup_after_start`] from its reconcile tick
-//! (`daemon::engine_reconcile`) until it has run once with no run in flight;
+//! (`daemon::pidash_agent_reconcile`) until it has run once with no run in flight;
 //! a directory a live process still executes from is kept
 //! ([`dir_in_use_by_a_process`]).
 
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// chat turn is in flight — the caller tries again later). `in_use` is asked
 /// per directory, as for [`remove_older_versions`].
 pub fn cleanup_after_start(
-    engine: &super::locate::ResolvedEngine,
+    engine: &super::locate::ResolvedPidashAgent,
     busy: bool,
     in_use: impl Fn(&Path) -> bool,
 ) -> Option<io::Result<Cleanup>> {
@@ -241,15 +241,15 @@ mod tests {
 
     #[test]
     fn daemon_wiring_removes_old_versions_beside_the_resolved_engine() {
-        use super::super::locate::{EngineSource, Layout, ResolvedEngine};
+        use super::super::locate::{PidashAgentSource, Layout, ResolvedPidashAgent};
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("lib/pidash/engine");
         let old = version_dir(&root, "0.150.0");
         let running = version_dir(&root, "0.153.4");
-        let engine = ResolvedEngine {
+        let engine = ResolvedPidashAgent {
             binary: running.join("pidash-agent-engine"),
             version: Some("0.153.4".into()),
-            source: EngineSource::Installed(Layout::UnixLib),
+            source: PidashAgentSource::Installed(Layout::UnixLib),
         };
         // A run in flight: nothing yet.
         assert!(cleanup_after_start(&engine, true, |_| false).is_none());
@@ -268,10 +268,10 @@ mod tests {
         assert_eq!(removed, vec![old.clone()]);
         assert!(!old.exists() && running.exists());
         // A config override has no version directory to clean beside.
-        let custom = ResolvedEngine {
+        let custom = ResolvedPidashAgent {
             binary: running.join("pidash-agent-engine"),
             version: None,
-            source: EngineSource::ConfigOverride,
+            source: PidashAgentSource::ConfigOverride,
         };
         assert!(cleanup_after_start(&custom, false, |_| false).is_none());
     }
