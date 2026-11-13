@@ -312,7 +312,6 @@ pub mod read {
 /// scheduler, user settings, and cloud ops commands.
 pub mod ops {
     pub use pidash_db::runner_sessions::outbox::OutboxError;
-    pub use pidash_jobs::dispatch::dispatch_waiting;
     pub use pidash_jobs::orchestration::complete_project_move_handoff_inline;
     pub use pidash_jobs::orchestration::drain_publish_effects;
     pub use pidash_jobs::orchestration::fire_pending_entry;
@@ -861,7 +860,7 @@ pub mod cloud_agent {
 pub mod jobs {
     pub use pidash_jobs::admission::RedisAdmissionCache;
     pub use pidash_jobs::default_schedule;
-    pub use pidash_jobs::dispatch::extra_toolsets_allowed;
+    // P4: extra_toolsets_allowed died with the retired plane.
     pub use pidash_jobs::integrations::git_sync::TASK_NAMES as GIT_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::integrations::github_signals::dispatch_completion_comment;
     pub use pidash_jobs::integrations::github_signals::dispatch_job;

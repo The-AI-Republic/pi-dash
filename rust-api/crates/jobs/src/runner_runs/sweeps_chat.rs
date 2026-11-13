@@ -258,12 +258,6 @@ pub trait RunnerRunsSeams: Send + Sync {
         &self,
         pod_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
-    /// `cloud_agent.dispatch.dispatch_waiting` (D-11). Unisolated: a
-    /// failure propagates and the capacity marker stays unset.
-    fn dispatch_waiting(
-        &self,
-        workspace_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.service.complete_project_move_handoff` (D-12):
     /// after the hooks transaction, isolated.
     fn complete_project_move_handoff(
@@ -2025,12 +2019,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             Box::pin(async move { Ok(()) })
         }
-        fn dispatch_waiting(
-            &self,
-            _workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
-        }
         fn complete_project_move_handoff(
             &self,
             _run_id: Uuid,
@@ -2177,13 +2165,6 @@ mod tests {
             pod_id: Uuid,
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             self.record(json!({"fn": "drain_pod", "args": [pod_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
-        }
-        fn dispatch_waiting(
-            &self,
-            workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            self.record(json!({"fn": "dispatch_waiting", "args": [workspace_id.to_string()]}));
             Box::pin(async move { Ok(()) })
         }
         fn complete_project_move_handoff(
