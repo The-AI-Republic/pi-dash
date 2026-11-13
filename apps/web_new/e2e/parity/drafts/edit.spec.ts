@@ -6,9 +6,9 @@
 // performing their own outcome. Rows: DRAFT-008, DRAFT-009. Green on
 // apps/web first.
 //
-// DRAFT-009's translated-labels half is a bug: scenario (the oracle
-// renders raw i18n keys); that scenario lives in this file once its
-// linked issue exists.
+// DRAFT-009's menu labels are plain behaviour: main#532 translated the
+// old app's draft row menu, so both legs render Edit / Make a copy /
+// Move to project / Delete rather than raw i18n keys.
 import { test, expect } from "../fixtures";
 import { serverCreateDraft, serverDraftNames, serverDraftRecord } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";

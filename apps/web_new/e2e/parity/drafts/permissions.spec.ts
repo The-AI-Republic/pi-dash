@@ -122,6 +122,21 @@ test(
       expect(await serverIssueNames(workspaceSlug, projectId, owner.cookie)).not.toContain(guestOwn.name);
     });
 
+    await test.step("cross-user patches are refused and leave the owner's row alone", async () => {
+      const hijack = `${name} Hijacked`;
+      // Only the role half refuses a foreign PATCH now: the creator bypass
+      // admits the owner at any role, so the role check is all that stands
+      // between another user and this row (spec §9, DRAFT-025). A member
+      // clears the member half and then meets the owner-scoped queryset,
+      // which hides the row (404); a guest fails the role half (403).
+      // Either way the write must not land.
+      expect((await serverPatchDraftStatus(workspaceSlug, draft.id, member.cookie, { name: hijack })).status).toBe(404);
+      expect((await serverPatchDraftStatus(workspaceSlug, draft.id, guest.cookie, { name: hijack })).status).toBe(403);
+      const ownerRow = await serverDraftRecord(workspaceSlug, draft.id, owner.cookie);
+      expect(ownerRow.name).toBe(name);
+      expect(ownerRow.name).not.toBe(hijack);
+    });
+
     await test.step("single-fetch of another user's draft is refused", async () => {
       expect((await serverFetchDraftStatus(workspaceSlug, draft.id, member.cookie)).status).toBe(403);
       expect((await serverFetchDraftStatus(workspaceSlug, draft.id, guest.cookie)).status).toBe(403);

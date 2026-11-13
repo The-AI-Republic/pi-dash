@@ -345,7 +345,7 @@ The screen needs the viewer's project list/details to resolve project marker, pr
 
 Project role never widens draft ownership except that a workspace admin is also authorized. A project admin who is only a workspace member does not get cross-user draft fetch/edit/delete. A guest who created a draft may edit/fetch/delete it under the fixed API (PDASHOSS01-320), but may not promote it. The UI's disabled header control for guests must not be implemented by removing the guest's ability to manage drafts they already created; the rows still expose their permitted own-draft actions.
 
-The response to an unauthorized cross-user request is a permission refusal (403) and must not reveal/edit/delete the draft. The fixed server behavior for owned PATCH/GET (NEWFRONT-299, PDASHOSS01-320) is proven by DRAFT-025's "an owner patches and fetches their own draft at any role" scenario; the permissions slice NEWFRONT-787 verifies the client delete gate is workspace-admin rather than project-admin; it must not simply preserve the oracle's bug behavior.
+An unauthorized cross-user request is refused and must not reveal, edit or delete the draft: the permission gate answers 403, and an update by a role the gate admits (a member) meets the owner-scoped queryset and answers 404 instead. Either refusal is correct as long as the row is untouched; a 2xx is not. The fixed server behavior for owned PATCH/GET (NEWFRONT-299, PDASHOSS01-320) is proven by DRAFT-025's "an owner patches and fetches their own draft at any role" scenario; the permissions slice NEWFRONT-787 verifies the client delete gate is workspace-admin rather than project-admin; it must not simply preserve the oracle's bug behavior.
 
 ## 10. Reuse seams
 
