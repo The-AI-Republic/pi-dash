@@ -4,12 +4,11 @@
 // See the LICENSE file for details.
 // Active-cycle hero (parity/specs/cycles.md §15, CYC-041–042): the
 // disclosure with its count, the loading/error/empty/active panel
-// states, the list-predicate narrowing, the shared measure, and the
+// states, the unfiltered hero selection, the shared measure, and the
 // breakdown click wiring.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { CycleRow as CycleRowData } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -100,7 +99,7 @@ function activeRow(): Record<string, unknown> {
   return makeCycleRow({ id: CYCLES_CYCLE_ID, name: "Active sprint", status: "current" }) as never;
 }
 
-function renderHero(canMutate = true, cycleFilter?: (cycle: CycleRowData) => boolean): void {
+function renderHero(canMutate = true): void {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <ActiveCycleHero
@@ -111,7 +110,6 @@ function renderHero(canMutate = true, cycleFilter?: (cycle: CycleRowData) => boo
         canMutate={canMutate}
         onPeek={() => undefined}
         currentProject={{ id: CYCLES_PROJECT_ID, name: "Website", identifier: "WEB" }}
-        cycleFilter={cycleFilter}
       />
     </QueryClientProvider>
   );
@@ -179,23 +177,14 @@ describe("ActiveCycleHero", () => {
     expect(screen.queryByTestId("cycle-hero-cards")).not.toBeInTheDocument();
   });
 
-  it("becomes the empty view when the list predicate rejects the active cycle", async () => {
-    renderHero(true, () => false);
-    expect(await screen.findByTestId("hero-empty-probe")).toBeInTheDocument();
-    expect(screen.getByTestId("cycle-hero-count")).toHaveTextContent("0");
-    expect(screen.queryByTestId("hero-row")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("cycle-hero-cards")).not.toBeInTheDocument();
-  });
-
-  it("keeps the row when the list predicate accepts the active cycle", async () => {
-    const seen: string[] = [];
-    renderHero(true, (cycle) => {
-      seen.push(cycle.id);
-      return true;
-    });
+  it("selects the hero from its own query with no list predicate input", async () => {
+    // NEWPIDASH-225: list filters narrow the grouped rows only, so the
+    // hero takes no predicate input and stays on the cycle covering
+    // today even when a filter excludes the current cycle.
+    renderHero(true);
     expect(await screen.findByTestId("hero-row")).toBeInTheDocument();
     expect(screen.getByTestId("cycle-hero-count")).toHaveTextContent("1");
-    expect(seen).toEqual([CYCLES_CYCLE_ID]);
+    expect(screen.queryByTestId("hero-empty-probe")).not.toBeInTheDocument();
   });
 
   it("shares one measure between the burn-down and the breakdown", async () => {

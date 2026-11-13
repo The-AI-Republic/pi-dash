@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 // The list body: the hero slot leads, upcoming and completed groups
 // carry their counts and collapse independently, search narrows live,
-// the filter predicate reaches the hero slot with the groups,
+// the filter predicate narrows the groups only, never the hero slot,
 // narrowing to zero falls to the no-match view for the cause, and the
 // peeked cycle renders the quick look over the list.
 
@@ -36,14 +36,13 @@ interface HeroProbeProps {
   canMutate: boolean;
   onPeek: (cycleId: string) => void;
   currentProject: { id: string; name: string; identifier: string };
-  cycleFilter?: ((cycle: CycleRowData) => boolean) | undefined;
 }
 
-const heroSeen = vi.hoisted(() => ({ cycleFilter: undefined as unknown }));
+const heroSeen = vi.hoisted(() => ({ props: null as HeroProbeProps | null }));
 
 vi.mock("./ActiveCycleHero.js", () => ({
   ActiveCycleHero: (props: HeroProbeProps) => {
-    heroSeen.cycleFilter = props.cycleFilter;
+    heroSeen.props = props;
     return (
       <div
         data-testid="default-hero"
@@ -110,7 +109,7 @@ function seedCycles(): CycleRowData[] {
 
 beforeEach(() => {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
-  heroSeen.cycleFilter = undefined;
+  heroSeen.props = null;
   harness = {
     cycles: seedCycles(),
     roles: { [CYCLES_PROJECT_ID]: 20 },
@@ -271,11 +270,12 @@ describe("CyclesListBody", () => {
     expect(screen.getByRole("button", { name: "Upcoming cycle 1" })).toBeInTheDocument();
   });
 
-  it("hands the filter predicate to the default hero slot", async () => {
-    const predicate = (cycle: CycleRowData): boolean => cycle.status !== "draft";
-    renderBody({ cycleFilter: predicate });
+  it("does not hand the filter predicate to the default hero slot", async () => {
+    // NEWPIDASH-225: filters narrow the grouped rows only, so the hero
+    // still renders even when the predicate rejects every row.
+    renderBody({ cycleFilter: () => false });
     expect(await screen.findByTestId("default-hero")).toBeInTheDocument();
-    expect(heroSeen.cycleFilter).toBe(predicate);
+    expect("cycleFilter" in ((heroSeen.props ?? {}) as Record<string, unknown>)).toBe(false);
   });
 
   it("opens the peek from the eye and closes it back to the list", async () => {

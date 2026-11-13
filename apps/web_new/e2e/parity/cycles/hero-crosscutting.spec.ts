@@ -521,6 +521,43 @@ test(
 );
 
 test(
+  specTitle(["CYC-042", "CYC-006"], "a status filter excluding the current cycle keeps the hero"),
+  { tag: specTags(["CYC-042", "CYC-006"]) },
+  async ({ driver, seed }) => {
+    const tag = Date.now().toString(36);
+    const ownerSession = await signInSession(seed.email, seed.password);
+    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    const projectId = await createCyclesProject(seed, `NF254 S42f ${tag} project`, ownerSession);
+    try {
+      const currentName = `S42f active ${tag}`;
+      const doneName = `S42f done ${tag}`;
+      await serverCreateCycle(seed.workspaceSlug, projectId, currentName, CURRENT_START, CURRENT_END, ownerSession);
+      await serverCreateCycle(seed.workspaceSlug, projectId, doneName, DONE_START, DONE_END, ownerSession);
+      await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
+      await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(currentName);
+
+      // Status = Completed excludes the current cycle: the grouped rows
+      // narrow but the hero stays on the cycle covering today instead of
+      // the no-active-cycle explainer.
+      await driver.cyclesFiltersOpen();
+      await driver.cyclesFilterPick("Status", "Completed");
+      await driver.cyclesFiltersClose();
+      await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(currentName);
+      await expect.poll(() => driver.cyclesHeroEmptyCopy(), { timeout: 60_000 }).toBeNull();
+      if (!(await driver.cyclesGroupExpanded("Completed"))) {
+        await driver.cyclesGroupToggle("Completed");
+      }
+      // The hero row leads the same reader, so the current cycle still
+      // shows there while the completed group carries the narrowed row.
+      await expect.poll(() => driver.cyclesVisibleNames(), { timeout: 30_000 }).toEqual([currentName, doneName]);
+      expect(await driver.cyclesHeroGroupHeading()).toMatch(/active cycle/i);
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, ownerSession);
+    }
+  }
+);
+
+test(
   specTitle(["CYC-043"], "Workspace actives page is a paid upsell with a pricing path"),
   { tag: specTags(["CYC-043"]) },
   async ({ driver, seed }) => {
