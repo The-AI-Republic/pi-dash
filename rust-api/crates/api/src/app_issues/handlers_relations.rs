@@ -108,8 +108,8 @@ use pidash_services::app_issues::relation_mapper::get_actual_relation;
 use pidash_services::domain::relations as relation_domain;
 
 use pidash_db::entity::{
-    git_code_review_links, github_pull_request_links, issue_links, issue_relations, issues,
-    project_members, projects, users, workspaces,
+    git_code_review_links, issue_links, issue_relations, issues, project_members, projects, users,
+    workspaces,
 };
 use sea_orm::sea_query::{Condition, Expr};
 use sea_orm::{
@@ -2985,34 +2985,38 @@ async fn link_dupe_exists(
 /// (it only requires the project to have a membership row; no
 /// `deleted_at` guard — bug 7), archived guard, `-created_at`. Same scope
 /// shape as `queries_core::link_list_select`.
+/// PDASHOSS01-355: reads git_code_review_links (provider='github') and maps
+/// namespace->namespace, external_iid->external_iid for the GitHub shape.
 fn pr_link_list_select(
     slug: &str,
     project_id: Uuid,
     issue_id: Uuid,
-) -> sea_orm::Select<github_pull_request_links::Entity> {
-    github_pull_request_links::Entity::find()
+) -> sea_orm::Select<git_code_review_links::Entity> {
+    git_code_review_links::Entity::find()
         .distinct()
         .join(
             JoinType::InnerJoin,
-            github_pull_request_links::Entity::belongs_to(project_members::Entity)
-                .from(github_pull_request_links::Column::ProjectId)
+            git_code_review_links::Entity::belongs_to(project_members::Entity)
+                .from(git_code_review_links::Column::ProjectId)
                 .to(project_members::Column::ProjectId)
                 .into(),
         )
         .join(
             JoinType::InnerJoin,
-            github_pull_request_links::Relation::Projects.def(),
+            git_code_review_links::Relation::Projects.def(),
         )
         .join(
             JoinType::InnerJoin,
-            github_pull_request_links::Relation::Workspaces.def(),
+            git_code_review_links::Relation::Workspaces.def(),
         )
-        .filter(github_pull_request_links::Column::DeletedAt.is_null())
-        .filter(github_pull_request_links::Column::IssueId.eq(issue_id))
-        .filter(github_pull_request_links::Column::ProjectId.eq(project_id))
+        .filter(git_code_review_links::Column::DeletedAt.is_null())
+        .filter(git_code_review_links::Column::IssueId.eq(issue_id))
+        .filter(git_code_review_links::Column::ProjectId.eq(project_id))
         .filter(projects::Column::ArchivedAt.is_null())
         .filter(workspaces::Column::Slug.eq(slug))
-        .order_by_desc(github_pull_request_links::Column::CreatedAt)
+        .filter(git_code_review_links::Column::Provider.eq("github"))
+        .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+        .order_by_desc(git_code_review_links::Column::CreatedAt)
 }
 
 /// `GitCodeReviewLinkViewSet.get_queryset` (`git_code_review.py:33-44`),
@@ -3051,15 +3055,15 @@ fn review_link_list_select(
 struct PrLinkOwned {
     id: String,
     issue_id: String,
-    repo_owner: String,
+    namespace: String,
     repo_name: String,
-    pr_number: i32,
+    external_iid: i32,
     url: String,
     title: String,
     state: String,
     merged: bool,
     draft: bool,
-    pr_updated_at: Option<String>,
+    remote_updated_at: Option<String>,
     created_at: String,
     updated_at: String,
     created_by_id: Option<uuid::Uuid>,
@@ -3088,20 +3092,28 @@ struct ReviewLinkOwned {
     created_by_id: Option<uuid::Uuid>,
 }
 
-impl From<github_pull_request_links::Model> for PrLinkOwned {
-    fn from(row: github_pull_request_links::Model) -> Self {
+impl From<git_code_review_links::Model> for PrLinkOwned {
+    fn from(row: git_code_review_links::Model) -> Self {
+        // PDASHOSS01-355: map generic fields to GitHub shape.
+        let external_iid = row.external_iid.parse::<i32>().unwrap_or(0);
+        let state = if row.state == "merged" {
+            "closed"
+        } else {
+            row.state.as_str()
+        }
+        .to_owned();
         Self {
             id: row.id.to_string(),
             issue_id: row.issue_id.to_string(),
-            repo_owner: row.repo_owner,
+            namespace: row.namespace,
             repo_name: row.repo_name,
-            pr_number: row.pr_number,
+            external_iid,
             url: row.url,
             title: row.title,
-            state: row.state,
+            state,
             merged: row.merged,
             draft: row.draft,
-            pr_updated_at: row.pr_updated_at.as_ref().map(rfc3339),
+            remote_updated_at: row.remote_updated_at.as_ref().map(rfc3339),
             created_at: rfc3339(&row.created_at),
             updated_at: rfc3339(&row.updated_at),
             created_by_id: row.created_by_id,
@@ -3137,6 +3149,8 @@ impl From<git_code_review_links::Model> for ReviewLinkOwned {
 
 /// `GithubPullRequestLinkSerializer` read shape through the
 /// serializers-D port (FX-ISS-04), datetimes in the actor zone.
+/// PDASHOSS01-355: PrLinkOwned is generic (namespace/external_iid/remote_updated_at),
+/// mapped to the GitHub shape here.
 fn render_pr_row(row: &PrLinkOwned, lites: &HashMap<uuid::Uuid, UserLiteOwned>, tz: &Tz) -> Value {
     use pidash_services::app_issues::serializers_links::{
         github_pull_request_link_to_representation, GithubPullRequestLinkRow, UserLiteRow,
@@ -3153,7 +3167,7 @@ fn render_pr_row(row: &PrLinkOwned, lites: &HashMap<uuid::Uuid, UserLiteOwned>, 
     });
     let created_by = row.created_by_id.map(|id| id.to_string());
     let pr_updated_at = row
-        .pr_updated_at
+        .remote_updated_at
         .as_deref()
         .map(|raw| render_dt_str(raw, tz));
     let created_at = render_dt_str(&row.created_at, tz);
@@ -3161,9 +3175,9 @@ fn render_pr_row(row: &PrLinkOwned, lites: &HashMap<uuid::Uuid, UserLiteOwned>, 
     let input = GithubPullRequestLinkRow {
         id: &row.id,
         issue: &row.issue_id,
-        repo_owner: &row.repo_owner,
+        repo_owner: &row.namespace,
         repo_name: &row.repo_name,
-        pr_number: row.pr_number,
+        pr_number: row.external_iid,
         url: &row.url,
         title: &row.title,
         state: &row.state,
@@ -3348,7 +3362,7 @@ use pidash_services::integrations::accounts::{
 };
 use pidash_services::integrations::code_reviews::{
     AdapterSource, AttachRequest, CodeReviewError, CodeReviewStore, NewCodeReviewLink,
-    NewLegacyLink, ReviewAdapter, ReviewParser,
+    ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
 
@@ -3369,8 +3383,7 @@ const PR_PAYLOAD_INVALID: &str = "relations: payload not valid";
 use pidash_db::integrations::git_models::git_code_review_link::GitCodeReviewLink;
 use pidash_db::integrations::git_models::git_provider_account::GitProviderAccount;
 use pidash_db::integrations::git_models::git_repository::GitRepository;
-use pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink;
-use pidash_services::integrations::code_reviews::{LegacyLinkUpdate, LinkWriteError};
+use pidash_services::integrations::code_reviews::LinkWriteError;
 
 /// Map a SeaORM failure into the integrations store error.
 fn git_store_error(context: &str, error: DbErr) -> GitStoreError {
@@ -3420,17 +3433,6 @@ impl CodeReviewStore for ReviewStore {
         reviews_orm::issue_exists(&self.db, issue_id, project_id, workspace_slug)
             .await
             .map_err(|error| git_store_error("review issue exists", error))
-    }
-
-    async fn find_legacy_link(
-        &self,
-        repo_owner_lower: &str,
-        repo_name_lower: &str,
-        pr_number: i32,
-    ) -> Result<Option<GithubPullRequestLink>, GitStoreError> {
-        reviews_orm::find_legacy_link(&self.db, repo_owner_lower, repo_name_lower, pr_number)
-            .await
-            .map_err(|error| git_store_error("legacy link find", error))
     }
 
     async fn find_path_review_link(
@@ -3584,52 +3586,6 @@ impl CodeReviewStore for ReviewStore {
         }
     }
 
-    async fn insert_legacy_link(
-        &self,
-        row: NewLegacyLink,
-    ) -> Result<GithubPullRequestLink, GitStoreError> {
-        let link = GithubPullRequestLink {
-            id: row.id,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            created_by_id: Some(self.actor),
-            updated_by_id: None,
-            deleted_at: None,
-            project_id: row.project_id,
-            workspace_id: row.workspace_id,
-            issue_id: row.issue_id,
-            repo_owner: row.repo_owner,
-            repo_name: row.repo_name,
-            pr_number: row.pr_number,
-            url: row.url,
-            title: row.title,
-            state: row.state,
-            merged: row.merged,
-            draft: row.draft,
-            pr_updated_at: row.pr_updated_at,
-        };
-        reviews_orm::insert_legacy_link(&self.db, &link)
-            .await
-            .map_err(|error| git_store_error("legacy link insert", error))?;
-        Ok(link)
-    }
-
-    async fn update_legacy_link(
-        &self,
-        id: Uuid,
-        update: LegacyLinkUpdate,
-    ) -> Result<GithubPullRequestLink, GitStoreError> {
-        reviews_orm::update_legacy_link(&self.db, id, &update)
-            .await
-            .map_err(|error| git_store_error("legacy link update", error))?;
-        // `existing.save(update_fields=[...])` mutates in place; reread
-        // the row for the caller.
-        reviews_orm::legacy_link_by_id(&self.db, id)
-            .await
-            .map_err(|error| git_store_error("legacy link reread", error))?
-            .ok_or(GitStoreError::NotFound("legacy link"))
-    }
-
     async fn delete_code_review_link(&self, id: Uuid) -> Result<(), GitStoreError> {
         // Instance `.delete()` (`mixins.py:71-78`): soft row, then the
         // fan-out — the port delegates the write mechanics here.
@@ -3637,14 +3593,6 @@ impl CodeReviewStore for ReviewStore {
             .await
             .map_err(|error| git_store_error("review link delete", error))?;
         enqueue_soft_delete(&self.pool, "gitcodereviewlink", &id).await;
-        Ok(())
-    }
-
-    async fn delete_legacy_link(&self, id: Uuid) -> Result<(), GitStoreError> {
-        reviews_orm::soft_delete_legacy_link(&self.db, id, self.actor, chrono::Utc::now())
-            .await
-            .map_err(|error| git_store_error("legacy link delete", error))?;
-        enqueue_soft_delete(&self.pool, "githubpullrequestlink", &id).await;
         Ok(())
     }
 }
@@ -4198,7 +4146,7 @@ async fn pr_create(
 /// Re-read one PR link for the create response (the serializer reads
 /// the saved instance, whose audit columns the store stamped).
 async fn fetch_pr_owned(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<PrLinkOwned, Denial> {
-    github_pull_request_links::Entity::find_by_id(*id)
+    git_code_review_links::Entity::find_by_id(*id)
         .one(&orm(pool))
         .await
         .map_err(db_denial)?
@@ -4252,15 +4200,15 @@ async fn pr_destroy(
         id: ctx.pk,
         project_id: ctx.project_id,
         issue_id: ctx.issue_id,
-        repo_owner: row.repo_owner.clone(),
+        repo_owner: row.namespace.clone(),
         repo_name: row.repo_name.clone(),
-        pr_number: i64::from(row.pr_number),
+        pr_number: i64::from(row.external_iid),
         url: row.url.clone(),
         title: row.title.clone(),
         state: row.state.clone(),
         merged: row.merged,
         draft: row.draft,
-        pr_updated_at: row.pr_updated_at.clone(),
+        pr_updated_at: row.remote_updated_at.clone(),
     };
     let now = chrono::Utc::now();
     let outcome = match pidash_services::app_issues::pr_links::detach_pull_request_link(
@@ -4291,7 +4239,7 @@ async fn fetch_scoped_pr(
     pk: &uuid::Uuid,
 ) -> Result<Option<PrLinkOwned>, Denial> {
     let row = pr_link_list_select(slug, *project_id, *issue_id)
-        .filter(github_pull_request_links::Column::Id.eq(*pk))
+        .filter(git_code_review_links::Column::Id.eq(*pk))
         .limit(1)
         .one(&orm(pool))
         .await
@@ -5447,7 +5395,7 @@ mod tests {
             "projects",
             "project_members",
             "issue_links",
-            "github_pull_request_links",
+            "git_code_review_links",
             "git_code_review_links",
         ])
         .await
@@ -5479,8 +5427,8 @@ mod tests {
         };
         let pr_row = |id: Uuid, project: Uuid| {
             format!(
-                "INSERT INTO github_pull_request_links (id, created_at, updated_at, repo_owner, \
-                 repo_name, pr_number, url, title, state, merged, draft, pr_updated_at, \
+                "INSERT INTO git_code_review_links (id, created_at, updated_at, namespace, \
+                 repo_name, external_iid, url, title, state, merged, draft, remote_updated_at, \
                  created_by_id, issue_id, project_id, workspace_id) VALUES ('{id}', now(), now(), \
                  'o', 'r', 7, 'https://github.com/o/r/pull/7', 'T', 'open', false, true, \
                  '2026-01-02T03:04:05+00', '{member}', '{issue}', '{project}', '{ws}')"
@@ -5609,9 +5557,9 @@ mod tests {
             .expect("prs");
         assert_eq!(prs.len(), 1);
         let owned = PrLinkOwned::from(prs[0].clone());
-        assert_eq!(owned.pr_number, 7);
+        assert_eq!(owned.external_iid, 7);
         assert_eq!(
-            owned.pr_updated_at.as_deref(),
+            owned.remote_updated_at.as_deref(),
             Some("2026-01-02T03:04:05.000000Z")
         );
         assert!(pr_link_list_select("acme", lonely, issue)

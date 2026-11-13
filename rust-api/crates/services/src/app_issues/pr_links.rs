@@ -150,7 +150,7 @@ pub const ISSUE_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"issues\" INNER JOIN
 
 /// Existing-link lookup (`:141`, `:168`): full row, soft-delete scope,
 /// `-created_at` ordering. `$1` owner, `$2` name, `$3` PR number.
-pub const PR_LINK_LOOKUP_SQL: &str = "SELECT \"github_pull_request_links\".\"id\", \"github_pull_request_links\".\"created_at\", \"github_pull_request_links\".\"updated_at\", \"github_pull_request_links\".\"created_by_id\", \"github_pull_request_links\".\"updated_by_id\", \"github_pull_request_links\".\"deleted_at\", \"github_pull_request_links\".\"project_id\", \"github_pull_request_links\".\"workspace_id\", \"github_pull_request_links\".\"issue_id\", \"github_pull_request_links\".\"repo_owner\", \"github_pull_request_links\".\"repo_name\", \"github_pull_request_links\".\"pr_number\", \"github_pull_request_links\".\"url\", \"github_pull_request_links\".\"title\", \"github_pull_request_links\".\"state\", \"github_pull_request_links\".\"merged\", \"github_pull_request_links\".\"draft\", \"github_pull_request_links\".\"pr_updated_at\" FROM \"github_pull_request_links\" WHERE (\"github_pull_request_links\".\"deleted_at\" IS NULL AND \"github_pull_request_links\".\"repo_owner\" = $1 AND \"github_pull_request_links\".\"repo_name\" = $2 AND \"github_pull_request_links\".\"pr_number\" = $3) ORDER BY \"github_pull_request_links\".\"created_at\" DESC LIMIT 1";
+pub const PR_LINK_LOOKUP_SQL: &str = "SELECT \"git_code_review_links\".\"id\", \"git_code_review_links\".\"created_at\", \"git_code_review_links\".\"updated_at\", \"git_code_review_links\".\"created_by_id\", \"git_code_review_links\".\"updated_by_id\", \"git_code_review_links\".\"deleted_at\", \"git_code_review_links\".\"project_id\", \"git_code_review_links\".\"workspace_id\", \"git_code_review_links\".\"issue_id\", \"git_code_review_links\".\"namespace\" AS \"repo_owner\", \"git_code_review_links\".\"repo_name\", CAST(\"git_code_review_links\".\"external_iid\" AS INTEGER) AS \"pr_number\", \"git_code_review_links\".\"url\", \"git_code_review_links\".\"title\", CASE WHEN \"git_code_review_links\".\"state\" = 'merged' THEN 'closed' ELSE \"git_code_review_links\".\"state\" END AS \"state\", \"git_code_review_links\".\"merged\", \"git_code_review_links\".\"draft\", \"git_code_review_links\".\"remote_updated_at\" AS \"pr_updated_at\" FROM \"git_code_review_links\" WHERE (\"git_code_review_links\".\"deleted_at\" IS NULL AND \"git_code_review_links\".\"provider\" = 'github' AND \"git_code_review_links\".\"host_url\" = 'https://github.com' AND \"git_code_review_links\".\"namespace\" = $1 AND \"git_code_review_links\".\"repo_name\" = $2 AND CAST(\"git_code_review_links\".\"external_iid\" AS INTEGER) = $3) ORDER BY \"git_code_review_links\".\"created_at\" DESC LIMIT 1";
 
 /// Mirror lookup (`_matching_code_review_link`, `:62-73`): full row,
 /// soft-delete scope, `-created_at` ordering. `$1` owner (namespace),
@@ -172,7 +172,7 @@ pub const PROJECT_WORKSPACE_LOOKUP_SQL: &str =
 /// `$7` issue, `$8`-`$10` owner/name/number, `$11` url, `$12`-`$15`
 /// snapshot, `$16` pr_updated_at (NULL when unknown). `updated_by_id`
 /// and `deleted_at` insert NULL.
-pub const PR_LINK_INSERT_SQL: &str = "INSERT INTO \"github_pull_request_links\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"repo_owner\", \"repo_name\", \"pr_number\", \"url\", \"title\", \"state\", \"merged\", \"draft\", \"pr_updated_at\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+pub const PR_LINK_INSERT_SQL: &str = "INSERT INTO \"git_code_review_links\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"provider\", \"host_url\", \"namespace\", \"repo_name\", \"repo_external_id\", \"external_id\", \"external_iid\", \"url\", \"title\", \"state\", \"merged\", \"draft\", \"remote_updated_at\", \"metadata\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, 'github', 'https://github.com', $8, $9, '', '', $10::text, $11, $12, $13, $14, $15, $16, '{}')";
 
 /// Mirror INSERT (`:100-109`): field order; `repo_external_id` and
 /// `external_id` insert `""`. `$1` id, `$2`/`$3` created/updated,
@@ -191,7 +191,7 @@ pub const REVIEW_LINK_UPDATE_SQL: &str = "UPDATE \"git_code_review_links\" SET \
 /// Instance `delete()` (`db/mixins.py:72-76`, full save collapsed):
 /// `$1` deleted/updated stamp, `$2` updated_by, `$3` id. Each delete
 /// also enqueues [`SOFT_DELETE_TASK`] (see [`TaskEnqueue`]).
-pub const PR_LINK_SOFT_DELETE_SQL: &str = "UPDATE \"github_pull_request_links\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"github_pull_request_links\".\"id\" = $3";
+pub const PR_LINK_SOFT_DELETE_SQL: &str = "UPDATE \"git_code_review_links\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"git_code_review_links\".\"id\" = $3 AND \"git_code_review_links\".\"provider\" = 'github' AND \"git_code_review_links\".\"host_url\" = 'https://github.com'";
 
 /// Mirror instance `delete()`: same shape as [`PR_LINK_SOFT_DELETE_SQL`].
 pub const REVIEW_LINK_SOFT_DELETE_SQL: &str = "UPDATE \"git_code_review_links\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"git_code_review_links\".\"id\" = $3";
@@ -606,6 +606,7 @@ pub fn mirror_state(link: &PrLinkRow) -> String {
 
 /// Merged mirror metadata (`:88-91`): the existing metadata (or `{}`)
 /// plus the legacy link id. `metadata` is never NULL
+#[allow(dead_code)]
 /// (`JSONField(default=dict)`); a non-object value passes through
 /// untouched and the legacy key is still added — matching `{**meta,
 /// ...}` for every dict and degrading gracefully otherwise. (Python
@@ -624,6 +625,7 @@ fn merged_metadata(existing: Option<&Value>, link_id: &Uuid) -> Value {
 }
 
 /// The mirror overwrite fields for a link (`fields`, `:79-92`).
+#[allow(dead_code)]
 fn mirror_fields(link: &PrLinkRow, existing: Option<&ReviewLinkRow>) -> ReviewMirrorFields {
     ReviewMirrorFields {
         project_id: link.project_id,
@@ -662,9 +664,10 @@ impl From<PullRequestAlreadyLinked> for AttachError {
     }
 }
 
-/// `_ensure_code_review_link` (`:76-109`): create the mirror, or
+/// `_ensure_code_review_link` (`:76-109`): create the mirror, or #[allow(dead_code)]
 /// overwrite it when it already exists on the same issue; a mirror on
 /// another issue raises [`PullRequestAlreadyLinked`].
+#[allow(dead_code)]
 async fn ensure_code_review_link<S: PrLinksStore>(
     store: &S,
     link: &PrLinkRow,
@@ -776,6 +779,9 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
         return Err(AttachError::IssueNotFound(IssueNotFound));
     }
 
+    // PDASHOSS01-355: generic git_code_review_links is the source of truth.
+    // pr_link_by_pr now queries generic (via PR_LINK_LOOKUP_SQL alias), so
+    // one lookup covers the GitHub PR identity.
     if let Some(existing) = store.pr_link_by_pr(&owner, &name, number).await? {
         if existing.issue_id != issue_id {
             return Err(PullRequestAlreadyLinked {
@@ -783,7 +789,6 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
             }
             .into());
         }
-        ensure_code_review_link(store, &existing, now, actor_id).await?;
         return Ok(AttachOutcome {
             link: existing,
             created: false,
@@ -791,23 +796,19 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
         });
     }
 
-    if let Some(review) = store
-        .review_link_by_pr(&owner, &name, &parsed.number)
-        .await?
-    {
-        if review.issue_id != issue_id {
-            return Err(PullRequestAlreadyLinked {
-                issue_id: review.issue_id,
-            }
-            .into());
-        }
-    }
-
     let installation = store
         .installation_for_account(workspace_slug, &owner)
         .await?;
     let (snapshot, warning) =
         best_effort_snapshot::<C>(installation.as_ref(), &owner, &name, number);
+    // PDASHOSS01-355: map snapshot to generic state (merged wins).
+    let git_state = if snapshot.merged {
+        "merged".to_owned()
+    } else if snapshot.state == "closed" {
+        "closed".to_owned()
+    } else {
+        "open".to_owned()
+    };
     let new = NewPrLink {
         id: Uuid::new_v4(),
         project_id,
@@ -817,7 +818,7 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
         pr_number: number,
         url: format!("{GITHUB_HOST}/{owner}/{name}/pull/{number}"),
         title: snapshot.title,
-        state: snapshot.state,
+        state: git_state,
         merged: snapshot.merged,
         draft: snapshot.draft,
         pr_updated_at: snapshot.pr_updated_at,
@@ -826,15 +827,14 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
     if let Some(line) = warning {
         warnings.push(line);
     }
+    // PDASHOSS01-355: create_pr_link now inserts into git_code_review_links
+    // (provider='github', namespace, external_iid). No separate mirror needed.
     match store.create_pr_link(&new, now, actor_id).await? {
-        CreatePrLinkOutcome::Created(link) => {
-            ensure_code_review_link(store, &link, now, actor_id).await?;
-            Ok(AttachOutcome {
-                link: *link,
-                created: true,
-                warnings,
-            })
-        }
+        CreatePrLinkOutcome::Created(link) => Ok(AttachOutcome {
+            link: *link,
+            created: true,
+            warnings,
+        }),
         // A concurrent attach won the partial-unique race; resolve to
         // the row that now exists (`:165-174`).
         CreatePrLinkOutcome::Conflict => {
@@ -850,7 +850,6 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
                         }
                         .into());
                     }
-                    ensure_code_review_link(store, &link, now, actor_id).await?;
                     Ok(AttachOutcome {
                         link,
                         created: false,
@@ -873,25 +872,12 @@ pub async fn detach_pull_request_link<S: PrLinksStore>(
     now: &chrono::DateTime<chrono::Utc>,
     actor_id: Option<Uuid>,
 ) -> Result<DetachOutcome, StoreError> {
-    let review = store
-        .review_link_by_pr(
-            &link.repo_owner,
-            &link.repo_name,
-            &link.pr_number.to_string(),
-        )
-        .await?;
+    // PDASHOSS01-355: only git_code_review_links is written; soft-delete it directly.
+    // The PR row is generic, so delete_pr_link (now generic) is the sole write.
     store.delete_pr_link(link.id, now, actor_id).await?;
-    let mut enqueues = vec![soft_delete_enqueue("githubpullrequestlink", &link.id)];
-    let review_deleted = match review {
-        Some(row) if row.issue_id == link.issue_id => {
-            store.delete_review_link(row.id, now, actor_id).await?;
-            enqueues.push(soft_delete_enqueue("gitcodereviewlink", &row.id));
-            true
-        }
-        _ => false,
-    };
+    let enqueues = vec![soft_delete_enqueue("gitcodereviewlink", &link.id)];
     Ok(DetachOutcome {
-        review_deleted,
+        review_deleted: true,
         enqueues,
     })
 }
@@ -1386,28 +1372,22 @@ mod tests {
         assert_eq!(out.link.pr_number, 7);
         assert_eq!(out.link.url, "https://github.com/octo/repo/pull/7");
         assert_eq!(out.link.title, "T");
-        // Call order mirrors Python: exists → link lookup → review lookup
-        // → installation → create → mirror lookup → mirror create.
+        // PDASHOSS01-355: pr_link_by_pr now queries generic git_code_review_links
+        // directly, so no separate mirror lookup/create.
         assert_eq!(
             *store.calls.borrow(),
             vec![
                 "issue_exists".to_owned(),
                 "pr_link_by_pr octo/repo#7".to_owned(),
-                "review_link_by_pr octo/repo#7".to_owned(),
                 "installation_for_account acme octo".to_owned(),
                 "create_pr_link octo/repo/7".to_owned(),
-                "review_link_by_pr octo/repo#7".to_owned(),
-                "create_review_link".to_owned(),
             ]
         );
+        // Generic creation is via create_pr_link (now generic INSERT).
         let created = &store.created_reviews.borrow();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].namespace, "octo");
-        assert_eq!(created[0].external_iid, "7");
-        assert_eq!(created[0].state, "open");
-        assert_eq!(
-            created[0].metadata,
-            serde_json::json!({"legacy_github_pull_request_link_id": out.link.id.to_string()})
+        assert!(
+            created.is_empty(),
+            "no separate review mirror after generic cutover"
         );
     }
 
@@ -1453,7 +1433,7 @@ mod tests {
         store
             .links
             .insert(("octo".to_owned(), "repo".to_owned(), 7), link_row(issue));
-        // Same issue → ensure mirror, (link, False).
+        // Same issue → idempotent (link, False) via generic only.
         let out = attach_pull_request::<FakeStore, ScriptedClient>(
             &store,
             project,
@@ -1467,7 +1447,8 @@ mod tests {
         .expect("re-attaches");
         assert!(!out.created);
         assert_eq!(out.link.id, uuid(0x11));
-        assert!(store
+        // PDASHOSS01-355: no review mirror created for idempotent path.
+        assert!(!store
             .calls
             .borrow()
             .contains(&"create_review_link".to_owned()));
@@ -1506,15 +1487,13 @@ mod tests {
             AttachError::AlreadyLinked(PullRequestAlreadyLinked { issue_id: issue })
         );
 
-        // Mirror on another issue (no link row) → AlreadyLinked(review.issue_id).
+        // PDASHOSS01-355: review-only check removed; pr_link_by_pr now is the sole
+        // identity check (generic). Insert a generic row on another issue via
+        // pr_link and expect AlreadyLinked.
         store.links.clear();
-        store.reviews.insert(
-            ("octo".to_owned(), "repo".to_owned(), "7".to_owned()),
-            ReviewLinkRow {
-                id: uuid(0x41),
-                issue_id: uuid(0x77),
-                metadata: Value::Object(Map::new()),
-            },
+        store.links.insert(
+            ("octo".to_owned(), "repo".to_owned(), 7),
+            link_row(uuid(0x77)),
         );
         let err = attach_pull_request::<FakeStore, ScriptedClient>(
             &store,
@@ -1631,17 +1610,9 @@ mod tests {
         .await
         .expect("re-attaches");
         assert!(!out.created);
+        // PDASHOSS01-355: no separate mirror to update; generic row is the link.
         let updated = store.updated_reviews.borrow();
-        assert_eq!(updated.len(), 1);
-        assert_eq!(updated[0].0, uuid(0x41));
-        assert_eq!(
-            updated[0].1.metadata,
-            serde_json::json!({
-                "keep": "me",
-                "legacy_github_pull_request_link_id": uuid(0x11).to_string(),
-            })
-        );
-        assert_eq!(updated[0].1.state, "open");
+        assert_eq!(updated.len(), 0, "no mirror update after generic cutover");
     }
 
     #[tokio::test]
@@ -1672,51 +1643,39 @@ mod tests {
     #[tokio::test]
     async fn detach_deletes_link_and_same_issue_mirror() {
         let issue = uuid(1);
-        let mut store = FakeStore::empty();
-        let review_id = uuid(0x41);
-        store.reviews.insert(
-            ("octo".to_owned(), "repo".to_owned(), "7".to_owned()),
-            ReviewLinkRow {
-                id: review_id,
-                issue_id: issue,
-                metadata: Value::Object(Map::new()),
-            },
-        );
+        let store = FakeStore::empty();
+        // PDASHOSS01-355: only generic link is used, detach is a single soft delete.
         let out = detach_pull_request_link(&store, &link_row(issue), &now(), Some(uuid(9)))
             .await
             .expect("detaches");
         assert!(out.review_deleted);
         assert_eq!(*store.deleted_links.borrow(), vec![uuid(0x11)]);
-        assert_eq!(*store.deleted_reviews.borrow(), vec![review_id]);
-        assert_eq!(
-            *store.calls.borrow(),
-            vec![
-                "review_link_by_pr octo/repo#7".to_owned(),
-                "delete_pr_link".to_owned(),
-                "delete_review_link".to_owned(),
-            ]
-        );
-        // Fan-out order: link first, then mirror.
-        assert_eq!(out.enqueues.len(), 2);
+        assert!(store.deleted_reviews.borrow().is_empty());
+        assert_eq!(*store.calls.borrow(), vec!["delete_pr_link".to_owned(),]);
+        // Fan-out: single generic enqueue.
+        assert_eq!(out.enqueues.len(), 1);
         assert_eq!(out.enqueues[0].task, SOFT_DELETE_TASK);
         assert_eq!(
             out.enqueues[0].args,
             vec![
                 Value::String("db".to_owned()),
-                Value::String("githubpullrequestlink".to_owned()),
+                Value::String("gitcodereviewlink".to_owned()),
                 Value::String(uuid(0x11).to_string()),
             ]
         );
         assert_eq!(out.enqueues[0].kwargs.get("using"), Some(&Value::Null));
         assert_eq!(
-            out.enqueues[1].args[1],
+            out.enqueues[0].args[1],
             Value::String("gitcodereviewlink".to_owned())
         );
     }
 
     #[tokio::test]
     async fn detach_keeps_other_issue_mirror() {
+        // PDASHOSS01-355: no separate mirror exists, so the old "keep other
+        // issue's mirror" case is gone. Detach always deletes the generic row.
         let mut store = FakeStore::empty();
+        // Keep a stray review entry to prove detach ignores it (no legacy mirror handling).
         store.reviews.insert(
             ("octo".to_owned(), "repo".to_owned(), "7".to_owned()),
             ReviewLinkRow {
@@ -1728,16 +1687,16 @@ mod tests {
         let out = detach_pull_request_link(&store, &link_row(uuid(1)), &now(), None)
             .await
             .expect("detaches");
-        assert!(!out.review_deleted);
+        assert!(out.review_deleted);
         assert!(store.deleted_reviews.borrow().is_empty());
         assert_eq!(out.enqueues.len(), 1);
 
-        // No mirror at all: link delete only.
+        // No separate mirror (generic only): still single delete, reported as deleted.
         let store = FakeStore::empty();
         let out = detach_pull_request_link(&store, &link_row(uuid(1)), &now(), None)
             .await
             .expect("detaches");
-        assert!(!out.review_deleted);
+        assert!(out.review_deleted);
         assert_eq!(out.enqueues.len(), 1);
     }
 
@@ -1758,7 +1717,7 @@ mod tests {
             .contains("LOWER(\"github_app_installations\".\"account_login\") = LOWER($2)"));
         assert!(INSTALLATION_LOOKUP_SQL.contains("\"workspaces\".\"slug\" = $1"));
         assert!(ISSUE_EXISTS_SQL.contains("SELECT 1 AS \"a\""));
-        assert!(PR_LINK_INSERT_SQL.contains("\"pr_number\""));
+        assert!(PR_LINK_INSERT_SQL.contains("external_iid"));
         assert!(REVIEW_LINK_INSERT_SQL.contains("'', '', $17"));
         assert!(REVIEW_LINK_UPDATE_SQL.contains("\"metadata\" = $12"));
         assert!(PR_LINK_SOFT_DELETE_SQL.contains("\"deleted_at\" = $1"));
