@@ -68,13 +68,20 @@ def test_assigned_runner_writes_two_rows_per_change(admin_client, world, seeder)
     issue_id = world["issue2"]["id"]
     url = _issue_url(world, issue_id)
 
-    # None -> A — assign with explicit pod so the DB check
-    # issues_dedicated_runner_needs_pod holds on the first save
-    # (apply_execution_target would otherwise set pod only after super().save()).
-    resp = admin_client.patch(url, json={"assigned_runner_id": runner_a["id"], "assigned_pod_id": world["pod"]["id"]})
+    # Seed the execution pod directly so issues_dedicated_runner_needs_pod
+    # holds on the first PATCH save (apply_execution_target sets pod only
+    # after super().save()). Direct UPDATE, not PATCH, so no assigned_pod
+    # activity row is written — the PATCHes below stay runner-only and
+    # history remains exactly the six runner rows.
+    seeder.db.execute(
+        "UPDATE issues SET assigned_pod_id=%s WHERE id=%s",
+        (world["pod"]["id"], issue_id),
+    )
+    # None -> A
+    resp = admin_client.patch(url, json={"assigned_runner_id": runner_a["id"]})
     assert resp.status_code in (200, 204), resp.text[:500]
     # A -> B
-    resp = admin_client.patch(url, json={"assigned_runner_id": runner_b["id"], "assigned_pod_id": world["pod"]["id"]})
+    resp = admin_client.patch(url, json={"assigned_runner_id": runner_b["id"]})
     assert resp.status_code in (200, 204), resp.text[:500]
     # B -> null (clear)
     resp = admin_client.patch(url, json={"assigned_runner_id": None})
