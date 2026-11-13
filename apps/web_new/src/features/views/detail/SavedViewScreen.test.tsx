@@ -23,6 +23,39 @@ const routerHarness = vi.hoisted(() => ({
   navigate: vi.fn(),
   pathname: "/acme/projects/223e4567-e89b-12d3-a456-426614174001/views/323e4567-e89b-12d3-a456-426614174002",
 }));
+const session = vi.hoisted(() => ({ useMe: vi.fn() }));
+vi.mock("../../../core/session/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../core/session/index.js")>()),
+  useMe: session.useMe,
+}));
+
+const harnessEdition = vi.hoisted(() => ({
+  edition: { id: "oss", flags: {} } as {
+    id: string;
+    flags: Record<string, boolean>;
+    slots?: Record<string, unknown>;
+  },
+}));
+vi.mock("../../../core/edition/index.js", () => ({
+  get edition() {
+    return harnessEdition.edition;
+  },
+}));
+
+const platformMocks = vi.hoisted(() => ({
+  openExternal: vi.fn(async (_url: string): Promise<void> => undefined),
+  shareableUrl: vi.fn((path: string): string => `https://app.test${path}`),
+}));
+vi.mock("../../../core/platform/index.js", () => ({
+  platform: {
+    openExternal: platformMocks.openExternal,
+    shareableUrl: platformMocks.shareableUrl,
+  },
+}));
+
+const shareMocks = vi.hoisted(() => ({ copyWorkItemLink: vi.fn(async (): Promise<boolean> => true) }));
+vi.mock("../../../shared/shell/shareLink.js", () => shareMocks);
+
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => routerHarness.navigate,
   useRouterState: ({ select }: { select: (state: { location: { pathname: string; searchStr: string } }) => unknown }) =>
@@ -204,6 +237,7 @@ vi.mock("../dialog/CreateViewDialog.js", () => ({
       </button>
     </div>
   ),
+  UpdateViewDialog: () => null,
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -311,6 +345,11 @@ beforeEach(() => {
   bodyHarness.peek = null;
   routerHarness.navigate.mockReset();
   routerHarness.navigate.mockReset();
+  session.useMe.mockReturnValue({ data: { id: "423e4567-e89b-12d3-a456-426614174003" } });
+  harnessEdition.edition = { id: "oss", flags: {} };
+  platformMocks.openExternal.mockClear();
+  platformMocks.shareableUrl.mockClear();
+  shareMocks.copyWorkItemLink.mockClear();
   filterHarness.view = null;
   filterHarness.viewDisplay = null;
   filterHarness.viewsEnabled = undefined;
@@ -370,6 +409,8 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   document.title = "";
+  session.useMe.mockReset();
+  harnessEdition.edition = { id: "oss", flags: {} };
 });
 
 function renderScreen(search: React.ComponentProps<typeof SavedViewScreen>["search"] = {}): void {
@@ -696,5 +737,123 @@ describe("SavedViewScreen", () => {
     expect(await screen.findByTestId("create-dialog")).toHaveAttribute("data-open", "true");
     fireEvent.click(screen.getByRole("button", { name: "close-create" }));
     await waitFor(() => expect(screen.queryByTestId("create-dialog")).toBeNull());
+  });
+
+  describe("detail header overflow menu (VIEW-017 detail half)", () => {
+    async function openHeaderMenu() {
+      renderScreen();
+      await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId("project-view-detail-menu-trigger"));
+      await waitFor(() => expect(screen.getAllByRole("menuitem").length).toBeGreaterThan(0));
+    }
+
+    it("shows edit/open/copy/delete for the owner", async () => {
+      // viewerId and view owned_by match, member_role is member (15)
+      session.useMe.mockReturnValue({ data: { id: "423e4567-e89b-12d3-a456-426614174003" } });
+      harness.view = {
+        ...makeView({
+          id: VIEW_ID,
+          project: PROJECT_ID,
+          name: "Triage",
+          owned_by: "423e4567-e89b-12d3-a456-426614174003",
+        }),
+      };
+      harness.project = projectRow({ member_role: 15 });
+      await openHeaderMenu();
+      expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+        "Edit",
+        "Open in new tab",
+        "Copy link",
+        "Delete",
+      ]);
+    });
+
+    it("shows open/copy only for a member non-owner", async () => {
+      session.useMe.mockReturnValue({ data: { id: "623e4567-e89b-12d3-a456-426614174005" } });
+      harness.view = {
+        ...makeView({
+          id: VIEW_ID,
+          project: PROJECT_ID,
+          name: "Triage",
+          owned_by: "423e4567-e89b-12d3-a456-426614174003",
+        }),
+      };
+      harness.project = projectRow({ member_role: 15 });
+      await openHeaderMenu();
+      expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
+    });
+
+    it("shows open/copy/delete for an admin non-owner", async () => {
+      session.useMe.mockReturnValue({ data: { id: "623e4567-e89b-12d3-a456-426614174005" } });
+      harness.view = {
+        ...makeView({
+          id: VIEW_ID,
+          project: PROJECT_ID,
+          name: "Triage",
+          owned_by: "423e4567-e89b-12d3-a456-426614174003",
+        }),
+      };
+      harness.project = projectRow({ member_role: 20 });
+      await openHeaderMenu();
+      expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+        "Open in new tab",
+        "Copy link",
+        "Delete",
+      ]);
+    });
+
+    it("copies the canonical view address, not the current URL", async () => {
+      session.useMe.mockReturnValue({ data: { id: "623e4567-e89b-12d3-a456-426614174005" } });
+      harness.view = {
+        ...makeView({
+          id: VIEW_ID,
+          project: PROJECT_ID,
+          name: "Triage",
+          owned_by: "423e4567-e89b-12d3-a456-426614174003",
+        }),
+      };
+      harness.project = projectRow({ member_role: 15 });
+      // current page has query params (peek) — copy must still be canonical
+      renderScreen({ peekIssueId: "issue-9", peekProjectId: "other-project", layout: "compact" });
+      await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId("project-view-detail-menu-trigger"));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }));
+      expect(shareMocks.copyWorkItemLink).toHaveBeenCalledWith(
+        `/acme/projects/${PROJECT_ID}/views/${VIEW_ID}`,
+        expect.objectContaining({ copied: "Link Copied" })
+      );
+    });
+
+    it("seats publish after copy on cloud for the owner and opens the publish dialog", async () => {
+      harnessEdition.edition = {
+        id: "cloud",
+        flags: {},
+        slots: {
+          viewPublish: {
+            publish: vi.fn(async () => ({ anchor: "pub-1" })),
+            unpublish: vi.fn(async () => undefined),
+            publicLink: (anchor: string) => `https://public.test/v/${anchor}`,
+          },
+        },
+      };
+      session.useMe.mockReturnValue({ data: { id: "423e4567-e89b-12d3-a456-426614174003" } });
+      harness.view = {
+        ...makeView({
+          id: VIEW_ID,
+          project: PROJECT_ID,
+          name: "Triage",
+          owned_by: "423e4567-e89b-12d3-a456-426614174003",
+        }),
+      };
+      harness.project = projectRow({ member_role: 15 });
+      await openHeaderMenu();
+      expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+        "Edit",
+        "Open in new tab",
+        "Copy link",
+        "Publish",
+        "Delete",
+      ]);
+    });
   });
 });
