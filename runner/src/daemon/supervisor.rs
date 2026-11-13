@@ -89,6 +89,11 @@ impl Supervisor {
         // pre-pickup gate uses, so an operator sees it without waiting for an
         // Assign to be rejected. Presence-only; never validated.
         for runner_cfg in &config.runners {
+            // Managed Codex runners carry Pi Dash-managed auth and skip the
+            // presence check, like Engine.
+            if crate::agent::auth::is_managed_codex(&runner_cfg.codex) {
+                continue;
+            }
             if !crate::agent::auth::has_credentials(runner_cfg.agent.kind) {
                 tracing::warn!(
                     runner = %runner_cfg.name,
@@ -1879,13 +1884,17 @@ impl RunnerLoop {
     ///
     /// Pure helper so the Assign-reject decision is unit-testable without
     /// driving the whole loop. The production call site passes
-    /// `crate::agent::auth::has_credentials(kind)`.
+    /// `crate::agent::auth::has_credentials(kind)` and `is_managed_codex`.
+    /// Managed Codex runners carry Pi Dash-managed auth and skip the
+    /// presence check, like `Engine`.
     fn agent_auth_missing_rejection(
         agent_kind: AgentKind,
         has_credentials: bool,
+        managed_codex: bool,
     ) -> Option<FailureReason> {
         match agent_kind {
             AgentKind::OpenClaw | AgentKind::Engine => None,
+            AgentKind::Codex if managed_codex => None,
             _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
             _ => None,
         }
@@ -1897,7 +1906,7 @@ impl RunnerLoop {
         agent_kind: AgentKind,
         has_credentials: bool,
     ) -> Option<FailureReason> {
-        Self::agent_auth_missing_rejection(agent_kind, has_credentials)
+        Self::agent_auth_missing_rejection(agent_kind, has_credentials, false)
     }
 
     /// The detail string and warning fix hint for an auth-missing NACK.
@@ -2172,9 +2181,12 @@ impl RunnerLoop {
                     // would burn the issue's tick budget. Reject the Assign
                     // before `Accept` (and before spawning the agent) so the
                     // cloud re-queues it for another runner.
+                    // Managed Codex runners carry Pi Dash-managed auth and
+                    // skip the presence check, like Engine.
                     if let Some(reason) = Self::agent_auth_missing_rejection(
                         self.runner_config.agent.kind,
                         crate::agent::auth::has_credentials(self.runner_config.agent.kind),
+                        crate::agent::auth::is_managed_codex(&self.runner_config.codex),
                     ) {
                         let machine = hostname().unwrap_or_else(|| "unknown".to_string());
                         let detail = Self::agent_auth_missing_detail(
@@ -6839,35 +6851,45 @@ mod tests {
         // The pre-pickup gate: every supported kind + no creds → reject;
         // with creds → accept; OpenClaw/Engine never blocked.
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, false, false),
             Some(FailureReason::AgentAuthMissing)
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, true),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, true, false),
             None
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false, false),
             Some(FailureReason::AgentAuthMissing)
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::ClaudeCode, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::ClaudeCode, false, false),
             Some(FailureReason::AgentAuthMissing)
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::CursorAgent, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::CursorAgent, false, false),
             Some(FailureReason::AgentAuthMissing)
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false, false),
             Some(FailureReason::AgentAuthMissing)
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::OpenClaw, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::OpenClaw, false, false),
             None
         );
         assert_eq!(
-            RunnerLoop::agent_auth_missing_rejection(AgentKind::Engine, false),
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Engine, false, false),
+            None
+        );
+        // Managed Codex (Pi Dash-managed auth) skips the presence check
+        // even without user credentials, like Engine.
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false, true),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, true, true),
             None
         );
         // Backwards-compatible alias still works for Muse.

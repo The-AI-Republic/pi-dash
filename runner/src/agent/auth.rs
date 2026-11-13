@@ -86,6 +86,18 @@ pub fn has_codex_credentials() -> bool {
 pub const CODEX_FIX_HINT: &str =
     "run `codex login` or set OPENAI_API_KEY for the daemon's environment";
 
+/// True when the runner is a Pi Dash-managed Codex runner (desktop host).
+///
+/// Managed runners carry Pi Dash-managed auth via `codex_home` +
+/// `model_token_file` and the user's `~/.codex` is ignored, so the
+/// presence gate and doctor check must not run for them — the same
+/// out-of-scope class as `Engine`. Config validation requires the fields
+/// are set together, so checking `codex_home` or `model_token_file` is
+/// enough; both are checked to be explicit.
+pub fn is_managed_codex(codex: &crate::config::schema::CodexSection) -> bool {
+    codex.codex_home.is_some() || codex.model_token_file.is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code
 // ---------------------------------------------------------------------------
@@ -402,6 +414,18 @@ mod tests {
     fn grok_neither_is_missing() {
         let dir = TempDir::new().unwrap();
         assert!(!grok_credentials_present(None, &empty_home(&dir)));
+    }
+
+    // ---- Managed Codex ----
+    #[test]
+    fn managed_codex_is_detected() {
+        let mut codex = crate::config::schema::CodexSection::default();
+        assert!(!is_managed_codex(&codex));
+        codex.codex_home = Some(PathBuf::from("/app/managed/codex-home"));
+        assert!(is_managed_codex(&codex));
+        codex.codex_home = None;
+        codex.model_token_file = Some(PathBuf::from("/app/managed/model.token"));
+        assert!(is_managed_codex(&codex));
     }
 
     // ---- Dispatcher ----
