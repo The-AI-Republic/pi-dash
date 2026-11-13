@@ -82,6 +82,13 @@ orchestration/test_ticker_tasks.py
 # (Process note on PIDASHCONV-1.)
 runner/test_offline_runner_recovery.py
 runner/test_offline_runner_sweeps.py
+# PDASHOSS01-233: the unsatisfiable-pin reconcile + BUSY-but-dead sweep
+# oracle. Same stage-8 shape as the offline-runner files above: the
+# checkout's Django predates Python PR #541, so the Django run cannot pass
+# until #541 is on main. Passes locally against #541-Django + Rust (see the
+# issue's Rust PR). Once #541 is on main: move it to the worker-plane oracle
+# pytest selection (it needs a worker).
+runner/test_unsatisfiable_pins.py
 # PDASHOSS01-278: the v1 scheduler write routes (binding PATCH, run-now,
 # definition PATCH) exist only on origin/main (PR #1365), so the frozen
 # checkout Django answers 404 and the oracle run cannot pass. The file
