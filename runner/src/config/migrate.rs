@@ -23,9 +23,10 @@
 //!   sharer is given its own new working dir (the same
 //!   `data_dir/workspaces/<proj>_<runner>_<id>` a fresh `runner add` would pick,
 //!   via [`crate::cli::runner_ops::default_working_dir_in`]). That directory
-//!   starts empty; the runner needs a checkout of the project to work in, so the
-//!   cloud's per-run `repo_url` populates it with a `git clone` on first run
-//!   (`workspace::resolve`) — nothing is cloned at upgrade time. Every
+//!   starts empty. The platform never clones (PDASHOSS01-279): the agent
+//!   receives the repo facts in its prompt and clones itself if the task
+//!   needs the repo — or the operator pre-populates the directory before the
+//!   first run. Nothing is cloned at upgrade time. Every
 //!   reassignment is reported, so no agent moves silently.
 //! - **Case 3 — legacy runners with no `[[workdir]]`.** Nothing here; the early
 //!   return leaves them to 134's ordinary validation.
@@ -190,7 +191,9 @@ pub fn migrate_legacy_pool(
             // A second-or-later sharer of the same pool. It cannot keep the
             // canonical clone (one dir per runner now), so give it the same
             // fresh dir a `runner add` with no --working-dir would pick. It
-            // starts empty; the cloud clones the repo into it on first run.
+            // starts empty; the platform never clones (PDASHOSS01-279) — the
+            // agent clones itself from the prompt context, or the operator
+            // pre-populates the directory.
             let project_slug = runner.project_slug.as_deref().unwrap_or("project");
             let assigned = crate::cli::runner_ops::default_working_dir_in(
                 data_dir,
@@ -202,9 +205,9 @@ pub fn migrate_legacy_pool(
             report.push(format!(
                 "runner {runner_name:?}: shared removed pool {workdir_name:?} with \
                  another runner, which keeps the canonical clone {:?}. This runner \
-                 now has its own working_dir {:?} (created empty; the repo is cloned \
-                 into it on first run). Its previous working_dir {:?} is no longer \
-                 used.",
+                 now has its own working_dir {:?} (created empty; the agent clones \
+                 the repo itself if the task needs it). Its previous working_dir \
+                 {:?} is no longer used.",
                 canonical.display(),
                 assigned.display(),
                 previous.display()

@@ -3821,13 +3821,13 @@ impl AssignWorker {
         expected_codex_model: Option<String>,
     ) -> Result<()> {
         // Resolve the directory the agent runs in: this runner's single,
-        // exclusive `workspace.working_dir`. Clone-bootstrap it once if a repo
-        // url is provided (`resolve` tolerates a non-git task folder too).
+        // exclusive `workspace.working_dir`. The platform never clones here
+        // (PDASHOSS01-279): `repo_url` is carried on to history/prompt
+        // context below and the agent clones itself if the task needs it.
         let workspace_path = {
             let wd = self.runner_config.workspace.working_dir.clone();
             match crate::workspace::resolve(&wd, repo_url.as_deref()).await {
                 Ok(crate::workspace::Resolution::ExistingRepo(p))
-                | Ok(crate::workspace::Resolution::Cloned(p))
                 | Ok(crate::workspace::Resolution::Directory(p)) => p,
                 Err(e) => {
                     // Git never fails a run: `workspace::resolve` degrades every
@@ -5655,8 +5655,7 @@ mod tests {
             .unwrap()
         {
             crate::workspace::Resolution::Directory(p)
-            | crate::workspace::Resolution::ExistingRepo(p)
-            | crate::workspace::Resolution::Cloned(p) => p,
+            | crate::workspace::Resolution::ExistingRepo(p) => p,
         };
         assert_eq!(run_dir, chat_dir);
     }
