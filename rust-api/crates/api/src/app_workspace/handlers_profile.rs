@@ -650,8 +650,6 @@ async fn user_profile(
     let last_name = profile_row.last_name;
     let avatar = profile_row.avatar;
     let avatar_asset_id = profile_row.avatar_asset_id;
-    let cover_image = profile_row.cover_image;
-    let cover_image_asset_id = profile_row.cover_image_asset_id;
     let date_joined = profile_row.date_joined;
     let user_timezone = profile_row.user_timezone;
     let display_name = profile_row.display_name;
@@ -661,15 +659,11 @@ async fn user_profile(
     let role = fetch_workspace_role(&pool, &slug, &viewer)
         .await?
         .ok_or(Denial::NotFound)?;
-    // Asset entity rows for the `avatar_url` / `cover_image_url`
-    // properties (`db/models/user.py:143-165`, FK-first, text fallback).
+    // Asset entity rows for the `avatar_url` property
+    // (`db/models/user.py:143-165`, FK-first, text fallback).
     let mut avatar_entity: Option<Option<String>> = None;
-    let mut cover_entity: Option<Option<String>> = None;
-    if avatar_asset_id.is_some() || cover_image_asset_id.is_some() {
-        let wanted: Vec<uuid::Uuid> = [avatar_asset_id, cover_image_asset_id]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+    if avatar_asset_id.is_some() {
+        let wanted: Vec<uuid::Uuid> = [avatar_asset_id].into_iter().flatten().collect::<Vec<_>>();
         let rows: Vec<(uuid::Uuid, Option<String>)> = file_assets::Entity::find()
             .select_only()
             .columns([file_assets::Column::Id, file_assets::Column::EntityType])
@@ -3166,14 +3160,6 @@ fn activity_annotate(stmt: &mut SelectStatement) {
             p_a("project_identifier"),
         )
         .expr_as(p_col("p", projects::Column::Name), p_a("project_name"))
-        .expr_as(
-            p_col("p", projects::Column::CoverImage),
-            p_a("project_cover_image"),
-        )
-        .expr_as(
-            p_col("p", projects::Column::CoverImageAssetId),
-            p_a("project_cover_image_asset_id"),
-        )
         .expr_as(
             p_col("p", projects::Column::LogoProps),
             p_a("project_logo_props"),

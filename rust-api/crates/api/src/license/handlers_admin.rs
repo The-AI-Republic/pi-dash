@@ -1103,7 +1103,6 @@ async fn list_admins(
                     avatar_asset_project: asset.and_then(|a| a.project_id),
                     avatar_asset_issue: asset.and_then(|a| a.issue_id),
                     avatar_asset_workspace_slug: slug,
-                    cover_image: None,
                     date_joined: None,
                     display_name: Some(u.display_name.clone()),
                     email: Some(u.email.clone().unwrap_or_default()),

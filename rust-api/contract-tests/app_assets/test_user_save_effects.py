@@ -1,7 +1,7 @@
 """v2 user-asset link/unlink apply the ``User.save()`` column effects (PIDASHCONV-1397).
 
 ``entity_asset_save`` / ``entity_asset_delete`` (``app/views/asset/v2.py:40-107``)
-funnel avatar/cover links through a full ``user.save()``
+funnel avatar links through a full ``user.save()``
 (``db/models/user.py:169-187``), which on top of the avatar/cover write:
 
 - bumps ``updated_at`` (``auto_now``);
@@ -19,7 +19,7 @@ from . import seed_assets as seed_a
 
 COLS = (
     "email, display_name, is_staff, is_superuser, token,"
-    " token_updated_at, updated_at, avatar_asset_id, cover_image_asset_id"
+    " token_updated_at, updated_at, avatar_asset_id"
 )
 
 
@@ -91,7 +91,6 @@ def test_avatar_link_and_unlink_apply_save_effects(org):
     assert r.status_code == 204, r.text
     after = _row(org.conn, uid)
     assert str(after["avatar_asset_id"]) == asset_id
-    assert after["cover_image_asset_id"] is None
     _assert_save_effects(before, after)
     _assert_first_save_normalization(after)
 
@@ -100,31 +99,8 @@ def test_avatar_link_and_unlink_apply_save_effects(org):
     assert r.status_code == 204, r.text
     after = _row(org.conn, uid)
     assert after["avatar_asset_id"] is None
-    assert after["cover_image_asset_id"] is None
     _assert_save_effects(before, after)
     row = seed_a.fetch(org.conn, asset_id)
     assert row["is_deleted"] is True
 
 
-def test_cover_link_and_unlink_apply_save_effects(org):
-    uid = _rotating_user(org)
-    asset_id = _post(org, "USER_COVER")
-
-    before = _row(org.conn, uid)
-    r = org.request("PATCH", detail(asset_id), "admin", json={})
-    assert r.status_code == 204, r.text
-    after = _row(org.conn, uid)
-    assert after["avatar_asset_id"] is None
-    assert str(after["cover_image_asset_id"]) == asset_id
-    _assert_save_effects(before, after)
-    _assert_first_save_normalization(after)
-
-    before = after
-    r = org.request("DELETE", detail(asset_id), "admin")
-    assert r.status_code == 204, r.text
-    after = _row(org.conn, uid)
-    assert after["avatar_asset_id"] is None
-    assert after["cover_image_asset_id"] is None
-    _assert_save_effects(before, after)
-    row = seed_a.fetch(org.conn, asset_id)
-    assert row["is_deleted"] is True

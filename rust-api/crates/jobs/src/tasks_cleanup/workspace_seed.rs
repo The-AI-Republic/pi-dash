@@ -1615,7 +1615,6 @@ impl SeedStore for PgSeedStore {
                 is_default: project.is_default,
                 description: &project.description,
                 network: project.network,
-                cover_image: project.cover_image.as_deref(),
                 logo_props: &project.logo_props,
                 default_agent_executor: &project.default_agent_executor,
                 created_by: actor,

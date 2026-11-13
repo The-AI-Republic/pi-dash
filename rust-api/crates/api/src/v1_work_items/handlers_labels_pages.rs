@@ -1172,10 +1172,9 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
             })
     }
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
+        }
         Some("ISSUE_ATTACHMENT") => {
             let slug = workspace_slug(pool, workspace_id).await?;
             Ok(slug.map(|s| {
@@ -1332,12 +1331,10 @@ struct ProjectLiteLookup {
     id: Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
     icon_prop: Option<Value>,
     emoji: Option<String>,
     description: String,
     is_default: bool,
-    cover_image_asset_id: Option<Uuid>,
 }
 
 /// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`): `id`,
@@ -1351,12 +1348,10 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
             projects::Column::IconProp,
             projects::Column::Emoji,
             projects::Column::Description,
             projects::Column::IsDefault,
-            projects::Column::CoverImageAssetId,
         ])
         .filter(projects::Column::Id.eq(*project_id))
         .into_model::<ProjectLiteLookup>()
@@ -1366,21 +1361,10 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    // `Project.cover_image_url` (`db/models/project.py:176-185`): the
-    // asset URL wins, then the stored text, else null.
-    let cover_url = match row.cover_image_asset_id {
-        Some(id) => file_asset_url(pool, &id).await?,
-        None => None,
-    };
-    let cover_url = cover_url.or_else(|| row.cover_image.clone().filter(|text| !text.is_empty()));
-    let mut map = Map::with_capacity(9);
+    let mut map = Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(row.id.to_string()));
     map.insert("identifier".to_owned(), Value::String(row.identifier));
     map.insert("name".to_owned(), Value::String(row.name));
-    map.insert(
-        "cover_image".to_owned(),
-        row.cover_image.map(Value::String).unwrap_or(Value::Null),
-    );
     map.insert("icon_prop".to_owned(), row.icon_prop.unwrap_or(Value::Null));
     map.insert(
         "emoji".to_owned(),
@@ -1388,10 +1372,6 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
     );
     map.insert("description".to_owned(), Value::String(row.description));
     map.insert("is_default".to_owned(), Value::Bool(row.is_default));
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
-    );
     Ok(Value::Object(map))
 }
 
@@ -9180,7 +9160,6 @@ mod orm_tests {
         );
         let project_lite = expand_project(&pool, &project).await.expect("project");
         assert_eq!(project_lite["identifier"], "ACME");
-        assert_eq!(project_lite["cover_image_url"], Value::Null);
         assert_eq!(
             expand_parent_label(&pool, &label_global)
                 .await

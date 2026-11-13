@@ -107,7 +107,7 @@ use pidash_db::entity::{
     file_assets, instance_admins, instances, project_members as pm_entity, sessions, users,
     workspace_member_invites, workspace_members, workspaces,
 };
-use pidash_services::app_workspace::{models_user, queries_user, ser_extras, ser_user, tasks};
+use pidash_services::app_workspace::{models_user, queries_user, ser_user, tasks};
 use pidash_services::auth_session::{guards as throttle_kernel, shapes as auth_shapes};
 use pidash_services::domain::user_saves;
 use pidash_services::read::{self, AssetRow, ProfileRow};
@@ -362,8 +362,6 @@ impl From<users::Model> for UserRow {
             last_name: model.last_name,
             avatar: model.avatar,
             avatar_asset_id: model.avatar_asset_id,
-            cover_image: model.cover_image,
-            cover_image_asset_id: model.cover_image_asset_id,
             date_joined: model.date_joined.with_timezone(&Utc),
             created_at: model.created_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
@@ -2591,8 +2589,6 @@ pub async fn me_partial_update(
         last_name: &merged.last_name,
         avatar: &merged.avatar,
         avatar_asset_id: merged.avatar_asset_id,
-        cover_image: merged.cover_image.as_deref(),
-        cover_image_asset_id: merged.cover_image_asset_id,
         is_password_expired: merged.is_password_expired,
         is_password_reset_required: merged.is_password_reset_required,
         bot_type: merged.bot_type.as_deref(),

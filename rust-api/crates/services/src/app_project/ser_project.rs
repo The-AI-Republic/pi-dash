@@ -2581,7 +2581,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 50);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 48);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2592,7 +2592,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 56);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 53);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2607,7 +2607,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 52);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 50);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(

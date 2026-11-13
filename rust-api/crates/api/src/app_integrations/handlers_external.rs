@@ -499,8 +499,8 @@ async fn fetch_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<WorkspaceLit
 
 /// `Project.objects.get(pk=project_id)` (`:171`) — 404 when missing.
 async fn fetch_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<ProjectLite, Denial> {
-    use pidash_db::entity::{file_assets, projects};
-    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect};
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let db = pidash_db::pool::sea_orm_connection(pool);
     let row: Option<ProjectRow> = projects::Entity::find()
         .select_only()
@@ -508,39 +508,18 @@ async fn fetch_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Project
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
-            projects::Column::CoverImageAssetId,
-        ])
-        .column_as(file_assets::Column::EntityType, "entity_type")
-        .columns([
             projects::Column::LogoProps,
             projects::Column::Description,
             projects::Column::IsDefault,
         ])
-        .join(
-            JoinType::LeftJoin,
-            projects::Entity::belongs_to(file_assets::Entity)
-                .from(projects::Column::CoverImageAssetId)
-                .to(file_assets::Column::Id)
-                .into(),
-        )
         .filter(projects::Column::Id.eq(*project_id))
         .filter(projects::Column::DeletedAt.is_null())
         .into_tuple()
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (
-        id,
-        identifier,
-        name,
-        cover_image,
-        cover_asset_id,
-        cover_asset_entity,
-        logo_props,
-        description,
-        is_default,
-    ) = row.ok_or(Denial::NotFound)?;
+    let (id, identifier, name, logo_props, description, is_default) =
+        row.ok_or(Denial::NotFound)?;
     Ok(ProjectLite {
         id,
         identifier,
@@ -775,81 +754,6 @@ async fn post_workspace_assistant(
         Value::String(external::response_html(&text)),
     );
     json_response(Value::Object(map))
-}
-
-/// `GET unsplash/` (`UnsplashEndpoint.get`, `base.py:215-243`): no
-/// decorator, so any authenticated caller reaches the body
-/// (FX-PERM-01: `Authenticated`). Without an access key the endpoint
-/// answers `[]` (`:226-227`); otherwise it proxies api.unsplash.com
-/// and relays the payload with the upstream status verbatim
-/// (`:242-243`).
-async fn get_unsplash(
-    State(state): State<AppState>,
-    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Err(denial) = actor(&state, &pool, extension).await {
-        return denial.into_response();
-    }
-    let row = gate_for("GET", "unsplash/").expect("unsplash gate");
-    debug_assert!(matches!(row.gate, super::gates::Gate::Authenticated));
-    let access_key = match config_value(
-        &pool,
-        &state.settings().secret_key,
-        "UNSPLASH_ACCESS_KEY",
-        env_default("UNSPLASH_ACCESS_KEY", None),
-    )
-    .await
-    {
-        Ok(key) => key,
-        Err(denial) => return denial.into_response(),
-    };
-    let access_key = access_key.unwrap_or_default();
-    if access_key.is_empty() {
-        return json_response(Vec::<Value>::new());
-    }
-    let url = external::unsplash_url(
-        &access_key,
-        params.get("query").map(String::as_str),
-        params.get("page").map(String::as_str),
-        params.get("per_page").map(String::as_str),
-    );
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let response = match client
-        .get(url)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let status =
-        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let payload: Value = match serde_json::from_slice(&bytes) {
-        Ok(payload) => payload,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let body = serde_json::to_string(&payload).expect("upstream payload serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("unsplash relay")
 }
 
 #[cfg(test)]

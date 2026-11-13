@@ -96,7 +96,6 @@ use pidash_compat::response::{
 };
 use pidash_db::entity::{file_assets, project_members, projects, workspace_members, workspaces};
 use pidash_services::app_assets::queries_v2_project as q;
-use pidash_services::domain::projects as domain_projects;
 use pidash_types::WorkspaceId;
 use sea_orm::sea_query::{Expr, InsertStatement, Query};
 use sea_orm::{
@@ -1463,9 +1462,6 @@ fn bulk_link_update(
         .filter(file_assets::Column::WorkspaceId.eq(workspace_id))
         .filter(file_assets::Column::DeletedAt.is_null());
     Some(match branch {
-        q::BulkBranch::ProjectCover => {
-            base.col_expr(file_assets::Column::ProjectId, Expr::value(project_id))
-        }
         q::BulkBranch::IssueDescription => base
             .col_expr(file_assets::Column::IssueId, Expr::value(entity_id))
             .col_expr(file_assets::Column::ProjectId, Expr::value(project_id)),
@@ -1480,17 +1476,6 @@ fn bulk_link_update(
         }
         q::BulkBranch::Noop => return None,
     })
-}
-
-/// `save_project_cover`'s per-row re-get (`v2.py:631-634`): the default
-/// manager, so soft-deleted projects read as missing.
-fn save_project_cover_query(project_id: &Uuid) -> Select<projects::Entity> {
-    projects::Entity::find()
-        .filter(projects::Column::Id.eq(*project_id))
-        .filter(projects::Column::DeletedAt.is_null())
-        .select_only()
-        .column(projects::Column::Id)
-        .limit(1u64)
 }
 
 /// `ProjectBulkAssetEndpoint.post` (`v2.py:636-688`).
@@ -1511,7 +1496,7 @@ async fn post_bulk_asset(
         Ok(actor) => actor,
         Err(denial) => return denial,
     };
-    let Some(pool) = pool(&state) else {
+    let Some(_pool) = pool(&state) else {
         return server_error();
     };
     let Some(db) = orm_connection(&state) else {
@@ -1594,42 +1579,6 @@ async fn post_bulk_asset(
     {
         let result = update.exec(&db).await;
         match branch {
-            q::BulkBranch::ProjectCover => {
-                if result.is_err() {
-                    return server_error();
-                }
-                // `assets.update(project_id=project_id)` (`:658`) plus
-                // the per-row cover stamp (`:659`); the LAST row wins.
-                for row in &ordered {
-                    // `save_project_cover` (`:631-634`): re-get the
-                    // project per row (default manager) and stamp
-                    // `cover_image_asset_id` — a full `save()`, so
-                    // `updated_by`/`updated_at` too.
-                    let exists: Option<Uuid> = match save_project_cover_query(&project_id)
-                        .into_tuple::<Uuid>()
-                        .one(&db)
-                        .await
-                    {
-                        Ok(exists) => exists,
-                        Err(_) => return server_error(),
-                    };
-                    if exists.is_none() {
-                        return does_not_exist();
-                    }
-                    if domain_projects::save_project_cover(
-                        &pidash_db::pool::sea_orm_connection(pool),
-                        project_id,
-                        row.id,
-                        Utc::now(),
-                        actor.id,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return server_error();
-                    }
-                }
-            }
             // Integrity errors swallowed (`:664-667`, `:672-675`,
             // `:683-686`).
             q::BulkBranch::IssueDescription
@@ -3357,12 +3306,6 @@ mod tests {
         use sea_orm::QueryTrait;
         let (a, b) = test_ids();
         let ids = [a, b];
-        // ProjectCover sets only project_id.
-        let cover = bulk_link_update(&ids, a, b, a, q::BulkBranch::ProjectCover)
-            .expect("cover branch writes");
-        let sql = cover.build(sea_orm::DbBackend::Postgres).to_string();
-        assert!(sql.contains(r#""project_id""#), "cover column: {sql}");
-        assert!(!sql.contains(r#""issue_id""#), "no issue column: {sql}");
         // IssueDescription sets issue_id + project_id; comment does not
         // carry project_id (ported difference).
         let issue = bulk_link_update(&ids, a, b, a, q::BulkBranch::IssueDescription)
@@ -3488,13 +3431,8 @@ mod tests {
     }
 
     #[test]
-    fn cover_and_original_shapes_pin_scopes() {
+    fn original_shapes_pin_scopes() {
         let (asset_id, project_id) = test_ids();
-        let cover = build_select(save_project_cover_query(&project_id));
-        assert!(
-            cover.contains(r#""deleted_at" IS NULL"#),
-            "cover scope: {cover}"
-        );
         let original = build_select(duplicate_original_query(&asset_id));
         assert!(
             original.contains(r#""is_uploaded" = "#),

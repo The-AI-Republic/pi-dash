@@ -1,11 +1,10 @@
 """v2 workspace-asset link/unlink stamps the entity audit columns.
 
-``PATCH`` (link) and ``DELETE`` (unlink) for ``WORKSPACE_LOGO`` /
-``PROJECT_COVER`` run a full Django ``workspace.save()`` /
-``project.save()`` (``v2.py:259,281,293,309``), so the workspaces /
-projects row gets ``updated_at`` (``auto_now``) and ``updated_by``
-(CRUM request user) — not just the logo/cover columns.
-PIDASHCONV-1398; twin of the bulk-cover fix PIDASHCONV-929.
+``PATCH`` (link) and ``DELETE`` (unlink) for ``WORKSPACE_LOGO``
+run a full Django ``workspace.save()`` (``v2.py:259,293``), so the
+workspaces row gets ``updated_at`` (``auto_now``) and ``updated_by``
+(CRUM request user) — not just the logo column.
+PIDASHCONV-1398.
 """
 
 from .test_workspace_assets import ws_base, ws_detail, ws_payload
@@ -56,19 +55,3 @@ def test_logo_unlink_stamps_workspace(org):
     assert updated_at > before
 
 
-def test_cover_link_stamps_project(org):
-    before = _backdate(org.conn, "projects", org.project["id"], org.outsider["id"])
-    _link(org, "PROJECT_COVER", org.project["id"])
-    updated_at, updated_by = _stamps(org.conn, "projects", org.project["id"])
-    assert str(updated_by) == org.admin["id"]
-    assert updated_at > before
-
-
-def test_cover_unlink_stamps_project(org):
-    asset_id = _link(org, "PROJECT_COVER", org.project["id"])
-    before = _backdate(org.conn, "projects", org.project["id"], org.outsider["id"])
-    r = org.request("DELETE", ws_detail(org, asset_id), "admin")
-    assert r.status_code == 204, r.text
-    updated_at, updated_by = _stamps(org.conn, "projects", org.project["id"])
-    assert str(updated_by) == org.admin["id"]
-    assert updated_at > before

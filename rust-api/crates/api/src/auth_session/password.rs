@@ -1823,8 +1823,6 @@ async fn user_snapshot(
             last_name: model.last_name,
             avatar: model.avatar,
             avatar_asset: model.avatar_asset_id.map(|id| id.to_string()),
-            cover_image: model.cover_image,
-            cover_image_asset: model.cover_image_asset_id.map(|id| id.to_string()),
             date_joined: dt(&model.date_joined),
             created_at: dt(&model.created_at),
             updated_at: dt(&model.updated_at),

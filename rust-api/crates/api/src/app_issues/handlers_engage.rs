@@ -1276,7 +1276,8 @@ pub(crate) async fn fetch_user_lite(
 
 /// [`UserLiteOwned`] over fetched columns (the avatar URL resolved).
 async fn user_lite_owned(pool: &sqlx::PgPool, row: UserLiteDb) -> Result<UserLiteOwned, Denial> {
-    let avatar_url = logo_or_cover_url(pool, Some(row.avatar.clone()), row.avatar_asset_id).await?;
+    let avatar_url =
+        logo_or_avatar_url(pool, Some(row.avatar.clone()), row.avatar_asset_id).await?;
     Ok(UserLiteOwned {
         id: row.id.to_string(),
         first_name: row.first_name,
@@ -1339,8 +1340,6 @@ pub(crate) async fn fetch_project_lite(
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
-            projects::Column::CoverImageAssetId,
             projects::Column::LogoProps,
             projects::Column::Description,
             projects::Column::IsDefault,
@@ -1354,19 +1353,15 @@ pub(crate) async fn fetch_project_lite(
     project_lite_owned(pool, row).await
 }
 
-/// [`ProjectLiteOwned`] over fetched columns (the cover URL resolved).
+/// [`ProjectLiteOwned`] over fetched columns.
 async fn project_lite_owned(
-    pool: &sqlx::PgPool,
+    _pool: &sqlx::PgPool,
     row: ProjectLiteDb,
 ) -> Result<ProjectLiteOwned, Denial> {
-    let cover_image_url =
-        logo_or_cover_url(pool, row.cover_image.clone(), row.cover_image_asset_id).await?;
     Ok(ProjectLiteOwned {
         id: row.id.to_string(),
         identifier: row.identifier,
         name: row.name,
-        cover_image: row.cover_image,
-        cover_image_url,
         logo_props: row.logo_props,
         description: row.description,
         is_default: row.is_default,
@@ -1379,8 +1374,6 @@ struct ProjectLiteDb {
     id: uuid::Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<uuid::Uuid>,
     logo_props: Value,
     description: String,
     is_default: bool,
@@ -1438,7 +1431,7 @@ async fn workspace_lite_owned(
     pool: &sqlx::PgPool,
     row: WorkspaceLiteDb,
 ) -> Result<WorkspaceLiteOwned, Denial> {
-    let logo_url = logo_or_cover_url(pool, row.logo, row.logo_asset_id).await?;
+    let logo_url = logo_or_avatar_url(pool, row.logo, row.logo_asset_id).await?;
     Ok(WorkspaceLiteOwned {
         name: row.name,
         slug: row.slug,
@@ -5959,43 +5952,45 @@ async fn subscriber_list(
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let id = row.id;
-        let member = match row.member_id {
-            None => None,
-            Some(member_id) => {
-                // The LEFT JOIN hit a user row: its NOT NULL columns are set.
-                let (
-                    Some(first_name),
-                    Some(last_name),
-                    Some(avatar),
-                    Some(is_bot),
-                    Some(display_name),
-                ) = (
-                    row.first_name,
-                    row.last_name,
-                    row.avatar,
-                    row.is_bot,
-                    row.display_name,
-                )
-                else {
-                    return Denial::ServerError.into_response();
-                };
-                let avatar_url =
-                    match logo_or_cover_url(&pool, Some(avatar.clone()), row.avatar_asset_id).await
-                    {
-                        Ok(url) => url,
-                        Err(error) => return error.into_response(),
+        let member =
+            match row.member_id {
+                None => None,
+                Some(member_id) => {
+                    // The LEFT JOIN hit a user row: its NOT NULL columns are set.
+                    let (
+                        Some(first_name),
+                        Some(last_name),
+                        Some(avatar),
+                        Some(is_bot),
+                        Some(display_name),
+                    ) = (
+                        row.first_name,
+                        row.last_name,
+                        row.avatar,
+                        row.is_bot,
+                        row.display_name,
+                    )
+                    else {
+                        return Denial::ServerError.into_response();
                     };
-                Some(UserLiteOwned {
-                    id: member_id.to_string(),
-                    first_name,
-                    last_name,
-                    avatar,
-                    avatar_url,
-                    is_bot,
-                    display_name,
-                })
-            }
-        };
+                    let avatar_url =
+                        match logo_or_avatar_url(&pool, Some(avatar.clone()), row.avatar_asset_id)
+                            .await
+                        {
+                            Ok(url) => url,
+                            Err(error) => return error.into_response(),
+                        };
+                    Some(UserLiteOwned {
+                        id: member_id.to_string(),
+                        first_name,
+                        last_name,
+                        avatar,
+                        avatar_url,
+                        is_bot,
+                        display_name,
+                    })
+                }
+            };
         let id_string = id.to_string();
         let member_row =
             member.as_ref().map(
@@ -8929,9 +8924,9 @@ mod orm_tests {
                 "INSERT INTO workspaces (id, name, slug, logo, logo_asset_id) VALUES ('{ws}', 'Acme', 'acme', 'https://x/logo', NULL)"
             ),
             format!(
-                "INSERT INTO projects (id, identifier, name, cover_image, cover_image_asset_id, logo_props, description, is_default, workspace_id, guest_view_all_features, archived_at, deleted_at) VALUES \
-                 ('{project}', 'ENG', 'Eng', NULL, '{attach_asset}', '{{\"a\":1}}', 'd', true, '{ws}', false, NULL, now()), \
-                 ('{archived}', 'OLD', 'Old', '', NULL, '{{}}', '', false, '{ws}', false, now(), NULL)"
+                "INSERT INTO projects (id, identifier, name, logo_props, description, is_default, workspace_id, guest_view_all_features, archived_at, deleted_at) VALUES \
+                 ('{project}', 'ENG', 'Eng', '{{\"a\":1}}', 'd', true, '{ws}', false, NULL, now()), \
+                 ('{archived}', 'OLD', 'Old', '{{}}', '', false, '{ws}', false, now(), NULL)"
             ),
             format!(
                 "INSERT INTO issues (id, name, description_json, description_html, priority, complexity_score, start_date, target_date, sequence_id, sort_order, is_draft, project_id, created_by_id, deleted_at) VALUES \
@@ -9076,12 +9071,6 @@ mod orm_tests {
         );
         assert_eq!((user.avatar.as_str(), user.is_bot), ("raw.png", false));
         let project_lite = fetch_project_lite(&pool, &project).await.unwrap();
-        assert_eq!(
-            project_lite.cover_image_url,
-            Some(format!(
-                "/api/assets/v2/workspaces/acme/projects/{project}/issues/{issue}/attachments/{attach_asset}/"
-            ))
-        );
         assert_eq!(project_lite.logo_props, serde_json::json!({"a": 1}));
         let workspace = fetch_workspace_lite(&pool, &ws).await.unwrap();
         assert_eq!(workspace.logo_url.as_deref(), Some("https://x/logo"));

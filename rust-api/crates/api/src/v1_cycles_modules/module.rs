@@ -2064,8 +2064,6 @@ pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Va
         id: uuid::Uuid,
         identifier: String,
         name: String,
-        cover_image: Option<String>,
-        cover_image_asset_id: Option<uuid::Uuid>,
         icon_prop: Option<Value>,
         /// `CharField(null=True)`: a string on the wire, never JSON.
         emoji: Option<String>,
@@ -2078,8 +2076,6 @@ pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Va
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
-            projects::Column::CoverImageAssetId,
             projects::Column::IconProp,
             projects::Column::Emoji,
             projects::Column::Description,
@@ -2093,26 +2089,14 @@ pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Va
     let Some(row) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    let mut cover_image_url = Value::Null;
-    if let Some(asset_id) = row.cover_image_asset_id {
-        cover_image_url = file_asset_url(pool, &asset_id)
-            .await?
-            .map(Value::String)
-            .unwrap_or(Value::Null);
-    }
-    let mut map = serde_json::Map::with_capacity(9);
+    let mut map = serde_json::Map::with_capacity(7);
     map.insert("id".to_owned(), render_uuid(&row.id));
     map.insert("identifier".to_owned(), Value::String(row.identifier));
     map.insert("name".to_owned(), Value::String(row.name));
-    map.insert(
-        "cover_image".to_owned(),
-        render_string_opt(&row.cover_image),
-    );
     map.insert("icon_prop".to_owned(), row.icon_prop.unwrap_or(Value::Null));
     map.insert("emoji".to_owned(), render_string_opt(&row.emoji));
     map.insert("description".to_owned(), Value::String(row.description));
     map.insert("is_default".to_owned(), Value::Bool(row.is_default));
-    map.insert("cover_image_url".to_owned(), cover_image_url);
     Ok(Value::Object(map))
 }
 

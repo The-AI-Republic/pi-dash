@@ -270,17 +270,6 @@ pub fn bulk_swallows_integrity_error(branch: BulkBranch) -> bool {
     }
 }
 
-/// `save_project_cover` (`v2.py:631-634`): per row, re-get the project and
-/// stamp `cover_image_asset_id`; the LAST row wins. The re-get uses the
-/// default manager, so it carries `deleted_at IS NULL`. The write is a
-/// FULL `project.save()` (`db/models/base.py:24-44`, `db/mixins.py:18-19`),
-/// so it also stamps `updated_by` (CRUM request user) and `updated_at`.
-pub const SAVE_PROJECT_COVER_GET_SQL: &str =
-    "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"deleted_at\" IS NULL";
-// NOTE: the cover write (`SAVE_PROJECT_COVER_SQL`) moved to
-// `domain::projects::save_project_cover` (PIDASHCONV-1630) —
-// `projects` is a covered table, so the statement lives in domain/.
-
 // ---------------------------------------------------------------------------
 // Check endpoint (`v2.py:691-697`)
 // ---------------------------------------------------------------------------
@@ -527,12 +516,7 @@ mod tests {
             BulkBranch::DraftIssueDescription
         ));
         assert!(!bulk_swallows_integrity_error(BulkBranch::PageDescription));
-        assert!(!bulk_swallows_integrity_error(BulkBranch::ProjectCover));
-        // Cover loop re-gets the project per row; last row wins (documented).
-        // The write itself (`domain::projects::save_project_cover`: the FK
-        // plus the full-save stamps) is pinned in the domain tests.
-        // The per-row project re-get uses the default manager.
-        assert!(SAVE_PROJECT_COVER_GET_SQL.contains("\"deleted_at\" IS NULL"));
+        assert!(!bulk_swallows_integrity_error(BulkBranch::Noop));
         // Lookup scopes ids + slug + active rows.
         assert!(BULK_LOOKUP_SQL.contains("= ANY($1)"));
         assert!(BULK_LOOKUP_SQL.contains("\"workspaces\".\"slug\" = $2"));

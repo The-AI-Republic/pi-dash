@@ -411,8 +411,6 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
         .map_err(into_sqlx)?;
     Ok(model.map(|m| ProjectRow {
         id: m.id,
-        cover_image_asset_id: m.cover_image_asset_id,
-        cover_image: m.cover_image,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
         deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),

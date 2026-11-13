@@ -1136,7 +1136,6 @@ pub async fn render_project(
         "project_lead",
         render_uuid_opt(&row_uuid_opt(row, "project_lead_id")?),
     );
-    put(&mut map, "cover_image_asset", render_uuid_opt(&asset_id));
     put(
         &mut map,
         "estimate",
@@ -2971,7 +2970,6 @@ pub async fn create_project_inner(
     let v1_name = name.clone().unwrap_or_default();
     let v1_icon = field_json(&data, "icon_prop").unwrap_or(Value::Null);
     let v1_emoji = field_opt_str(&data, "emoji").unwrap_or(None);
-    let v1_cover = field_opt_str(&data, "cover_image").unwrap_or(None);
     let v1_ext_source = field_opt_str(&data, "external_source").unwrap_or(None);
     let v1_ext_id = field_opt_str(&data, "external_id").unwrap_or(None);
     let v1_repo = field_str(&data, "repo_url").unwrap_or_default();
@@ -3002,8 +3000,6 @@ pub async fn create_project_inner(
                 .unwrap_or(false),
             is_issue_type_enabled: field_bool(&data, "is_issue_type_enabled").unwrap_or(false),
             guest_view_all_features: field_bool(&data, "guest_view_all_features").unwrap_or(false),
-            cover_image: v1_cover.as_deref(),
-            cover_image_asset: None,
             estimate: None,
             archive_in: field_int(&data, "archive_in").unwrap_or(0),
             close_in: field_int(&data, "close_in").unwrap_or(0),
@@ -4293,11 +4289,6 @@ mod live_tests {
         let at2 = chrono::DateTime::parse_from_rfc3339("2026-01-03T04:05:06Z").unwrap();
         let mut sel = Query::select();
         sel.expr_as(Expr::value(row_id), Alias::new("id"));
-        sel.expr_as(
-            Expr::value(None::<uuid::Uuid>),
-            Alias::new("cover_image_asset_id"),
-        );
-        sel.expr_as(Expr::value(None::<String>), Alias::new("cover_image"));
         sel.expr_as(Expr::value(at), Alias::new("created_at"));
         sel.expr_as(Expr::value(at2), Alias::new("updated_at"));
         sel.expr_as(
@@ -4399,14 +4390,12 @@ mod live_tests {
                 "sort_order",
                 "member_role",
                 "is_deployed",
-                "cover_image_url",
             ]
         );
         assert_eq!(obj["total_members"], serde_json::json!(7));
         assert_eq!(obj["is_member"], serde_json::Value::Bool(true));
         assert_eq!(obj["sort_order"], serde_json::json!(15000.0));
         assert_eq!(obj["member_role"], serde_json::json!(20));
-        assert_eq!(obj["cover_image_url"], serde_json::Value::Null);
         assert_eq!(obj["network"], serde_json::json!(2));
         assert_eq!(
             obj["workspace"],

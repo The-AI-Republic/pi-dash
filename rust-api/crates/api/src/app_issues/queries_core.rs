@@ -171,7 +171,7 @@ pub const STATE_FIELDS: [states::Column; 18] = [
 ];
 
 /// All 46 concrete `projects` columns (`Project.objects.get` order).
-pub const PROJECT_FIELDS: [projects::Column; 46] = [
+pub const PROJECT_FIELDS: [projects::Column; 44] = [
     projects::Column::CreatedAt,
     projects::Column::UpdatedAt,
     projects::Column::CreatedById,
@@ -199,8 +199,6 @@ pub const PROJECT_FIELDS: [projects::Column; 46] = [
     projects::Column::IsDefault,
     projects::Column::GuestViewAllFeatures,
     projects::Column::MembersCanEditStates,
-    projects::Column::CoverImage,
-    projects::Column::CoverImageAssetId,
     projects::Column::EstimateId,
     projects::Column::ArchiveIn,
     projects::Column::CloseIn,

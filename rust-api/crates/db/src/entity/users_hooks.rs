@@ -103,8 +103,6 @@ mod tests {
             last_name: Set(String::new()),
             avatar: Set(String::new()),
             avatar_asset_id: Set(None),
-            cover_image: Set(None),
-            cover_image_asset_id: Set(None),
             date_joined: Set(now),
             created_at: Set(now),
             updated_at: Set(now),

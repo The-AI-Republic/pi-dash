@@ -39,7 +39,7 @@ pub const STATE_COLUMNS: &str = "state.created_at, state.updated_at, state.creat
     state.name, state.description, state.color, state.slug, state.sequence, state.\"group\", \
     state.is_triage, state.\"default\", state.external_source, state.external_id";
 
-/// All 46 concrete `projects` columns (`Project.objects.get` order).
+/// All 44 concrete `projects` columns (`Project.objects.get` order).
 pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
     projects.created_by_id, projects.updated_by_id, projects.deleted_at, projects.id, \
     projects.name, projects.description, projects.description_text, projects.description_html, \
@@ -47,8 +47,8 @@ pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
     projects.project_lead_id, projects.emoji, projects.icon_prop, projects.module_view, \
     projects.cycle_view, projects.issue_views_view, projects.page_view, projects.intake_view, \
     projects.is_time_tracking_enabled, projects.is_issue_type_enabled, projects.is_default, \
-    projects.guest_view_all_features, projects.members_can_edit_states, projects.cover_image, \
-    projects.cover_image_asset_id, projects.estimate_id, projects.archive_in, projects.close_in, \
+    projects.guest_view_all_features, projects.members_can_edit_states, \
+    projects.estimate_id, projects.archive_in, projects.close_in, \
     projects.logo_props, projects.default_state_id, projects.archived_at, projects.timezone, \
     projects.external_source, projects.external_id, projects.repo_url, projects.base_branch, \
     projects.agent_default_interval_seconds, projects.agent_default_max_ticks, \
@@ -851,7 +851,7 @@ mod pins {
             names(&LITE_ISSUE_FIELDS),
             stems(LITE_ISSUE_COLUMNS, "issue")
         );
-        assert_eq!(full_row_aliases().len(), 177);
+        assert_eq!(full_row_aliases().len(), 175);
     }
 }
 

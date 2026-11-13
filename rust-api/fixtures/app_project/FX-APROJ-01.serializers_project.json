@@ -411,7 +411,6 @@
       "member_role": 20,
       "anchor": null,
       "members": ["c5545f98-21b6-4fac-88e7-af418831335d"],
-      "cover_image_url": null,
       "inbox_view": false,
       "next_work_item_sequence": 1,
       "agent_executor_options": [

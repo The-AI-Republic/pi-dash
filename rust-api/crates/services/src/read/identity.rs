@@ -93,7 +93,6 @@ pub struct UserShape {
     pub avatar_asset_project: Option<Uuid>,
     pub avatar_asset_issue: Option<Uuid>,
     pub avatar_asset_workspace_slug: Option<String>,
-    pub cover_image: Option<String>,
     pub date_joined: Option<DateTime<Utc>>,
     pub display_name: Option<String>,
     pub email: Option<String>,
@@ -109,7 +108,7 @@ pub struct UserShape {
 /// The [`UserShape`] column list, in field order.
 /// Kept for source compatibility (space/issues docs reference it); the
 /// SeaORM builder below is authoritative.
-pub const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.cover_image AS cover_image, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
+pub const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
 
 /// SeaORM select for [`fetch_user`]: `users` + LEFT JOIN `file_assets`
 /// (unscoped) + LEFT JOIN `workspaces` (unscoped), filtered by id.
@@ -140,7 +139,6 @@ fn fetch_user_query(user_id: Uuid) -> sea_orm::Select<users::Entity> {
         .column_as(file_assets::Column::ProjectId, "avatar_asset_project")
         .column_as(file_assets::Column::IssueId, "avatar_asset_issue")
         .column_as(workspaces::Column::Slug, "avatar_asset_workspace_slug")
-        .column_as(users::Column::CoverImage, "cover_image")
         .column_as(users::Column::DateJoined, "date_joined")
         .column_as(users::Column::DisplayName, "display_name")
         .column_as(users::Column::Email, "email")

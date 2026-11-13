@@ -73,7 +73,7 @@ use sea_orm::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::entity::{file_assets, intakes as intake_entity, projects, users, workspaces};
+use pidash_db::entity::{intakes as intake_entity, projects, users, workspaces};
 
 use pidash_services::app_intake::permissions as guards;
 
@@ -546,8 +546,6 @@ struct ProjectProbe {
     id: Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<Uuid>,
     logo_props: serde_json::Value,
     description: String,
     is_default: bool,
@@ -561,8 +559,6 @@ async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Projec
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
-            projects::Column::CoverImageAssetId,
             projects::Column::LogoProps,
             projects::Column::Description,
             projects::Column::IsDefault,
@@ -575,70 +571,10 @@ async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Projec
         id: r.id,
         identifier: r.identifier,
         name: r.name,
-        cover_image: r.cover_image,
-        cover_image_asset_id: r.cover_image_asset_id,
         logo_props: r.logo_props,
         description: r.description,
         is_default: r.is_default,
     }))
-}
-
-/// `cover_image_url` (`db/models/project.py:176-185`): the cover asset's
-/// Decision from one `file_assets` cover lookup. The pre-migration
-/// `Option<(String,)>` decode made a present row with a NULL
-/// `entity_type` a decode error (500); preserved exactly here. Do not
-/// align to Django (which returns the asset URL, `None` for NULL or
-/// unmatched types) — that divergence is tracked separately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CoverDecision {
-    /// No asset row, or a non-static entity type: serve the raw
-    /// `cover_image` text (or null).
-    Raw,
-    /// A static cover type: serve `/api/assets/v2/static/<id>/`.
-    Static,
-    /// A present row with a NULL `entity_type`: preserve the old 500.
-    ServerError,
-}
-
-fn cover_decision(row: Option<Option<String>>) -> CoverDecision {
-    match row {
-        None => CoverDecision::Raw,
-        Some(None) => CoverDecision::ServerError,
-        Some(Some(entity_type)) => match entity_type.as_str() {
-            "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-                CoverDecision::Static
-            }
-            _ => CoverDecision::Raw,
-        },
-    }
-}
-
-/// URL, else the raw `cover_image` text, else null.
-async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<String>, Denial> {
-    if let Some(asset_id) = project.cover_image_asset_id {
-        let db = pidash_db::pool::sea_orm_connection(pool);
-        let row: Option<Option<String>> = file_assets::Entity::find_by_id(asset_id)
-            .select_only()
-            .column(file_assets::Column::EntityType)
-            .into_tuple()
-            .one(&db)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        match cover_decision(row) {
-            CoverDecision::ServerError => return Err(Denial::ServerError),
-            CoverDecision::Static => {
-                return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
-            }
-            CoverDecision::Raw => return Ok(project.cover_image.clone()),
-        }
-    }
-    Ok(project.cover_image.clone())
-}
-
-fn opt_string(text: &Option<String>) -> serde_json::Value {
-    text.clone()
-        .map(serde_json::Value::String)
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_dt(moment: &Option<DateTime<Utc>>, timezone: chrono_tz::Tz) -> serde_json::Value {
@@ -1255,38 +1191,6 @@ mod tests {
             assert!(
                 validate_datetime(&mut errs, "deleted_at", &json!(text), true).is_none(),
                 "{text:?}"
-            );
-        }
-    }
-
-    /// `cover_image_url` lookup outcome (NEWPIDASH-113): the
-    /// pre-migration `Option<(String,)>` decode made a present row
-    /// with a NULL `entity_type` a 500; preserved exactly.
-    #[test]
-    fn cover_decision_preserves_old_null_decode_error() {
-        // No row: raw fall-through, as before.
-        assert_eq!(cover_decision(None), CoverDecision::Raw);
-        // NULL entity_type: the old 500, not a raw-text fallback.
-        assert_eq!(cover_decision(Some(None)), CoverDecision::ServerError);
-        // Static cover types serve the static path.
-        for kind in [
-            "WORKSPACE_LOGO",
-            "USER_AVATAR",
-            "USER_COVER",
-            "PROJECT_COVER",
-        ] {
-            assert_eq!(
-                cover_decision(Some(Some(kind.to_owned()))),
-                CoverDecision::Static,
-                "{kind}"
-            );
-        }
-        // Anything else (incl. empty) serves the raw text, as before.
-        for kind in ["ISSUE_ATTACHMENT", "unknown", ""] {
-            assert_eq!(
-                cover_decision(Some(Some(kind.to_owned()))),
-                CoverDecision::Raw,
-                "{kind}"
             );
         }
     }

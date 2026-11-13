@@ -358,10 +358,9 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         return Ok(None);
     };
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
+        }
         Some("ISSUE_ATTACHMENT") => {
             let slug = super::workspace::workspace_slug(pool, workspace_id).await?;
             Ok(slug.map(|s| {
@@ -892,23 +891,10 @@ pub async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<V
     let Some(model) = model else {
         return Ok(None);
     };
-    let cover_asset = model.cover_image_asset_id;
-    let cover_text = model.cover_image.clone();
-    // `Project.cover_image_url` (`db/models/project.py:176-185`): the
-    // asset URL wins, then the stored text, else null.
-    let cover_url = match cover_asset {
-        Some(id) => file_asset_url(pool, &id).await?,
-        None => None,
-    };
-    let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
-    let mut map = Map::with_capacity(9);
+    let mut map = Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(model.id.to_string()));
     map.insert("identifier".to_owned(), Value::String(model.identifier));
     map.insert("name".to_owned(), Value::String(model.name));
-    map.insert(
-        "cover_image".to_owned(),
-        cover_text.map(Value::String).unwrap_or(Value::Null),
-    );
     map.insert(
         "icon_prop".to_owned(),
         model.icon_prop.unwrap_or(Value::Null),
@@ -919,10 +905,6 @@ pub async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<V
     );
     map.insert("description".to_owned(), Value::String(model.description));
     map.insert("is_default".to_owned(), Value::Bool(model.is_default));
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
-    );
     Ok(Some(Value::Object(map)))
 }
 

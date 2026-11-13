@@ -1221,8 +1221,6 @@ struct ProjectRowOrm {
     is_time_tracking_enabled: bool,
     is_issue_type_enabled: bool,
     guest_view_all_features: bool,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<uuid::Uuid>,
     estimate_id: Option<uuid::Uuid>,
     archive_in: i32,
     close_in: i32,
@@ -1276,8 +1274,6 @@ fn project_row_from(orm: ProjectRowOrm) -> ProjectRow {
         is_time_tracking_enabled: orm.is_time_tracking_enabled,
         is_issue_type_enabled: orm.is_issue_type_enabled,
         guest_view_all_features: orm.guest_view_all_features,
-        cover_image: orm.cover_image,
-        cover_image_asset_id: orm.cover_image_asset_id,
         estimate_id: orm.estimate_id,
         archive_in: orm.archive_in,
         close_in: orm.close_in,
@@ -1356,8 +1352,6 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::IsTimeTrackingEnabled,
         proj_entity::Column::IsIssueTypeEnabled,
         proj_entity::Column::GuestViewAllFeatures,
-        proj_entity::Column::CoverImage,
-        proj_entity::Column::CoverImageAssetId,
         proj_entity::Column::EstimateId,
         proj_entity::Column::ArchiveIn,
         proj_entity::Column::CloseIn,
@@ -1719,24 +1713,6 @@ async fn asset_workspace_slug(
 fn opt_uuid_py(id: Option<uuid::Uuid>) -> String {
     id.map(|id| id.to_string())
         .unwrap_or_else(|| "None".to_owned())
-}
-
-/// `Project.cover_image_url` (`db/models/project.py:175-185`, L5
-/// `cover_image_url`): an attached asset answers its `asset_url` as-is —
-/// even `None` for an unrecognized entity, with NO fallback to the legacy
-/// text; otherwise the legacy `cover_image` text; else `None`.
-async fn cover_image_url(
-    pool: &sqlx::PgPool,
-    asset_id: Option<uuid::Uuid>,
-    cover_image: Option<&str>,
-) -> Result<Option<String>, Denial> {
-    use pidash_db::app_project::models::project::cover_image_url as pick;
-    let has_asset = asset_id.is_some();
-    let asset_url: Option<String> = match asset_id {
-        None => None,
-        Some(id) => file_asset_url(pool, &id).await?,
-    };
-    Ok(pick(has_asset, asset_url.as_deref(), cover_image).map(str::to_owned))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3654,7 +3630,6 @@ async fn validate_fk(
 /// instead — see [`file_asset_url`] — so the read path stays
 /// unfiltered. Both halves live-probed.)
 const FK_USERS_SQL: &str = "users";
-const FK_FILE_ASSETS_SQL: &str = "file_assets";
 const FK_ESTIMATES_SQL: &str = "estimates";
 /// `StateManager` excludes triage (`db/models/state.py:79-83`) as well as
 /// soft-deleted rows.
@@ -4689,11 +4664,6 @@ async fn insert_project(
             is_time_tracking_enabled: validated.is_time_tracking_enabled.unwrap_or(false),
             is_issue_type_enabled: validated.is_issue_type_enabled.unwrap_or(false),
             guest_view_all_features: validated.guest_view_all_features.unwrap_or(false),
-            cover_image: validated
-                .cover_image
-                .as_ref()
-                .and_then(|value| value.as_deref()),
-            cover_image_asset: validated.cover_image_asset.unwrap_or(None),
             estimate: validated.estimate.unwrap_or(None),
             archive_in,
             close_in,
@@ -4991,13 +4961,6 @@ async fn apply_update(
         guest_view_all_features: validated
             .guest_view_all_features
             .unwrap_or(instance.guest_view_all_features),
-        cover_image: validated
-            .cover_image
-            .as_ref()
-            .map_or(instance.cover_image.as_deref(), |v| v.as_deref()),
-        cover_image_asset: validated
-            .cover_image_asset
-            .unwrap_or(instance.cover_image_asset_id),
         estimate: validated.estimate.unwrap_or(instance.estimate_id),
         archive_in,
         close_in,
@@ -5638,8 +5601,6 @@ fn paginate_order_column(key: &str) -> Result<proj_entity::Column, Denial> {
         "is_default" => proj_entity::Column::IsDefault,
         "guest_view_all_features" => proj_entity::Column::GuestViewAllFeatures,
         "members_can_edit_states" => proj_entity::Column::MembersCanEditStates,
-        "cover_image" => proj_entity::Column::CoverImage,
-        "cover_image_asset" => proj_entity::Column::CoverImageAssetId,
         "estimate" => proj_entity::Column::EstimateId,
         "archive_in" => proj_entity::Column::ArchiveIn,
         "close_in" => proj_entity::Column::CloseIn,
@@ -7437,8 +7398,8 @@ mod tests {
         assert!(position("name") < position("identifier"));
         assert!(position("identifier") < position("workspace"));
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
-        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 44);
+        assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 5], "workspace");
+        assert_eq!(WRITE_FIELDS.len(), 42);
     }
 
     #[test]

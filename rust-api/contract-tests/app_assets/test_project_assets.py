@@ -119,16 +119,17 @@ def test_post_non_uuid_entity_identifier_still_400(org):
     assert r.json() == {"error": "Please provide valid detail"}
 
 
-def test_post_project_cover_500_duplicate_kwarg(org):
-    # Ported bug: PROJECT_COVER resolves to {"project_id": ...} which
-    # collides with the explicit project_id kwarg → TypeError → 500.
-    r = org.request(
-        "POST", proj_base(org), "admin",
-        json=proj_payload(entity_type="PROJECT_COVER",
-                          entity_identifier=org.project["id"]),
-    )
-    assert r.status_code == 500
-    assert r.json() == {"error": "Something went wrong please try again later"}
+def test_post_removed_cover_types_invalid(org):
+    # PDASHOSS01-237: PROJECT_COVER / USER_COVER left EntityTypeContext, so
+    # the mint guard rejects them like any unknown entity type.
+    for entity_type in ("PROJECT_COVER", "USER_COVER"):
+        r = org.request(
+            "POST", proj_base(org), "admin",
+            json=proj_payload(entity_type=entity_type,
+                              entity_identifier=org.project["id"]),
+        )
+        assert r.status_code == 400, entity_type
+        assert r.json() == {"error": "Invalid entity type.", "status": False}
 
 
 def test_post_invalid_entity_type(org):

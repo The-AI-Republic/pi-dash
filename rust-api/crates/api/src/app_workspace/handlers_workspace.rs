@@ -2716,10 +2716,7 @@ async fn resolve_logo_url(
     let workspace_id = asset.workspace_id;
     let project_id = asset.project_id;
     let issue_id = asset.issue_id;
-    if matches!(
-        entity_type.as_str(),
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER"
-    ) {
+    if matches!(entity_type.as_str(), "WORKSPACE_LOGO" | "USER_AVATAR") {
         return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
     }
     if entity_type == "ISSUE_ATTACHMENT" {

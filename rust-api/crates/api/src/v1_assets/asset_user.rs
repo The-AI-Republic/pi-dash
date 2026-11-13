@@ -907,8 +907,6 @@ impl UserRow {
             last_name: model.last_name.clone(),
             avatar: model.avatar.clone(),
             avatar_asset_id: model.avatar_asset_id,
-            cover_image: model.cover_image.clone(),
-            cover_image_asset_id: model.cover_image_asset_id,
             date_joined: model.date_joined.with_timezone(&Utc),
             created_at: model.created_at.with_timezone(&Utc),
             last_location: model.last_location.clone(),
@@ -1918,7 +1916,7 @@ mod tests {
             save.contains("$1") && save.contains("$37") && save.contains("$38"),
             "{save}"
         );
-        assert_eq!(asset_queries::USER_COLUMNS.len(), 40);
+        assert_eq!(asset_queries::USER_COLUMNS.len(), 38);
         let select = asset_queries::soft_delete_select(
             Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
         )

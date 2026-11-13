@@ -180,7 +180,7 @@ fn asset_url(
     issue_id: Option<&str>,
 ) -> Option<String> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Some(format!("/api/assets/v2/static/{asset_id}/"))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -316,8 +316,6 @@ pub struct ProjectLiteView {
     pub id: String,
     pub identifier: String,
     pub name: String,
-    pub cover_image: Option<String>,
-    pub cover_image_url: Option<String>,
     pub logo_props: Value,
     pub description: Option<String>,
     pub is_default: bool,
@@ -593,8 +591,6 @@ struct ProjectLiteRow {
     id: Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<Uuid>,
     logo_props: Value,
     description: String,
     is_default: bool,
@@ -607,8 +603,6 @@ fn project_lite_query(project_id: Uuid) -> sea_orm::Select<projects::Entity> {
             projects::Column::Id,
             projects::Column::Identifier,
             projects::Column::Name,
-            projects::Column::CoverImage,
-            projects::Column::CoverImageAssetId,
             projects::Column::LogoProps,
             projects::Column::Description,
             projects::Column::IsDefault,
@@ -633,18 +627,10 @@ async fn render_project_lite(
         .await
         .map_err(|error| DbError::from_orm("project-detail", error))?
         .ok_or(Error::Failed("project-detail"))?;
-    let cover_image_url = logo_or_cover_url(
-        pool,
-        row.cover_image.clone(),
-        row.cover_image_asset_id.map(|id| id.to_string()),
-    )
-    .await?;
     Ok(ProjectLiteView {
         id: row.id.to_string(),
         identifier: row.identifier,
         name: row.name,
-        cover_image: row.cover_image,
-        cover_image_url,
         logo_props: row.logo_props,
         description: Some(row.description),
         is_default: row.is_default,

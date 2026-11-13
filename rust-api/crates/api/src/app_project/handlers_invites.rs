@@ -945,11 +945,6 @@ fn invite_select() -> sea_orm::Select<pmi_entity::Entity> {
         .column_as(proj_entity::Column::Id, "project_id")
         .column_as(proj_entity::Column::Identifier, "project_identifier")
         .column_as(proj_entity::Column::Name, "project_name")
-        .column_as(proj_entity::Column::CoverImage, "project_cover_image")
-        .column_as(
-            proj_entity::Column::CoverImageAssetId,
-            "project_cover_asset_id",
-        )
         .column_as(proj_entity::Column::LogoProps, "project_logo_props")
         .column_as(proj_entity::Column::Description, "project_description")
         .column_as(proj_entity::Column::IsDefault, "project_is_default")
@@ -1186,8 +1181,6 @@ struct BoardFull {
     workspace_logo_asset_id: Option<uuid::Uuid>,
     project_identifier: Option<String>,
     project_name: Option<String>,
-    project_cover_image: Option<String>,
-    project_cover_asset_id: Option<uuid::Uuid>,
     project_logo_props: Option<Value>,
     project_description: Option<String>,
     project_is_default: Option<bool>,
@@ -1222,11 +1215,6 @@ fn board_select() -> sea_orm::Select<db_entity::Entity> {
         .column_as(ws_entity::Column::LogoAssetId, "workspace_logo_asset_id")
         .column_as(proj_entity::Column::Identifier, "project_identifier")
         .column_as(proj_entity::Column::Name, "project_name")
-        .column_as(proj_entity::Column::CoverImage, "project_cover_image")
-        .column_as(
-            proj_entity::Column::CoverImageAssetId,
-            "project_cover_asset_id",
-        )
         .column_as(proj_entity::Column::LogoProps, "project_logo_props")
         .column_as(proj_entity::Column::Description, "project_description")
         .column_as(proj_entity::Column::IsDefault, "project_is_default")
@@ -1260,8 +1248,6 @@ fn board_from_full(full: BoardFull) -> BoardRow {
         workspace_logo_asset_id: full.workspace_logo_asset_id,
         project_identifier: full.project_identifier,
         project_name: full.project_name,
-        project_cover_image: full.project_cover_image,
-        project_cover_asset_id: full.project_cover_asset_id,
         project_logo_props: full.project_logo_props,
         project_description: full.project_description,
         project_is_default: full.project_is_default,

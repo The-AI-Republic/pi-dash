@@ -300,8 +300,6 @@ where
         last_name: Set(user.last_name.to_owned()),
         avatar: Set(user.avatar.to_owned()),
         avatar_asset_id: Set(None),
-        cover_image: Set(None),
-        cover_image_asset_id: Set(None),
         date_joined: Set(now),
         created_at: Set(now),
         updated_at: Set(now),
@@ -353,7 +351,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// The one full-row `users` insert shape the bot and provisioned paths
-/// share: all 40 physical columns (the moved
+/// share: all 38 physical columns (the moved
 /// `db::orchestration::workpad::AGENT_USER_INSERT_SQL` column list), the
 /// caller-varying ones here, every other at its Django model default.
 struct FullUserRow<'a> {
@@ -389,8 +387,6 @@ fn full_user_row(row: &FullUserRow<'_>) -> users::ActiveModel {
         last_name: Set(row.last_name.to_owned()),
         avatar: Set(row.avatar.to_owned()),
         avatar_asset_id: Set(None),
-        cover_image: Set(None),
-        cover_image_asset_id: Set(None),
         date_joined: Set(now),
         created_at: Set(now),
         updated_at: Set(now),
@@ -1172,36 +1168,6 @@ pub async fn link_avatar_asset(
     exec_update(db, avatar_link_update(user_id, asset_id, write, now)).await
 }
 
-/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the
-/// cover link plus the full `user.save()` column effects.
-/// `cover_image = NULL` here (asymmetry with avatar — ported).
-fn cover_link_update(
-    user_id: Uuid,
-    asset_id: Uuid,
-    write: &pidash_db::ops::users::UserSaveWrite,
-    now: DateTime<Utc>,
-) -> UpdateMany<users::Entity> {
-    with_user_save_effects(
-        users::Entity::update_many()
-            .col_expr(users::Column::CoverImage, Expr::value(None::<String>))
-            .col_expr(users::Column::CoverImageAssetId, Expr::value(asset_id)),
-        write,
-        now,
-    )
-    .filter(users::Column::Id.eq(user_id))
-}
-
-/// Link a cover asset onto one user row.
-pub async fn link_cover_asset(
-    db: &impl ConnectionTrait,
-    user_id: Uuid,
-    asset_id: Uuid,
-    write: &pidash_db::ops::users::UserSaveWrite,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    exec_update(db, cover_link_update(user_id, asset_id, write, now)).await
-}
-
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`):
 /// clears the avatar link FK only (the `avatar` string is untouched
 /// here), plus the full `user.save()` column effects.
@@ -1227,33 +1193,6 @@ pub async fn unlink_avatar_asset(
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     exec_update(db, avatar_unlink_update(user_id, write, now)).await
-}
-
-/// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`):
-/// clears the cover link FK only, plus the full `user.save()`
-/// column effects.
-fn cover_unlink_update(
-    user_id: Uuid,
-    write: &pidash_db::ops::users::UserSaveWrite,
-    now: DateTime<Utc>,
-) -> UpdateMany<users::Entity> {
-    with_user_save_effects(
-        users::Entity::update_many()
-            .col_expr(users::Column::CoverImageAssetId, Expr::value(None::<Uuid>)),
-        write,
-        now,
-    )
-    .filter(users::Column::Id.eq(user_id))
-}
-
-/// Clear one user row's cover link FK.
-pub async fn unlink_cover_asset(
-    db: &impl ConnectionTrait,
-    user_id: Uuid,
-    write: &pidash_db::ops::users::UserSaveWrite,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    exec_update(db, cover_unlink_update(user_id, write, now)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2155,8 +2094,8 @@ pub async fn save_user_password(
 /// is a **full-row** save — every non-pk column in `_meta` order, pk
 /// in `WHERE`. The template renders exactly that: `SET` over
 /// [`pidash_db::v1_assets::asset_queries::USER_COLUMNS`] minus `id`
-/// (`$1`–`$39`), `WHERE "users"."id" = ($40)`. Handlers bind the fetched
-/// row with `AvatarAssetId` / `CoverImageAssetId` nulled (see
+/// (`$1`–`$37`), `WHERE "users"."id" = ($38)`. Handlers bind the fetched
+/// row with `AvatarAssetId` nulled (see
 /// [`pidash_db::v1_assets::asset_queries::EntityClearTarget`]); the
 /// `NoOp` arm binds the row unchanged (and the handler skips the
 /// statement entirely — the view returns without touching the profile).
@@ -2353,7 +2292,7 @@ pub async fn touch_user_updated_at(
 /// `save_is_staff`, `user.py:169-187`).
 ///
 /// Moved from `api::app_workspace::handlers_user` (PIDASHCONV-1628):
-/// the fourteen merged columns, then the four derived ones, then the
+/// the twelve merged columns, then the four derived ones, then the
 /// `auto_now` stamp, in that order. The merge and the derivation stay
 /// at the call site (pure computation, not SQL); every resolved value
 /// rides this struct.
@@ -2364,8 +2303,6 @@ pub struct MeProfileSave<'a> {
     pub last_name: &'a str,
     pub avatar: &'a str,
     pub avatar_asset_id: Option<Uuid>,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_asset_id: Option<Uuid>,
     pub is_password_expired: bool,
     pub is_password_reset_required: bool,
     pub bot_type: Option<&'a str>,
@@ -2390,8 +2327,6 @@ fn me_profile_update(user_id: Uuid, save: &MeProfileSave<'_>) -> UpdateMany<user
         .col_expr(C::LastName, Expr::value(save.last_name))
         .col_expr(C::Avatar, Expr::value(save.avatar))
         .col_expr(C::AvatarAssetId, Expr::value(save.avatar_asset_id))
-        .col_expr(C::CoverImage, Expr::value(save.cover_image))
-        .col_expr(C::CoverImageAssetId, Expr::value(save.cover_image_asset_id))
         .col_expr(C::IsPasswordExpired, Expr::value(save.is_password_expired))
         .col_expr(
             C::IsPasswordResetRequired,
@@ -2673,9 +2608,9 @@ mod tests {
     const T0: &str = "'1970-01-01 00:00:00.000000 +00:00'";
 
     /// Every `users` column the bot and provisioned rows set, in `_meta`
-    /// order: all 40 physical columns, none left to a database default.
+    /// order: all 38 physical columns, none left to a database default.
     #[test]
-    fn bot_and_provisioned_rows_set_all_40_columns() {
+    fn bot_and_provisioned_rows_set_all_38_columns() {
         use sea_orm::{ActiveModelTrait, Iden, Iterable};
         let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
         let bot = bot_user_row(
@@ -2713,7 +2648,7 @@ mod tests {
             },
         );
         let columns: Vec<String> = users::Column::iter().map(|c| c.to_string()).collect();
-        assert_eq!(columns.len(), 40);
+        assert_eq!(columns.len(), 38);
         for name in USER_META_COLUMNS {
             assert!(
                 columns.iter().any(|c| c == name),
@@ -3059,22 +2994,12 @@ mod tests {
             set_clause(&avatar_link),
             format!("\"avatar\" = '', \"avatar_asset_id\" = '00000000-0000-0000-0000-000000000000', {effects}")
         );
-        let cover_link = render(cover_link_update(id, Uuid::nil(), &write, now));
-        assert_eq!(
-            set_clause(&cover_link),
-            format!("\"cover_image\" = NULL, \"cover_image_asset_id\" = '00000000-0000-0000-0000-000000000000', {effects}")
-        );
         let avatar_unlink = render(avatar_unlink_update(id, &write, now));
         assert_eq!(
             set_clause(&avatar_unlink),
             format!("\"avatar_asset_id\" = NULL, {effects}")
         );
-        let cover_unlink = render(cover_unlink_update(id, &write, now));
-        assert_eq!(
-            set_clause(&cover_unlink),
-            format!("\"cover_image_asset_id\" = NULL, {effects}")
-        );
-        for sql in [&avatar_link, &cover_link, &avatar_unlink, &cover_unlink] {
+        for sql in [&avatar_link, &avatar_unlink] {
             assert!(
                 sql.ends_with(&format!("WHERE \"users\".\"id\" = {ID1}")),
                 "{sql}"
@@ -3093,7 +3018,7 @@ mod tests {
             format!("\"password\" = 'pbkdf2$new', \"is_password_autoset\" = FALSE, {effects}")
         );
 
-        // `PATCH users/me/`: fourteen merged columns, four derived, the stamp.
+        // `PATCH users/me/`: twelve merged columns, four derived, the stamp.
         let me = render(me_profile_update(
             id,
             &MeProfileSave {
@@ -3103,8 +3028,6 @@ mod tests {
                 last_name: "L",
                 avatar: "img",
                 avatar_asset_id: None,
-                cover_image: None,
-                cover_image_asset_id: None,
                 is_password_expired: false,
                 is_password_reset_required: false,
                 bot_type: None,
@@ -3125,8 +3048,8 @@ mod tests {
         );
         assert_eq!(
             set_clause(&me).matches(" = ").count(),
-            19,
-            "nineteen SET entries"
+            17,
+            "seventeen SET entries"
         );
     }
 
@@ -3382,14 +3305,13 @@ mod tests {
         }
     }
 
-    /// Temp `users`: the 40 insert columns with production nullability
+    /// Temp `users`: the 38 insert columns with production nullability
     /// plus the `username` unique index the race seam relies on.
     const USERS_DDL: &str = "CREATE TEMPORARY TABLE users (
         password TEXT NOT NULL, last_login TIMESTAMPTZ, id UUID PRIMARY KEY,
         username TEXT NOT NULL UNIQUE, mobile_number TEXT, email TEXT UNIQUE,
         display_name TEXT NOT NULL, first_name TEXT NOT NULL, last_name TEXT NOT NULL,
-        avatar TEXT NOT NULL, avatar_asset_id UUID, cover_image TEXT,
-        cover_image_asset_id UUID, date_joined TIMESTAMPTZ NOT NULL,
+        avatar TEXT NOT NULL, avatar_asset_id UUID, date_joined TIMESTAMPTZ NOT NULL,
         created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
         last_location TEXT NOT NULL, created_location TEXT NOT NULL,
         is_superuser BOOLEAN NOT NULL, is_managed BOOLEAN NOT NULL,
@@ -3770,21 +3692,6 @@ mod tests {
         unlink_avatar_asset(&orm(&pool), user, &write, now)
             .await
             .expect("avatar unlink");
-        let cover_asset = Uuid::new_v4();
-        link_cover_asset(&orm(&pool), user, cover_asset, &write, now)
-            .await
-            .expect("cover link");
-        let cover: (Option<String>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
-            "SELECT cover_image, cover_image_asset_id, avatar_asset_id FROM users WHERE id = $1",
-        )
-        .bind(user)
-        .fetch_one(&pool)
-        .await
-        .expect("read back");
-        assert_eq!(cover, (None, Some(cover_asset), None));
-        unlink_cover_asset(&orm(&pool), user, &write, now)
-            .await
-            .expect("cover unlink");
         let pref = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO user_notification_preferences (id, created_at, updated_at, user_id, property_change, state_change, comment, mention, issue_completed) VALUES ($1, $2, $2, $3, TRUE, TRUE, TRUE, TRUE, TRUE)",
@@ -4269,7 +4176,7 @@ mod tests {
 
     /// `_meta` column order for the provisioned-insert assertion
     /// (the bot test above carries its own copy for its statement).
-    const USER_META_COLUMNS: [&str; 40] = [
+    const USER_META_COLUMNS: [&str; 38] = [
         "password",
         "last_login",
         "id",
@@ -4281,8 +4188,6 @@ mod tests {
         "last_name",
         "avatar",
         "avatar_asset_id",
-        "cover_image",
-        "cover_image_asset_id",
         "date_joined",
         "created_at",
         "updated_at",
@@ -4320,7 +4225,7 @@ mod tests {
         }
     }
 
-    /// Whole-row read-back as JSON: one assertion pins all 40 stored
+    /// Whole-row read-back as JSON: one assertion pins all 38 stored
     /// values, so a swapped bind cannot hide.
     async fn user_json(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -4391,8 +4296,6 @@ mod tests {
                 "last_name": "",
                 "avatar": "",
                 "avatar_asset_id": null,
-                "cover_image": null,
-                "cover_image_asset_id": null,
                 "date_joined": stamp,
                 "created_at": stamp,
                 "updated_at": stamp,
@@ -4460,8 +4363,6 @@ mod tests {
                 "last_name": "User",
                 "avatar": "https://picture.test/sync1616",
                 "avatar_asset_id": null,
-                "cover_image": null,
-                "cover_image_asset_id": null,
                 "date_joined": stamp,
                 "created_at": stamp,
                 "updated_at": stamp,
@@ -4834,11 +4735,11 @@ mod tests {
     fn entity_user_save_is_full_row_with_pk_last() {
         let sql = entity_user_save_sql();
         assert!(sql.starts_with("UPDATE \"users\" SET "), "{sql}");
-        // Every non-pk column bound in USER_COLUMNS order ($1-$39),
-        // pk last ($40) — Django save() shape.
+        // Every non-pk column bound in USER_COLUMNS order ($1-$37),
+        // pk last ($38) — Django save() shape.
         assert!(sql.contains("\"password\" = $1"), "{sql}");
-        assert!(sql.contains("\"masked_at\" = $39"), "{sql}");
-        assert!(sql.contains("WHERE \"users\".\"id\" = ($40)"), "{sql}");
+        assert!(sql.contains("\"masked_at\" = $37"), "{sql}");
+        assert!(sql.contains("WHERE \"users\".\"id\" = ($38)"), "{sql}");
         assert!(!sql.contains("\"id\" = $"), "{sql}");
     }
 
@@ -5216,8 +5117,6 @@ mod tests {
                 last_name: "Lovelace",
                 avatar: "img",
                 avatar_asset_id: None,
-                cover_image: Some("cover"),
-                cover_image_asset_id: None,
                 is_password_expired: true,
                 is_password_reset_required: false,
                 bot_type: Some("agent"),
