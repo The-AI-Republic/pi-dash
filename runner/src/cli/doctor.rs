@@ -378,12 +378,25 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            // Muse Code auth is via the `META_API_KEY` env var; there's no cheap
-            // non-interactive probe, so surface a hint rather than block.
+            // Muse Code auth is a presence check only: `META_API_KEY` in the
+            // environment the daemon spawns `muse` with, or a non-empty
+            // `~/.config/muse/auth.json` under the same home. See
+            // `muse_code::auth`. No API call is made; presence is enough to
+            // accept a run, absence means `muse exec` would fail at
+            // `run.lifecycle.started` and burn a tick.
+            let has_creds = crate::muse_code::auth::has_muse_credentials();
             checks.push(Check {
                 name: tag("muse-auth"),
-                ok: true,
-                detail: "assumed ok (set META_API_KEY if runs fail with auth errors)".to_string(),
+                ok: has_creds,
+                detail: if has_creds {
+                    "Muse credentials present (META_API_KEY or ~/.config/muse/auth.json)"
+                        .to_string()
+                } else {
+                    format!(
+                        "missing Muse credentials: {}",
+                        crate::muse_code::auth::FIX_HINT
+                    )
+                },
                 blocker: false,
             });
         }

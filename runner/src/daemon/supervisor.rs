@@ -85,6 +85,20 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
+        // Muse credential presence at startup: surface the same warning the
+        // pre-pickup gate uses, so an operator sees it without waiting for an
+        // Assign to be rejected. Presence-only; never validated.
+        for runner_cfg in &config.runners {
+            if runner_cfg.agent.kind == AgentKind::MuseCode
+                && !crate::muse_code::auth::has_muse_credentials()
+            {
+                tracing::warn!(
+                    runner = %runner_cfg.name,
+                    "Muse credentials missing on this runner; Muse runs will be refused at pickup until fixed: {}",
+                    crate::muse_code::auth::FIX_HINT
+                );
+            }
+        }
         // Daemon-level state has no single runner_id any more — runners
         // come and go under one connection. Per-instance state still
         // holds its own runner_id (set in RunnerInstance::new).
@@ -1860,6 +1874,32 @@ enum ChatCommand {
 }
 
 impl RunnerLoop {
+    /// Decide whether an `Assign` to this runner should be NACKed before
+    /// `Accept` for a Muse credential reason. Returns `Some(reason)` when the
+    /// assign must be turned down without starting `muse`.
+    ///
+    /// Pure helper so the Assign-reject decision is unit-testable without
+    /// driving the whole loop. The production call site passes
+    /// `crate::muse_code::auth::has_muse_credentials()`.
+    fn muse_assign_rejection(
+        agent_kind: AgentKind,
+        has_credentials: bool,
+    ) -> Option<FailureReason> {
+        if agent_kind == AgentKind::MuseCode && !has_credentials {
+            Some(FailureReason::AgentAuthMissing)
+        } else {
+            None
+        }
+    }
+
+    /// The detail string and warning fix hint for an auth-missing NACK.
+    fn muse_auth_missing_detail(runner_name: &str) -> String {
+        format!(
+            "assign rejected: Muse credentials missing on runner {runner_name}: {}",
+            crate::muse_code::auth::FIX_HINT
+        )
+    }
+
     /// NACK an `Assign` this runner cannot take right now. The cloud frees a
     /// runner the moment its previous run goes terminal in the database,
     /// which can precede the local agent actually stopping (most commonly a
@@ -1873,11 +1913,18 @@ impl RunnerLoop {
     /// loop. Delivery failure is logged only — the session-open redeliver
     /// path remains the backstop for a lost NACK.
     fn nack_assign(&self, run_id: uuid::Uuid, detail: String) {
+        self.nack_assign_with(run_id, detail, FailureReason::AssignRejectedBusy);
+    }
+
+    /// Same as [`nack_assign`](Self::nack_assign) but with an explicit
+    /// `FailureReason`. Used for `AgentAuthMissing` where the cloud re-queues
+    /// identically to `AssignRejectedBusy` but distinguishes the case.
+    fn nack_assign_with(&self, run_id: uuid::Uuid, detail: String, reason: FailureReason) {
         let out = self.out.clone();
         tokio::spawn(async move {
             let msg = ClientMsg::RunFailed {
                 run_id,
-                reason: FailureReason::AssignRejectedBusy,
+                reason,
                 detail: Some(detail),
                 ended_at: Utc::now(),
                 tokens: None,
@@ -2094,6 +2141,25 @@ impl RunnerLoop {
                                 current.run_id
                             ),
                         );
+                        continue;
+                    }
+                    // Pre-pickup Muse credential check: without `META_API_KEY`
+                    // or a non-empty `~/.config/muse/auth.json`, `muse exec`
+                    // would fail at `run.lifecycle.started` before any work,
+                    // and the failure would burn the issue's tick budget.
+                    // Reject the Assign before `Accept` (and before spawning
+                    // `muse`) so the cloud re-queues it for another runner.
+                    if let Some(reason) = Self::muse_assign_rejection(
+                        self.runner_config.agent.kind,
+                        crate::muse_code::auth::has_muse_credentials(),
+                    ) {
+                        let detail = Self::muse_auth_missing_detail(&self.runner_config.name);
+                        tracing::warn!(
+                            %run_id,
+                            runner = %self.runner_config.name,
+                            "assign rejected: Muse credentials missing on this runner; refusing pickup before Accept (not starting muse)",
+                        );
+                        self.nack_assign_with(run_id, detail, reason);
                         continue;
                     }
                     let cancel = tokio_util::sync::CancellationToken::new();
@@ -6736,5 +6802,46 @@ mod tests {
             ),
             "unexpected status 503 Service Unavailable: boom, url: https://x/v1/responses, request id: r1"
         );
+    }
+
+    #[test]
+    fn muse_assign_with_missing_credentials_is_rejected_with_agent_auth_missing() {
+        // The pre-pickup gate: Muse + no creds → reject; Muse + creds → accept;
+        // non-Muse kinds are never rejected for credential reasons.
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, true),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::Codex, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::ClaudeCode, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::Grok, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::Engine, false),
+            None
+        );
+    }
+
+    #[test]
+    fn muse_auth_missing_detail_names_runner_and_fix() {
+        let detail = RunnerLoop::muse_auth_missing_detail("build-box");
+        assert!(
+            detail.contains("build-box"),
+            "detail names runner: {detail}"
+        );
+        assert!(detail.contains("muse login"), "detail has fix: {detail}");
+        assert!(detail.contains("META_API_KEY"), "detail has fix: {detail}");
     }
 }

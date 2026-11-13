@@ -328,6 +328,28 @@ def apply_assign_rejected_busy(
     apply_run_resume_unavailable(runner, run_id, locked_run=locked_run)
 
 
+def apply_agent_auth_missing(
+    runner: Runner,
+    run_id: UUID | str,
+    *,
+    locked_run: Optional[AgentRun] = None,
+) -> None:
+    """Re-queue an Assign the runner NACKed because Muse credentials are missing.
+
+    The runner reports ``reason=agent_auth_missing`` before ``Accept`` when
+    neither ``META_API_KEY`` nor a non-empty ``~/.config/muse/auth.json`` is
+    present, so ``muse exec`` never starts and the run does not burn the
+    issue's tick budget. Same DB effect as
+    :func:`apply_assign_rejected_busy` (BUSY flip + requeue) so the pod drain
+    cannot instantly re-assign it to the same credential-less runner, but
+    with a distinct wire name for telemetry.
+
+    Must be called inside ``transaction.atomic()``.
+    """
+    Runner.objects.filter(pk=runner.pk).update(status=RunnerStatus.BUSY)
+    apply_run_resume_unavailable(runner, run_id, locked_run=locked_run)
+
+
 # Detail-string prefixes for failures that aren't actionable by the user
 # (the runner restarted, the cloud watchdog reaped a stalled cluster of
 # runs, etc.). These get a DB row update and nothing else — surfacing a

@@ -393,6 +393,28 @@ class RunFailedEndpoint(_RunEndpointBase):
                     locked_run=locked,
                 )
                 return Response({"ok": True, "rescheduled": True})
+            # The runner rejected this Assign before Accept because Muse
+            # credentials are missing (neither META_API_KEY nor a non-empty
+            # ~/.config/muse/auth.json), so `muse exec` never started.
+            # Re-queue for another runner without charging the tick budget;
+            # without this branch the NACK would fail-stop the run.
+            if (request.data.get("reason") or "") == "agent_auth_missing":
+                locked, closed = self._lock_non_terminal(run)
+                if closed:
+                    return closed
+                if locked.status == AgentRunStatus.CANCEL_REQUESTED:
+                    run_lifecycle.finalize_run_terminal(
+                        runner,
+                        locked.id,
+                        AgentRunStatus.CANCELLED,
+                    )
+                    return Response({"ok": True, "cancelled": True})
+                run_lifecycle.apply_agent_auth_missing(
+                    runner,
+                    locked.id,
+                    locked_run=locked,
+                )
+                return Response({"ok": True, "rescheduled": True})
             # A safety-classifier decline (e.g. Claude Fable 5 cyber/bio) is a
             # terminal REFUSED, not a generic crash. The runner reports
             # `reason: "refusal"` with a `category`; record both so a policy
