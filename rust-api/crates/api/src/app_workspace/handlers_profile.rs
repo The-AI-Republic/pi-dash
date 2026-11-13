@@ -1115,67 +1115,23 @@ fn profile_id_exists(user_id: uuid::Uuid, slug: &str) -> SimpleExpr {
 
 /// The rich `filters` param compiled like `complex_filter`, over the
 /// `issue` / `state` aliases. Returns the condition plus the relation
-/// aliases a leaf filters through (a declared relation leaf that compiled
-/// to a predicate, not to the match-all / match-none constants).
+/// aliases with a plain positive occurrence (INNER); `or`-only aliases
+/// share the LEFT join via the mention scan below, and `not`'d aliases
+/// compile to `NOT EXISTS` with no join (Django `split_exclude`).
 fn p_rich_condition(
     query: &QueryMap,
     tz: &chrono_tz::Tz,
 ) -> Result<Option<(Condition, std::collections::BTreeSet<&'static str>)>, Denial> {
     use pidash_db::filter::FilterTree;
-    fn relation_alias(name: &str) -> Option<&'static str> {
-        use pidash_db::filterset::{FilterKind, ISSUE_FILTERSET};
-        let decl = ISSUE_FILTERSET.iter().find(|decl| decl.name == name)?;
-        match decl.kind {
-            FilterKind::Relation { join_table, .. } => Some(join_table),
-            _ => None,
-        }
-    }
-    fn walk(
-        tree: &FilterTree,
-        tz: &chrono_tz::Tz,
-        used: &mut std::collections::BTreeSet<&'static str>,
-    ) -> Result<Condition, pidash_db::filter::FilterError> {
-        match tree {
-            FilterTree::And(children) => {
-                let mut cond = Condition::all();
-                for child in children {
-                    cond = cond.add(walk(child, tz, used)?);
-                }
-                Ok(cond)
-            }
-            FilterTree::Or(children) => {
-                let mut cond = Condition::any();
-                for child in children {
-                    cond = cond.add(walk(child, tz, used)?);
-                }
-                Ok(cond)
-            }
-            FilterTree::Not(child) => Ok(walk(child, tz, used)?.not()),
-            FilterTree::Leaf(leaves) => {
-                let mut combined = Condition::all();
-                for leaf in leaves {
-                    let name = crate::app_issues::leaf_name(&leaf.field, leaf.lookup);
-                    let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !pidash_db::filterset::is_constant(&expr) {
-                        if let Some(alias) = relation_alias(&name) {
-                            used.insert(alias);
-                        }
-                    }
-                    combined = combined.add(expr);
-                }
-                Ok(combined)
-            }
-        }
-    }
     let raw = query_last(query, "filters").unwrap_or_default();
     if raw.is_empty() {
         return Ok(None);
     }
     match FilterTree::parse_param_opt(&raw).map_err(crate::app_issues::filter_denial)? {
         Some(tree) => {
-            let mut used = std::collections::BTreeSet::new();
-            let cond = walk(&tree, tz, &mut used).map_err(crate::app_issues::filter_denial)?;
-            Ok(Some((cond, used)))
+            let compiled = pidash_db::filterset::compile_tree(&tree, tz)
+                .map_err(crate::app_issues::filter_denial)?;
+            Ok(Some((compiled.condition, compiled.inner)))
         }
         None => Ok(None),
     }
@@ -1275,8 +1231,10 @@ fn profile_filtered_set(
     }
     let legacy = p_legacy_condition(query)?;
     // Rendered filter text decides the relation joins (the text engine's
-    // scan): rich leaves that filter through a relation take INNER,
-    // legacy values keep LEFT+WHERE semantics, `__isnull`-only stays LEFT.
+    // scan): INNER only on a plain positive rich occurrence or a positive
+    // legacy predicate; a rich `or`-only alias joins LEFT (Django
+    // LEFT-OUTERs disjuncts) and a `not`'d alias is `NOT EXISTS` with no
+    // join.
     {
         let mut probe = Condition::all();
         if let Some((rich, _)) = rich_pair.as_ref() {
@@ -1286,10 +1244,16 @@ fn profile_filtered_set(
             probe = probe.add(legacy_cond);
         }
         let (fragment, _) = render_condition(&probe);
+        let legacy_fragment: String = match legacy.as_ref() {
+            Some(legacy_cond) => render_condition(legacy_cond).0,
+            None => String::new(),
+        };
         for (table, alias) in RELATION_JOINS {
             let mentioned = fragment.contains(&format!("\"{alias}\"."))
                 || fragment.contains(&format!("{alias}."));
-            let nullable_only = mentioned && alias_nullable_only(&fragment, alias);
+            let legacy_mentioned = legacy_fragment.contains(&format!("\"{alias}\"."))
+                || legacy_fragment.contains(&format!("{alias}."));
+            let legacy_positive = legacy_mentioned && !alias_nullable_only(&legacy_fragment, alias);
             let grouped = group_join_alias(group_by, sub_group_by, alias);
             let rich_inner = rich_used.contains(alias);
             let used_leg = mentioned || grouped;
@@ -1298,9 +1262,9 @@ fn profile_filtered_set(
             }
             // NEWPIDASH-152 (NEWPIDASH-131 twin): a grouped m2m alias is
             // joined LEFT (Django's LEFT OUTER JOIN + `deleted_at IS NULL`
-            // on `utils/grouper.py:41-49`); only a rich leaf or a
-            // positive legacy predicate upgrades to INNER.
-            let inner = rich_inner || (mentioned && !nullable_only);
+            // on `utils/grouper.py:41-49`); only a plain positive rich
+            // leaf or a positive legacy predicate upgrades to INNER.
+            let inner = rich_inner || legacy_positive;
             let kind = if inner {
                 JoinType::InnerJoin
             } else {

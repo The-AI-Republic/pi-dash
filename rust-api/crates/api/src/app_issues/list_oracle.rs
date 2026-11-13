@@ -14,8 +14,9 @@ use sqlx::Row;
 
 use super::reads_oracle::{archive_scope_where, ARCHIVE_JOINS};
 use super::{
-    bind_all, complex_filter, legacy_sql, query_last, render_condition, with_order_joins, Binder,
-    Denial, FilterLayers, FilteredSet, Gate, OrderKey, QueryMap, INVALID_DETAIL_BODY_MSG,
+    bind_all, complex_filter, legacy_sql, query_last, render_condition, rich_inner_aliases,
+    with_order_joins, Binder, Denial, FilterLayers, FilteredSet, Gate, OrderKey, QueryMap,
+    INVALID_DETAIL_BODY_MSG,
 };
 use super::{min_order_subquery, order_key, parse_datetime_param};
 
@@ -264,7 +265,7 @@ pub fn filtered_set(
         fragments.push(complex_sql);
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     if let Some((fragment, binds)) = extra {
         fragments.push(binder.splice(&fragment, binds));
@@ -284,23 +285,32 @@ pub fn filtered_set(
         fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
-    // INNER when referenced by a positive condition (Django's
-    // `filter()` join); LEFT when every reference is an
-    // `IS [NOT] NULL` test (Django's `__isnull` join, the m2m group
-    // key included) or unreferenced.
+    // INNER when referenced positively (Django's `filter()` join): a
+    // plain positive rich occurrence or a positive legacy predicate.
+    // A rich `or`-only alias joins LEFT (Django LEFT-OUTERs disjuncts),
+    // an `IS [NOT] NULL`-only alias takes LEFT (Django's `__isnull`
+    // join, the m2m group key included), and a `not`'d alias lives only
+    // in `NOT EXISTS` subqueries (Django `split_exclude`) — the `__e_`
+    // subquery alias never matches the `"alias".` scan below.
     // Joined tables carry no soft-delete guard: `filter()` never applies a
     // related manager to a join, so `filter(labels__in=...)` matches
     // soft-deleted link rows and `labels__isnull=False` keeps issues whose
     // only links are deleted.
+    let rich_inner = if layers.rich {
+        rich_inner_aliases(query, &gate.timezone)
+    } else {
+        Default::default()
+    };
     let mut joins = String::new();
     let mut referenced = Vec::new();
     if layers.rich || layers.legacy {
         for (table, alias, key_column) in RELATION_JOINS {
             let marker = format!("\"{alias}\".");
             let mentioned = where_sql.contains(&marker);
-            let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+            let legacy_positive =
+                legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
             let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-            let inner = used && !nullable_only;
+            let inner = rich_inner.contains(alias) || legacy_positive;
             if used {
                 referenced.push(*alias);
             }
@@ -562,7 +572,7 @@ fn archive_filtered_set(
         fragments.push(complex_sql);
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
     // group key — group or sub — filters its join's `deleted_at`.
@@ -579,14 +589,20 @@ fn archive_filtered_set(
         fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
+    // Same INNER/LEFT rule as `filtered_set`: plain positive rich
+    // occurrence or positive legacy predicate → INNER; `or`-only,
+    // `IS NULL`-only and group-key aliases → LEFT; `not`'d aliases sit
+    // in `NOT EXISTS` subqueries and never promote a join.
+    let rich_inner = rich_inner_aliases(query, &gate.timezone);
     let mut joins = String::new();
     let mut referenced = Vec::new();
     for (table, alias, key_column) in RELATION_JOINS {
         let marker = format!("\"{alias}\".");
         let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+        let legacy_positive =
+            legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-        let inner = used && !nullable_only;
+        let inner = rich_inner.contains(alias) || legacy_positive;
         if used {
             referenced.push(*alias);
         }

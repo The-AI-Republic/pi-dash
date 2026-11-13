@@ -3508,6 +3508,17 @@ async fn view_issues_list(
     } else {
         pidash_db::filter::FilterTree::parse_param_opt(&filters_raw).map_err(filter_denial)?
     };
+    // Relation aliases with a plain positive rich occurrence (INNER);
+    // `or`-only aliases join LEFT and `not`'d aliases compile to
+    // `NOT EXISTS` (Django `split_exclude` / LEFT-OUTER disjuncts).
+    let rich_inner: std::collections::BTreeSet<&'static str> = tree
+        .as_ref()
+        .map(|tree| {
+            pidash_db::filterset::compile_tree(tree, &timezone)
+                .map(|compiled| compiled.inner)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     let complex_where = match tree {
         None => None,
         Some(tree) => {
@@ -3579,7 +3590,10 @@ async fn view_issues_list(
     );
 
     // Relation joins for filter references (Django's `filter()` joins):
-    // INNER when referenced positively, LEFT when only `__isnull`-tested.
+    // INNER when referenced positively (a plain rich occurrence or a
+    // positive legacy predicate), LEFT when only `__isnull`-tested or
+    // under `or`; `not`'d aliases are in the SQL only as `NOT EXISTS`
+    // subqueries and never promote a join.
     // The probe is the filter fragments only: the base statement never
     // mentions these aliases, and the ORDER BY key resolves to `issue.*`,
     // `state.*`, self-contained subqueries, or the cycle-name traversal
@@ -3600,11 +3614,14 @@ async fn view_issues_list(
         if !alias_referenced(&filter_probe, alias) {
             continue;
         }
-        let kind = if alias_nullable_only(&filter_probe, alias) {
-            "LEFT JOIN"
-        } else {
-            "INNER JOIN"
-        };
+        // Legacy `__isnull`-only references stay LEFT; a rich `or`-only
+        // alias joins LEFT too (Django LEFT-OUTERs disjuncts). Only a
+        // plain positive occurrence upgrades to INNER.
+        let legacy_positive = legacy_where.as_deref().is_some_and(|legacy| {
+            alias_referenced(legacy, alias) && !alias_nullable_only(legacy, alias)
+        });
+        let inner = rich_inner.contains(alias) || legacy_positive;
+        let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
         ));

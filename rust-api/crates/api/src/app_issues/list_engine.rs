@@ -16,14 +16,17 @@
 //! - the `issue_objects` preamble, guest scoping and the detail
 //!   permission `EXISTS`;
 //! - rich (`filters`) and legacy (`issue_filters`) predicates;
-//! - the relation joins: INNER when a compiled rich leaf filters through
-//!   the relation, LEFT otherwise (an m2m group key only guards its
+//! - the relation joins: INNER only on a plain positive rich leaf,
+//!   LEFT for an `or`-only rich alias (Django LEFT-OUTERs disjuncts,
+//!   fan-out preserved) and for an m2m group key (which only guards its
 //!   join's `deleted_at` in the WHERE, exactly like Django's LEFT OUTER
 //!   JOIN + `isnull` filter, so linkless rows survive with the NULL
-//!   group key that feeds the "None" bucket). The decision is
-//!   structural (which declared relation leaf compiled to a predicate),
-//!   not a text search. Legacy predicates never upgrade a join, exactly as
-//!   before (a positive predicate over a LEFT join keeps the same rows);
+//!   group key that feeds the "None" bucket); a `not`'d relation leaf
+//!   compiles to `NOT EXISTS` (Django `split_exclude`) with no join.
+//!   The decision is structural (which declared relation leaf compiled
+//!   to a predicate, and in which context), not a text search. Legacy
+//!   predicates never upgrade a join, exactly as before (a positive
+//!   predicate over a LEFT join keeps the same rows);
 //! - the annotation subqueries, order keys, group expressions, windows and
 //!   counts.
 //!
@@ -40,7 +43,7 @@ use pidash_db::entity::{
     issue_assignees, issue_labels, issue_links, issue_mentions, issue_subscribers, issue_types,
     issues, labels, module_issues, modules, project_members, projects, states, users, workspaces,
 };
-use pidash_db::filterset::{FilterKind, ISSUE_FILTERSET};
+use pidash_db::filterset::CompiledTree;
 use pidash_db::issue_filters::FilterValue;
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult};
 use sea_query::extension::postgres::{PgExpr, PgFunc};
@@ -215,71 +218,21 @@ impl IssueSet {
 }
 
 /// The rich `filters` param compiled like [`super::complex_filter`],
-/// additionally reporting which relation aliases a leaf filters through
-/// (a declared relation leaf that compiled to a predicate, not to the
-/// match-all / match-none constants).
-fn rich_condition(
-    query: &QueryMap,
-    tz: &Tz,
-    used: &mut BTreeSet<&'static str>,
-) -> Result<Option<Condition>, Denial> {
+/// additionally reporting each relation alias's join kind: `inner`
+/// aliases have a plain positive occurrence (INNER join), `left`
+/// aliases occur only under `or` (LEFT join, fan-out preserved).
+/// Aliases under an odd `not` compile to `NOT EXISTS` and need no join.
+fn rich_condition(query: &QueryMap, tz: &Tz) -> Result<Option<CompiledTree>, Denial> {
     use pidash_db::filter::FilterTree;
-    fn walk(
-        tree: &FilterTree,
-        tz: &Tz,
-        used: &mut BTreeSet<&'static str>,
-    ) -> Result<Condition, pidash_db::filter::FilterError> {
-        match tree {
-            FilterTree::And(children) => {
-                let mut cond = Condition::all();
-                for child in children {
-                    cond = cond.add(walk(child, tz, used)?);
-                }
-                Ok(cond)
-            }
-            FilterTree::Or(children) => {
-                let mut cond = Condition::any();
-                for child in children {
-                    cond = cond.add(walk(child, tz, used)?);
-                }
-                Ok(cond)
-            }
-            FilterTree::Not(child) => Ok(walk(child, tz, used)?.not()),
-            FilterTree::Leaf(leaves) => {
-                // `build_combined`, leaf by leaf, in the caller's order.
-                let mut combined = Condition::all();
-                for leaf in leaves {
-                    let name = super::leaf_name(&leaf.field, leaf.lookup);
-                    let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !pidash_db::filterset::is_constant(&expr) {
-                        if let Some(alias) = relation_alias(&name) {
-                            used.insert(alias);
-                        }
-                    }
-                    combined = combined.add(expr);
-                }
-                Ok(combined)
-            }
-        }
-    }
     let raw = query_last(query, "filters").unwrap_or_default();
     if raw.is_empty() {
         return Ok(None);
     }
     match FilterTree::parse_param_opt(&raw).map_err(super::filter_denial)? {
-        Some(tree) => walk(&tree, tz, used)
+        Some(tree) => pidash_db::filterset::compile_tree(&tree, tz)
             .map(Some)
             .map_err(super::filter_denial),
         None => Ok(None),
-    }
-}
-
-/// The relation alias a declared rich filter joins through, if any.
-fn relation_alias(name: &str) -> Option<&'static str> {
-    let decl = ISSUE_FILTERSET.iter().find(|decl| decl.name == name)?;
-    match decl.kind {
-        FilterKind::Relation { join_table, .. } => Some(join_table),
-        _ => None,
     }
 }
 
@@ -367,10 +320,13 @@ fn finish_set(
     extra: Option<SimpleExpr>,
     layers: FilterLayers,
 ) -> Result<IssueSet, Denial> {
-    let mut used = BTreeSet::new();
+    let mut rich_inner: BTreeSet<&'static str> = BTreeSet::new();
+    let mut rich_left: BTreeSet<&'static str> = BTreeSet::new();
     if layers.rich {
-        if let Some(rich) = rich_condition(query, tz, &mut used)? {
-            cond = cond.add(rich);
+        if let Some(rich) = rich_condition(query, tz)? {
+            rich_inner = rich.inner.clone();
+            rich_left = rich.left.clone();
+            cond = cond.add(rich.condition);
         }
     }
     if layers.legacy {
@@ -398,9 +354,10 @@ fn finish_set(
         }
         for (table, alias) in RELATION_JOINS {
             let grouped = group_join_alias(group_by, sub_group_by, alias);
-            let rich = used.contains(alias);
+            let rich_inner = rich_inner.contains(alias);
+            let rich_left = rich_left.contains(alias);
             let legacy_need = legacy_used.contains(alias);
-            let needs_join = rich || grouped || legacy_need;
+            let needs_join = rich_inner || rich_left || grouped || legacy_need;
             // `issue_cycle` must always be joined: cycle-name ordering
             // (`order_expr` with `Some("issue_cycle")`) resolves to
             // `OrderJoins::Bridge("issue_cycle")`, which references
@@ -412,10 +369,14 @@ fn finish_set(
                 continue;
             }
             // NEWPIDASH-131: a grouped m2m alias is joined LEFT (Django's
-            // LEFT OUTER JOIN + `deleted_at IS NULL`); only a rich leaf
-            // upgrades to INNER. NEWPIDASH-132: unreferenced aliases are
-            // skipped entirely.
-            let inner = rich;
+            // LEFT OUTER JOIN + `deleted_at IS NULL`). A rich alias joins
+            // INNER only on a plain positive occurrence; an `or`-only
+            // alias joins LEFT (Django LEFT-OUTERs disjuncts within one
+            // `filter()`, keeping single-table matches and their
+            // fan-out) and a `not`-only alias compiles to `NOT EXISTS`
+            // with no join at all. NEWPIDASH-132: unreferenced aliases
+            // are skipped entirely.
+            let inner = rich_inner;
             if inner {
                 referenced.push(*alias);
             }
@@ -2359,5 +2320,69 @@ mod tests {
             text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#),
             "filled assignee leaf must INNER JOIN: {text}"
         );
+    }
+
+    #[test]
+    fn negated_relation_uses_exists_without_join() {
+        // NEWPIDASH-194: {"not": {"assignee_id__in": X}} must be
+        // NOT EXISTS (Django split_exclude): linkless issues stay in,
+        // X+Y issues stay out. No issue_assignee join at all.
+        let negated = query(&[(
+            "filters",
+            r#"{"not":{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}}"#,
+        )]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &negated,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(set.referenced.is_empty(), "referenced={:?}", set.referenced);
+        let text = sql(&count_distinct(&set));
+        assert!(text.contains("EXISTS"), "{text}");
+        assert!(text.contains("NOT EXISTS("), "{text}");
+        assert!(
+            !text.contains(r#"JOIN "issue_assignees" AS "issue_assignee""#),
+            "negated leaf must not join issue_assignees: {text}"
+        );
+    }
+
+    #[test]
+    fn or_relation_uses_left_join() {
+        // NEWPIDASH-194: {"or": [{"assignee_id": X}, {"label_id": L}]}
+        // must be LEFT joins (Django LEFT-OUTERs disjuncts): an issue
+        // assigned to X with no label still matches.
+        let ored = query(&[(
+            "filters",
+            r#"{"or":[{"assignee_id":"00000000-0000-0000-0000-000000000001"},{"label_id":"00000000-0000-0000-0000-000000000002"}]}"#,
+        )]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &ored,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(set.referenced.is_empty(), "referenced={:?}", set.referenced);
+        let text = sql(&count_distinct(&set));
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_assignees" AS "issue_assignee""#),
+            "or leaf must LEFT JOIN issue_assignees: {text}"
+        );
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#),
+            "or leaf must LEFT JOIN issue_labels: {text}"
+        );
+        assert!(!text.contains(r#"INNER JOIN "issue_assignees""#), "{text}");
+        assert!(!text.contains(r#"INNER JOIN "issue_labels""#), "{text}");
     }
 }
