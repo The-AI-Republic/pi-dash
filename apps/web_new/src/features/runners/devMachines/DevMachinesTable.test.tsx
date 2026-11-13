@@ -134,7 +134,11 @@ describe("DevMachinesTable", () => {
       ],
     });
     const states = screen.getAllByTestId("dev-machine-engine-state").map((node) => node.textContent);
-    expect(states).toEqual(["Engine paused by you", "Engine paused: wallet is empty", "Engine unavailable"]);
+    expect(states).toEqual([
+      "Pi Dash Agent paused by you",
+      "Pi Dash Agent paused: wallet is empty",
+      "Pi Dash Agent unavailable",
+    ]);
   });
 
   it("expands a row into its engine and own-agent runners", () => {
@@ -156,7 +160,7 @@ describe("DevMachinesTable", () => {
     expect(within(details).getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(within(details).queryByRole("button", { name: "Pause the Pi Dash Agent" })).not.toBeInTheDocument();
     expect(within(details).queryByRole("switch")).not.toBeInTheDocument();
-    expect(within(details).queryByRole("button", { name: "Sign out the engine" })).not.toBeInTheDocument();
+    expect(within(details).queryByRole("button", { name: "Sign out Pi Dash Agent" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: MACHINE_DETAILS_HIDE }));
     expect(screen.queryByTestId("dev-machine-details")).not.toBeInTheDocument();
   });
@@ -175,7 +179,7 @@ describe("DevMachinesTable", () => {
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "pause", paused: false }));
     fireEvent.click(screen.getByRole("switch"));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "team-runs", enabled: true }));
-    fireEvent.click(screen.getByRole("button", { name: "Sign out the engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign out Pi Dash Agent" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "sign-out-pidash-agent" }));
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "rename" }));

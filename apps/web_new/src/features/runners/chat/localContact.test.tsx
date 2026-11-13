@@ -122,6 +122,6 @@ describe("usePidashAgentContact", () => {
     platformState.localChat = true;
     contracts.getPidashAgentProfile.mockRejectedValue({ code: 500 });
     const { result } = setup();
-    await waitFor(() => expect(result.current[0]?.unavailableReason).toBe("The built-in agent is unavailable."));
+    await waitFor(() => expect(result.current[0]?.unavailableReason).toBe("Pi Dash Agent is unavailable."));
   });
 });

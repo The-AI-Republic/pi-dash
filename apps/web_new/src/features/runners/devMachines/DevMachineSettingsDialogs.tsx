@@ -94,8 +94,8 @@ export const REMOVE_ENGINE_COPY: MachineConfirmCopy = {
 
 export const SIGN_OUT_ENGINE_COPY: MachineConfirmCopy = {
   title: "Sign out the Pi Dash Agent?",
-  body: "This revokes the engine's credential on this computer only. Its engine stops taking runs until someone signs it in again on the computer (`pidash login --engine` or the desktop app). Pi Dash and the computer's own-agent runners stay signed in.",
-  confirm: "Sign out the engine",
+  body: "This revokes the Pi Dash Agent's credential on this computer only. It stops taking runs until someone signs it in again on the computer (`pidash login --engine` or the desktop app). Pi Dash and the computer's own-agent runners stay signed in.",
+  confirm: "Sign out Pi Dash Agent",
 };
 
 /** Confirmation copy for merging a replaced computer into its successor. */

@@ -70,7 +70,7 @@ export function usePidashAgentContact(): PidashAgentContact[] {
   if (availability.isError) {
     const error = availability.error;
     unavailableReason =
-      error instanceof Error && error.message !== "" ? error.message : "The built-in agent is unavailable.";
+      error instanceof Error && error.message !== "" ? error.message : "Pi Dash Agent is unavailable.";
   } else if (availability.data !== undefined) {
     unavailableReason = pidashAgentContactAvailability(availability.data).unavailableReason;
   }

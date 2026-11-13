@@ -160,8 +160,8 @@ describe("DevMachinesContainer", () => {
     await waitFor(() =>
       expect(updateAsync).toHaveBeenCalledWith({ machineId: "old-id", patch: { engine_paused_by_owner: true } })
     );
-    fireEvent.click(screen.getByRole("button", { name: "Sign out the engine" }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Sign out the engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign out Pi Dash Agent" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Sign out Pi Dash Agent" }));
     await waitFor(() => expect(signOutAsync).toHaveBeenCalledWith("old-id"));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Replaced by new box" }));

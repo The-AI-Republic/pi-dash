@@ -28,7 +28,7 @@ export const APPROVAL_MODE_COPY: Record<ApprovalMode, ApprovalModeCopy> = {
   },
   full_access: {
     label: "Full access",
-    help: "Run everything without asking. Commands the engine blocks stay blocked.",
+    help: "Run everything without asking. Commands Pi Dash Agent blocks stay blocked.",
   },
 };
 

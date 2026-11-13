@@ -30,8 +30,9 @@ export const PIDASH_AGENT_PROVISIONING = "desktop_bundled";
 /** The product name of the bundled agent (section 6/7). */
 export const PIDASH_AGENT_NAME = "Pi Dash Agent";
 
-/** Short badge text shown beside Pi Dash Agent runners. */
-export const PIDASH_AGENT_BADGE = "Pi Dash Agent";
+/** Short badge text shown beside Pi Dash Agent runners. The badge is a
+ * descriptor, not a name, so it stays "Built-in" (spec §7.1). */
+export const PIDASH_AGENT_BADGE = "Built-in";
 
 /** True for a Pi Dash Agent runner. */
 export function isPidashAgentRunner(runner: Pick<RunnerIdentity, "provisioning">): boolean {

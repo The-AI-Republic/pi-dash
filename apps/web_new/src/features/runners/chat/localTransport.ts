@@ -238,7 +238,7 @@ export function pidashAgentRunnerRow(): Runner {
   const status: RunnerStatus = "online";
   return {
     id: BUILTIN_CHAT_ID,
-    name: "Built-in agent",
+    name: "Pi Dash Agent",
     status,
     host_label: "",
     provisioning: "manual",

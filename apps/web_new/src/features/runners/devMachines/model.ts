@@ -149,37 +149,37 @@ export function pidashAgentState(
   formatDate: (iso: string) => string = (iso) => new Date(iso).toLocaleDateString()
 ): PidashAgentStateView | null {
   if (machine.revoked_at !== null || !context.hasPidashAgent) return null;
-  if (machine.engine_paused_by_owner === true) return { label: "Engine paused by you", tone: "warning" };
+  if (machine.engine_paused_by_owner === true) return { label: "Pi Dash Agent paused by you", tone: "warning" };
   const reason = machine.engine_auto_pause_reason ?? "";
   if (reason !== "") {
-    return { label: `Engine paused: ${PIDASH_AGENT_AUTO_PAUSE_TEXT[reason] ?? reason}`, tone: "warning" };
+    return { label: `Pi Dash Agent paused: ${PIDASH_AGENT_AUTO_PAUSE_TEXT[reason] ?? reason}`, tone: "warning" };
   }
   // Legacy desktops use the app's session, not an engine credential. Their
   // migrated sign-in state is `never` even while the engine is working.
   const signInState = machine.provisioning === "desktop_bundled" ? undefined : machine.engine_sign_in_state;
   switch (signInState) {
     case "never":
-      return { label: "Engine not signed in", tone: "neutral" };
+      return { label: "Pi Dash Agent not signed in", tone: "neutral" };
     case "signed_out":
-      return { label: "Engine signed out", tone: "neutral" };
+      return { label: "Pi Dash Agent signed out", tone: "neutral" };
     case "revoked":
-      return { label: "Engine sign-in revoked", tone: "neutral" };
+      return { label: "Pi Dash Agent sign-in revoked", tone: "neutral" };
     case "expired":
-      return { label: "Engine sign-in expired", tone: "warning" };
+      return { label: "Pi Dash Agent sign-in expired", tone: "warning" };
     default:
       break;
   }
   if (!(machine.control_online || machine.online_runner_count > 0)) {
-    return { label: "Engine unavailable", tone: "neutral" };
+    return { label: "Pi Dash Agent unavailable", tone: "neutral" };
   }
   if (signInState === "expiring") {
     const at = machine.engine_credential_expires_at ?? null;
     return {
-      label: at === null ? "Engine sign-in expiring" : `Engine expiring on ${formatDate(at)}`,
+      label: at === null ? "Pi Dash Agent sign-in expiring" : `Pi Dash Agent expiring on ${formatDate(at)}`,
       tone: "warning",
     };
   }
-  return { label: "Engine available", tone: "success" };
+  return { label: "Pi Dash Agent available", tone: "success" };
 }
 
 /** Sign-in states with a live or renewable credential to revoke. */
