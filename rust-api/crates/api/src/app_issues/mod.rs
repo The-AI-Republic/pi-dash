@@ -875,19 +875,28 @@ pub fn rich_inner_aliases(
 
 /// The request user's zone for rich-filter compilation, for callers whose
 /// gate does not already carry one (cycle / module / profile lists).
-/// Loaded only when a `filters` param is present: unfiltered requests keep
-/// their current behavior. A bad zone or a missing user row is a 500 —
-/// Django blows up the same way in `TimezoneMixin.initial`, before the
-/// view body runs.
+/// Loaded when a `filters` param is present, or when any legacy
+/// `__date` filter (created_at / updated_at / completed_at) is present,
+/// since those truncate in the actor zone (`TimezoneMixin`). Unfiltered
+/// requests keep their current behavior. A bad zone or a missing user
+/// row is a 500 — Django blows up the same way in
+/// `TimezoneMixin.initial`, before the view body runs.
 pub async fn filters_timezone(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
     query: &QueryMap,
 ) -> Result<chrono_tz::Tz, Denial> {
-    if query_last(query, "filters")
-        .map(|raw| raw.is_empty())
-        .unwrap_or(true)
-    {
+    let need_rich = query_last(query, "filters")
+        .map(|raw| !raw.is_empty())
+        .unwrap_or(false);
+    let need_legacy = ["created_at", "updated_at", "completed_at"]
+        .iter()
+        .any(|key| {
+            query_last(query, key)
+                .map(|raw| !raw.is_empty())
+                .unwrap_or(false)
+        });
+    if !need_rich && !need_legacy {
         return Ok(chrono_tz::UTC);
     }
     let name = access::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
