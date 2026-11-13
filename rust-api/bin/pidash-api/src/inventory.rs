@@ -1823,7 +1823,6 @@ mod tests {
             &mut registry,
             pool.clone(),
             std::env::temp_dir(),
-            seed_settings.cloud_agent.clone(),
             seed_settings.managed_runner.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
@@ -1879,7 +1878,6 @@ mod tests {
             pool.clone(),
             std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
                 pool.clone(),
-                dispatch_settings.cloud_agent.clone(),
                 dispatch_settings.managed_runner.clone(),
                 None,
                 dispatch_settings.runner.clone(),
@@ -1891,7 +1889,6 @@ mod tests {
             pool.clone(),
             pidash_jobs::orchestration::live_scheduler_dispatch(
                 pool.clone(),
-                dispatch_settings.cloud_agent,
                 dispatch_settings.managed_runner,
                 None,
                 dispatch_settings.runner.clone(),

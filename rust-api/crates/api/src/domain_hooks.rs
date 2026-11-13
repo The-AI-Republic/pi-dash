@@ -131,7 +131,6 @@ impl AppMovePostCommitHook {
         Self {
             hook: MoveHook::new(
                 pool,
-                &settings.cloud_agent,
                 client_from_settings(settings),
                 &settings.runner,
                 terminal,

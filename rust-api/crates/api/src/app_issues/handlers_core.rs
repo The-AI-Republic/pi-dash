@@ -2881,7 +2881,6 @@ async fn run_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        cloud: &state.settings().cloud_agent,
         managed: &state.settings().managed_runner,
         viewer: Some(&viewer),
     };

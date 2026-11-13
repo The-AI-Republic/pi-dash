@@ -45,7 +45,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, dev_machine, git_code_review_links, git_repositories,
@@ -81,10 +81,8 @@ use pidash_compat::datetime::render_isoformat;
 
 /// The jobs-owned inputs behind a [`LiveCreationStore`].
 /// (P4: the cache/toolsets admission inputs died with the cache
-/// family; what remains is the drain settings + the two LLM lookups.)
+/// family; the `cloud` drain argument died with the cloud drain.)
 pub struct StoreDeps<H, P> {
-    /// Cloud settings (the `dispatch_agent_run` drain argument).
-    pub cloud: CloudAgentSettings,
     /// Managed settings (the `managed_runner_enabled` kill switch).
     pub managed: ManagedRunnerSettings,
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
@@ -2046,13 +2044,12 @@ pub struct CreationOutcome<T> {
 
 async fn drain(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
     dispatches: Vec<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<Vec<(Uuid, DispatchDecision)>, CreationJobsError> {
     let mut decisions = Vec::with_capacity(dispatches.len());
     for run_id in dispatches {
-        let decision = dispatch_agent_run(pool, cloud, run_id, now).await?;
+        let decision = dispatch_agent_run(pool, run_id, now).await?;
         decisions.push((run_id, decision));
     }
     Ok(decisions)
@@ -2070,14 +2067,13 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
         pidash_services::orchestration::creation::create_and_dispatch_run(&mut store, req).await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, dispatches, req.now).await?;
+    let dispatch_decisions = drain(pool, dispatches, req.now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2098,14 +2094,13 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
         pidash_services::orchestration::creation::create_continuation_run(&mut store, req).await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, dispatches, req.now).await?;
+    let dispatch_decisions = drain(pool, dispatches, req.now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2126,7 +2121,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
@@ -2134,7 +2128,7 @@ where
             .await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, dispatches, req.now).await?;
+    let dispatch_decisions = drain(pool, dispatches, req.now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2156,7 +2150,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome = pidash_services::orchestration::creation::complete_project_move_handoff(
@@ -2165,7 +2158,7 @@ where
     .await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, dispatches, now).await?;
+    let dispatch_decisions = drain(pool, dispatches, now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2289,45 +2282,6 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
@@ -2342,10 +2296,6 @@ mod tests {
         false
     }
 
-    fn llm_ok(_user: Uuid) -> bool {
-        true
-    }
-
     fn unavailable_profile(_user: Option<Uuid>) -> LlmProfile {
         LlmProfile {
             available: false,
@@ -2357,7 +2307,6 @@ mod tests {
 
     fn deps() -> TestDeps {
         StoreDeps {
-            cloud: django_cloud_settings(),
             managed: django_managed_settings(),
             has_usable_llm_config: no_llm,
             llm_profile: unavailable_profile,
@@ -2993,61 +2942,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
-    async fn live_c4_admission_error_failed() {
-        let pool = pool().await;
-        let graph = seed_graph(&pool, "c4").await;
-        let cases = fixture(CREATE_DISPATCH);
-        let case = &cases["cases"]["C4_admission_error_failed"];
-        sqlx::query("UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = $1")
-            .bind(graph.project)
-            .execute(&pool)
-            .await
-            .expect("cloud project");
-        let mut settings = deps();
-        settings.cloud.enabled = true;
-        settings.cloud.github_tools_enabled = false;
-        settings.cloud.max_queued_per_workspace = 0;
-        settings.has_usable_llm_config = llm_ok;
-        let mut req = dispatch_req(&graph, None);
-        req.trigger = AgentRunTrigger::Tick.value().to_owned();
-        let result = create_and_dispatch_run(&pool, settings, &req)
-            .await
-            .expect("failed, not error");
-        assert_eq!(result.outcome.reason, case["reason"].as_str().unwrap());
-        let created = result.outcome.created_run.expect("row exists");
-        assert!(result.dispatched.is_empty());
-        assert!(result.dispatch_decisions.is_empty());
-        assert_eq!(result.terminal_effects, vec![created]);
-        let row = run_row(&pool, created).await;
-        let after = &case["after"];
-        assert_eq!(row.0, after["status"].as_str().unwrap());
-        assert_eq!(row.5, "tick");
-        assert_eq!(row.7, "cloud_agent");
-        assert_eq!(row.8, after["error_code"].as_str().unwrap());
-        assert_eq!(row.9, after["error"].as_str().unwrap());
-        assert_eq!(row.10, Some(now()));
-        assert!(row.11.is_empty());
-        assert_eq!(row.12, None);
-        // The cloud terminal event lands exactly once.
-        let events: Vec<(i32, String, Value)> = sqlx::query_as(
-            "SELECT seq, kind, payload FROM agent_run_event WHERE agent_run_id = $1",
-        )
-        .bind(created)
-        .fetch_all(&pool)
-        .await
-        .expect("events");
-        assert_eq!(
-            events,
-            vec![(
-                1,
-                "terminal".to_owned(),
-                json!({"status": "failed", "error_code": "run_quota_exceeded"})
-            )]
-        );
-        cleanup(&pool, graph, &[created], &[], &[], &[], &[], &[]).await;
-    }
 
     #[tokio::test]
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
@@ -3194,40 +3088,6 @@ mod tests {
         view
     }
 
-    #[tokio::test]
-    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
-    async fn live_k2_admission_error_failed() {
-        let pool = pool().await;
-        let graph = seed_graph(&pool, "k2").await;
-        let cases = fixture(CONTINUATION);
-        let case = &cases["cases"]["K2_admission_error_failed"];
-        sqlx::query("UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = $1")
-            .bind(graph.project)
-            .execute(&pool)
-            .await
-            .expect("cloud project");
-        let mut settings = deps();
-        settings.cloud.enabled = true;
-        settings.cloud.github_tools_enabled = false;
-        settings.cloud.max_queued_per_workspace = 0;
-        settings.has_usable_llm_config = llm_ok;
-        let parent = continuation_parent(&pool, &graph).await;
-        let parent_id = parent.id;
-        let mut req = continuation_req(&graph, parent);
-        req.trigger = AgentRunTrigger::Tick.value().to_owned();
-        let result = create_continuation_run(&pool, settings, &req)
-            .await
-            .expect("failed, not error");
-        assert_eq!(result.outcome.reason, case["reason"].as_str().unwrap());
-        assert_eq!(result.outcome.coalesced_into, None);
-        let created = result.outcome.created_run.expect("row exists");
-        assert!(result.dispatched.is_empty());
-        let row = run_row(&pool, created).await;
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.8, "run_quota_exceeded");
-        assert_eq!(row.10, Some(now()));
-        cleanup(&pool, graph, &[parent_id, created], &[], &[], &[], &[], &[]).await;
-    }
 
     #[tokio::test]
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]

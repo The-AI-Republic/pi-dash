@@ -414,7 +414,6 @@ mod tests {
             &mut registry,
             pool.clone(),
             std::env::temp_dir(),
-            seed_settings.cloud_agent.clone(),
             seed_settings.managed_runner.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
