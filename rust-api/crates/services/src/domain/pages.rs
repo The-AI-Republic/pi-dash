@@ -214,6 +214,7 @@ pub async fn move_to_project(
 
     let stamp: sea_orm::prelude::DateTimeWithTimeZone = now.into();
     let subtree: Vec<Uuid> = db
+        // raw-sql: SeaORM 1.1 / sea-query 0.32 has no recursive-CTE query builder; the subtree read is a single read-only statement (see module docs).
         .query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             SUBTREE_SQL,
