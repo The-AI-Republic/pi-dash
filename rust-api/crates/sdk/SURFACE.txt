@@ -505,7 +505,6 @@ pidash_sdk::jobs::django_dumps
 pidash_sdk::jobs::enqueue
 pidash_sdk::jobs::ensure_schema
 pidash_sdk::jobs::ensure_schema_sql
-pidash_sdk::jobs::extra_toolsets_allowed
 pidash_sdk::jobs::preflight_eligibility_or_bounce
 pidash_sdk::jobs::register_oss_handlers
 pidash_sdk::jobs::run_scheduler
@@ -603,7 +602,6 @@ pidash_sdk::ops::complete_project_move_handoff_inline
 pidash_sdk::ops::connect_primary
 pidash_sdk::ops::create_ticker_sql
 pidash_sdk::ops::default_for
-pidash_sdk::ops::dispatch_waiting
 pidash_sdk::ops::drain_for_runner_by_id
 pidash_sdk::ops::drain_pod_by_id
 pidash_sdk::ops::drain_publish_effects

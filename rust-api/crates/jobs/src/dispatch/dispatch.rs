@@ -5,11 +5,10 @@
 //! What survives P3 step A (agent naming convention): the creation
 //! re-exports (`execution_fields` and friends, owned by
 //! `pidash_services::dispatch::execution`), the runner-plane
-//! `dispatch_agent_run` (non-cloud kinds drain their pod), the
-//! post-commit collector, and the `dispatch_waiting` stub. The cloud
-//! lease/offer engine, the event append, and their tests died with
-//! the retired plane; `dispatch_waiting` is removed with its trait
-//! methods in P4.
+//! `dispatch_agent_run` (non-cloud kinds drain their pod), and the
+//! post-commit collector. The cloud lease/offer engine, the event
+//! append, and their tests died with the retired plane; P4 removed
+//! the `dispatch_waiting` stub and its trait methods.
 //!
 //! Fixture: `rust-api/fixtures/dispatch/fx-disp-06-dispatch.golden.json`
 //! (FX-DISP-06), replayed by the suite below (trimmed in P3 step B).
@@ -18,7 +17,6 @@ use chrono::{DateTime, Utc};
 use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Select,
 };
-use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -57,25 +55,7 @@ fn dispatch_run_query(run_id: Uuid) -> Select<agent_run::Entity> {
 // Dispatch engine (`dispatch.py:20-70`)
 // ---------------------------------------------------------------------------
 
-/// The `extra_toolsets` plan flag (`runtime.py:36`): a sibling of the
-/// name sets, read with Python truthiness over the plan value.
-///
-/// Survives from the retired execute plane by spec (P3 step A): the
-/// SDK re-exports it and the overlay uses it until P4 removes it.
-pub fn extra_toolsets_allowed(tool_plan: &Value) -> bool {
-    match tool_plan.get("extra_toolsets") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::Number(number)) => {
-            number.as_i64().map(|n| n != 0).unwrap_or(false)
-                || number.as_u64().map(|n| n != 0).unwrap_or(false)
-                || number.as_f64().map(|n| n != 0.0).unwrap_or(false)
-        }
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Object(map)) => !map.is_empty(),
-    }
-}
+// `extra_toolsets_allowed` deleted in P4 with the SDK re-export.
 
 /// One `agent_run` row as `dispatch_agent_run` reads it (`dispatch.py:62`).
 #[derive(Debug, Clone, FromQueryResult)]
@@ -106,22 +86,6 @@ pub enum DispatchDecision {
         /// The pod to drain.
         pod_id: Uuid,
     },
-}
-
-/// Lease and offer the oldest queued rows up to workspace capacity
-/// (`dispatch_waiting`, `dispatch.py:20-48`).
-///
-/// P3 step A: the cloud lease/offer engine is gone — no queue row
-/// tail remains to offer into. This stub returns `Ok(0)` (offered
-/// nothing) so the runner-plane callers stay compiling; the trait
-/// methods and fakes are removed in P4.
-pub async fn dispatch_waiting(
-    _pool: &PgPool,
-    _cloud: &CloudAgentSettings,
-    _workspace_id: Uuid,
-    _now: DateTime<Utc>,
-) -> Result<usize, sqlx::Error> {
-    Ok(0)
 }
 
 /// Dispatch one run (`dispatch_agent_run`, `dispatch.py:61-70`).

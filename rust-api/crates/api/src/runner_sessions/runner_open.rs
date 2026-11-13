@@ -692,10 +692,6 @@ impl RunnerPorts for SessionPorts<'_> {
         self.live.agent_system_user_id().await
     }
 
-    async fn dispatch_waiting(&self, workspace_id: Uuid) -> Result<(), PortError> {
-        self.live.dispatch_waiting(workspace_id).await
-    }
-
     async fn emit_terminal_effects(&self, run_id: Uuid) -> Result<(), PortError> {
         self.live.emit_terminal_effects(run_id).await
     }

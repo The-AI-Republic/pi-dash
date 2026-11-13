@@ -24,7 +24,6 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::dispatch::dispatch_waiting;
 use crate::orchestration::runner_seams::{
     complete_project_move_handoff_live, disarm_on_terminal_signal as disarm_executor,
     maybe_apply_deferred_pause_live,
@@ -133,18 +132,6 @@ impl RunnerRunsSeams for RunnerSeams {
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
         Box::pin(async move {
             drain_pod_by_id(&self.pool, self.redis.as_ref(), &self.runner, pod_id)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    }
-
-    fn dispatch_waiting(
-        &self,
-        workspace_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-        Box::pin(async move {
-            dispatch_waiting(&self.pool, &self.cloud, workspace_id, Utc::now())
                 .await
                 .map(|_| ())
                 .map_err(|error| error.to_string())

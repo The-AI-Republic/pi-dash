@@ -180,8 +180,7 @@ pub async fn lock_workspace(
 /// P3 step B: collapsed to `resolve_executor_kind` plus an empty tool
 /// plan — the cloud gate, admission rate limits, quota verdict, and
 /// tool-plan build died with the retired plane. The admission/cache/
-/// seams parameters remain for the P4 signature cleanup.
-#[allow(clippy::too_many_arguments)]
+/// seams parameters remain for the admission cleanup below.
 pub async fn execution_fields<C, F>(
     _tx: &mut Transaction<'_>,
     inputs: &ExecutionInputs<'_>,
@@ -195,10 +194,10 @@ where
     C: AdmissionCache,
     F: FnOnce() -> bool,
 {
+    let _ = cloud;
     let executor = resolve_executor_kind(
         inputs.requested,
         &inputs.project.default_agent_executor,
-        cloud,
     )?;
     Ok(ExecutionFields {
         executor_kind: executor,

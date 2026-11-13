@@ -155,13 +155,11 @@ impl std::error::Error for ResolveExecutorError {
 /// engine is a runner; new runs are pod-level) — the instance kill switch no
 /// longer turns it away.
 ///
-/// P1 (agent naming convention): a stored `cloud_agent` value resolves to
-/// `LocalRunner` too — the retired path is unreachable. The `cloud`
-/// parameter is kept for the P4 removal and is otherwise unused.
+/// P1/P4 (agent naming convention): a stored `cloud_agent` value
+/// resolves to `LocalRunner` too — the retired path is unreachable.
 pub fn resolve_executor_kind(
     requested: Option<&str>,
     project_default: &str,
-    _cloud: &CloudAgentSettings,
 ) -> Result<AgentExecutorKind, ResolveExecutorError> {
     let value = requested
         .filter(|r| !r.is_empty())
@@ -564,35 +562,30 @@ mod tests {
 
     #[test]
     fn executor_matrix_matches_fixture() {
-        let cloud_on = CloudAgentSettings {
-            enabled: true,
-            ..django_cloud_settings()
-        };
-        let cloud_off = django_cloud_settings();
         let matrix = fixture()["resolve_executor_kind_matrix"]
             .as_array()
             .expect("matrix")
             .clone();
         // requested=null inherits the default.
         assert_eq!(
-            resolve_executor_kind(None, "local_runner", &cloud_on),
+            resolve_executor_kind(None, "local_runner"),
             Ok(AgentExecutorKind::LocalRunner)
         );
         // P1: an explicit cloud request resolves to local even when
         // configured — the retired path is unreachable.
         assert_eq!(
-            resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_on),
+            resolve_executor_kind(Some("cloud_agent"), "local_runner"),
             Ok(AgentExecutorKind::LocalRunner)
         );
         // #2903: a legacy managed value resolves to local (the kill
         // switch no longer turns it away).
         assert_eq!(
-            resolve_executor_kind(Some("managed_runner"), "local_runner", &cloud_on),
+            resolve_executor_kind(Some("managed_runner"), "local_runner"),
             Ok(AgentExecutorKind::LocalRunner)
         );
         assert_eq!(matrix[2]["result"], "local_runner");
         // Unknown values raise the bare ValueError message (no code).
-        let err = resolve_executor_kind(Some("bogus"), "local_runner", &cloud_on)
+        let err = resolve_executor_kind(Some("bogus"), "local_runner")
             .expect_err("unknown executor raises");
         assert_eq!(err, ResolveExecutorError::UnknownExecutor);
         assert_eq!(err.to_string(), "unknown agent executor");
@@ -602,35 +595,31 @@ mod tests {
         // of raising. This intentionally diverges from the Python matrix
         // at matrix[4] (Django still gates on CLOUD_AGENT_ENABLED).
         assert_eq!(
-            resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_off),
+            resolve_executor_kind(Some("cloud_agent"), "local_runner"),
             Ok(AgentExecutorKind::LocalRunner)
         );
         // A stored cloud default resolves to local, as does an explicit
         // local override over a cloud default.
         assert_eq!(
-            resolve_executor_kind(None, "cloud_agent", &cloud_on),
+            resolve_executor_kind(None, "cloud_agent"),
             Ok(AgentExecutorKind::LocalRunner)
         );
         assert_eq!(
-            resolve_executor_kind(Some("local_runner"), "cloud_agent", &cloud_off),
+            resolve_executor_kind(Some("local_runner"), "cloud_agent"),
             Ok(AgentExecutorKind::LocalRunner)
         );
     }
 
     #[test]
     fn executor_resolution_edge_cases_match_python() {
-        let cloud_on = CloudAgentSettings {
-            enabled: true,
-            ..django_cloud_settings()
-        };
         // `requested or default`: "" behaves as None (oracle-verified).
         assert_eq!(
-            resolve_executor_kind(Some(""), "local_runner", &cloud_on),
+            resolve_executor_kind(Some(""), "local_runner"),
             Ok(AgentExecutorKind::LocalRunner)
         );
         // An invalid project default fails the same membership check.
         assert_eq!(
-            resolve_executor_kind(None, "bogus", &cloud_on),
+            resolve_executor_kind(None, "bogus"),
             Err(ResolveExecutorError::UnknownExecutor)
         );
         // Error taxonomy (P3 step B: the cloud capability / required-tool
