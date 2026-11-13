@@ -6,9 +6,9 @@
 // the server refuses cross-user and guest-convert calls. Row: DRAFT-025.
 // Green on apps/web first.
 //
-// The creator-bypass halves are bug: scenarios (guest edits and
-// member/guest single-fetches of owned drafts 403 on the oracle); those
-// scenarios live below once their linked issue exists.
+// The creator-bypass halves (guest edits and member/guest single-fetches
+// of owned drafts) were a bug on both apps until PDASHOSS01-320 fixed the
+// endpoints; they now assert the fixed contract on either target.
 import { test, expect } from "../fixtures";
 import {
   ROLE,
@@ -18,7 +18,6 @@ import {
   serverDeleteDraftStatus,
   serverDraftNames,
   serverDraftRecord,
-  serverDraftsPage,
   serverFetchDraftStatus,
   serverIssueNames,
   serverPatchDraftStatus,
@@ -74,15 +73,12 @@ test(
       await driver.draftOpenPriorityPicker(name);
       await driver.pickerPick("Medium");
       await expect.poll(() => driver.draftPriorityText(name), { timeout: 30_000 }).toBe("Medium");
-      // Members cannot single-fetch even owned drafts (NEWFRONT-299), so
-      // verify through the owner-scoped list both roles can read.
+      // The single fetch admits the creator at any role (DRAFT-025,
+      // PDASHOSS01-320), so read the stored row back through it.
       await expect
-        .poll(
-          async () =>
-            (await serverDraftsPage(workspaceSlug, member.cookie, "")).drafts.find((row) => row.id === draft.id)
-              ?.priority,
-          { timeout: 30_000 }
-        )
+        .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, member.cookie)).priority, {
+          timeout: 30_000,
+        })
         .toBe("medium");
     });
 
