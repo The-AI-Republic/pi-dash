@@ -50,7 +50,7 @@ use uuid::Uuid;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
+    agent_run, dev_machine, git_code_review_links, git_repositories,
     git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
     issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
     workspaces,
@@ -2060,7 +2060,7 @@ where
                 ("error", patch_text(error)),
             ],
         );
-        let locked = map_run_row(locked_row)?;
+        let _locked = map_run_row(locked_row)?;
         {
             let conn = TxConn::new(self.tx.inner());
             let ended_at: sea_orm::prelude::DateTimeWithTimeZone = now.into();
@@ -2080,47 +2080,6 @@ where
                 .exec(&conn)
                 .await
                 .map_err(sea_db)?;
-        }
-        if locked.executor_kind == AgentExecutorKind::CloudAgent {
-            let exists = {
-                let conn = TxConn::new(self.tx.inner());
-                agent_run_event::Entity::find()
-                    .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                    .filter(agent_run_event::Column::Kind.eq("terminal"))
-                    .count(&conn)
-                    .await
-                    .map_err(sea_db)?
-                    > 0
-            };
-            if !exists {
-                let seq = {
-                    let conn = TxConn::new(self.tx.inner());
-                    agent_run_event::Entity::find()
-                        .select_only()
-                        .column(agent_run_event::Column::Seq)
-                        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                        .order_by_desc(agent_run_event::Column::Seq)
-                        .limit(1)
-                        .into_tuple::<i32>()
-                        .one(&conn)
-                        .await
-                        .map_err(sea_db)?
-                        .unwrap_or(0)
-                        + 1
-                };
-                let payload = serde_json::json!({"status": "failed", "error_code": error_code});
-                let created_at: sea_orm::prelude::DateTimeWithTimeZone = now.into();
-                let event = agent_run_event::ActiveModel {
-                    id: ActiveValue::NotSet,
-                    agent_run_id: Set(run_id),
-                    seq: Set(seq),
-                    kind: Set("terminal".to_owned()),
-                    payload: Set(payload),
-                    created_at: Set(created_at),
-                };
-                let conn = TxConn::new(self.tx.inner());
-                event.insert(&conn).await.map_err(sea_db)?;
-            }
         }
         // The `on_commit` lambda (`_publish_effects`): captured, never
         // executed — the celery delay + terminal hooks are D-15's
