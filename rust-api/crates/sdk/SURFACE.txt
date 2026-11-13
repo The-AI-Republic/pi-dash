@@ -831,8 +831,9 @@ pidash_sdk::state::AppState
 pidash_sdk::state::AssistantModelSeam
 pidash_sdk::state::CredentialError
 pidash_sdk::state::CredentialUnavailable
-pidash_sdk::state::DesktopCredential
-pidash_sdk::state::DesktopRequestGate
+pidash_sdk::state::PidashAgentDesktopCredential
+pidash_sdk::state::PidashAgentDesktopRequestGate
+pidash_sdk::state::PidashAgentProfile
 pidash_sdk::state::SeamFuture
 pidash_sdk::state::TitleError
 pidash_sdk::state::TitleRequest

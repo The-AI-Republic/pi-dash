@@ -401,8 +401,8 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -434,12 +434,12 @@ mod tests {
         // `cloud_agent_is_configured` died in P4: the retired row is
         // static (decision 4); only the managed switch reads settings.
         let managed = django_managed_settings();
-        assert!(!managed_runner_is_enabled(&managed));
-        let managed = ManagedRunnerSettings {
+        assert!(!pidash_agent_is_enabled(&managed));
+        let managed = PidashAgentSettings {
             enabled: true,
             ..django_managed_settings()
         };
-        assert!(managed_runner_is_enabled(&managed));
+        assert!(pidash_agent_is_enabled(&managed));
     }
 
     #[test]
