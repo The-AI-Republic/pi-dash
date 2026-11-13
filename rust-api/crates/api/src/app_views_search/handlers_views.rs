@@ -7,16 +7,22 @@
 //! `apps/api/pi_dash/app/urls/views.py:16-65`.
 //!
 //! Handler notes (all verified against the Python source):
-//! - `create` on both viewsets is the DRF default (no `allow_permission`
-//!   decorator in Python): session auth only, then `perform_create`
-//!   scoping. The response serializes the bare instance, so `is_favorite`
-//!   is absent on every create response.
-//! - `PUT` on both detail routes is the DRF default `update` (no
-//!   locked/owner recheck in Python): full write through the serializer,
-//!   response re-read through the *annotated* queryset on project views,
-//!   so `is_favorite` is present. `PATCH` is the custom `partial_update`
-//!   with the locked/owner rechecks and the un-annotated read, so
-//!   `is_favorite` is absent.
+//! - `create` on both viewsets is the DRF default in Python, but
+//!   NEWPIDASH-202 gates it (DIFF-17): workspace create is WORKSPACE
+//!   `[ADMIN, MEMBER]`, project create is PROJECT `[ADMIN, MEMBER, GUEST]`
+//!   on active membership; the response serializes the bare instance, so
+//!   `is_favorite` is absent on every create response.
+//! - `PUT` on both detail routes was the DRF default `update` with no
+//!   locked/owner recheck (Python) — NEWPIDASH-202 makes the Rust PUT run
+//!   the same creator / locked / owner chain as `PATCH` (full write
+//!   through the serializer, response re-read through the *annotated*
+//!   queryset on project views, so `is_favorite` is present; on workspace
+//!   views the un-annotated read, so `is_favorite` is absent).
+//! - `PATCH` is the custom `partial_update` with the locked/owner
+//!   rechecks and the un-annotated read, so `is_favorite` is absent.
+//! - `workspace_retrieve` was undecorated (authN only) in Python —
+//!   NEWPIDASH-202 gates it as WORKSPACE `[ADMIN, MEMBER, GUEST]`
+//!   (PB-0644/0662).
 //! - Destroy of a missing row calls `.get()` directly: `DoesNotExist`
 //!   answers the `ObjectDoesNotExist` branch (`{"error": "The required
 //!   object does not exist."}`, 404), not the DRF `{"detail": ...}` body.
@@ -2360,9 +2366,9 @@ fn resolve_view_order(raw: &str) -> Result<queries_views::ViewOrder, Denial> {
     Ok(queries_views::ViewOrder { column, descending })
 }
 
-/// `POST /api/workspaces/<slug>/views/`: the DRF default create (no role
-/// gate in Python) with `perform_create` scoping (`:56-58`) — 201 with
-/// the bare instance (no `is_favorite`).
+/// `POST /api/workspaces/<slug>/views/`: NEWPIDASH-202 gated WORKSPACE
+/// `[ADMIN, MEMBER]` (Django has no decorator, `perform_create` only
+/// `:56-58`) — 201 with the bare instance (no `is_favorite`).
 async fn workspace_create(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -2373,6 +2379,8 @@ async fn workspace_create(
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
     let timezone = resolved.timezone;
+    let member = membership(&pool, &slug, None, &user_id).await?;
+    permissions::workspace_view_create_gate(&member).map_err(gate_denial)?;
     // DRF parses the body after initial (auth): serializer validation
     // (400) precedes `perform_create`'s workspace lookup (404).
     let body = match detail_body(&state, req).await {
@@ -2419,10 +2427,10 @@ async fn fetch_workspace_view(
     single_row(rows)
 }
 
-/// `GET /api/workspaces/<slug>/views/<pk>/` (`:102-112`): no decorator —
-/// auth only. Unknown pk answers the `get_initial()` 200 (B1). Fires the
-/// retrieve visit publish for found rows (the task runs unconditionally
-/// in Python, but there is no row to name when missing).
+/// `GET /api/workspaces/<slug>/views/<pk>/` (`:102-112`): NEWPIDASH-202
+/// gated WORKSPACE `[ADMIN, MEMBER, GUEST]` (was undecorated, authN
+/// only). Unknown pk for a member answers the `get_initial()` 200 (B1).
+/// Fires the retrieve visit publish for found rows.
 async fn workspace_retrieve(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
@@ -2439,6 +2447,8 @@ async fn workspace_retrieve(
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
     let timezone = resolved.timezone;
+    let member = membership(&pool, &slug, None, &user_id).await?;
+    permissions::workspace_view_retrieve_gate(&member).map_err(gate_denial)?;
     let row = fetch_workspace_view(
         &pool,
         &slug,
@@ -2532,11 +2542,10 @@ async fn workspace_patch(
     Ok(json_response(StatusCode::OK, rendered))
 }
 
-/// `PUT /api/workspaces/<slug>/views/<pk>/`: the DRF default `update` —
-/// no decorator and no locked/owner recheck in Python, so auth only;
-/// full write through the queryset, response without `is_favorite` (the
-/// un-annotated queryset serves workspace views). A miss is the
-/// model-named `Http404`.
+/// `PUT /api/workspaces/<slug>/views/<pk>/`: NEWPIDASH-202 — was the DRF
+/// default `update` (no decorator, no locked/owner recheck); now runs the
+/// same WORKSPACE creator gate and locked/owner rechecks as `PATCH`
+/// (`:80-100`), with a full (non-partial) write.
 async fn workspace_put(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
@@ -2557,15 +2566,15 @@ async fn workspace_put(
         StatusCode::BAD_REQUEST,
         r#"{"error":"Please provide valid detail"}"#.to_owned(),
     ))?;
-    // `get_object()` through the queryset precedes validation: a miss is
-    // the model-named 404.
-    let existing = fetch_workspace_view(&pool, &slug, user_id, &pk).await?;
-    let Some(existing) = existing else {
-        return Err(Denial::Raw(
-            StatusCode::NOT_FOUND,
-            VIEW_PUT_MISSING_BODY.to_owned(),
-        ));
-    };
+    let member = membership(&pool, &slug, None, &user_id).await?;
+    let creator = is_view_creator(&pool, &pk, &user_id).await?;
+    permissions::workspace_view_partial_gate(&member, creator).map_err(gate_denial)?;
+    let (is_locked, owned_by, filters_old) = lock_workspace_view(&pool, &slug, &pk).await?;
+    permissions::view_partial_recheck(permissions::ViewRow::Found {
+        is_locked,
+        is_owner: owned_by == user_id,
+    })
+    .map_err(gate_denial)?;
     let body = match detail_body(&state, req).await {
         Ok(body) => body,
         Err(into) => return Ok(into),
@@ -2573,7 +2582,7 @@ async fn workspace_put(
     let object = body.as_object().cloned().unwrap_or_default();
     reject_null_json(&object)?;
     let write = split_write(&object, false)?;
-    let query = update_query(write.filters.as_ref(), existing.get("filters"))?;
+    let query = update_query(write.filters.as_ref(), Some(&filters_old))?;
     let rendered =
         apply_view_update(&pool, &pk, &user_id, &timezone, &write, &query, false).await?;
     Ok(json_response(StatusCode::OK, rendered))
@@ -2746,9 +2755,10 @@ async fn project_list(
     Ok(json_response(StatusCode::OK, out))
 }
 
-/// `POST /api/workspaces/<slug>/projects/<project_id>/views/`: the DRF
-/// default create (no role gate in Python) with `perform_create` scoping
-/// (`:260-262`) — 201 with the bare instance (no `is_favorite`).
+/// `POST /api/workspaces/<slug>/projects/<project_id>/views/`: NEWPIDASH-202
+/// gated PROJECT `[ADMIN, MEMBER, GUEST]` (Django has no decorator,
+/// `perform_create` only `:260-262`) — 201 with the bare instance (no
+/// `is_favorite`).
 async fn project_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -2760,9 +2770,12 @@ async fn project_create(
     let user_id = resolved.id;
     let timezone = resolved.timezone;
     // The identifier rewrite runs in `initial`, before the view: it stays
-    // ahead of validation. Serializer validation (400) then precedes the
-    // save-time workspace fallback.
+    // ahead of validation. The gate runs after the rewrite (the project
+    // id is needed for the membership row) and before validation, mirroring
+    // the decorator order in Django.
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
+    let member = membership(&pool, &slug, Some(&project_id), &user_id).await?;
+    permissions::project_view_create_gate(&member).map_err(gate_denial)?;
     let body = match detail_body(&state, req).await {
         Ok(body) => body,
         Err(into) => return Ok(into),
@@ -2951,9 +2964,10 @@ async fn project_patch(
     Ok(json_response(StatusCode::OK, rendered))
 }
 
-/// `PUT .../views/<pk>/`: the DRF default `update` (no decorator and no
-/// locked/owner recheck in Python) — auth only, full write through the
-/// annotated queryset, so `is_favorite` is present.
+/// `PUT .../views/<pk>/`: NEWPIDASH-202 — was the DRF default `update`
+/// (no decorator, no locked/owner recheck); now runs the same PROJECT
+/// creator gate and locked/owner rechecks as `PATCH` (`:343-363`), with a
+/// full (non-partial) write through the annotated queryset.
 async fn project_put(
     State(state): State<AppState>,
     Path((slug, project_raw, pk)): Path<(String, String, String)>,
@@ -2975,15 +2989,16 @@ async fn project_put(
         StatusCode::BAD_REQUEST,
         r#"{"error":"Please provide valid detail"}"#.to_owned(),
     ))?;
-    // `get_object()` through the annotated queryset precedes validation:
-    // a miss is the model-named `Http404`.
-    let existing = fetch_project_view(&pool, &slug, &project_id, &user_id, &pk).await?;
-    let Some(existing) = existing else {
-        return Err(Denial::Raw(
-            StatusCode::NOT_FOUND,
-            VIEW_PUT_MISSING_BODY.to_owned(),
-        ));
-    };
+    let member = membership(&pool, &slug, Some(&project_id), &user_id).await?;
+    let creator = is_view_creator(&pool, &pk, &user_id).await?;
+    permissions::project_view_partial_gate(&member, creator).map_err(gate_denial)?;
+    let (is_locked, owned_by, filters_old) =
+        lock_project_view(&pool, &slug, &project_id, &pk).await?;
+    permissions::view_partial_recheck(permissions::ViewRow::Found {
+        is_locked,
+        is_owner: owned_by == user_id,
+    })
+    .map_err(gate_denial)?;
     let body = match detail_body(&state, req).await {
         Ok(body) => body,
         Err(into) => return Ok(into),
@@ -2991,7 +3006,7 @@ async fn project_put(
     let object = body.as_object().cloned().unwrap_or_default();
     reject_null_json(&object)?;
     let write = split_write(&object, false)?;
-    let query = update_query(write.filters.as_ref(), existing.get("filters"))?;
+    let query = update_query(write.filters.as_ref(), Some(&filters_old))?;
     apply_view_update(&pool, &pk, &user_id, &timezone, &write, &query, false).await?;
     let reread = fetch_project_view(&pool, &slug, &project_id, &user_id, &pk)
         .await?
