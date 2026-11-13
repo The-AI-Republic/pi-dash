@@ -2930,7 +2930,7 @@ mod tests {
         .expect("sql");
         assert_eq!(
             sql,
-            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $3"
+            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $2"
         );
     }
 
