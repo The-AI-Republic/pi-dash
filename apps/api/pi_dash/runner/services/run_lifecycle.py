@@ -374,11 +374,7 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
 
     detail = (error_detail or "").strip()
 
-    run = (
-        AgentRun.objects.select_related("work_item", "work_item__project", "work_item__state")
-        .filter(pk=run_id)
-        .first()
-    )
+    run = AgentRun.objects.select_related("work_item", "work_item__project").filter(pk=run_id).first()
     if run is None or run.work_item_id is None:
         return
 
