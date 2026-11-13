@@ -31,8 +31,8 @@
 //!
 //! ```rust,ignore
 //! let deps = pidash_sdk::hooks::HookDeps {
-//!     pool, cloud, managed, cache, redis, runner,
-//!     toolsets, assistant_seam,
+//!     pool, cloud, managed, redis, runner,
+//!     assistant_seam,
 //!     publish: std::sync::Arc::new(pidash_sdk::hooks::QueuePublishDrain::new(&pool)),
 //!     pods: std::sync::Arc::new(pidash_sdk::hooks::LivePodDrain::new(&pool, redis.clone(), runner.clone())),
 //!     terminal: std::sync::Arc::new(pidash_sdk::hooks::QueueTerminalEffectsDrain::new(&pool)),
@@ -74,16 +74,15 @@ use chrono::{DateTime, Utc};
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues_move::{
-    CreationDeps, MoveAdmissionCache, MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
+    CreationDeps, MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
 };
 use pidash_services::domain::transition::IssueTransitionHook;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{dispatch_agent_run, DispatchDecision};
 use crate::issue_transition::{fire_transition, PodDrain, PublishEffectsDrain};
 use crate::orchestration::live_inputs::{
@@ -288,10 +287,8 @@ pub struct HookDeps {
     pub pool: PgPool,
     pub cloud: CloudAgentSettings,
     pub managed: ManagedRunnerSettings,
-    pub cache: RedisAdmissionCache,
     pub redis: Option<redis::Client>,
     pub runner: RunnerSettings,
-    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     pub assistant_seam: Arc<dyn AssistantModelSeam>,
     /// The transition fire's terminal-effects drain (per-fire actor is
     /// bound by the implementation: the api drain binds the fire's actor
@@ -321,7 +318,6 @@ impl HookDeps {
         MoveHook::new(
             &self.pool,
             &self.cloud,
-            self.cache.clone(),
             self.redis.clone(),
             &self.runner,
             Arc::clone(&self.terminal),
@@ -329,10 +325,6 @@ impl HookDeps {
         )
     }
 
-    /// The admission cache over these deps, for the move's creation facts.
-    pub fn admission_cache(&self) -> LiveMoveAdmissionCache {
-        LiveMoveAdmissionCache::new(self.cache.clone())
-    }
 
     /// The shared operation dependencies with the OSS hooks installed:
     /// `transition` + `enqueue` over these deps, through
@@ -354,15 +346,9 @@ impl HookDeps {
     /// The move's handoff-creation runtime facts over these deps, for
     /// the `creation` parameter of
     /// [`move_to_project`][pidash_services::operations::issues::move_to_project].
-    pub fn creation_deps(&self, now_unix_secs: i64) -> CreationDeps {
+    pub fn creation_deps(&self, _now_unix_secs: i64) -> CreationDeps {
         CreationDeps {
             pool: self.pool.clone(),
-            cloud: self.cloud.clone(),
-            managed: self.managed.clone(),
-            now_unix_secs,
-            toolsets: Arc::clone(&self.toolsets),
-            assistant_seam: Arc::clone(&self.assistant_seam),
-            admission: Arc::new(self.admission_cache()),
         }
     }
 }
@@ -452,11 +438,8 @@ impl IssueTransitionHook for TransitionHook {
             let build_deps = || StoreDeps {
                 cloud: deps.cloud.clone(),
                 managed: deps.managed.clone(),
-                cache: deps.cache.clone(),
                 has_usable_llm_config: gate_fn(Arc::clone(&verdicts)),
-                toolsets: Arc::clone(&deps.toolsets),
                 llm_profile: profile_fn(Arc::clone(&presence)),
-                now_unix_secs: request.now.timestamp(),
             };
             let matcher = JobsMatcher::new(deps.pool.clone());
             fire_transition(
@@ -517,7 +500,6 @@ impl TaskEnqueueHook for EnqueueHook {
 pub struct MoveHook {
     pool: PgPool,
     cloud: CloudAgentSettings,
-    cache: RedisAdmissionCache,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
     terminal: Arc<dyn TerminalEffectsDrain>,
@@ -528,7 +510,6 @@ impl MoveHook {
     pub fn new(
         pool: &PgPool,
         cloud: &CloudAgentSettings,
-        cache: RedisAdmissionCache,
         redis: Option<redis::Client>,
         runner: &RunnerSettings,
         terminal: Arc<dyn TerminalEffectsDrain>,
@@ -537,7 +518,6 @@ impl MoveHook {
         Self {
             pool: pool.clone(),
             cloud: cloud.clone(),
-            cache,
             redis,
             runner: runner.clone(),
             terminal,
@@ -587,9 +567,7 @@ impl MovePostCommitHook for MoveHook {
                     }
                 }
             }
-            for consume in &outboxes.deferred {
-                pidash_services::dispatch::admission::consume_admission_token(&this.cache, consume);
-            }
+            // P4: deferred admission consumes died with the cache family.
             Ok(())
         })
     }
@@ -629,40 +607,11 @@ impl MovePostCommitHook for MoveHook {
     }
 }
 
-/// The admission cache over an explicit [`RedisAdmissionCache`]: the two
-/// reads the execution resolve needs, with string errors. Moved
-/// verbatim from the api `AppMoveAdmissionCache`.
-#[derive(Clone)]
-pub struct LiveMoveAdmissionCache {
-    cache: RedisAdmissionCache,
-}
-
-impl LiveMoveAdmissionCache {
-    pub fn new(cache: RedisAdmissionCache) -> Self {
-        Self { cache }
-    }
-}
-
-impl MoveAdmissionCache for LiveMoveAdmissionCache {
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, String> {
-        use pidash_services::dispatch::AdmissionCache;
-        self.cache
-            .bucket_count(key)
-            .map_err(|error| error.to_string())
-    }
-
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), String> {
-        use pidash_services::dispatch::AdmissionCache;
-        self.cache
-            .add_or_incr(key, timeout_secs)
-            .map_err(|error| error.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use pidash_services::extensions::{SeamFuture, TitleError, TitleRequest};
+
     use super::*;
-    use pidash_services::extensions::{NoExtraToolsets, SeamFuture, TitleError, TitleRequest};
 
     #[derive(Debug)]
     struct StubAssistantSeam;
@@ -684,10 +633,8 @@ mod tests {
             pool: pool.clone(),
             cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
-            cache: RedisAdmissionCache::new(None),
             redis: None,
             runner: settings.runner.clone(),
-            toolsets: Arc::new(NoExtraToolsets),
             assistant_seam: Arc::new(StubAssistantSeam),
             publish: Arc::new(QueuePublishDrain::new(&pool)),
             pods: Arc::new(LivePodDrain::new(&pool, None, settings.runner.clone())),

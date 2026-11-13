@@ -37,14 +37,13 @@ use std::sync::Arc;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::transition::IssueTransitionHook;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
@@ -109,10 +108,10 @@ fn fire_erased<E: std::fmt::Display>(error: E, site: &str, request: &FireRequest
     );
 }
 #[allow(clippy::too_many_arguments, clippy::result_unit_err)]
-pub async fn fire_transition<C, H, P, M>(
+pub async fn fire_transition<H, P, M>(
     pool: &PgPool,
-    store_deps: StoreDeps<C, H, P>,
-    preflight_deps: StoreDeps<C, H, P>,
+    store_deps: StoreDeps<H, P>,
+    preflight_deps: StoreDeps<H, P>,
     matcher: M,
     cloud: &CloudAgentSettings,
     request: FireRequest,
@@ -120,7 +119,6 @@ pub async fn fire_transition<C, H, P, M>(
     pod_drain: &dyn PodDrain,
 ) -> Result<FireOutcome, ()>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
     M: PodRunnerMatcher,
@@ -144,7 +142,7 @@ where
     };
 
     let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
-    let (tx, _pool, cache, dispatches, deferred, terminal_effects) = seam.store.into_parts();
+    let (tx, _pool, dispatches, terminal_effects) = seam.store.into_parts();
 
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -198,9 +196,6 @@ where
                 return Err(());
             }
         }
-    }
-    for consume in &deferred {
-        pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
     }
     Ok(outcome)
 }
@@ -259,12 +254,12 @@ pub(crate) async fn completion_comment_job(
 
 /// The ticker/clock seam methods run pool-direct (autocommit); everything
 /// else delegates to the tx-backed [`LiveCreationStore`].
-struct LiveTransitionSeam<'a, C, H, P> {
+struct LiveTransitionSeam<'a, H, P> {
     pool: &'a PgPool,
-    store: LiveCreationStore<'a, C, H, P>,
+    store: LiveCreationStore<'a, H, P>,
 }
 
-impl<C, H, P> LiveTransitionSeam<'_, C, H, P> {
+impl<H, P> LiveTransitionSeam<'_, H, P> {
     fn db(error: sqlx::Error) -> CreationError {
         CreationError::Db(error.to_string())
     }
@@ -301,17 +296,16 @@ fn orm_error_text(error: sea_orm::DbErr) -> String {
 /// the driver takes them by value while the seam only lends `&mut self`; the
 /// driver consults preflight at most once per fire, so the `None` arm is
 /// defensive.
-struct LivePreflight<C, H, P, M> {
+struct LivePreflight<H, P, M> {
     pool: PgPool,
-    deps: Option<StoreDeps<C, H, P>>,
+    deps: Option<StoreDeps<H, P>>,
     matcher: M,
     now: chrono::DateTime<chrono::Utc>,
     jitter_secs: f64,
 }
 
-impl<C, H, P, M> PreflightSeam for LivePreflight<C, H, P, M>
+impl<H, P, M> PreflightSeam for LivePreflight<H, P, M>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
     M: PodRunnerMatcher,
@@ -477,9 +471,8 @@ fn clock_policy_select(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::p
 // Seam impls
 // ---------------------------------------------------------------------------
 
-impl<C, H, P> CreationSeam for LiveTransitionSeam<'_, C, H, P>
+impl<H, P> CreationSeam for LiveTransitionSeam<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -621,14 +614,10 @@ where
             .await
     }
 
-    fn extra_toolsets_schema_tool(&self) -> String {
-        self.store.extra_toolsets_schema_tool()
-    }
 }
 
-impl<C, H, P> FinalizeAgentRunSeam for LiveTransitionSeam<'_, C, H, P>
+impl<H, P> FinalizeAgentRunSeam for LiveTransitionSeam<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -645,9 +634,8 @@ where
     }
 }
 
-impl<C, H, P> EntriesSeam for LiveTransitionSeam<'_, C, H, P>
+impl<H, P> EntriesSeam for LiveTransitionSeam<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -807,7 +795,6 @@ impl WorkerTransitionHook {
         managed: ManagedRunnerSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         use crate::hooks::{
@@ -821,10 +808,8 @@ impl WorkerTransitionHook {
             pool,
             cloud,
             managed,
-            cache: crate::admission::RedisAdmissionCache::from_env(),
             redis,
             runner,
-            toolsets,
             assistant_seam,
             publish,
             pods,

@@ -6,7 +6,6 @@ use pidash_db::config::Settings;
 use pidash_db::redis::RedisHandle;
 use pidash_db::DatabaseConnection;
 use pidash_db::Pools;
-use pidash_services::extensions::{CloudAgentToolsetsSeam, NoExtraToolsets};
 use pidash_services::user_settings::{base_settings_schema, SettingsSchema};
 
 use crate::desktop_gate::CeDesktopRequestGate;
@@ -49,7 +48,6 @@ pub struct AppState {
     redis: Option<RedisHandle>,
     shadow_gate: Option<Arc<ShadowGate>>,
     shadow_config: Option<ShadowConfig>,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     user_settings_schema: Arc<SettingsSchema>,
     desktop_gate: Option<DesktopGateHandle>,
@@ -100,7 +98,6 @@ impl AppState {
             redis: None,
             shadow_gate: None,
             shadow_config: None,
-            toolsets: Arc::new(NoExtraToolsets),
             assistant_seam,
             user_settings_schema: Arc::new(base_settings_schema()),
             desktop_gate: None,
@@ -147,7 +144,6 @@ impl AppState {
             redis: self.redis.clone(),
             shadow_gate: None,
             shadow_config: None,
-            toolsets: self.toolsets.clone(),
             assistant_seam: self.assistant_seam.clone(),
             user_settings_schema: self.user_settings_schema.clone(),
             desktop_gate: self.desktop_gate.clone(),
@@ -255,18 +251,7 @@ impl AppState {
         &self.edge
     }
 
-    /// Install the cloud-agent extra-toolsets seam (PIDASHCONV-915). The
-    /// cloud binary installs its gateway seam here; creation call sites
-    /// consult this instance. CE default: [`NoExtraToolsets`].
-    pub fn with_toolsets(mut self, toolsets: Arc<dyn CloudAgentToolsetsSeam>) -> Self {
-        self.toolsets = toolsets;
-        self
-    }
-
-    /// The installed toolsets seam.
-    pub fn toolsets(&self) -> &Arc<dyn CloudAgentToolsetsSeam> {
-        &self.toolsets
-    }
+    // (P4: `with_toolsets`/`toolsets` died with the toolsets seam.)
 
     /// Install the user-settings schema the profile endpoint validates
     /// `settings` PATCHes against (PIDASHCONV-916). CE keeps the empty
@@ -292,26 +277,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pidash_services::user_settings::extend_settings_schema;
-
-    #[test]
-    fn toolsets_seam_defaults_to_ce_and_installs() {
-        #[derive(Debug)]
-        struct AcmeToolsets;
-
-        impl CloudAgentToolsetsSeam for AcmeToolsets {
-            fn schema_tool_name(&self) -> &'static str {
-                "acme_get_tool_schema"
-            }
-        }
-
-        let state = AppState::new("0.1.0");
-        assert_eq!(state.toolsets().schema_tool_name(), "");
-        let state = state.with_toolsets(Arc::new(AcmeToolsets));
-        assert_eq!(state.toolsets().schema_tool_name(), "acme_get_tool_schema");
-        // The shadow clone keeps the installed seam.
-        let shadow = state.with_edge_replaced(EdgeHandle::for_tests(DEFAULT_UPSTREAM));
-        assert_eq!(shadow.toolsets().schema_tool_name(), "acme_get_tool_schema");
-    }
 
     #[test]
     fn settings_schema_defaults_to_empty_ce_schema() {

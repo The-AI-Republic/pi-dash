@@ -447,9 +447,7 @@ pidash_sdk::hooks::FireOutcome
 pidash_sdk::hooks::FireRequest
 pidash_sdk::hooks::HookDeps
 pidash_sdk::hooks::IssueTransitionHook
-pidash_sdk::hooks::LiveMoveAdmissionCache
 pidash_sdk::hooks::LivePodDrain
-pidash_sdk::hooks::MoveAdmissionCache
 pidash_sdk::hooks::MoveHook
 pidash_sdk::hooks::OutboxTaskSink
 pidash_sdk::hooks::PodDrain
@@ -481,7 +479,6 @@ pidash_sdk::jobs::OssWorkerCtx
 pidash_sdk::jobs::PROCESS_LOGS_TASK
 pidash_sdk::jobs::RESTORE_TASK_NAME
 pidash_sdk::jobs::RUNNER_RUNS_TASK_NAMES
-pidash_sdk::jobs::RedisAdmissionCache
 pidash_sdk::jobs::Registry
 pidash_sdk::jobs::SCAN_DUE_TICKERS_TASK
 pidash_sdk::jobs::SEND_EMAIL_NOTIFICATION_TASK
@@ -565,7 +562,6 @@ pidash_sdk::ops::PoolPrStore
 pidash_sdk::ops::PoolPubsubStore
 pidash_sdk::ops::PrLinksSurface
 pidash_sdk::ops::ProjectClockPolicy
-pidash_sdk::ops::RedisAdmissionCache
 pidash_sdk::ops::RevokeBundle
 pidash_sdk::ops::RevokeCollected
 pidash_sdk::ops::RevokeCtx
@@ -835,20 +831,14 @@ pidash_sdk::startup::stack
 pidash_sdk::state::AgentModelProfile
 pidash_sdk::state::AppState
 pidash_sdk::state::AssistantModelSeam
-pidash_sdk::state::CloudAgentToolsetsSeam
 pidash_sdk::state::CredentialError
 pidash_sdk::state::CredentialUnavailable
 pidash_sdk::state::DesktopCredential
 pidash_sdk::state::DesktopRequestGate
 pidash_sdk::state::ExecuteModelInputs
-pidash_sdk::state::ExtraToolset
-pidash_sdk::state::NoExtraToolsets
 pidash_sdk::state::ResolvedRunModel
 pidash_sdk::state::RunModelKey
 pidash_sdk::state::SeamFuture
 pidash_sdk::state::TitleError
 pidash_sdk::state::TitleRequest
-pidash_sdk::state::ToolsetsResolution
-pidash_sdk::state::ToolsetsRun
-pidash_sdk::state::ToolsetsUnavailable
 pidash_sdk::state::header_value

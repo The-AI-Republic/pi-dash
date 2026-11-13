@@ -156,10 +156,9 @@ use pidash_services::v1_work_items::queries_search as q;
 
 use super::handlers_social::{preamble, query_last, rewrite_project_id, QueryMap};
 use super::perms::{gate_for, V1WorkItemsRoute};
-use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
+use crate::domain_hooks::{AppMovePostCommitHook, AppTaskEnqueueHook};
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
-use crate::orchestration::SpanCreationDeps;
 use crate::serializer::render_datetime;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
@@ -1233,20 +1232,12 @@ async fn move_inner(
         transition,
         enqueue,
     };
-    let span_deps = SpanCreationDeps::from_state(state);
     let drain: Arc<dyn domain_issues::MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
         &pre.pool,
         state,
-        span_deps.cache.clone(),
     ));
     let creation = domain_issues::CreationDeps {
         pool: pre.pool.clone(),
-        cloud: span_deps.cloud.clone(),
-        managed: span_deps.managed.clone(),
-        now_unix_secs: span_deps.now_unix_secs,
-        toolsets: span_deps.toolsets.clone(),
-        assistant_seam: span_deps.assistant_seam.clone(),
-        admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
     };
     let write = operations::issues::MoveWrite {
         slug,

@@ -9,20 +9,14 @@
 //! counts) died with the retired plane. `lock_workspace` stays —
 //! shared with the dispatch engine.
 
-use std::sync::Arc;
-
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_db::tx::Transaction;
 use pidash_types::dispatch::AgentExecutorKind;
 
-use super::admission::{AdmissionCache, DeferredConsume};
 use super::policy::resolve_executor_kind;
 use super::policy::ResolveExecutorError;
 use super::policy::UserFlags;
-use crate::extensions::CloudAgentToolsetsSeam;
 
 /// The captured quota shape (`creation.py:70,175`): `{code, detail}` — the
 /// `retry_after_seconds` the raised error carries is dropped on capture.
@@ -106,17 +100,7 @@ pub struct ExecutionInputs<'a> {
     pub now_unix_secs: i64,
 }
 
-/// The EE-overlayable seams `execution_fields` consults, each only when the
-/// Python short-circuit reaches it. (P3 step B: currently unconsulted —
-/// kept so the creation call sites keep their shape until P4.)
-pub struct ExecutionSeams<F> {
-    /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`): consulted
-    /// only for a present, active, non-bot actor on the cloud path.
-    pub has_usable_llm_config: F,
-    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`): the
-    /// injected toolsets seam, awaited only when a creator is present.
-    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-}
+
 
 /// The executor-specific `AgentRun` fields for one run creation
 /// (`execution_fields`, `creation.py:11-89`, #2903).
@@ -179,22 +163,11 @@ pub async fn lock_workspace(
 ///
 /// P3 step B: collapsed to `resolve_executor_kind` plus an empty tool
 /// plan — the cloud gate, admission rate limits, quota verdict, and
-/// tool-plan build died with the retired plane. The admission/cache/
-/// seams parameters remain for the admission cleanup below.
-pub async fn execution_fields<C, F>(
-    _tx: &mut Transaction<'_>,
+/// tool-plan build died with the retired plane.
+/// P4: the admission/cache/seams parameters died with the cache family.
+pub async fn execution_fields(
     inputs: &ExecutionInputs<'_>,
-    cloud: &CloudAgentSettings,
-    _managed: &ManagedRunnerSettings,
-    _cache: &C,
-    _on_commit: &mut (dyn FnMut(DeferredConsume) + Send),
-    _seams: ExecutionSeams<F>,
-) -> Result<ExecutionFields, ExecutionFieldsError>
-where
-    C: AdmissionCache,
-    F: FnOnce() -> bool,
-{
-    let _ = cloud;
+) -> Result<ExecutionFields, ExecutionFieldsError> {
     let executor = resolve_executor_kind(
         inputs.requested,
         &inputs.project.default_agent_executor,

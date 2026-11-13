@@ -1825,7 +1825,6 @@ mod tests {
             std::env::temp_dir(),
             seed_settings.cloud_agent.clone(),
             seed_settings.managed_runner.clone(),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
@@ -1884,8 +1883,7 @@ mod tests {
                 dispatch_settings.managed_runner.clone(),
                 None,
                 dispatch_settings.runner.clone(),
-                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
-                dispatch_assistant_seam.clone(),
+                    dispatch_assistant_seam.clone(),
             )),
         );
         pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
@@ -1897,8 +1895,7 @@ mod tests {
                 dispatch_settings.managed_runner,
                 None,
                 dispatch_settings.runner.clone(),
-                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
-                dispatch_assistant_seam,
+                    dispatch_assistant_seam,
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
@@ -1917,7 +1914,6 @@ mod tests {
             pool.clone(),
             None,
             &runner_settings,
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
                 std::sync::Arc::new(runner_settings.clone()),
             )),

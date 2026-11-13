@@ -1323,15 +1323,9 @@ async fn render_scheduler_turn<S: EntriesSeam>(
     // attribute (`run.prompt = build_scheduler_turn(binding, run)` before
     // any `refresh_from_db`; `service.py:977`). The `Limits:` line must
     // print `policy.py` dict order (PIDASHCONV-1072).
-    let extra_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let schema_tool = if extra_enabled {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
+    // P4: extra toolsets died; keys render always-false/empty.
+    let extra_enabled = false;
+    let schema_tool = String::new();
     let input = SchedulerContextInput {
         workspace_slug: workspace.slug.clone(),
         workspace_name: workspace.name.clone(),
@@ -2044,9 +2038,6 @@ mod tests {
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
-        }
         async fn dedicated_pin(
             &mut self,
             args: &DedicatedPinArgs<'_>,

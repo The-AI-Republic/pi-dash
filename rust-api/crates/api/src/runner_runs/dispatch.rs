@@ -46,18 +46,16 @@ use uuid::Uuid;
 use pidash_db::entity as orm;
 use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
-use pidash_db::redis::client_from_settings;
 use pidash_db::runner_runs::pod::Pod;
 use pidash_db::runner_runs::AgentRun;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_jobs::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DispatchDecision,
-    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use pidash_jobs::orchestration::LiveCreationStore;
 use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
+use pidash_services::dispatch::{ExecutionFieldsError, ExecutionInputs, ProjectScope};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
 use pidash_services::orchestration::creation::CreationSeam;
 use pidash_services::orchestration::dispatch::DispatchSeam;
@@ -76,7 +74,6 @@ use super::runs::{
     ISSUE_NOT_FOUND_BODY,
 };
 use super::{json_response, server_error};
-use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 use crate::v1_work_items::handlers_actions::{dispatch_deps, draw_jitter, fetch_project, IssueRow};
 
@@ -625,14 +622,9 @@ async fn drain_direct_dispatch(
     pool: &PgPool,
     state: &AppState,
     cloud: &pidash_db::config::CloudAgentSettings,
-    cache: &RedisAdmissionCache,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     now: DateTime<Utc>,
 ) -> Result<(), Response> {
-    for consume in &deferred {
-        consume_admission_token(cache, consume);
-    }
     for run_id in dispatches {
         match dispatch_agent_run(pool, cloud, run_id, now).await {
             Ok(DispatchDecision::PodDrain { pod_id }) => {
@@ -1219,37 +1211,17 @@ pub async fn post_direct(
         flags: scope.actor_flags,
     };
     let cloud = state.settings().cloud_agent.clone();
-    let managed = state.settings().managed_runner.clone();
-    let capabilities: Vec<String> = Vec::new();
-    let capability_refs: Vec<&str> = capabilities.iter().map(String::as_str).collect();
-    let has_llm = false;
     let inputs = ExecutionInputs {
         project: &project,
         run_kind: RUN_KIND_DIRECT,
         has_issue: ctx.work_item_id.is_some(),
-        required_capabilities: &capability_refs,
+        required_capabilities: &[],
         actor: Some(&actor),
         automatic: false,
         requested: scope.requested.as_deref(),
         now_unix_secs: now.timestamp(),
     };
-    let cache = RedisAdmissionCache {
-        client: client_from_settings(state.settings()),
-    };
-    let mut deferred: Vec<DeferredConsume> = Vec::new();
-    let mut collect = |consume: DeferredConsume| deferred.push(consume);
-    let fields = match resolve_execution_fields(
-        &mut tx,
-        &inputs,
-        &cloud,
-        &managed,
-        &cache,
-        &mut collect,
-        ExecutionSeams {
-            has_usable_llm_config: move || has_llm,
-            toolsets: state.toolsets().clone(),
-        },
-    )
+    let fields = match resolve_execution_fields(&inputs)
     .await
     {
         Ok(fields) => fields,
@@ -1324,7 +1296,7 @@ pub async fn post_direct(
         return server_error();
     }
     if let Err(response) =
-        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
+        drain_direct_dispatch(pool, state, &cloud, dispatches, now).await
     {
         return response;
     }
@@ -1498,7 +1470,7 @@ async fn post_issue_dispatch(
     // Smallest failing unit first: the store comes apart for rollback.
     macro_rules! rollback_500 {
         () => {{
-            let (tx, _, _, _, _, _) = store.into_parts();
+            let (tx, _, _, _) = store.into_parts();
             return rollback_then(tx, server_error()).await;
         }};
     }
@@ -1564,7 +1536,7 @@ async fn post_issue_dispatch(
         }
         if outcome.decision.queued && !pod_once {
             // The queued entry commits (`:373-374/409-417`): no dispatch.
-            let (tx, _, _, _, _, _) = store.into_parts();
+            let (tx, _, _, _) = store.into_parts();
             if tx.commit().await.is_err() {
                 return server_error();
             }
@@ -1616,7 +1588,7 @@ async fn post_issue_dispatch(
             }
         }
     };
-    let (mut tx, pool, cache, dispatches, deferred, _terminal) = store.into_parts();
+    let (mut tx, pool, dispatches, _terminal) = store.into_parts();
     let Some(run_id) = run_id else {
         // `transaction.set_rollback(True)` (`:379/453`): the re-time and
         // any bounce writes vanish with the failed dispatch. The
@@ -1650,7 +1622,7 @@ async fn post_issue_dispatch(
         return server_error();
     }
     if let Err(response) =
-        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
+        drain_direct_dispatch(pool, state, &cloud, dispatches, now).await
     {
         return response;
     }

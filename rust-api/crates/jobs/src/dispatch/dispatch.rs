@@ -30,7 +30,6 @@ use pidash_db::pool::sea_orm_connection;
 /// `pidash_jobs::dispatch::…` path stable.
 pub use pidash_services::dispatch::execution::{
     execution_fields, lock_workspace, ActorScope, DeferredAdmissionError, ExecutionFields,
-    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope, WORKSPACE_LOCK_SQL,
 };
 
 // ---------------------------------------------------------------------------
@@ -121,7 +120,6 @@ pub async fn dispatch_agent_run(
 /// `transaction.on_commit(lambda: dispatch_agent_run(run_id))`.
 ///
 /// The run id collects into the caller's `on_commit` outbox (the
-/// `DeferredConsume` precedent); the caller drains it after commit by awaiting
 /// [`dispatch_agent_run`] per id. Nothing executes inline — provably: this
 /// function performs no I/O.
 pub fn dispatch_after_commit(on_commit: &mut dyn FnMut(Uuid), run_id: Uuid) {
@@ -129,6 +127,10 @@ pub fn dispatch_after_commit(on_commit: &mut dyn FnMut(Uuid), run_id: Uuid) {
 }
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
+    use pidash_services::dispatch::WORKSPACE_LOCK_SQL;
+
     use super::*;
 
     static FIXTURE: &str =

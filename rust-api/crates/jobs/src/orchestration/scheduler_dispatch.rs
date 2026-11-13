@@ -43,11 +43,10 @@ use pidash_db::orchestration::querysets::{
 };
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{CreationError, PodView, RenderedTurn, RunView};
 use pidash_services::orchestration::dispatch::DispatchError;
@@ -65,7 +64,6 @@ use super::fire_tick_seam::{drain_dispatch, DispatchJobsError, DispatchOutcome};
 use super::live_inputs::{
     fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
 };
-use crate::admission::RedisAdmissionCache;
 use crate::dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_binding::{
     BindingForDispatch, DispatchRun, SchedulerDispatch, SchedulerDispatchResult,
@@ -167,9 +165,8 @@ fn run_view_row_from_model(model: agent_run::Model) -> RunViewRow {
     }
 }
 
-impl<C, H, P> EntriesSeam for LiveCreationStore<'_, C, H, P>
+impl<H, P> EntriesSeam for LiveCreationStore<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -635,14 +632,13 @@ fn map_entries(error: EntriesError) -> DispatchJobsError {
 /// commit, then drain post-commit dispatch. The `dispatch_driver!`
 /// discipline, written out because the services call takes
 /// `(seam, req)` instead of the continuation argument shape.
-pub async fn dispatch_scheduler_run<C, H, P>(
+pub async fn dispatch_scheduler_run<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     binding_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<DispatchOutcome<SchedulerOutcome>, DispatchJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -654,7 +650,7 @@ where
             .await
             .map_err(map_entries)?;
     if store.dispatch_rollback_requested() {
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await?;
         return Ok(DispatchOutcome {
             outcome,
@@ -666,10 +662,10 @@ where
     if let Some(run_id) = outcome.run {
         tracing::info!(%run_id, %binding_id, "scheduler.dispatch: created run");
     }
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+        drain_dispatch(pool, &cloud, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -732,7 +728,6 @@ pub fn live_scheduler_dispatch(
     managed: ManagedRunnerSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> SchedulerDispatch {
     Arc::new(move |binding: BindingForDispatch| {
@@ -741,7 +736,6 @@ pub fn live_scheduler_dispatch(
         let managed = managed.clone();
         let redis = redis.clone();
         let runner = runner.clone();
-        let toolsets = toolsets.clone();
         let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
             let now = Utc::now();
@@ -761,11 +755,8 @@ pub fn live_scheduler_dispatch(
             let deps = StoreDeps {
                 cloud,
                 managed,
-                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
-                toolsets,
                 llm_profile: profile_fn(presence),
-                now_unix_secs: now.timestamp(),
             };
             let outcome = dispatch_scheduler_run(&pool, deps, binding.binding_id, now)
                 .await
@@ -908,50 +899,19 @@ mod tests {
     // through `TxConn`, exactly as production does. Skipped when
     // `DATABASE_URL` is unset.
 
-    use pidash_services::dispatch::admission::AdmissionCache;
     use pidash_services::dispatch::LlmProfile;
-    use pidash_services::extensions::NoExtraToolsets;
-
-    #[derive(Debug)]
-    struct StubCacheError(String);
-
-    impl std::fmt::Display for StubCacheError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
-
-    impl std::error::Error for StubCacheError {}
-
-    #[derive(Debug, Default)]
-    struct StubCache;
-
-    impl AdmissionCache for StubCache {
-        type Error = StubCacheError;
-
-        fn bucket_count(&self, _key: &str) -> Result<Option<i64>, Self::Error> {
-            Ok(None)
-        }
-
-        fn add_or_incr(&self, _key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
 
     #[allow(clippy::type_complexity)]
-    fn test_deps() -> StoreDeps<StubCache, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {
+    fn test_deps() -> StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {
         let settings = pidash_db::config::Settings::test_defaults();
         StoreDeps {
             cloud: settings.cloud_agent,
             managed: settings.managed_runner,
-            cache: StubCache,
             has_usable_llm_config: |_| false,
-            toolsets: Arc::new(NoExtraToolsets),
             llm_profile: |_| LlmProfile {
                 available: false,
                 reason_code: "test".to_owned(),
             },
-            now_unix_secs: 0,
         }
     }
 
