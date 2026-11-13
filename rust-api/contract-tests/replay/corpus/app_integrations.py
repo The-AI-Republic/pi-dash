@@ -300,8 +300,19 @@ SESSIONS = (
             "project2": PROJ2_ID,
         },
         # Install sessions stamp expires_at = now()+15m per backend.
+        # Sunset 3/6 (PDASHOSS01-356): Rust writes git_provider_install_sessions,
+        # Django still writes github_app_install_sessions. Both tables are
+        # compared via HTTP responses; DB comparison is skipped for the
+        # rename (Django dual-write for installs never existed — the rename
+        # diverges until Django 6/6 PDASHOSS01-359 removes legacy). The
+        # generic table's expires_at is also server-minted.
         timestamp_columns={
             "github_app_install_sessions": ["expires_at"],
+            "git_provider_install_sessions": ["expires_at"],
+        },
+        skip_tables={
+            "github_app_install_sessions": "sunset 3/6 legacy: Django still writes legacy table, Rust writes git_provider_install_sessions (PDASHOSS01-356)",
+            "git_provider_install_sessions": "sunset 3/6 generic: Rust writes generic table, Django writes legacy (PDASHOSS01-356)",
         },
         requests=(
             # Git provider accounts: providers -> guest 403 ->

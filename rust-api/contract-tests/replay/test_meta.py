@@ -124,7 +124,7 @@ def test_corpus_manifests_valid():
             )
         for task, issue in (sess.known_absent_jobs or {}).items():
             assert "." in task, f"{sess.name}: bad pinned task {task!r}"
-            assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
+            assert re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", issue), (
                 f"{sess.name}: pinned {task} must name its fix issue"
             )
         for entry in sess.db_cell_refs or []:
@@ -142,7 +142,7 @@ def test_corpus_manifests_valid():
                     isinstance(entry, (list, tuple))
                     and len(entry) == 3
                     and re.fullmatch(r"[a-z_]+", entry[0])
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and isinstance(entry[2], dict)
                     and entry[2]
                 ), f"{sess.name}: bad {field_name} {entry!r}"
@@ -153,7 +153,7 @@ def test_corpus_manifests_valid():
                 isinstance(entry, (list, tuple))
                 and len(entry) == 6
                 and re.fullmatch(r"[a-z_]+", entry[0])
-                and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                 and isinstance(entry[2], dict)
                 and entry[2]
                 and re.fullmatch(r"[a-z_]+", entry[3])
@@ -183,7 +183,7 @@ def test_corpus_manifests_valid():
                         isinstance(ref, (list, tuple))
                         and len(ref) == 4
                         and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
-                        and re.fullmatch(r"PIDASHCONV-\d+", ref[1])
+                        and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", ref[1])
                         and ref[2] != ref[3]
                     ), f"{sess.name}: bad value diff {ref!r} for {task} ({owner})"
         # Pin values render as templates: every placeholder must be a
@@ -287,7 +287,7 @@ def test_corpus_manifests_valid():
                     isinstance(entry, (list, tuple))
                     and len(entry) == 4
                     and "." in entry[0]
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and isinstance(entry[2], dict)
                     and entry[2]
                     and isinstance(entry[3], dict)
@@ -296,7 +296,7 @@ def test_corpus_manifests_valid():
                 ), f"{label}: bad known job shape {entry!r}"
             for task, issue in (req.known_absent_jobs or {}).items():
                 assert "." in task, f"{label}: bad pinned task {task!r}"
-                assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
+                assert re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", issue), (
                     f"{label}: pinned {task} must name its fix issue"
                 )
             for entry in req.known_headers or []:
@@ -304,7 +304,7 @@ def test_corpus_manifests_valid():
                     isinstance(entry, (list, tuple))
                     and len(entry) == 4
                     and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", entry[0])
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and (entry[2] is None or isinstance(entry[2], str))
                     and (entry[3] is None or isinstance(entry[3], str))
                     and entry[2] != entry[3]
@@ -315,7 +315,7 @@ def test_corpus_manifests_valid():
                     and len(entry) == 4
                     and isinstance(entry[0], str)
                     and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[0])
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and entry[2] != entry[3]
                 ), f"{label}: bad known body diff {entry!r}"
             for entry in req.known_body_aliases or []:
@@ -327,7 +327,7 @@ def test_corpus_manifests_valid():
                     and isinstance(entry[1], str)
                     and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[1])
                     and entry[0] != entry[1]
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[2])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[2])
                 ), f"{label}: bad known body alias {entry!r}"
             for entry in req.body_contains or []:
                 assert (
