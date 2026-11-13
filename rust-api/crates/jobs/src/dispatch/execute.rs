@@ -1137,18 +1137,9 @@ pub(crate) fn github_binding_exists_stmt(project_id: Uuid, workspace_id: Uuid) -
             Alias::new("workspace_integration_id"),
         ))),
     );
-    stmt.join(
-        JoinType::InnerJoin,
-        Alias::new("github_app_installations"),
-        Expr::col((
-            Alias::new("github_app_installations"),
-            Alias::new("workspace_integration_id"),
-        ))
-        .eq(Expr::col((
-            Alias::new("workspace_integrations"),
-            Alias::new("id"),
-        ))),
-    );
+    // NEWPIDASH-210: the verified/suspended legs read
+    // git_provider_accounts (the services mirror), not the legacy
+    // github_app_installations table.
     stmt.and_where(
         Expr::col((
             Alias::new("git_repository_bindings"),
@@ -1206,14 +1197,7 @@ pub(crate) fn github_binding_exists_stmt(project_id: Uuid, workspace_id: Uuid) -
     );
     stmt.and_where(
         Expr::col((
-            Alias::new("github_app_installations"),
-            Alias::new("verified_at"),
-        ))
-        .is_not_null(),
-    );
-    stmt.and_where(
-        Expr::col((
-            Alias::new("github_app_installations"),
+            Alias::new("git_provider_accounts"),
             Alias::new("suspended_at"),
         ))
         .is_null(),
@@ -3138,6 +3122,24 @@ mod tests {
         let mut cloud = django_cloud_settings();
         cloud.github_tools_enabled = false;
         assert!(!github_available_for_project(&cloud, || panic!("probed")));
+    }
+
+    #[test]
+    fn github_probe_statement_shape() {
+        // `github_binding_exists_stmt` (NEWPIDASH-210): generic tables
+        // only; verified/suspended read git_provider_accounts.
+        let sql = sea_orm::DbBackend::Postgres
+            .build(&github_binding_exists_stmt(Uuid::nil(), Uuid::max()))
+            .to_string();
+        assert!(sql.contains("git_repository_bindings"), "base: {sql}");
+        assert!(sql.contains("git_repositories"), "join r: {sql}");
+        assert!(sql.contains("git_provider_accounts"), "join a: {sql}");
+        assert!(sql.contains("workspace_integrations"), "join w: {sql}");
+        assert!(
+            !sql.contains("github_app_installations"),
+            "legacy leg gone (NEWPIDASH-210): {sql}"
+        );
+        assert!(sql.contains("LIMIT 1"), "first-row: {sql}");
     }
 
     fn sample_output(outcome: Outcome) -> CloudAgentOutput {
