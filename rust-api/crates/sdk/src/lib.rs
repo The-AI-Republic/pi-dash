@@ -54,9 +54,6 @@ pub mod state {
     pub use pidash_services::extensions::AssistantModelSeam;
     pub use pidash_services::extensions::CredentialError;
     pub use pidash_services::extensions::CredentialUnavailable;
-    pub use pidash_services::extensions::ExecuteModelInputs;
-    pub use pidash_services::extensions::ResolvedRunModel;
-    pub use pidash_services::extensions::RunModelKey;
     pub use pidash_services::extensions::SeamFuture;
     pub use pidash_services::extensions::TitleError;
     pub use pidash_services::extensions::TitleRequest;
