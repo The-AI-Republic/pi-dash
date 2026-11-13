@@ -20,9 +20,11 @@ export function pageLabel(page: number, totalPages: number): string {
 /**
  * Executor badge copy by kind alone. Legacy `managed_runner` rows ran on
  * the built-in engine; every other non-cloud run is the local runner.
+ * The retired cloud kind reads with the frontend-owned retired label
+ * (section 7.3): historical rows only.
  */
 export function executorLabel(kind: AgentRun["executor_kind"]): string {
-  if (kind === "cloud_agent") return "Cloud executor";
+  if (kind === "cloud_agent") return "Cloud agent run (retired)";
   if (kind === "managed_runner") return BUILT_IN_ENGINE;
   return "Local runner";
 }
@@ -45,7 +47,9 @@ export function runExecutorLabel(
 }
 
 export function executorTone(kind: AgentRun["executor_kind"]): BadgeTone {
-  return kind === "cloud_agent" ? "accent" : "neutral";
+  // Retired cloud rows read neutral (the retired label owns no accent).
+  void kind;
+  return "neutral";
 }
 
 /** The raw error text of a run, kept for the failure block. */

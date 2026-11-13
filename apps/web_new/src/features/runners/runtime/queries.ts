@@ -26,8 +26,8 @@ export function projectAvailabilityQueryOptions(client: ApiClient, workspaceSlug
   });
 }
 
-/** True when the server reports the managed runner available on this project. */
-export function isManagedRunnerAvailable(project: ProjectDetail | undefined): boolean {
+/** True when the server reports the Pi Dash Agent available on this project. */
+export function isPidashAgentAvailable(project: ProjectDetail | undefined): boolean {
   return (
     project?.agent_executor_options.some((option) => option.kind === MANAGED_RUNNER_KIND && option.available) ?? false
   );

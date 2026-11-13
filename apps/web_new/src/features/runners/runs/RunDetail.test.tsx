@@ -109,7 +109,7 @@ describe("identity", () => {
       run: run({ executor_kind: "cloud_agent" }),
       schedulerHref: () => null,
     });
-    expect(screen.getByTestId("run-executor")).toHaveTextContent("Cloud executor");
+    expect(screen.getByTestId("run-executor")).toHaveTextContent("Cloud agent run (retired)");
     expect(screen.queryByTestId("run-scheduler-link")).toBeNull();
   });
 
