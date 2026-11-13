@@ -1,6 +1,6 @@
 {
   "_trace": "orchestration/service.py:180-300 (handle_issue_state_transition); resume capture :214-219; guards :221-291; build :264-300",
-  "_method": "live handle_issue_state_transition on pidash_524_scratch; frozen clock, random.seed(52407) before each call; real reconcile + preflight + builders except T6b/T7 stubbed reconcile; real composer (run.id normalized); dispatch/on_commit captured; actor=None (signal-equivalent) so creator falls back to issue.created_by; T10 runs the real bounce (matrix is FX-08 scope)",
+  "_method": "live handle_issue_state_transition on pidash_524_scratch; frozen clock, random.seed(52407) before each call; real reconcile + preflight + builders except T6b/T7 stubbed reconcile; real composer (run.id normalized); dispatch/on_commit captured; actor=None (signal-equivalent) so creator falls back to issue.created_by; T10 is PDASHOSS01-366 human preserve (state kept, ticker disarmed); matrix is FX-08 scope",
   "cases": {
     "T1_leave_bucket": {
       "issue": "FX7-1",
@@ -273,7 +273,7 @@
       "runners_in_pod": 0,
       "reason": "no-eligible-runner",
       "created_run": null,
-      "issue_state_after": "Backlog",
+      "issue_state_after": "In Progress",
       "bounce_comment_head": "Agent run skipped \u2014 no eligible runner.No runner is registered in this pod that can serve this issue. Add a runner under",
       "after": {
         "ticker": {
@@ -281,9 +281,9 @@
           "granted": 0,
           "waited": 0,
           "user_disabled": false,
-          "enabled": true,
-          "disarm_reason": "",
-          "next_run_at": "2026-06-01T15:08:15.036849+00:00",
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
           "last_tick_at": null,
           "pending_entry": false,
           "pending_entry_free": false,
@@ -459,9 +459,7 @@
         },
         "runs": 1
       },
-      "dispatched": [
-        "run-T11a"
-      ],
+      "dispatched": ["run-T11a"],
       "on_commit": []
     },
     "T11b_cross_stage_resume_capture": {
@@ -583,9 +581,7 @@
         },
         "runs": 2
       },
-      "dispatched": [
-        "run-T11b"
-      ]
+      "dispatched": ["run-T11b"]
     }
   }
 }

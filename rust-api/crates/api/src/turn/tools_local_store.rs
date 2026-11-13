@@ -2654,6 +2654,7 @@ impl ToolStore for PgToolStore {
                             &matcher,
                             *now,
                             0.0,
+                            false,
                         )
                         .await
                         .map_err(|error| StoreError::Transition(error.to_string()))?;
@@ -2712,6 +2713,7 @@ impl ToolStore for PgToolStore {
                             &matcher,
                             *now,
                             0.0,
+                            false,
                         )
                         .await
                         .map_err(|error| StoreError::Transition(error.to_string()))?;
@@ -3035,6 +3037,7 @@ impl ToolStore for PgToolStore {
                         &matcher,
                         *now,
                         0.0,
+                        false,
                     )
                     .await
                     .map_err(|error| StoreError::Transition(error.to_string()))?;
@@ -3095,6 +3098,7 @@ impl ToolStore for PgToolStore {
                         &matcher,
                         *now,
                         0.0,
+                        false,
                     )
                     .await
                     .map_err(|error| StoreError::Transition(error.to_string()))?;
@@ -3547,6 +3551,7 @@ impl pidash_services::orchestration::entries::PreflightSeam for FixedPreflight {
         _creator_id: Uuid,
         _pod_id: Uuid,
         _triggered_by: &str,
+        _preserve_state: bool,
     ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
         self.consulted = true;
         Ok(self.proceed)
@@ -3590,6 +3595,7 @@ where
         creator_id: Uuid,
         pod_id: Uuid,
         triggered_by: &str,
+        preserve_state: bool,
     ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
         use pidash_services::orchestration::creation::CreationError;
         let Some(deps) = self.deps.take() else {
@@ -3607,6 +3613,7 @@ where
             Some(creator_id),
             pod_id,
             triggered_by,
+            preserve_state,
         )
         .await
         .map_err(|error| CreationError::Db(error.to_string()))?;

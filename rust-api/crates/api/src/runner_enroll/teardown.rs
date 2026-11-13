@@ -2799,6 +2799,7 @@ async fn fire_bundle(
                         &triggered_by,
                         &reason,
                         &name,
+                        false,
                     )
                     .await
                     {

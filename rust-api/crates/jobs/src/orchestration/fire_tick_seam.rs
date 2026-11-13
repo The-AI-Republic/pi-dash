@@ -888,6 +888,7 @@ pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     triggered_by: &str,
     reason: &str,
     reason_name: &str,
+    preserve_state: bool,
 ) -> Result<DispatchOutcome<BounceOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -905,6 +906,7 @@ where
         reason_name,
         now,
         jitter_secs,
+        preserve_state,
     )
     .await?;
     let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
@@ -920,16 +922,52 @@ where
     })
 }
 
-dispatch_driver!(
-    preflight_eligibility_or_bounce,
-    pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce,
-    PreflightOutcome,
-    |_: &PreflightOutcome| false,
+#[allow(clippy::too_many_arguments)]
+pub async fn preflight_eligibility_or_bounce<C, H, P>(
+    pool: &PgPool,
+    deps: StoreDeps<C, H, P>,
+    matcher: &dyn PodRunnerMatcher,
+    now: DateTime<Utc>,
+    jitter_secs: f64,
     issue_id: Uuid,
     run_creator: Option<Uuid>,
     pod_id: Uuid,
     triggered_by: &str,
-);
+    preserve_state: bool,
+) -> Result<DispatchOutcome<PreflightOutcome>, DispatchJobsError>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    let cloud = deps.cloud.clone();
+    let tx = Transaction::begin(pool).await?;
+    let mut store = LiveCreationStore::new(tx, pool, deps);
+    let outcome: PreflightOutcome =
+        pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce(
+            &mut store,
+            issue_id,
+            run_creator,
+            pod_id,
+            triggered_by,
+            matcher,
+            now,
+            jitter_secs,
+            preserve_state,
+        )
+        .await?;
+    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    tx.commit().await?;
+    let dispatch_decisions =
+        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+    let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
+    Ok(DispatchOutcome {
+        outcome,
+        dispatched,
+        dispatch_decisions,
+        terminal_effects,
+    })
+}
 
 dispatch_driver!(
     re_tick_ticker,
@@ -2674,6 +2712,7 @@ mod tests {
             "tick",
             "no-eligible-runner",
             "",
+            false,
         )
         .await
         .expect("bounce");
@@ -2712,6 +2751,7 @@ mod tests {
             "tick",
             "no-eligible-runner",
             "",
+            false,
         )
         .await
         .expect("bounce");
@@ -2743,6 +2783,7 @@ mod tests {
             "tick",
             "no-eligible-runner",
             "",
+            false,
         )
         .await
         .unwrap_err();
@@ -2787,6 +2828,7 @@ mod tests {
             "tick",
             "no-eligible-runner",
             "",
+            false,
         )
         .await
         .expect("bounce");
@@ -2976,6 +3018,7 @@ mod tests {
             "tick",
             "no-eligible-runner",
             "",
+            false,
         )
         .await
         .expect("bounce");
@@ -3216,6 +3259,7 @@ mod tests {
             Some(graph.user),
             graph.pod,
             "run_ai",
+            false,
         )
         .await
         .expect("preflight");

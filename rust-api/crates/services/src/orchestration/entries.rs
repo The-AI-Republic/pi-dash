@@ -114,6 +114,7 @@ use super::creation::{
     ERROR_CODE_PROMPT_BUILD_FAILED, RUN_VIEW_COLUMNS,
 };
 use pidash_compat::py::py_uuid_or_none;
+use pidash_db::tasks_ticker::TickerDisarmReason;
 
 // ---------------------------------------------------------------------------
 // Reasons, error strings, signal attributes (all verbatim)
@@ -530,12 +531,16 @@ pub trait EntriesSeam: CreationSeam + FinalizeAgentRunSeam {
 pub trait PreflightSeam {
     /// `True` when dispatch may proceed; `False` when the issue was
     /// bounced (the seam owns the Backlog move + notice comment).
+    /// `preserve_state` is the PDASHOSS01-366 human-move flag: when
+    /// `true` the seam keeps the requested state instead of bouncing
+    /// to Backlog (the notice still posts and the ticker disarms).
     async fn preflight_eligibility_or_bounce(
         &mut self,
         issue_id: Uuid,
         creator_id: Uuid,
         pod_id: Uuid,
         triggered_by: &str,
+        preserve_state: bool,
     ) -> Result<bool, CreationError>;
 
     /// The `pod_once` preflight (PDASHOSS01-350, design §23.3): the
@@ -903,15 +908,31 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
     };
 
     if !req.pod_once {
+        let preserve_state = req.moved_by_run.is_none();
         if !preflight
             .preflight_eligibility_or_bounce(
                 req.issue_id,
                 creator,
                 pod,
                 AgentRunTrigger::StateTransition.value(),
+                preserve_state,
             )
             .await?
         {
+            if preserve_state {
+                // PDASHOSS01-366: keep the requested state but disarm the
+                // clock so the next tick does not re-bounce. The seam's
+                // bounce already does this when alive; the fake seam used
+                // in unit tests does not, so disarm here to keep live and
+                // test tickers identical.
+                if let Some(mut row) = seam.lock_ticker(req.issue_id).await? {
+                    let _ = super::clock::disarm_ticker(
+                        Some(&mut row),
+                        TickerDisarmReason::LeftTickingState.as_str(),
+                    );
+                    seam.save_ticker(&row, ClockWrite::Update).await?;
+                }
+            }
             return Ok(TransitionOutcome {
                 created_run: None,
                 reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
@@ -2386,9 +2407,11 @@ mod tests {
             creator_id: Uuid,
             pod_id: Uuid,
             triggered_by: &str,
+            preserve_state: bool,
         ) -> Result<bool, CreationError> {
             self.calls
                 .push((issue_id, creator_id, pod_id, triggered_by.to_owned()));
+            let _ = preserve_state;
             match self.verdict {
                 Some(v) => Ok(v),
                 None => panic!("preflight consulted outside its script"),
@@ -2792,6 +2815,38 @@ mod tests {
         );
         let row = seam.tickers.get(&uid(0x01)).expect("ticker created");
         assert_ticker_scalars(&case["after"]["ticker"], row);
+        assert!(seam.dispatched.is_empty());
+        assert!(seam.inserted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn t10b_preserve_in_review_keeps_state() {
+        // PDASHOSS01-366: human move to In Review with no eligible
+        // runner preserves In Review (saved state, not just response),
+        // disarms the ticker, and creates no run.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        // Seed In Review as the ticking target (id 0x32).
+        set_issue_state(&mut seam, uid(0x32));
+        let seam2 = seam.with_bundle_state(uid(0x32));
+        let mut seam = seam2;
+        set_issue_state(&mut seam, uid(0x32));
+        let from = seam.states[&uid(0x31)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::deny();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NO_ELIGIBLE_RUNNER);
+        assert!(outcome.created_run.is_none());
+        // Ticker was armed by reconcile then disarmed by the preserve path.
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker created");
+        assert!(!row.enabled);
+        assert_eq!(row.disarm_reason, "left_ticking_state");
         assert!(seam.dispatched.is_empty());
         assert!(seam.inserted.is_empty());
     }
