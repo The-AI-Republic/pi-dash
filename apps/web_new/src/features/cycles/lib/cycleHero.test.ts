@@ -150,16 +150,37 @@ describe("heroChartAvailable", () => {
   const now = new Date("2026-10-23T12:00:00Z");
 
   it("plots a dated cycle that has started", () => {
-    expect(heroChartAvailable("2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z", now)).toBe(true);
-    expect(heroChartAvailable("2026-10-23T12:00:00Z", "2026-10-31T00:00:00Z", now)).toBe(true);
+    expect(heroChartAvailable("2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z", "UTC", now)).toBe(true);
+    expect(heroChartAvailable("2026-10-23T12:00:00Z", "2026-10-31T00:00:00Z", "UTC", now)).toBe(true);
   });
 
   it("withholds undated, future-start, and unparseable cycles", () => {
-    expect(heroChartAvailable(null, "2026-10-31T00:00:00Z", now)).toBe(false);
-    expect(heroChartAvailable("2026-10-01T00:00:00Z", null, now)).toBe(false);
-    expect(heroChartAvailable(undefined, undefined, now)).toBe(false);
-    expect(heroChartAvailable("2026-11-01T00:00:00Z", "2026-11-30T00:00:00Z", now)).toBe(false);
-    expect(heroChartAvailable("not-a-date", "2026-10-31T00:00:00Z", now)).toBe(false);
+    expect(heroChartAvailable(null, "2026-10-31T00:00:00Z", "UTC", now)).toBe(false);
+    expect(heroChartAvailable("2026-10-01T00:00:00Z", null, "UTC", now)).toBe(false);
+    expect(heroChartAvailable(undefined, undefined, "UTC", now)).toBe(false);
+    expect(heroChartAvailable("2026-11-01T00:00:00Z", "2026-11-30T00:00:00Z", "UTC", now)).toBe(false);
+    expect(heroChartAvailable("not-a-date", "2026-10-31T00:00:00Z", "UTC", now)).toBe(false);
+  });
+
+  it("compares in the project zone, not the browser clock (CYC-044, §17)", () => {
+    // 23:00 UTC is still Oct 9 in New York while UTC is Oct 9.
+    // A cycle starting 00:30 UTC Oct 10 is Oct 9 in New York but Oct 10 in UTC:
+    // New York has started (Oct 9 <= Oct 9) while UTC has not (Oct 10 > Oct 9).
+    const boundaryNow = new Date("2026-10-09T23:00:00Z");
+    const boundaryStart = "2026-10-10T00:30:00Z";
+    const boundaryEnd = "2026-10-11T00:30:00Z";
+    expect(heroChartAvailable(boundaryStart, boundaryEnd, "America/New_York", boundaryNow)).toBe(true);
+    expect(heroChartAvailable(boundaryStart, boundaryEnd, "UTC", boundaryNow)).toBe(false);
+  });
+
+  it("matches the sidebar gate around local midnight", () => {
+    // At 04:00 UTC, Los Angeles is still Oct 28 while UTC is Oct 29:
+    // a cycle starting Oct 29 has not started in Los Angeles yet.
+    const nowDate = new Date("2026-10-29T04:00:00Z");
+    expect(heroChartAvailable("2026-10-29T12:00:00Z", "2026-11-20T12:00:00Z", "America/Los_Angeles", nowDate)).toBe(
+      false
+    );
+    expect(heroChartAvailable("2026-10-29T12:00:00Z", "2026-11-20T12:00:00Z", "UTC", nowDate)).toBe(true);
   });
 });
 
