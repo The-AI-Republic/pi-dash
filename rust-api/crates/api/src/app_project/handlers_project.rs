@@ -1344,6 +1344,7 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::Id,
         proj_entity::Column::Name,
         proj_entity::Column::Description,
+        proj_entity::Column::Context,
         proj_entity::Column::DescriptionText,
         proj_entity::Column::DescriptionHtml,
         proj_entity::Column::Network,
