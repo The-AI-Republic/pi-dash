@@ -11,18 +11,13 @@
 //! * `user_has_llm_config` (`agent_execution.py:69-80`) → [`user_has_llm_config`].
 //! * `agent_executor_options` (`agent_execution.py:83-128`) → [`agent_executor_options`]
 //!   + [`LOCAL_RUNNER_EXISTS_SQL`].
-//! * `READ_TOOLS` / `WRITE_TOOLS` (`policy.py:11-29`) → [`READ_TOOLS`] / [`WRITE_TOOLS`].
-//! * `REPEATABLE_WRITE_TOOLS` / `CURRENT_ISSUE_WRITE_TOOLS` (`policy.py:30-42`) →
-//!   [`REPEATABLE_WRITE_TOOLS`] / [`CURRENT_ISSUE_WRITE_TOOLS`].
-//! * `CloudAgentUnavailable` / `CloudCapabilityUnavailable` / `RequiredToolUnavailable`
-//!   (`policy.py:45-54`) → [`CloudAgentUnavailable`] / [`CloudCapabilityUnavailable`] /
-//!   [`RequiredToolUnavailable`].
+//! * `CloudAgentUnavailable` (`policy.py:45-46`) → [`CloudAgentUnavailable`].
 //! * `resolve_executor_kind` (`policy.py:57-72`) → [`resolve_executor_kind`].
-//! * `github_available_for_project` (`policy.py:75-94`) → [`github_available_for_project`]
-//!   + [`GITHUB_BINDING_EXISTS_SQL`].
-//! * `build_tool_plan` (`policy.py:97-159`) → [`build_tool_plan`] + [`ToolPlan`].
-//! * `resolve_current_tool_names` (`policy.py:162-196`) → [`resolve_current_tool_names`]
-//!   + [`resolve_run_project`] + [`BINDING_REPO_SQL`] + [`CODE_REVIEW_LINK_EXISTS_SQL`].
+//!
+//! P3 step B deleted the cloud tool-catalog half (`READ_TOOLS` /
+//! `WRITE_TOOLS` / `CloudCapabilityUnavailable` / `RequiredToolUnavailable` /
+//! `build_tool_plan` / `resolve_current_tool_names` / GitHub-binding checks)
+//! with the retired execute plane.
 //!
 //! Out of scope here (owned by siblings): `AgentExecutorKind` / `MACHINE_EXECUTORS` /
 //! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `ManagedRunnerReason` /
@@ -67,66 +62,10 @@ use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::entity::{dev_machine, pod, runner};
 use pidash_types::dispatch::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// Tool catalogs (`policy.py:11-42`)
-// ---------------------------------------------------------------------------
-
-/// Read tools, in `policy.py:11-21` order.
-pub const READ_TOOLS: [&str; 9] = [
-    "pidash_get_current_issue",
-    "pidash_list_current_issue_comments",
-    "pidash_list_project_states",
-    "pidash_search_project_issues",
-    "pidash_get_project_issue",
-    "pidash_list_linked_code_reviews",
-    "pidash_list_issue_relations",
-    "github_get_file",
-    "github_get_linked_pull_request",
-];
-
-/// Write tools, in `policy.py:22-29` order.
-pub const WRITE_TOOLS: [&str; 6] = [
-    "pidash_add_current_issue_comment",
-    "pidash_update_current_issue_workpad",
-    "pidash_transition_current_issue",
-    "pidash_create_project_issue",
-    "pidash_relate_issues",
-    "pidash_unrelate_issues",
-];
-
-/// Idempotent-by-construction writes a run may call more than once
-/// (`policy.py:30-34`). Consumed by L5 (`tools.py:105`); defined here because this
-/// is its Python home. Literal order kept.
-pub const REPEATABLE_WRITE_TOOLS: [&str; 2] = ["pidash_relate_issues", "pidash_unrelate_issues"];
-
-/// Writes aimed at the run's bound issue (`policy.py:35-42`). Literal order kept.
-pub const CURRENT_ISSUE_WRITE_TOOLS: [&str; 3] = [
-    "pidash_add_current_issue_comment",
-    "pidash_update_current_issue_workpad",
-    "pidash_transition_current_issue",
-];
-
-/// The two github tools, named once for the two sites that strip them together
-/// (`policy.py:122` in `build_tool_plan`, `policy.py:176` in
-/// `resolve_current_tool_names`).
-pub const GITHUB_TOOLS: [&str; 2] = ["github_get_file", "github_get_linked_pull_request"];
-
-/// Tools dropped when the run has no bound issue (`policy.py:107-115`), verbatim.
-/// (The three write names are no-ops here — the set holds reads only at that point —
-/// and are stripped again from the writes union at `policy.py:127-128`; the order of
-/// operations below mirrors Python exactly rather than folding the two sites.)
-const NO_ISSUE_STRIPPED: [&str; 7] = [
-    "pidash_get_current_issue",
-    "pidash_list_current_issue_comments",
-    "pidash_list_linked_code_reviews",
-    "github_get_linked_pull_request",
-    "pidash_add_current_issue_comment",
-    "pidash_update_current_issue_workpad",
-    "pidash_transition_current_issue",
-];
+// B catalogs deleted in P3 step B (retired tool lists).
 
 // ---------------------------------------------------------------------------
 // Kill switches (`agent_execution.py:34-54`)
@@ -183,78 +122,6 @@ impl std::fmt::Display for CloudAgentUnavailable {
 }
 
 impl std::error::Error for CloudAgentUnavailable {}
-
-/// Required capabilities the plan cannot provide (`policy.py:49-50`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudCapabilityUnavailable {
-    message: String,
-}
-
-impl CloudCapabilityUnavailable {
-    /// The `code` class attribute (`policy.py:50`).
-    pub const CODE: &'static str = "cloud_capability_unavailable";
-
-    /// `CloudCapabilityUnavailable(message)`.
-    pub fn new(message: impl Into<String>) -> Self {
-        CloudCapabilityUnavailable {
-            message: message.into(),
-        }
-    }
-
-    /// The carried message (`str(exc)`).
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    /// The reason code.
-    pub fn code(&self) -> &'static str {
-        Self::CODE
-    }
-}
-
-impl std::fmt::Display for CloudCapabilityUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for CloudCapabilityUnavailable {}
-
-/// A plan-required tool withdrawn mid-flight (`policy.py:53-54`; a `RuntimeError`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequiredToolUnavailable {
-    message: String,
-}
-
-impl RequiredToolUnavailable {
-    /// The `code` class attribute (`policy.py:54`).
-    pub const CODE: &'static str = "required_tool_unavailable";
-
-    /// `RequiredToolUnavailable(message)`.
-    pub fn new(message: impl Into<String>) -> Self {
-        RequiredToolUnavailable {
-            message: message.into(),
-        }
-    }
-
-    /// The carried message (`str(exc)`).
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    /// The reason code.
-    pub fn code(&self) -> &'static str {
-        Self::CODE
-    }
-}
-
-impl std::fmt::Display for RequiredToolUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for RequiredToolUnavailable {}
 
 /// The `resolve_executor_kind` failure mode (`policy.py:57-72`, #2903).
 ///
@@ -535,6 +402,7 @@ pub async fn local_runner_available_exists(
     }))
 }
 
+<<<<<<< HEAD
 // ---------------------------------------------------------------------------
 // GitHub availability (`policy.py:75-94`)
 // ---------------------------------------------------------------------------
@@ -816,6 +684,11 @@ pub fn resolve_current_tool_names(
     names.sort();
     Ok(names)
 }
+=======
+// build_tool_plan / resolve_current_tool_names / ToolPlan /
+// resolve_run_project / LinkedPrCtx / GitHub-binding SQL deleted
+// in P3 step B.
+>>>>>>> e239eb7bb (refactor(p3b): delete the retired creation path (step B))
 
 #[cfg(test)]
 mod tests {
@@ -897,56 +770,6 @@ mod tests {
     }
 
     // -- catalogs (`policy.py:11-42`) --------------------------------------
-
-    #[test]
-    fn catalogs_match_python_verbatim() {
-        // Traced to `policy.py:11-42` and cross-checked by executing the real
-        // module (oracle run 2026-10-01); the build_tool_plan goldens below pin
-        // membership transitively.
-        assert_eq!(
-            READ_TOOLS.as_slice(),
-            [
-                "pidash_get_current_issue",
-                "pidash_list_current_issue_comments",
-                "pidash_list_project_states",
-                "pidash_search_project_issues",
-                "pidash_get_project_issue",
-                "pidash_list_linked_code_reviews",
-                "pidash_list_issue_relations",
-                "github_get_file",
-                "github_get_linked_pull_request",
-            ]
-        );
-        assert_eq!(
-            WRITE_TOOLS.as_slice(),
-            [
-                "pidash_add_current_issue_comment",
-                "pidash_update_current_issue_workpad",
-                "pidash_transition_current_issue",
-                "pidash_create_project_issue",
-                "pidash_relate_issues",
-                "pidash_unrelate_issues",
-            ]
-        );
-        assert_eq!(
-            REPEATABLE_WRITE_TOOLS.as_slice(),
-            ["pidash_relate_issues", "pidash_unrelate_issues"]
-        );
-        assert_eq!(
-            CURRENT_ISSUE_WRITE_TOOLS.as_slice(),
-            [
-                "pidash_add_current_issue_comment",
-                "pidash_update_current_issue_workpad",
-                "pidash_transition_current_issue",
-            ]
-        );
-        assert_eq!(
-            UNAVAILABLE_CAPABILITIES.as_slice(),
-            ["filesystem", "shell", "worktree"]
-        );
-        assert_eq!(TOOL_PLAN_VERSION, 1);
-        assert_eq!(TOOL_CATALOG_VERSION, 1);
-    }
 
     // -- kill switches + effective executor + llm gate -----------------------
 
@@ -1094,20 +917,15 @@ mod tests {
             resolve_executor_kind(None, "bogus", &cloud_on),
             Err(ResolveExecutorError::UnknownExecutor)
         );
-        // Error taxonomy: codes, messages, std::error::Error impls.
+        // Error taxonomy (P3 step B: the cloud capability / required-tool
+        // errors died with the tool plan): codes, messages,
+        // std::error::Error impls.
         assert_eq!(CloudAgentUnavailable::CODE, "cloud_agent_unavailable");
-        assert_eq!(
-            CloudCapabilityUnavailable::CODE,
-            "cloud_capability_unavailable"
-        );
-        assert_eq!(RequiredToolUnavailable::CODE, "required_tool_unavailable");
         let cloud_err = CloudAgentUnavailable::new("m");
         assert_eq!(cloud_err.code(), CloudAgentUnavailable::CODE);
         assert_eq!(cloud_err.message(), "m");
         assert_eq!(cloud_err.to_string(), "m");
         let _: &dyn std::error::Error = &cloud_err;
-        let _: &dyn std::error::Error = &CloudCapabilityUnavailable::new("m");
-        let _: &dyn std::error::Error = &RequiredToolUnavailable::new("m");
         assert!(ResolveExecutorError::UnknownExecutor.source().is_none());
     }
 
@@ -1279,6 +1097,7 @@ mod tests {
             .contains("PINNED_ONLY"));
     }
 
+<<<<<<< HEAD
     // -- build_tool_plan goldens ---------------------------------------------
 
     /// `build_tool_plan` with the fixture's default settings (cloud on, writes off,
@@ -1729,4 +1548,6 @@ mod tests {
         assert_eq!(resolve_run_project(None, Some(scheduler), pod), scheduler);
         assert_eq!(resolve_run_project(None, None, pod), pod);
     }
+=======
+>>>>>>> e239eb7bb (refactor(p3b): delete the retired creation path (step B))
 }

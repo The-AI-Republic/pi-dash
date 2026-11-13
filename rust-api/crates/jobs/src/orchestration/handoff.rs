@@ -59,9 +59,8 @@ use pidash_types::dispatch::AgentExecutorKind;
 
 use crate::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
-    execution_fields as resolve_execution_fields, lock_cloud_creation_capacity as lock_capacity,
-    ActorScope, DeferredAdmissionError, DispatchDecision, ExecutionFieldsError, ExecutionInputs,
-    ExecutionSeams, ProjectScope,
+    execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
+    DispatchDecision, ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 
 /// `timezone.now()` truncated to microseconds (Django datetimes are
@@ -976,32 +975,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .map_err(twin_map_execution_error)
     }
 
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        let outcome = lock_capacity(
-            &mut self.tx,
-            workspace_id,
-            &executor_kind,
-            automatic,
-            &self.cloud,
-        )
-        .await;
-        match outcome {
-            Ok(deferred) => Ok(deferred.map(twin_map_admission_error)),
-            Err(ExecutionFieldsError::Admission(exc)) => {
-                Err(CreationError::CapacityRefused(exc.detail().to_owned()))
-            }
-            Err(ExecutionFieldsError::Db(error)) => Err(CreationError::Db(error.to_string())),
-            // Unreachable: the lock path only locks, counts and
-            // verdicts (no resolve/LLM/tool gates).
-            Err(other) => Err(CreationError::Db(format!("unexpected lock error: {other}"))),
-        }
-    }
-
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
         collect_dispatch(&mut |id| self.dispatches.push(id), run_id);
     }
@@ -1050,7 +1023,6 @@ fn twin_map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }

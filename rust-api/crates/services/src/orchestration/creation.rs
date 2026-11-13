@@ -2356,15 +2356,6 @@ pub trait CreationSeam {
         &mut self,
         req: &ExecutionRequest,
     ) -> Result<ExecutionFields, ExecutionError>;
-    /// `lock_cloud_creation_capacity` (`creation.py:155-177`) on the
-    /// caller's insertion transaction. A manual over-capacity raise
-    /// surfaces as [`CreationError::CapacityRefused`] and propagates.
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError>;
     /// `dispatch_after_commit` (`creation.py:148-152`): collect the run
     /// id for post-commit dispatch. Nothing executes inline.
     fn dispatch_after_commit(&mut self, run_id: Uuid);
@@ -2591,11 +2582,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     let effective_parent = if req.fresh_session {
         None
     } else {
@@ -2757,11 +2744,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     // The dedicated pin (§9.2): a dedicated issue pins its runner,
     // whatever the parent/locality path computed.
     let pin_kind = if issue.assigned_runner_id.is_some() {
@@ -3905,15 +3888,6 @@ mod tests {
             _req: &ExecutionRequest,
         ) -> Result<ExecutionFields, ExecutionError> {
             self.execution.clone().expect("script execution")
-        }
-
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
         }
 
         fn dispatch_after_commit(&mut self, run_id: Uuid) {

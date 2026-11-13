@@ -65,77 +65,16 @@
 //! overshoot (`admission.py:40-42`) and the +5s consume overhang (`:24`) are
 //! documented-by-design and translated as-is.
 
-use super::policy::{
-    managed_runner_is_enabled, CloudAgentUnavailable, ManagedAvailability, UserFlags, READ_TOOLS,
-    WRITE_TOOLS,
-};
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use super::policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
+use pidash_db::config::ManagedRunnerSettings;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
 // Admission error (`admission.py:15-19`)
 // ---------------------------------------------------------------------------
 
-/// Admission refusal (`admission.py:15-19`; a `RuntimeError` in Python).
-///
-/// Raised by [`take_bucket`] (`run_quota_exceeded` / `admission_unavailable`)
-/// and, in the creation layer (L6, `creation.py:63-69,169-173`), for a full
-/// workspace queue — so `detail` is stored, not derived from `code`. The
-/// `from exc` chain on the cache-down raise is a traceback detail; `code` /
-/// `detail` / `retry_after_seconds` are the contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudAgentAdmissionError {
-    code: String,
-    detail: String,
-    retry_after_seconds: Option<i64>,
-}
-
-impl CloudAgentAdmissionError {
-    /// Bucket full (`admission.py:52-57`).
-    pub const RUN_QUOTA_EXCEEDED: &'static str = "run_quota_exceeded";
-    /// Cache read failed (`admission.py:46-51`).
-    pub const ADMISSION_UNAVAILABLE: &'static str = "admission_unavailable";
-
-    /// `CloudAgentAdmissionError(code, detail, retry_after_seconds=None)`
-    /// (`admission.py:16-19`).
-    pub fn new(
-        code: impl Into<String>,
-        detail: impl Into<String>,
-        retry_after_seconds: Option<i64>,
-    ) -> Self {
-        CloudAgentAdmissionError {
-            code: code.into(),
-            detail: detail.into(),
-            retry_after_seconds,
-        }
-    }
-
-    /// The refusal code.
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    /// `str(exc)`: the detail (`:17` passes it to `RuntimeError`).
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
-
-    /// Seconds until the next minute bucket (always `Some` at the raise
-    /// sites in this module; `None` is the constructor default).
-    pub fn retry_after_seconds(&self) -> Option<i64> {
-        self.retry_after_seconds
-    }
-}
-
-impl std::fmt::Display for CloudAgentAdmissionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.detail)
-    }
-}
-
-impl std::error::Error for CloudAgentAdmissionError {}
+// CloudAgentAdmissionError deleted in P3 step B (admission removal).
 
 // ---------------------------------------------------------------------------
 // Bucket math and keys (`admission.py:63-76`)
@@ -200,114 +139,9 @@ pub fn consume_admission_token<C: AdmissionCache>(cache: &C, deferred: &Deferred
     let _ = cache.add_or_incr(&deferred.key, deferred.timeout_secs);
 }
 
-/// Reject on the bucket's current count; consume only on commit (`_take`,
-/// `admission.py:32-58`).
-///
-/// The check-then-increment window lets a concurrent burst slightly overshoot
-/// the per-minute rate (`:40-42`); the workspace queue cap stays the hard
-/// limit. Private: handlers enforce through [`enforce_creation_rate`].
-fn take_bucket<C: AdmissionCache>(
-    cache: &C,
-    on_commit: &mut dyn FnMut(DeferredConsume),
-    key: String,
-    limit: i64,
-    retry_after: i64,
-) -> Result<(), CloudAgentAdmissionError> {
-    let count = cache
-        .bucket_count(&key)
-        .map_err(|_| {
-            CloudAgentAdmissionError::new(
-                CloudAgentAdmissionError::ADMISSION_UNAVAILABLE,
-                "Cloud Agent admission is temporarily unavailable",
-                Some(retry_after),
-            )
-        })?
-        .unwrap_or(0);
-    if count >= limit {
-        return Err(CloudAgentAdmissionError::new(
-            CloudAgentAdmissionError::RUN_QUOTA_EXCEEDED,
-            "Cloud Agent creation rate exceeded",
-            Some(retry_after),
-        ));
-    }
-    on_commit(DeferredConsume {
-        key,
-        timeout_secs: retry_after + CONSUME_TIMEOUT_OVERHANG_SECS,
-    });
-    Ok(())
-}
+// take_bucket + enforce_creation_rate deleted in P3 step B.
 
-/// Consume fixed one-minute buckets (`enforce_creation_rate`,
-/// `admission.py:61-76`).
-///
-/// The workspace bucket is always checked; the user bucket only when
-/// `!automatic && actor_id.is_some()` (`:71`). Nothing is consumed here:
-/// each passing bucket appends a [`DeferredConsume`] to `on_commit`, which the
-/// caller runs after commit — a rolled-back creation burns no quota (`:34-42`).
-pub fn enforce_creation_rate<C: AdmissionCache>(
-    cloud: &CloudAgentSettings,
-    now_unix_secs: i64,
-    workspace_id: &str,
-    actor_id: Option<&str>,
-    automatic: bool,
-    cache: &C,
-    on_commit: &mut dyn FnMut(DeferredConsume),
-) -> Result<(), CloudAgentAdmissionError> {
-    let retry_after = admission_retry_after(now_unix_secs);
-    let bucket = admission_bucket(now_unix_secs);
-    take_bucket(
-        cache,
-        on_commit,
-        workspace_admission_key(workspace_id, bucket),
-        cloud.workspace_creation_rate_per_minute,
-        retry_after,
-    )?;
-    if !automatic {
-        if let Some(actor) = actor_id {
-            take_bucket(
-                cache,
-                on_commit,
-                user_admission_key(actor, bucket),
-                cloud.user_creation_rate_per_minute,
-                retry_after,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Cloud unavailable API error (`api.py:5-8`)
-// ---------------------------------------------------------------------------
-
-/// `CloudAgentUnavailableAPI.status_code` (`api.py:6`): DRF 409.
-pub const CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS: u16 = 409;
-
-/// `CloudAgentUnavailableAPI.default_detail` (`api.py:7`), fields in dict
-/// order. The `code` reuses L3's [`CloudAgentUnavailable::CODE`] (`policy.py:46`,
-/// the same value `api.py:8` repeats as `default_code`) so the two can never
-/// drift apart.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloudAgentUnavailableBody {
-    pub error: String,
-    pub code: String,
-}
-
-impl CloudAgentUnavailableBody {
-    /// The default 409 body, verbatim.
-    pub fn new() -> Self {
-        CloudAgentUnavailableBody {
-            error: "Pi Dash Cloud Agent is not currently available".to_string(),
-            code: CloudAgentUnavailable::CODE.to_string(),
-        }
-    }
-}
-
-impl Default for CloudAgentUnavailableBody {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// CloudAgentUnavailableBody deleted in P3 step B.
 
 // ---------------------------------------------------------------------------
 // Managed runner availability (`managed_runner/policy.py:27-96`)
@@ -547,132 +381,7 @@ pub struct ConfigurationError {
     pub message: String,
 }
 
-/// `cloud_agent_configuration_check` (`cloud_agent/checks.py:8-74`, #2903).
-///
-/// Active ids are E005/E007/E008; E001/E002 retired with the executor
-/// translation (E003/E004/E006 covered retired platform model settings,
-/// `checks.py:15-17`). `default_agent_executor` is unused and kept only
-/// for signature parity with the pre-#2903 check.
-pub fn cloud_agent_configuration_check(
-    cloud: &CloudAgentSettings,
-    _default_agent_executor: &str,
-) -> Vec<ConfigurationError> {
-    let mut errors = Vec::new();
-    // `sorted(set(disabled) - set(READ) - set(WRITE))` (`checks.py:20`): sorted
-    // unique unknown names; byte order in both languages.
-    let known: BTreeSet<&str> = READ_TOOLS
-        .iter()
-        .copied()
-        .chain(WRITE_TOOLS.iter().copied())
-        .collect();
-    let unknown: BTreeSet<&str> = cloud
-        .disabled_tools
-        .iter()
-        .map(String::as_str)
-        .filter(|tool| !known.contains(tool))
-        .collect();
-    if !unknown.is_empty() {
-        errors.push(ConfigurationError {
-            id: "cloud_agent.E005",
-            message: format!(
-                "CLOUD_AGENT_DISABLED_TOOLS contains unknown names: {}",
-                unknown.iter().copied().collect::<Vec<_>>().join(", ")
-            ),
-        });
-    }
-    if !(0 < cloud.execution_timeout_secs
-        && cloud.execution_timeout_secs < cloud.run_soft_limit_secs
-        && cloud.run_soft_limit_secs < cloud.run_hard_limit_secs)
-    {
-        errors.push(ConfigurationError {
-            id: "cloud_agent.E007",
-            message: "Cloud Agent execution, soft, and hard timeouts must be positive and strictly increasing"
-                .to_string(),
-        });
-    }
-    // `positive_settings` (`checks.py:40-65`), in list order; the report keeps
-    // that order (`:66` is a list comprehension, not a set).
-    let positive: [(&str, i64); 24] = [
-        (
-            "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
-            cloud.model_request_timeout_secs,
-        ),
-        ("CLOUD_AGENT_STALE_GRACE_SECONDS", cloud.stale_grace_secs),
-        (
-            "CLOUD_AGENT_DISPATCH_LEASE_SECONDS",
-            cloud.dispatch_lease_secs,
-        ),
-        (
-            "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS",
-            cloud.dispatch_backoff_secs,
-        ),
-        (
-            "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            cloud.dispatch_scan_interval_secs,
-        ),
-        (
-            "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
-            cloud.sweep_interval_secs,
-        ),
-        ("CLOUD_AGENT_DISPATCH_SCAN_BATCH", cloud.dispatch_scan_batch),
-        (
-            "CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS",
-            cloud.max_queue_age_secs,
-        ),
-        ("CLOUD_AGENT_MODEL_REQUEST_LIMIT", cloud.model_request_limit),
-        ("CLOUD_AGENT_TOOL_CALL_LIMIT", cloud.tool_call_limit),
-        ("CLOUD_AGENT_WRITE_CALL_LIMIT", cloud.write_call_limit),
-        ("CLOUD_AGENT_INPUT_TOKEN_LIMIT", cloud.input_token_limit),
-        ("CLOUD_AGENT_OUTPUT_TOKEN_LIMIT", cloud.output_token_limit),
-        ("CLOUD_AGENT_TOTAL_TOKEN_LIMIT", cloud.total_token_limit),
-        (
-            "CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST",
-            cloud.max_output_tokens_per_request,
-        ),
-        (
-            "CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE",
-            cloud.max_queued_per_workspace,
-        ),
-        (
-            "CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE",
-            cloud.max_running_per_workspace,
-        ),
-        (
-            "CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE",
-            cloud.user_creation_rate_per_minute,
-        ),
-        (
-            "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE",
-            cloud.workspace_creation_rate_per_minute,
-        ),
-        ("CLOUD_AGENT_TOOL_TIMEOUT_SECONDS", cloud.tool_timeout_secs),
-        (
-            "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES",
-            cloud.max_tool_result_bytes,
-        ),
-        ("CLOUD_AGENT_MAX_PROMPT_BYTES", cloud.max_prompt_bytes),
-        (
-            "CLOUD_AGENT_MAX_FINAL_RESULT_BYTES",
-            cloud.max_final_result_bytes,
-        ),
-        ("CLOUD_AGENT_MAX_EVENTS", cloud.max_events),
-    ];
-    let invalid: Vec<&str> = positive
-        .iter()
-        .filter(|(_, value)| *value <= 0)
-        .map(|(name, _)| *name)
-        .collect();
-    if !invalid.is_empty() {
-        errors.push(ConfigurationError {
-            id: "cloud_agent.E008",
-            message: format!(
-                "Cloud Agent limits must be positive: {}",
-                invalid.join(", ")
-            ),
-        });
-    }
-    errors
-}
+// cloud_agent_configuration_check deleted in P3 step B.
 
 /// One `PHASES` row's contribution to managed E002
 /// (`orchestration/agent_phases.py:75-83`): only `state_name` and
@@ -843,56 +552,8 @@ mod tests {
 
     static FIXTURE: &str =
         include_str!("../../../../fixtures/dispatch/fx-disp-04-admission-checks.golden.json");
-    static FIXTURE_03: &str =
-        include_str!("../../../../fixtures/dispatch/fx-disp-03-policy.golden.json");
-
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("fixture parses")
-    }
-
-    fn fixture_03() -> Value {
-        serde_json::from_str(FIXTURE_03).expect("fixture parses")
-    }
-
-    /// Django-default settings (`settings/common.py:531-584` + `config/registry.py`),
-    /// same source as L3's test helpers.
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
     }
 
     fn django_managed_settings() -> ManagedRunnerSettings {
@@ -950,12 +611,6 @@ mod tests {
             }
         }
 
-        fn preset(key: &str, count: i64) -> Self {
-            let cache = Self::new();
-            cache.counts.borrow_mut().insert(key.to_string(), count);
-            cache
-        }
-
         fn count(&self, key: &str) -> i64 {
             self.counts.borrow().get(key).copied().unwrap_or(0)
         }
@@ -993,30 +648,6 @@ mod tests {
 
     // -- error shape (`admission.py:15-19`) ---------------------------------
 
-    #[test]
-    fn admission_error_shape_matches_fixture() {
-        let shape = &fixture()["cloud_admission_error_shape"];
-        assert_eq!(shape["class"], "RuntimeError subclass");
-        // Rust errors implement std::error::Error.
-        let err = CloudAgentAdmissionError::new("run_quota_exceeded", "detail", Some(23));
-        let _: &dyn std::error::Error = &err;
-        assert_eq!(
-            shape["codes"][0],
-            CloudAgentAdmissionError::RUN_QUOTA_EXCEEDED
-        );
-        assert_eq!(
-            shape["codes"][1],
-            CloudAgentAdmissionError::ADMISSION_UNAVAILABLE
-        );
-        assert_eq!(shape["codes"].as_array().expect("codes").len(), 2);
-        // str(exc) is the detail; retry passes through; None is the default.
-        assert_eq!(err.to_string(), "detail");
-        assert_eq!(err.code(), "run_quota_exceeded");
-        assert_eq!(err.retry_after_seconds(), Some(23));
-        let defaulted = CloudAgentAdmissionError::new("code", "detail", None);
-        assert_eq!(defaulted.retry_after_seconds(), None);
-    }
-
     // -- bucket math and keys (`admission.py:63-76`) --------------------------
 
     #[test]
@@ -1048,151 +679,6 @@ mod tests {
     // -- enforce_creation_rate (`admission.py:61-76`) -------------------------
 
     #[test]
-    fn allow_manual_defers_both_buckets() {
-        assert_eq!(fixture()["admission_allow_manual"], "allowed (no raise)");
-        let cloud = django_cloud_settings();
-        let cache = FakeCache::new();
-        let mut deferred = Vec::new();
-        let result = enforce_creation_rate(
-            &cloud,
-            FIXTURE_NOW,
-            "ws-1",
-            Some("actor-1"),
-            false,
-            &cache,
-            &mut |consume| deferred.push(consume),
-        );
-        assert!(result.is_ok());
-        assert_eq!(
-            deferred,
-            vec![
-                DeferredConsume {
-                    key: workspace_admission_key("ws-1", 29845934),
-                    timeout_secs: 28,
-                },
-                DeferredConsume {
-                    key: user_admission_key("actor-1", 29845934),
-                    timeout_secs: 28,
-                },
-            ]
-        );
-        // Nothing consumed before commit; post-commit consumes land once each.
-        assert_eq!(cache.count(&deferred[0].key), 0);
-        for consume in &deferred {
-            consume_admission_token(&cache, consume);
-        }
-        assert_eq!(cache.count(&deferred[0].key), 1);
-        assert_eq!(cache.count(&deferred[1].key), 1);
-    }
-
-    #[test]
-    fn automatic_skips_full_user_bucket() {
-        assert_eq!(
-            fixture()["admission_automatic_skips_user_bucket"],
-            "allowed despite full user bucket"
-        );
-        let cloud = django_cloud_settings();
-        let user_key = user_admission_key("actor-1", 29845934);
-        let cache = FakeCache::preset(&user_key, 6);
-        let mut deferred = Vec::new();
-        let result = enforce_creation_rate(
-            &cloud,
-            FIXTURE_NOW,
-            "ws-1",
-            Some("actor-1"),
-            true,
-            &cache,
-            &mut |consume| deferred.push(consume),
-        );
-        assert!(result.is_ok());
-        assert_eq!(deferred.len(), 1);
-        assert_eq!(deferred[0].key, workspace_admission_key("ws-1", 29845934));
-    }
-
-    #[test]
-    fn deny_branches_match_fixture() {
-        let cloud = django_cloud_settings();
-        // Full user bucket, manual call.
-        let user_key = user_admission_key("actor-1", 29845934);
-        let cache = FakeCache::preset(&user_key, 6);
-        let mut deferred = Vec::new();
-        let err = enforce_creation_rate(
-            &cloud,
-            FIXTURE_NOW,
-            "ws-1",
-            Some("actor-1"),
-            false,
-            &cache,
-            &mut |consume| deferred.push(consume),
-        )
-        .expect_err("user bucket full");
-        let golden = &fixture()["admission_deny_user_bucket"];
-        assert_eq!(err.code(), golden["code"].as_str().expect("code"));
-        assert_eq!(err.to_string(), golden["detail"].as_str().expect("detail"));
-        assert_eq!(
-            err.retry_after_seconds(),
-            Some(golden["retry_after_seconds"].as_i64().expect("retry"))
-        );
-        // The workspace deferral was already appended (Python calls on_commit
-        // for the passing bucket first); the caller runs deferred consumes
-        // only on Ok + commit, so the denial burns no quota.
-        assert_eq!(deferred.len(), 1);
-        drop(deferred);
-        assert_eq!(cache.count(&workspace_admission_key("ws-1", 29845934)), 0);
-        assert_eq!(cache.count(&user_key), 6);
-
-        // Full workspace bucket denies before the user bucket is even read.
-        let ws_key = workspace_admission_key("ws-1", 29845934);
-        let cache = FakeCache::preset(&ws_key, 30);
-        let mut deferred = Vec::new();
-        let err = enforce_creation_rate(
-            &cloud,
-            FIXTURE_NOW,
-            "ws-1",
-            Some("actor-1"),
-            false,
-            &cache,
-            &mut |consume| deferred.push(consume),
-        )
-        .expect_err("workspace bucket full");
-        let golden = &fixture()["admission_deny_workspace_bucket"];
-        assert_eq!(err.code(), golden["code"].as_str().expect("code"));
-        assert_eq!(err.to_string(), golden["detail"].as_str().expect("detail"));
-        assert_eq!(
-            err.retry_after_seconds(),
-            Some(golden["retry_after_seconds"].as_i64().expect("retry"))
-        );
-        assert!(deferred.is_empty());
-    }
-
-    #[test]
-    fn cache_down_fails_closed() {
-        let golden = &fixture()["admission_cache_down"];
-        let cloud = django_cloud_settings();
-        let cache = FakeCache {
-            fail_get: true,
-            ..FakeCache::new()
-        };
-        let mut deferred = Vec::new();
-        let err = enforce_creation_rate(
-            &cloud,
-            FIXTURE_NOW,
-            "ws-1",
-            Some("actor-1"),
-            false,
-            &cache,
-            &mut |consume| deferred.push(consume),
-        )
-        .expect_err("cache down");
-        assert_eq!(err.code(), golden["code"].as_str().expect("code"));
-        assert_eq!(err.to_string(), golden["detail"].as_str().expect("detail"));
-        // The fixture records code + detail; the source passes the live retry
-        // too (`admission.py:47-51`).
-        assert_eq!(err.retry_after_seconds(), Some(23));
-        assert!(deferred.is_empty());
-    }
-
-    #[test]
     fn consume_is_best_effort_and_rollback_burns_nothing() {
         // `_consume` swallows backend failures (`admission.py:26-29`).
         let cache = FakeCache {
@@ -1206,46 +692,26 @@ mod tests {
                 timeout_secs: 28,
             },
         );
-        // A passed check whose creation rolls back drops its deferred consumes
-        // (`admission.py:34-42`): rejections must not lock the user out.
-        let cloud = django_cloud_settings();
+        // Deferred consumes only burn on commit: dropping them without
+        // consuming leaves the buckets untouched (rollback burns
+        // nothing).
         let cache = FakeCache::new();
-        let mut deferred = Vec::new();
-        enforce_creation_rate(
-            &cloud,
-            FIXTURE_NOW,
-            "ws-1",
-            Some("actor-1"),
-            false,
-            &cache,
-            &mut |consume| deferred.push(consume),
-        )
-        .expect("allowed");
+        let deferred = vec![
+            DeferredConsume {
+                key: workspace_admission_key("ws-1", 29845934),
+                timeout_secs: 28,
+            },
+            DeferredConsume {
+                key: user_admission_key("actor-1", 29845934),
+                timeout_secs: 28,
+            },
+        ];
         drop(deferred); // rollback: post-commit wrapper never runs
         assert_eq!(cache.count(&workspace_admission_key("ws-1", 29845934)), 0);
         assert_eq!(cache.count(&user_admission_key("actor-1", 29845934)), 0);
     }
 
     // -- CloudAgentUnavailableAPI (`api.py:5-8`) -------------------------------
-
-    #[test]
-    fn unavailable_api_shape_matches_fx_disp_03() {
-        let golden = &fixture_03()["cloud_unavailable_api_shape"];
-        assert_eq!(CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS, 409);
-        assert_eq!(golden["status"], 409);
-        let body = CloudAgentUnavailableBody::new();
-        assert_eq!(body, CloudAgentUnavailableBody::default());
-        assert_eq!(body.code, golden["code"].as_str().expect("code"));
-        // Byte-exact body: `error` first, as DRF renders the dict.
-        assert_eq!(
-            serde_json::to_string(&body).expect("json"),
-            "{\"error\":\"Pi Dash Cloud Agent is not currently available\",\"code\":\"cloud_agent_unavailable\"}"
-        );
-        assert_eq!(
-            serde_json::to_value(&body).expect("value"),
-            golden["detail"]
-        );
-    }
 
     // -- IsDesktopSession (`permissions.py:12-28`) -----------------------------
 
@@ -1287,99 +753,6 @@ mod tests {
             .iter()
             .map(|error| (error.id, error.message.as_str()))
             .collect()
-    }
-
-    #[test]
-    fn cloud_check_clean_on_django_defaults() {
-        assert_eq!(
-            fixture()["cloud_agent_configuration_check"]["clean"],
-            serde_json::json!([])
-        );
-        let errors = cloud_agent_configuration_check(&django_cloud_settings(), "local_runner");
-        assert!(errors.is_empty());
-    }
-
-    #[test]
-    fn cloud_check_vectors_match_fixture() {
-        let golden = &fixture()["cloud_agent_configuration_check"];
-        // #2903: E001/E002 retired — an invalid or cloud default no
-        // longer errors here.
-        assert!(cloud_agent_configuration_check(&django_cloud_settings(), "bogus").is_empty());
-        assert!(
-            cloud_agent_configuration_check(&django_cloud_settings(), "cloud_agent").is_empty()
-        );
-        // E005: unknown disabled tool.
-        let mut cloud = django_cloud_settings();
-        cloud.disabled_tools = vec!["nope_tool".to_string()];
-        let errors = cloud_agent_configuration_check(&cloud, "local_runner");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                golden["E005"][0][0].as_str().expect("id"),
-                golden["E005"][0][1].as_str().expect("msg"),
-            )]
-        );
-        // E007: flat timeout chain.
-        let mut cloud = django_cloud_settings();
-        cloud.run_soft_limit_secs = cloud.run_hard_limit_secs;
-        let errors = cloud_agent_configuration_check(&cloud, "local_runner");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                golden["E007"][0][0].as_str().expect("id"),
-                golden["E007"][0][1].as_str().expect("msg"),
-            )]
-        );
-        // E008: one non-positive limit.
-        let mut cloud = django_cloud_settings();
-        cloud.tool_call_limit = 0;
-        let errors = cloud_agent_configuration_check(&cloud, "local_runner");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                golden["E008"][0][0].as_str().expect("id"),
-                golden["E008"][0][1].as_str().expect("msg"),
-            )]
-        );
-    }
-
-    #[test]
-    fn cloud_check_e005_dedupes_sorts_and_keeps_known() {
-        // Set semantics beyond the fixture: duplicates collapse, known tools
-        // are excluded, output is byte-sorted.
-        let mut cloud = django_cloud_settings();
-        cloud.disabled_tools = vec![
-            "zzz_tool".to_string(),
-            "pidash_add_current_issue_comment".to_string(),
-            "nope_tool".to_string(),
-            "zzz_tool".to_string(),
-            "github_get_file".to_string(),
-        ];
-        let errors = cloud_agent_configuration_check(&cloud, "local_runner");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                "cloud_agent.E005",
-                "CLOUD_AGENT_DISABLED_TOOLS contains unknown names: nope_tool, zzz_tool",
-            )]
-        );
-    }
-
-    #[test]
-    fn cloud_check_e008_keeps_settings_list_order() {
-        // List order beyond the fixture: the report follows `positive_settings`
-        // order, not the order values were zeroed in.
-        let mut cloud = django_cloud_settings();
-        cloud.max_events = 0;
-        cloud.model_request_timeout_secs = -1;
-        let errors = cloud_agent_configuration_check(&cloud, "local_runner");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                "cloud_agent.E008",
-                "Cloud Agent limits must be positive: CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS, CLOUD_AGENT_MAX_EVENTS",
-            )]
-        );
     }
 
     // -- managed_runner_configuration_check (`checks.py:20-50`) ----------------

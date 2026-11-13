@@ -119,67 +119,6 @@ pub const RECIPES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Locked executor-owned recipes, sharing no local Runner section
-/// (`recipes.py:88-129`).
-pub const CLOUD_RECIPES: &[(&str, &[&str])] = &[
-    (
-        KIND_CODING_TASK,
-        &[
-            "cloud-intro",
-            "cloud-capabilities",
-            "cloud-issue-context",
-            "cloud-execution-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_REVIEW,
-        &[
-            "cloud-review-intro",
-            "cloud-capabilities",
-            "cloud-issue-context",
-            "cloud-review-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_TEST,
-        &[
-            "cloud-test-intro",
-            "cloud-capabilities",
-            "cloud-issue-context",
-            "cloud-test-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_SCHEDULER,
-        &[
-            "cloud-scheduler-intro",
-            "cloud-project-context",
-            "cloud-capabilities",
-            "cloud-scheduler-task",
-            "cloud-scheduler-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_DIRECT,
-        &[
-            "cloud-intro",
-            "cloud-capabilities",
-            "cloud-direct-task",
-            "cloud-execution-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-];
-
 /// Recipes for the desktop-bundled managed runner (`recipes.py:163`).
 /// An alias of the local map, not a copy: a managed runner has exactly
 /// the same capabilities as a user-installed one.
@@ -195,8 +134,7 @@ pub fn kind_for<'a>(template_name: &'a str, work_kind: &str) -> &'a str {
 }
 
 /// Section keys for `kind` on `executor_kind` (default local runner:
-/// pass `None`) (`recipes.py:166-178`). Cloud recipes are deliberately
-/// not reachable here; use [`cloud_recipe_for`].
+/// pass `None`) (`recipes.py:166-178`).
 pub fn recipe_for(
     kind: &str,
     executor_kind: Option<&str>,
@@ -210,15 +148,6 @@ pub fn recipe_for(
         .iter()
         .find_map(|(name, sections)| (*name == kind).then_some(*sections))
         .ok_or_else(|| RecipeNotFound::new(format!("no recipe for kind '{kind}'")))
-}
-
-/// Section keys for `kind` on the locked Cloud Agent recipes
-/// (`recipes.py:181-185`).
-pub fn cloud_recipe_for(kind: &str) -> Result<&'static [&'static str], RecipeNotFound> {
-    CLOUD_RECIPES
-        .iter()
-        .find_map(|(name, sections)| (*name == kind).then_some(*sections))
-        .ok_or_else(|| RecipeNotFound::new(format!("no Cloud Agent recipe for kind '{kind}'")))
 }
 
 /// All local recipe kinds, in table order (`recipes.py:188-189`).
@@ -289,26 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn cloud_recipes_match_fixture() {
-        let golden = fixture();
-        let data = recipes_data(&golden);
-        for (kind, sections) in CLOUD_RECIPES {
-            let got: &[&str] = sections;
-            let expected = str_list(&data["cloud_recipes"][kind]);
-            let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
-            assert_eq!(got, &expected[..], "cloud recipe for {kind}");
-        }
-        let lengths = &data["cloud_recipe_lengths"];
-        for (kind, sections) in CLOUD_RECIPES {
-            assert_eq!(
-                sections.len(),
-                lengths[kind].as_u64().expect("u64") as usize,
-                "cloud recipe length for {kind}"
-            );
-        }
-    }
-
-    #[test]
     fn kind_for_is_identity_on_template_name() {
         let golden = fixture();
         let data = recipes_data(&golden);
@@ -360,12 +269,6 @@ mod tests {
             Some(false)
         );
         recipe_for(KIND_DIRECT, None).expect_err("direct has no local recipe");
-        let err = cloud_recipe_for("nope").expect_err("unknown cloud kind raises");
-        assert_eq!(err.message(), "no Cloud Agent recipe for kind 'nope'");
-        assert!(data["cloud_recipe_for_unknown"]["error"]
-            .as_str()
-            .expect("string")
-            .ends_with(err.message()));
     }
 
     #[test]

@@ -6,9 +6,11 @@
 //!
 //! * direct (`:238-345`) → [`post_direct`]: `validate_run_creation`
 //!   (§6.5) over a pool-backed [`PoolRunCreationStore`], the
-//!   `execution_fields` + `AgentRun` insert + `build_direct_turn` +
-//!   prompt-cap + `dispatch_after_commit` transaction, then the
-//!   `AgentRunSerializer` 201.
+//!   `execution_fields` + `AgentRun` insert + `dispatch_after_commit`
+//!   transaction, then the `AgentRunSerializer` 201. (P3 step B: the
+//!   cloud `build_direct_turn` compose and the prompt-size cap died
+//!   with the cloud direct-run plane; the prompt passes through
+//!   verbatim with a null manifest.)
 //! * `run_ai` (`:347-388`) → [`post_run_ai`] and `comment_and_run`
 //!   (`:420-466`) → [`post_comment_and_run`]: the issue-bound prefix
 //!   (falsy `work_item` 400, unknown issue / non-member 404) plus the
@@ -54,17 +56,15 @@ use pidash_jobs::dispatch::{
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use pidash_jobs::orchestration::LiveCreationStore;
-use pidash_services::dispatch::policy::{resolve_executor_kind, UserFlags};
+use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
-use pidash_services::orchestration::creation::{parent_done_payload, tick_value, CreationSeam};
+use pidash_services::orchestration::creation::CreationSeam;
 use pidash_services::orchestration::dispatch::DispatchSeam;
-use pidash_services::prompting::context as prompting_context;
 use pidash_services::runner_enroll::validation::{
     self, IssueProbe, RunCreationError, RunCreationStore, StoreError, ValidatedRunContext,
     ValidationError,
 };
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
     is_ticking_state, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
 };
@@ -91,9 +91,6 @@ pub const COMMENT_RUN_DISPATCH_FAILED_BODY: &str = r#"{"error":"could not dispat
 /// Direct-create lost the active-run race (`runs.py:335-339`).
 pub const ACTIVE_RUN_EXISTS_BODY: &str =
     r#"{"error":"work item already has an active run","code":"active_run_exists"}"#;
-/// Cloud prompt over the execution limit (`runs.py:330-334`).
-pub const PROMPT_TOO_LARGE_BODY: &str =
-    r#"{"error":"prompt exceeds Cloud Agent limit","code":"prompt_too_large"}"#;
 /// Queued-entry detail (`runs.py:410-417`): the `reason` key varies, the
 /// `detail` sentence is fixed.
 pub const QUEUED_ENTRY_DETAIL: &str =
@@ -474,42 +471,6 @@ fn direct_llm_config_select(
         .into_tuple::<Option<Vec<u8>>>()
 }
 
-/// The free-form cloud-context workspace row (`composer.py:477`):
-/// `(slug, name)`.
-fn direct_workspace_select(
-    workspace_id: Uuid,
-) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(String, String)>> {
-    use orm::workspaces::{Column, Entity};
-    Entity::find()
-        .select_only()
-        .columns([Column::Slug, Column::Name])
-        .filter(Column::Id.eq(workspace_id))
-        .limit(1)
-        .into_tuple::<(String, String)>()
-}
-
-/// One free-form cloud-context project row: `(id, identifier, name,
-/// description)`.
-type ContextProjectRow = (Uuid, String, String, Option<String>);
-
-/// The free-form cloud-context project row (`composer.py:476`).
-fn direct_context_project_select(
-    project_id: Uuid,
-) -> sea_orm::Selector<sea_orm::SelectGetableTuple<ContextProjectRow>> {
-    use orm::projects::{Column, Entity};
-    Entity::find()
-        .select_only()
-        .columns([
-            Column::Id,
-            Column::Identifier,
-            Column::Name,
-            Column::Description,
-        ])
-        .filter(Column::Id.eq(project_id))
-        .limit(1)
-        .into_tuple::<ContextProjectRow>()
-}
-
 /// The v1 `IssueRow` columns ([`dispatch_issue_select`]).
 #[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
 struct DispatchIssueRow {
@@ -591,14 +552,6 @@ struct ErrorCode<'a> {
     code: &'a str,
 }
 
-/// Ordered 429 (`runs.py:313-318`).
-#[derive(serde::Serialize)]
-struct Throttled<'a> {
-    error: &'a str,
-    code: &'a str,
-    retry_after_seconds: i64,
-}
-
 /// Ordered 202 (`runs.py:410-417`).
 #[derive(serde::Serialize)]
 struct QueuedEntry<'a> {
@@ -621,68 +574,14 @@ fn run_creation_denial(error: &RunCreationError) -> Response {
 }
 
 /// Map one `execution_fields` failure onto the direct-create arms
-/// (`runs.py:310-329`): `code = getattr(exc, "code", str(exc))`, then
-/// quota → 429, admission-down → 503, capability → 422, else 409.
+/// (`runs.py:310-329`): `code = getattr(exc, "code", str(exc))`.
+/// (P3 step B: the cloud quota/admission/capability arms died with
+/// the cloud creation path; Resolve → 409, Db → 500 remain.)
 /// The transaction is already rolled back by the caller.
 fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
-    let quota = pidash_services::dispatch::admission::CloudAgentAdmissionError::RUN_QUOTA_EXCEEDED;
-    let down =
-        pidash_services::dispatch::admission::CloudAgentAdmissionError::ADMISSION_UNAVAILABLE;
+    // P3 step B: the cloud admission/capability/limit arms died with
+    // the cloud creation path; only Resolve and Db remain.
     match error {
-        ExecutionFieldsError::Admission(admission) => {
-            let code = admission.code().to_owned();
-            let detail = admission.detail().to_owned();
-            if code == quota {
-                match admission.retry_after_seconds() {
-                    Some(retry) => {
-                        let body = serde_json::to_value(&Throttled {
-                            error: &detail,
-                            code: &code,
-                            retry_after_seconds: retry.max(1),
-                        })
-                        .expect("serializable throttle")
-                        .to_string();
-                        json_response(StatusCode::TOO_MANY_REQUESTS, body)
-                    }
-                    // `max(1, None)` raises `TypeError` in Python — a 500.
-                    None => server_error(),
-                }
-            } else if code == down {
-                let body = serde_json::to_value(&ErrorCode {
-                    error: &detail,
-                    code: &code,
-                })
-                .expect("serializable denial")
-                .to_string();
-                json_response(StatusCode::SERVICE_UNAVAILABLE, body)
-            } else {
-                let body = serde_json::to_value(&ErrorCode {
-                    error: &detail,
-                    code: &code,
-                })
-                .expect("serializable denial")
-                .to_string();
-                json_response(StatusCode::CONFLICT, body)
-            }
-        }
-        ExecutionFieldsError::Capability(capability) => {
-            let body = serde_json::to_value(&ErrorCode {
-                error: capability.message(),
-                code: capability.code(),
-            })
-            .expect("serializable denial")
-            .to_string();
-            json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
-        }
-        ExecutionFieldsError::Unavailable(unavailable) => {
-            let body = serde_json::to_value(&ErrorCode {
-                error: unavailable.message(),
-                code: unavailable.code(),
-            })
-            .expect("serializable denial")
-            .to_string();
-            json_response(StatusCode::CONFLICT, body)
-        }
         ExecutionFieldsError::Resolve(resolve) => {
             // P1: only `UnknownExecutor` remains — cloud resolves to local.
             let (error, code) = match resolve {
@@ -700,34 +599,6 @@ fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
             json_response(StatusCode::CONFLICT, body)
         }
         ExecutionFieldsError::Db(_) => server_error(),
-    }
-}
-
-/// Convert `required_capabilities` for the cloud tool planner
-/// (`policy.py:97-134`): `set(...)` over the raw value. Only the cloud
-/// path inspects it — local/managed runs store the value verbatim and
-/// never look — so this runs only past a cloud resolution. `Err` is the
-/// `TypeError` Django raises (a 500): non-string members break the
-/// `sorted`/`join`, non-iterables break `set()` itself. Strings iterate
-/// to chars, dicts to keys, exactly like `set()`.
-fn convert_capabilities(raw: &Value) -> Result<Vec<String>, ()> {
-    if !py_truthy_json(Some(raw)) {
-        return Ok(Vec::new());
-    }
-    match raw {
-        Value::String(text) => Ok(text.chars().map(|c| c.to_string()).collect()),
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                match item {
-                    Value::String(text) => out.push(text.clone()),
-                    _ => return Err(()),
-                }
-            }
-            Ok(out)
-        }
-        Value::Object(map) => Ok(map.keys().cloned().collect()),
-        _ => Err(()),
     }
 }
 
@@ -843,6 +714,9 @@ struct DirectScope {
     project_workspace_id: Uuid,
     default_agent_executor: String,
     actor_flags: UserFlags,
+    // Read for the scope shape; the cloud llm gate that consumed it
+    // died in P3 step B.
+    #[allow(dead_code)]
     has_llm_key: bool,
     requested: Option<String>,
 }
@@ -1081,292 +955,7 @@ fn py_repr_json(raw: &Value) -> String {
     }
 }
 
-/// Render the cloud prompt for an issue-bound direct run
-/// (`composer.py:459-514` with `issue is not None`): the full
-/// `build_context` over the seam-loaded bundle, composed as
-/// `KIND_DIRECT` with the user task wrapped as inert data. Returns the
-/// prompt text plus the v2 manifest stamp. Runs inside the insertion
-/// transaction (the bundle's prior-run count sees the new row, exactly
-/// like Django's in-`atomic` read).
-#[allow(clippy::too_many_arguments)]
-async fn render_cloud_issue_prompt<'a>(
-    state: &'a AppState,
-    pool: &'a PgPool,
-    tx: DbTransaction<'a>,
-    issue_id: Uuid,
-    run_id: Uuid,
-    actor_id: Uuid,
-    raw_prompt: &'a str,
-    tool_plan: &'a Value,
-    now_unix_secs: i64,
-) -> Result<(DbTransaction<'a>, String, Value), Response> {
-    use pidash_services::orchestration::creation::RenderBundle;
-    use pidash_services::prompting::recipes;
-
-    let row = dispatch_issue_select(issue_id)
-        .one(&sea_orm_connection(pool))
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        let _ = tx.rollback().await;
-        return Err(server_error());
-    };
-    let issue_row = row.into_issue_row();
-    let Some(project_id) = issue_row.project_id else {
-        let _ = tx.rollback().await;
-        return Err(server_error());
-    };
-    let project_row = match fetch_project(pool, &project_id).await {
-        Ok(Some(project_row)) => project_row,
-        Ok(None) => {
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    let (deps, _matcher) = match dispatch_deps(
-        state,
-        pool,
-        actor_id,
-        &issue_row,
-        &project_row,
-        now_unix_secs,
-    )
-    .await
-    {
-        Ok(deps) => deps,
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    let mut store = LiveCreationStore::new(tx, pool, deps);
-    let bundle: RenderBundle = match CreationSeam::render_bundle(
-        &mut store,
-        issue_id,
-        run_id,
-        None,
-        TRIGGER_DIRECT,
-        actor_id,
-    )
-    .await
-    {
-        Ok(bundle) => bundle,
-        Err(_) => {
-            let (tx, _, _, _, _, _) = store.into_parts();
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    // The `render_first_turn` assembly with `KIND_DIRECT`: same context
-    // keys Django's `build_context(issue, run)` produces for the direct
-    // row (`trigger="direct"`, `phase_kind=""`).
-    let issue = &bundle.issue;
-    let project = &bundle.project;
-    let related = prompting_context::related_context(
-        &issue.id.to_string(),
-        &bundle.relation_rows,
-        &bundle.refs,
-    );
-    let by_type = prompting_context::directional_relations_context(
-        &issue.id.to_string(),
-        &bundle.relation_rows,
-        &bundle.directional_refs,
-    );
-    let relations = prompting_context::relations_context(&by_type);
-    let repo = prompting_context::repo_context(
-        &prompting_context::ProjectRepoView {
-            url: project.repo_url.clone(),
-            base_branch: project.base_branch.clone(),
-        },
-        issue.git_work_branch.as_deref(),
-        bundle.remote.as_ref(),
-        bundle.adapter.as_ref(),
-    );
-    let extra_toolsets_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let schema_tool = if extra_toolsets_enabled {
-        state.toolsets().schema_tool_name().to_owned()
-    } else {
-        String::new()
-    };
-    let input = prompting_context::IssueContextInput {
-        issue_id: issue.id.to_string(),
-        project_identifier: project.identifier.clone(),
-        sequence_id: i64::from(issue.sequence_id),
-        title: issue.name.clone(),
-        description_stripped: issue.description_stripped.clone(),
-        state_name: bundle.state.as_ref().map(|state| state.name.clone()),
-        state_group: bundle.state.as_ref().map(|state| state.group.clone()),
-        priority: issue.priority.clone(),
-        labels: bundle.labels.clone(),
-        assignees: bundle.assignees.clone(),
-        target_date_iso: issue
-            .target_date
-            .map(|date| date.format("%Y-%m-%d").to_string()),
-        project_states: bundle.project_states.clone(),
-        workspace_slug: bundle.workspace_slug.clone(),
-        workspace_name: bundle.workspace_name.clone(),
-        project_id: project.id.to_string(),
-        project_name: project.name.clone(),
-        project_description: project.description.clone(),
-        repo,
-        code_reviews: prompting_context::code_reviews_context(&bundle.reviews),
-        parent: bundle.parent.clone(),
-        ancestors: bundle.lineage.clone(),
-        children: Value::Array(prompting_context::children_context(&bundle.children)),
-        related: Value::Array(related),
-        relations,
-        run_id: run_id.to_string(),
-        run_template_name: recipes::KIND_DIRECT.to_owned(),
-        attempt: prompting_context::compute_attempt(bundle.prior_run_count),
-        trigger: Some(TRIGGER_DIRECT.to_owned()),
-        executor_kind: AgentExecutorKind::CloudAgent.value().to_owned(),
-        available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
-        unavailable_capabilities: tool_plan
-            .get("unavailable_capabilities")
-            .cloned()
-            .unwrap_or(Value::Null),
-        extra_toolsets_enabled,
-        extra_toolsets_schema_tool: schema_tool,
-        limits: tool_plan.get("limits").cloned().unwrap_or(Value::Null),
-        tick: tick_value(
-            bundle.ticker.as_ref(),
-            project.pool,
-            project.interval_impl,
-            project.interval_review,
-            project.interval_test,
-            bundle.state.as_ref(),
-        ),
-        comments_section: prompting_context::comments_section(&bundle.comments),
-        parent_done_payload: parent_done_payload(
-            bundle.direct_parent_payload.as_ref(),
-            bundle.has_parent_run,
-            bundle.ticker_parent_payload.as_ref(),
-        ),
-        workpad_body: issue.workpad.clone().unwrap_or_default(),
-    };
-    let context_value = prompting_context::build_context(&input);
-    let catalog_version = tool_plan
-        .get("catalog_version")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
-    let turn = match prompting_context::build_direct_turn(
-        raw_prompt,
-        Some(&context_value),
-        Some(AgentExecutorKind::CloudAgent.value()),
-        catalog_version,
-    ) {
-        Ok(turn) => turn,
-        Err(_) => {
-            let (tx, _, _, _, _, _) = store.into_parts();
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    let (tx, _, _, _, _, _) = store.into_parts();
-    let manifest = turn
-        .manifest
-        .as_ref()
-        .map(|manifest| manifest.to_json())
-        .unwrap_or(Value::Null);
-    Ok((tx, turn.text, manifest))
-}
-
-/// Render the cloud prompt for a free-form direct run
-/// (`composer.py:475-498`): the small inline context (workspace slug +
-/// name, project id/identifier/name/description, the `direct` run
-/// block, tools, limits), composed as `KIND_DIRECT`.
-async fn render_cloud_free_prompt(
-    state: &AppState,
-    pool: &PgPool,
-    run_id: Uuid,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    raw_prompt: &str,
-    tool_plan: &Value,
-) -> Result<(String, Value), Response> {
-    let db = sea_orm_connection(pool);
-    let workspace = direct_workspace_select(workspace_id)
-        .one(&db)
-        .await
-        .map_err(|_| server_error())?;
-    let Some((workspace_slug, workspace_name)) = workspace else {
-        return Err(server_error());
-    };
-    let project = direct_context_project_select(project_id)
-        .one(&db)
-        .await
-        .map_err(|_| server_error())?;
-    let Some((project_id, project_identifier, project_name, project_description)) = project else {
-        return Err(server_error());
-    };
-    let extra_toolsets_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    // `extra_toolsets_vars(run)` (`context.py:514-517`): consulted only
-    // when the plan enables them; CE names none.
-    let schema_tool = if extra_toolsets_enabled {
-        state.toolsets().schema_tool_name().to_owned()
-    } else {
-        String::new()
-    };
-    let input = prompting_context::DirectContextInput {
-        run_id: run_id.to_string(),
-        workspace_slug,
-        workspace_name,
-        project_id: project_id.to_string(),
-        project_identifier,
-        project_name,
-        project_description,
-        trigger: Some(TRIGGER_DIRECT.to_owned()),
-        available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
-        unavailable_capabilities: tool_plan
-            .get("unavailable_capabilities")
-            .cloned()
-            .unwrap_or(Value::Null),
-        extra_toolsets_enabled,
-        extra_toolsets_schema_tool: schema_tool,
-        limits: tool_plan.get("limits").cloned().unwrap_or(Value::Null),
-    };
-    let context_value = prompting_context::direct_context(&input);
-    let catalog_version = tool_plan
-        .get("catalog_version")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
-    let turn = match prompting_context::build_direct_turn(
-        raw_prompt,
-        Some(&context_value),
-        Some(AgentExecutorKind::CloudAgent.value()),
-        catalog_version,
-    ) {
-        Ok(turn) => turn,
-        Err(_) => return Err(server_error()),
-    };
-    let manifest = turn
-        .manifest
-        .as_ref()
-        .map(|manifest| manifest.to_json())
-        .unwrap_or(Value::Null);
-    Ok((turn.text, manifest))
-}
-
-/// The direct-create llm gate through the installed assistant seam
-/// (`user_has_llm_config`, `agent_execution.py:69-80`): the CE default
-/// answers the BYOK key bit; the overlay routes OpenHub/Codex/BYOK
-/// through the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
-async fn direct_gate_allows(state: &AppState, actor_id: Uuid, has_key: bool) -> bool {
-    state
-        .assistant_seam()
-        .has_usable_llm_config(actor_id, has_key)
-        .await
-}
+// B cloud prompt renders deleted (render_cloud_*).
 
 /// Direct create (`runs.py:238-345`): the falsy-prompt 400 is answered
 /// by the caller; everything from `validate_run_creation` down runs
@@ -1631,35 +1220,9 @@ pub async fn post_direct(
     };
     let cloud = state.settings().cloud_agent.clone();
     let managed = state.settings().managed_runner.clone();
-    // Only the cloud planner inspects capabilities: pre-resolve the
-    // executor and convert strictly on the cloud path (a `TypeError`
-    // there is Django's 500); anywhere else the raw value is stored
-    // and never looked at.
-    let pre_resolved = resolve_executor_kind(
-        scope.requested.as_deref(),
-        &project.default_agent_executor,
-        &cloud,
-    )
-    .ok();
-    let capabilities: Vec<String> = if pre_resolved == Some(AgentExecutorKind::CloudAgent) {
-        match convert_capabilities(&required_raw) {
-            Ok(capabilities) => capabilities,
-            Err(()) => return rollback_then(tx, server_error()).await,
-        }
-    } else {
-        Vec::new()
-    };
+    let capabilities: Vec<String> = Vec::new();
     let capability_refs: Vec<&str> = capabilities.iter().map(String::as_str).collect();
-    // Only the cloud arm consults the llm gate (`creation.py:33-39`):
-    // like capabilities above, consult the installed seam only when
-    // the pre-resolve lands on the cloud path, so local and managed
-    // creates never pay for the overlay's reads (and a resolution
-    // failure still raises in the driver before any gate verdict).
-    let has_llm = if pre_resolved == Some(AgentExecutorKind::CloudAgent) {
-        direct_gate_allows(state, actor_id, scope.has_llm_key).await
-    } else {
-        false
-    };
+    let has_llm = false;
     let inputs = ExecutionInputs {
         project: &project,
         run_kind: RUN_KIND_DIRECT,
@@ -1735,61 +1298,10 @@ pub async fn post_direct(
         };
         return rollback_then(tx, denial).await;
     }
-    // `build_direct_turn` (`:293-299`): local and managed runs keep the
-    // raw prompt verbatim with a null manifest; cloud runs compose.
+    // B: local and managed runs keep the raw prompt verbatim with a
+    // null manifest (the cloud composes are gone).
     let prompt_text = py_str_json(&prompt_raw);
-    let (mut tx, prompt, manifest) = if fields.executor_kind == AgentExecutorKind::CloudAgent {
-        let outcome = match ctx.work_item_id {
-            Some(work_item_id) => {
-                render_cloud_issue_prompt(
-                    state,
-                    pool,
-                    tx,
-                    work_item_id,
-                    run_id,
-                    actor_id,
-                    &prompt_text,
-                    &fields.tool_plan,
-                    now.timestamp(),
-                )
-                .await
-            }
-            None => match render_cloud_free_prompt(
-                state,
-                pool,
-                run_id,
-                ctx.workspace_id,
-                scope.project_id,
-                &prompt_text,
-                &fields.tool_plan,
-            )
-            .await
-            {
-                Ok((prompt, manifest)) => Ok((tx, prompt, manifest)),
-                Err(response) => return rollback_then(tx, response).await,
-            },
-        };
-        match outcome {
-            Ok(outcome) => outcome,
-            Err(response) => return response,
-        }
-    } else {
-        (tx, prompt_text, Value::Null)
-    };
-    // The prompt-size cap is a Cloud Agent execution limit
-    // (`:300-308`); local runs stream the prompt verbatim.
-    if fields.executor_kind == AgentExecutorKind::CloudAgent
-        && prompt.len() > state.settings().cloud_agent.max_prompt_bytes.max(0) as usize
-    {
-        return rollback_then(
-            tx,
-            json_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                PROMPT_TOO_LARGE_BODY.to_owned(),
-            ),
-        )
-        .await;
-    }
+    let (mut tx, prompt, manifest) = (tx, prompt_text, Value::Null);
     let manifest_bind = if manifest.is_null() {
         None
     } else {
@@ -2436,81 +1948,4 @@ mod dispatch_tests {
         assert_eq!(coerce_filter_uuid(Some(&too_wide)), UuidCoerce::Invalid);
     }
 
-    #[test]
-    fn capability_conversion_matches_set_semantics() {
-        assert_eq!(
-            convert_capabilities(&json!(null)).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            convert_capabilities(&json!([])).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            convert_capabilities(&json!("abc")).unwrap(),
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
-        );
-        assert_eq!(
-            convert_capabilities(&json!(["x", "y"])).unwrap(),
-            vec!["x".to_owned(), "y".to_owned()]
-        );
-        assert_eq!(
-            convert_capabilities(&json!({"a": 1})).unwrap(),
-            vec!["a".to_owned()]
-        );
-        assert!(convert_capabilities(&json!(5)).is_err());
-        assert!(convert_capabilities(&json!([5])).is_err());
-        assert!(convert_capabilities(&json!([{"a": 1}])).is_err());
-    }
-
-    /// Overlay-shaped seam: a keyless user still counts as configured
-    /// (the gateway lane, not BYOK).
-    #[derive(Debug)]
-    struct GatewaySeam;
-
-    impl pidash_services::extensions::AssistantModelSeam for GatewaySeam {
-        fn has_usable_llm_config(
-            &self,
-            user_id: Uuid,
-            has_api_key: bool,
-        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
-            Box::pin(async move { true })
-        }
-
-        fn generate_title(
-            &self,
-            request: pidash_services::extensions::TitleRequest,
-        ) -> pidash_services::extensions::SeamFuture<
-            '_,
-            Result<String, pidash_services::extensions::TitleError>,
-        > {
-            let _ = request;
-            Box::pin(async move { Ok("seam title".to_owned()) })
-        }
-    }
-
-    #[tokio::test]
-    async fn direct_gate_uses_the_installed_seam() {
-        let state = AppState::new("test").with_assistant_seam(std::sync::Arc::new(GatewaySeam));
-        assert!(
-            direct_gate_allows(&state, Uuid::new_v4(), false).await,
-            "an installed seam that accepts the user must open the gate without a key"
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_gate_keeps_the_ce_default() {
-        // No `with_assistant_seam`: the default CE seam answers the key
-        // bit exactly like the pre-seam free function did.
-        let state = AppState::new("test");
-        assert!(
-            direct_gate_allows(&state, Uuid::new_v4(), true).await,
-            "CE still admits a keyed creator"
-        );
-        assert!(
-            !direct_gate_allows(&state, Uuid::new_v4(), false).await,
-            "CE still refuses a keyless creator (the 409 path)"
-        );
-    }
 }

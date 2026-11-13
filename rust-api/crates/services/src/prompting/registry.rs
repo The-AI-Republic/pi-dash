@@ -193,60 +193,6 @@ const SECTION_FILES: &[(&str, &str)] = &[
     ("autonomy.md", include_str!("sections/autonomy.md")),
     ("blocking.md", include_str!("sections/blocking.md")),
     (
-        "cloud-capabilities.md",
-        include_str!("sections/cloud-capabilities.md"),
-    ),
-    (
-        "cloud-direct-task.md",
-        include_str!("sections/cloud-direct-task.md"),
-    ),
-    ("cloud-ending.md", include_str!("sections/cloud-ending.md")),
-    (
-        "cloud-execution-loop.md",
-        include_str!("sections/cloud-execution-loop.md"),
-    ),
-    ("cloud-intro.md", include_str!("sections/cloud-intro.md")),
-    (
-        "cloud-issue-context.md",
-        include_str!("sections/cloud-issue-context.md"),
-    ),
-    (
-        "cloud-project-context.md",
-        include_str!("sections/cloud-project-context.md"),
-    ),
-    (
-        "cloud-review-intro.md",
-        include_str!("sections/cloud-review-intro.md"),
-    ),
-    (
-        "cloud-review-loop.md",
-        include_str!("sections/cloud-review-loop.md"),
-    ),
-    (
-        "cloud-scheduler-intro.md",
-        include_str!("sections/cloud-scheduler-intro.md"),
-    ),
-    (
-        "cloud-scheduler-loop.md",
-        include_str!("sections/cloud-scheduler-loop.md"),
-    ),
-    (
-        "cloud-scheduler-task.md",
-        include_str!("sections/cloud-scheduler-task.md"),
-    ),
-    (
-        "cloud-test-intro.md",
-        include_str!("sections/cloud-test-intro.md"),
-    ),
-    (
-        "cloud-test-loop.md",
-        include_str!("sections/cloud-test-loop.md"),
-    ),
-    (
-        "cloud-write-policy.md",
-        include_str!("sections/cloud-write-policy.md"),
-    ),
-    (
         "default-posture.md",
         include_str!("sections/default-posture.md"),
     ),

@@ -117,7 +117,7 @@ use uuid::Uuid;
 use super::pr_links::TaskEnqueue;
 use super::serializers_detail::serialize_drf_datetime;
 use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
-use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
+use crate::domain::issue_create_sql::{advisory_lock_key, saved_sequence_id};
 use crate::domain::issues_move::{REPOINT_DESCRIPTION_SQL, REPOINT_ISSUE_COMMENT_SQL};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};

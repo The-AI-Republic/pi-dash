@@ -1235,7 +1235,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error.into()),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
+    let admission_error = execution.cloud_admission_error.clone();
 
     // Permanent misconfiguration — refuse BEFORE creating a run so a
     // broken binding writes last_error once instead of minting a FAILED
@@ -1250,10 +1250,8 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
         });
     }
 
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, true)
-        .await?
-        .or(admission_error);
+    // Admission stays as recorded on the execution fields (P3 step B:
+    // the capacity gate's seam call is gone).
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_scheduler_run(&NewSchedulerRun {
@@ -2039,15 +2037,6 @@ mod tests {
         ) -> Result<ExecutionFields, ExecutionError> {
             self.execution_requests.push(req.clone());
             self.execution.clone().expect("script execution")
-        }
-
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
         }
 
         fn dispatch_after_commit(&mut self, run_id: Uuid) {

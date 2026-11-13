@@ -385,40 +385,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
             .map_err(twin_map_execution_error)
     }
 
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        // The relocated `lock_cloud_creation_capacity` needs the span's
-        // sqlx transaction, which the SeaORM transaction cannot lend, so
-        // the twin runs its three steps here: the workspace lock, the
-        // queued count, and the shared `quota_verdict`.
-        use crate::dispatch::execution::{
-            queued_cloud_count_select, quota_verdict, workspace_lock_select,
-        };
-        if executor_kind != AgentExecutorKind::CloudAgent {
-            return Ok(None);
-        }
-        query_one(&self.conn, &workspace_lock_select(workspace_id))
-            .await?
-            .ok_or_else(|| expected_row("workspace lock"))?;
-        let row = query_one(&self.conn, &queued_cloud_count_select(workspace_id))
-            .await?
-            .ok_or_else(|| expected_row("queued cloud count"))?;
-        let queued: i64 = get(&row, "n")?;
-        match quota_verdict(
-            queued,
-            self.cloud.max_queued_per_workspace,
-            self.cloud.dispatch_scan_interval_secs,
-            automatic,
-        ) {
-            Ok(deferred) => Ok(deferred.map(twin_map_admission_error)),
-            Err(exc) => Err(CreationError::CapacityRefused(exc.detail().to_owned())),
-        }
-    }
-
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
         // `jobs::dispatch_after_commit` only invokes the collector.
         self.dispatches.push(run_id);
@@ -844,7 +810,6 @@ fn twin_map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }
@@ -1730,25 +1695,16 @@ mod tests {
         assert_eq!(col::<Value>(&event, "payload"), json!({"status": "failed"}));
         assert_eq!(col::<Uuid>(&event, "agent_run_id"), run_id);
 
-        // The workspace mutex: live row locks, soft-deleted row misses;
-        // the queued-cloud count sees the one queued cloud run left.
-        use crate::dispatch::execution::{queued_cloud_count_select, workspace_lock_select};
+        // The workspace mutex: live row locks, soft-deleted row misses.
+        // (P3 step B: the queued-cloud count died with the cloud
+        // creation path.)
+        use crate::dispatch::execution::workspace_lock_select;
         assert!(one(&conn, &workspace_lock_select(uid(0x10)))
             .await
             .is_some());
         assert!(one(&conn, &workspace_lock_select(uid(0x11)))
             .await
             .is_none());
-        exec(&conn, &orm::run_insert(&new_run(uid(0xA2), issue, now))).await;
-        assert_eq!(
-            col::<i64>(
-                &one(&conn, &queued_cloud_count_select(uid(0x10)))
-                    .await
-                    .expect("count row"),
-                "n"
-            ),
-            1
-        );
         tx.rollback().await.expect("rollback");
     }
 

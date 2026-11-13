@@ -2093,8 +2093,8 @@ mod tests {
     use pidash_types::orchestration::{TRIGGER_COMMENT_AND_RUN, TRIGGER_TICK, WAIT_ACTIVITY_FIELD};
 
     use super::super::creation::{
-        AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, LockedIssue,
-        NewAgentRun, NewSystemComment, PinOutcome, PodView, RenderBundle, RunView, RunnerView,
+        ExecutionError, ExecutionFields, ExecutionRequest, LockedIssue, NewAgentRun,
+        NewSystemComment, PinOutcome, PodView, RenderBundle, RunView, RunnerView,
     };
 
     static PREFLIGHT: &str =
@@ -2452,15 +2452,6 @@ mod tests {
             &mut self,
             _req: &ExecutionRequest,
         ) -> Result<ExecutionFields, ExecutionError> {
-            todo!("builder-success paths replay live in jobs")
-        }
-
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
             todo!("builder-success paths replay live in jobs")
         }
 

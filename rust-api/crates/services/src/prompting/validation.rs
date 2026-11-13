@@ -316,14 +316,10 @@ pub fn sample_contexts(kind: &str) -> Vec<serde_json::Value> {
 
 /// All recipe kinds whose ordered section list contains `section_key`
 /// (`validation.py:285-294`): local recipes, then managed (an alias —
-/// contributes nothing new), then Cloud, each deduplicated in order.
+/// contributes nothing new), each deduplicated in order.
 pub fn kinds_for_section(section_key: &str) -> Vec<&'static str> {
     let mut kinds: Vec<&'static str> = Vec::new();
-    for table in [
-        recipes::RECIPES,
-        recipes::MANAGED_RECIPES,
-        recipes::CLOUD_RECIPES,
-    ] {
+    for table in [recipes::RECIPES, recipes::MANAGED_RECIPES] {
         for (kind, keys) in table {
             if keys.contains(&section_key) && !kinds.contains(kind) {
                 kinds.push(*kind);

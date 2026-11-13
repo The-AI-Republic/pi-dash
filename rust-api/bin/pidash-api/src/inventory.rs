@@ -1747,43 +1747,6 @@ mod tests {
     /// on any registration change): `PgPool` groups register for real
     /// over a lazy pool (no I/O); `Pools` groups register stubs over
     /// the same name constants the real register fns consume (`Pools`
-    /// cannot be built without a database). The table's rust set must
-    /// equal the const union, and the registry must own exactly the
-    /// table's rust names. Residual: a registration outside these
-    /// consts is invisible here (`Registry` has no iterator) — review
-    /// catches it, and the parity diff flags the behavior change.
-    /// The mirror's `ToolCtx` needs a transition hook; handlers never run
-    /// here, so it is never called.
-    struct NoopTransitionHook;
-
-    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
-        fn enqueue_completion_comment(
-            &self,
-            _issue_id: uuid::Uuid,
-            _prev_state_id: Option<uuid::Uuid>,
-            _current_state_id: Option<uuid::Uuid>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-            Box::pin(async move {})
-        }
-
-        fn fire(
-            &self,
-            _actor_id: uuid::Uuid,
-            _request: pidash_services::orchestration::entries::FireRequest,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            Box::pin(async move {
-                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
-            })
-        }
-    }
-
     #[tokio::test]
     async fn mirror_registry_matches_tasks_table() {
         use pidash_jobs::tasks_cleanup;
