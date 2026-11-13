@@ -160,7 +160,7 @@ export interface HeroPriorityEntry {
   priority: string;
 }
 
-/** The urgent and high rows of the first issues page, in server order. */
+/** The urgent and high rows across the loaded filtered pages, in server order. */
 export function heroPriorityEntries(
   issues: readonly Pick<IssueListItem, "id" | "name" | "priority">[]
 ): HeroPriorityEntry[] {

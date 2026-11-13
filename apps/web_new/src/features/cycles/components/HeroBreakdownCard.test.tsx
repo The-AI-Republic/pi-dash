@@ -26,7 +26,14 @@ vi.mock("../api/heroQueries.js", () => ({
   heroIssuesQueryOptions: (_client: unknown, workspaceSlug: string, projectId: string, cycleId: string) => ({
     queryKey: ["hero-issues", workspaceSlug, projectId, cycleId],
     queryFn: reads.issues,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last: { next_page_results: boolean; next_cursor: string }) =>
+      last.next_page_results && last.next_cursor !== "" ? last.next_cursor : undefined,
+    staleTime: 30_000,
   }),
+  heroIssuesRows: (
+    pages: ReadonlyArray<{ results: Array<{ id: string; name: string; priority: string }> }> | undefined
+  ) => (pages ?? []).flatMap((page) => page.results),
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -259,9 +266,48 @@ describe("HeroBreakdownCard", () => {
     expect(await screen.findByText(HERO_PRIORITY_EMPTY)).toBeInTheDocument();
     unmount();
 
-    reads.issues.mockResolvedValue(undefined);
+    reads.issues.mockResolvedValue({ ...issues(), results: [] });
     const reopened = renderCard();
     expect(await screen.findByText(HERO_PRIORITY_EMPTY)).toBeInTheDocument();
     reopened.unmount();
+  });
+
+  it("loads the next filtered page when the sentinel scrolls into view", async () => {
+    class FiringObserver {
+      constructor(private callback: IntersectionObserverCallback) {}
+      observe() {
+        this.callback([{ isIntersecting: true } as IntersectionObserverEntry], null as unknown as IntersectionObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+      takeRecords() {
+        return [] as IntersectionObserverEntry[];
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", FiringObserver);
+    try {
+      reads.issues.mockImplementation(({ pageParam }: { pageParam?: string } = {}) =>
+        pageParam === undefined
+          ? Promise.resolve({
+              ...issues(),
+              next_cursor: "next-1",
+              next_page_results: true,
+            })
+          : Promise.resolve({
+              ...issues(),
+              next_cursor: "",
+              next_page_results: false,
+              results: [{ id: "urgent-old", name: "Older urgent", priority: "urgent" }],
+            })
+      );
+      renderCard();
+      // The first page lists the recent urgent/high rows; the older
+      // urgent row arrives with the next page once the sentinel fires.
+      expect(await screen.findByRole("button", { name: /Urgent fix/ })).toBeInTheDocument();
+      expect(await screen.findByRole("button", { name: /Older urgent/ })).toBeInTheDocument();
+      expect(reads.issues).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -440,6 +440,48 @@ test(
 );
 
 test(
+  specTitle(["CYC-041"], "Priority tab lists urgent items beyond the first unfiltered page"),
+  { tag: specTags(["CYC-041"]) },
+  async ({ driver, seed }) => {
+    const tag = Date.now().toString(36);
+    const ownerSession = await signInSession(seed.email, seed.password);
+    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    const projectId = await createCyclesProject(seed, `NF254 S41e ${tag} project`, ownerSession);
+    try {
+      const cycleName = `S41 active ${tag}`;
+      const cycleId = await serverCreateCycle(
+        seed.workspaceSlug,
+        projectId,
+        cycleName,
+        CURRENT_START,
+        CURRENT_END,
+        ownerSession
+      );
+      // The oldest cycle item is urgent: it sorts last in `-created_at`
+      // order, beyond the first unfiltered page (NEWPIDASH-224). The
+      // priority tab must still list it through the server filter.
+      const oldestName = `S41 oldest urgent ${tag}`;
+      const oldestId = await serverCreateIssue(seed.workspaceSlug, projectId, ownerSession, oldestName);
+      await serverPatchIssue(seed.workspaceSlug, projectId, oldestId, { priority: "urgent" }, ownerSession);
+      const fillerIds: string[] = [];
+      for (let n = 0; n < 100; n++) {
+        fillerIds.push(await serverCreateIssue(seed.workspaceSlug, projectId, ownerSession, `S41 filler ${tag} ${n}`));
+      }
+      await serverAttachCycleIssues(seed.workspaceSlug, projectId, cycleId, [oldestId, ...fillerIds], ownerSession);
+      await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
+      await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(cycleName);
+      await driver.cyclesHeroBreakdownSelectTab("Priority work items");
+      await expect
+        .poll(async () => (await driver.cyclesHeroBreakdownEntries()).includes(oldestName), { timeout: 60_000 })
+        .toBe(true);
+      expect((await serverCycleProgress(seed.workspaceSlug, projectId, cycleId, ownerSession)).total).toBe(101);
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, ownerSession);
+    }
+  }
+);
+
+test(
   specTitle(["CYC-042"], "Hero explains the active cycle when none covers today"),
   { tag: specTags(["CYC-042"]) },
   async ({ driver, seed }) => {
