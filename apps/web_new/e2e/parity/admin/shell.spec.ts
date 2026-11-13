@@ -39,7 +39,7 @@
 // The console has no drag sources, file inputs, import/export or
 // desktop affordances, no bespoke shortcuts, and loop deletion goes
 // through immediately while workspaces offer no deletion at all.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
@@ -662,17 +662,18 @@ test(
       await driver.adminSidebarFollowEntry(name);
       expect((await driver.adminAbsenceFacts()).desktopMentions).toBe(0);
     }
-    // Packaging half: the desktop shell layers the web SPA only — no
-    // admin tree ships and no admin mount is referenced anywhere.
+    // Packaging half: the desktop shell bundles the new web app only — no
+    // admin tree ships, no admin mount is referenced anywhere, and the old
+    // desktop overlay tree that used to layer the legacy web app is gone
+    // (NEWFRONT-92/M-01).
     const root = repoRoot();
-    expect(readdirSync(join(root, "desktop-overlay", "apps"))).not.toContain("admin");
+    expect(existsSync(join(root, "desktop-overlay"))).toBe(false);
     const mount = /god-mode|godmode|god_mode|apps\/admin/;
     const hits: string[] = [];
     for (const dir of [
       join(root, "desktop", "src-tauri", "src"),
       join(root, "desktop", "src-tauri", "capabilities"),
       join(root, "desktop", "scripts"),
-      join(root, "desktop-overlay"),
     ]) {
       for (const file of sourceFiles(dir)) {
         if (mount.test(readFileSync(file, "utf8"))) hits.push(file);
