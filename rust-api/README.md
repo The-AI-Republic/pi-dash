@@ -506,7 +506,7 @@ Python fleet). Every `python manage.py <cmd>` became
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `docker-entrypoint-api.sh`          | wait_for_db → wait_for_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
 | `docker-entrypoint-api-local.sh`    | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000`                                                                                          |
-| `docker-entrypoint-worker.sh`       | waits → min(nproc,8) concurrency → `worker --concurrency`                                                                                                           |
+| `docker-entrypoint-worker.sh`       | waits → min(nproc,8) concurrency → `worker "${worker_args[@]}"` (--concurrency, --queue)                                                                            |
 | `docker-entrypoint-worker-local.sh` | waits → `worker`                                                                                                                                                    |
 | `docker-entrypoint-beat.sh`         | waits → `worker` (no `exec`, like Python)                                                                                                                           |
 | `docker-entrypoint-beat-local.sh`   | waits → `worker`                                                                                                                                                    |
@@ -531,6 +531,8 @@ Every variable the image sets or the scripts and boot path consume:
 | ------------------------------- | -------------------------------------- | ----------------------------- | ------------------------------------------------------------ |
 | `PORT`                          | `8000`                                 | api entrypoint                | `--bind 0.0.0.0:${PORT:-8000}`; serve alone defaults to 8080 |
 | `CELERY_WORKER_CONCURRENCY`     | min(nproc, 8)                          | worker entrypoint             | job budget; Rust multiplexes over a shared 10-conn pool      |
+| `WORKER_QUEUE`                  | `celery`                               | worker entrypoint             | queue label; agent worker sets `cloud_agent`                 |
+| `WORKER_NO_SCHEDULER`           | (unset)                                | worker entrypoint             | set `1`/`true` to disable scheduler (agent worker pool)      |
 | `DJANGO_SETTINGS_MODULE`        | `pi_dash.settings.local`               | api-local entrypoint          | no Rust effect; kept for shape parity                        |
 | `MACHINE_SIGNATURE`             | (set by api entrypoints)               | register-instance             | sha256 of hostname, mac, cpu, mem, disk                      |
 | `DATABASE_URL`                  | (required)                             | serve, worker, ops            | TCP postgres URL; replica: see below                         |
