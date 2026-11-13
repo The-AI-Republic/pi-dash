@@ -1461,10 +1461,6 @@ async fn run_capacity_plan(
     plan: &finalization::CapacityPlan,
 ) -> Result<(), SweepError> {
     match plan {
-        finalization::CapacityPlan::Cloud { workspace_id } => seams
-            .dispatch_waiting(*workspace_id)
-            .await
-            .map_err(SweepError::Seam),
         finalization::CapacityPlan::Local { runner_id, pod_id } => {
             if let Some(runner_id) = runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): free a
