@@ -945,8 +945,10 @@ fn shape_label_points(
 
 /// One chart series: `(date, pending)` with future days `None`, in
 /// chronological order. `completions` carries only non-null dates (the
-/// `item["date"] is not None` filter); values are floats for the
-/// `"points"` plot and ints for `"issues"`.
+/// `item["date"] is not None` filter). `as_float` is the Python `sum`
+/// typing: a `"points"` chart is float iff the cycle has any estimated
+/// issue (`sum([float(v)])`), int `0` otherwise (`sum([])`); the
+/// `"issues"` chart is always int.
 fn burndown_series(
     start: NaiveDate,
     end: NaiveDate,
@@ -1251,6 +1253,11 @@ async fn analytics_get(
             &total_points_stmt(&slug, project_id, cycle_id),
         )
         .await?;
+        // Python `sum([float(v)])` is int `0` when no cycle issue has an
+        // estimate point (`SUM` is NULL) and float otherwise; the chart
+        // typing follows that split like the archive handler's
+        // `ChartValue::Int`/`Float` (NEWPIDASH-215).
+        let has_estimates = total_points_row.is_some_and(|row| row.total_points.is_some());
         let total_points = total_points_row
             .and_then(|row| row.total_points)
             .unwrap_or(0.0);
@@ -1276,7 +1283,7 @@ async fn analytics_get(
             today,
             total_points,
             &completions,
-            true,
+            has_estimates,
         ));
     }
 
