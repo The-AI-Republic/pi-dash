@@ -3,16 +3,15 @@
 //! Ports the database read shapes behind
 //! `apps/api/pi_dash/app/views/integration/github.py` — the workspace
 //! connect/disconnect/status/repos reads (`:426-606`), the app-status
-//! ADMIN membership scoping (`:611-655`, ADMIN read at `:629`), the
-//! install-session callback read (`:751-755`), and the project
-//! sync/binding status reads (`:1093-1172`) — plus the pure read-helper
+//! ADMIN membership scoping (`:611-655`, ADMIN read at `:629`), and the
+//! install-session callback read (`:751-755`) — plus the pure read-helper
 //! shapes in `apps/api/pi_dash/utils/github_app_auth.py`
 //! (`build_app_jwt` / `app_headers` / `user_headers` /
 //! `exchange_user_code` / `list_user_installations`, no live calls).
 //! Fixtures FX-GHA-01, FX-GHA-02, FX-GHA-03
 //! (`rust-api/fixtures/app_integrations/fx-gha-0*.json`).
 //!
-//! Same conventions as [`super::queries_git`]: SeaORM entities (`ConnectionTrait`), row
+//! Same conventions as the sibling `queries_git` module: SeaORM entities (`ConnectionTrait`), row
 //! structs reused from the D-05 models (`crate::integrations::*`,
 //! PIDASHCONV-42, Done), joined columns aliased `<table>__<col>`.
 //!
@@ -39,13 +38,12 @@ use sea_orm::{
     QuerySelect, RelationTrait, Select,
 };
 
-use super::{queries_git, GITHUB_PROVIDER, ROLE_ADMIN};
+use super::{GITHUB_PROVIDER, ROLE_ADMIN};
 use crate::entity::{
-    git_provider_install_sessions, github_repositories, github_repository_syncs, integrations,
-    workspace_integrations, workspace_members, workspaces,
+    git_provider_install_sessions, integrations, workspace_integrations, workspace_members,
+    workspaces,
 };
 use crate::integrations::git_models::git_provider_install_session::GitProviderInstallSession;
-use crate::integrations::github_models::github_repository_sync::GithubRepositorySync;
 
 // ---------------------------------------------------------------------------
 // Integration / workspace-integration reads (github.py:90-137)
@@ -203,206 +201,6 @@ pub async fn fetch_is_workspace_admin(
         .one(db)
         .await?;
     Ok(row.is_some())
-}
-
-// ---------------------------------------------------------------------------
-// Project status reads (github.py:1093-1172)
-// ---------------------------------------------------------------------------
-
-impl From<github_repository_syncs::Model> for GithubRepositorySync {
-    fn from(row: github_repository_syncs::Model) -> Self {
-        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
-        Self {
-            id: row.id,
-            created_at: at(row.created_at),
-            updated_at: at(row.updated_at),
-            created_by_id: row.created_by_id,
-            updated_by_id: row.updated_by_id,
-            deleted_at: row.deleted_at.map(at),
-            project_id: row.project_id,
-            workspace_id: row.workspace_id,
-            repository_id: row.repository_id,
-            credentials: row.credentials,
-            actor_id: row.actor_id,
-            workspace_integration_id: row.workspace_integration_id,
-            label_id: row.label_id,
-            is_sync_enabled: row.is_sync_enabled,
-            last_synced_at: row.last_synced_at.map(at),
-            last_sync_error: row.last_sync_error,
-        }
-    }
-}
-
-/// Repository identity as the legacy status response renders it
-/// (`github.py:1135-1140`): `repository_id`, `owner`, `name`, `url`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LegacyRepositoryRef {
-    pub repository_id: i64,
-    pub owner: String,
-    pub name: String,
-    pub url: Option<String>,
-}
-
-/// One legacy sync with its repository (`bound: True` branch,
-/// `github.py:1131-1146`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProjectSyncStatus {
-    pub sync: GithubRepositorySync,
-    pub repository: LegacyRepositoryRef,
-}
-
-/// One `repository_sync_for_project_query` row.
-#[derive(Debug, Clone, FromQueryResult)]
-#[allow(non_snake_case)]
-struct ProjectSyncRow {
-    pub id: uuid::Uuid,
-    pub created_at: sea_orm::prelude::DateTimeWithTimeZone,
-    pub updated_at: sea_orm::prelude::DateTimeWithTimeZone,
-    pub created_by_id: Option<uuid::Uuid>,
-    pub updated_by_id: Option<uuid::Uuid>,
-    pub deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-    pub project_id: uuid::Uuid,
-    pub workspace_id: uuid::Uuid,
-    pub repository_id: uuid::Uuid,
-    pub credentials: serde_json::Value,
-    pub actor_id: uuid::Uuid,
-    pub workspace_integration_id: uuid::Uuid,
-    pub label_id: Option<uuid::Uuid>,
-    pub is_sync_enabled: bool,
-    pub last_synced_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-    pub last_sync_error: String,
-    pub github_repositories__repository_id: i64,
-    pub github_repositories__owner: String,
-    pub github_repositories__name: String,
-    pub github_repositories__url: Option<String>,
-}
-
-impl From<ProjectSyncRow> for ProjectSyncStatus {
-    fn from(row: ProjectSyncRow) -> Self {
-        Self {
-            sync: GithubRepositorySync::from(github_repository_syncs::Model {
-                id: row.id,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                created_by_id: row.created_by_id,
-                updated_by_id: row.updated_by_id,
-                deleted_at: row.deleted_at,
-                project_id: row.project_id,
-                workspace_id: row.workspace_id,
-                repository_id: row.repository_id,
-                credentials: row.credentials,
-                actor_id: row.actor_id,
-                workspace_integration_id: row.workspace_integration_id,
-                label_id: row.label_id,
-                is_sync_enabled: row.is_sync_enabled,
-                last_synced_at: row.last_synced_at,
-                last_sync_error: row.last_sync_error,
-            }),
-            repository: LegacyRepositoryRef {
-                repository_id: row.github_repositories__repository_id,
-                owner: row.github_repositories__owner,
-                name: row.github_repositories__name,
-                url: row.github_repositories__url,
-            },
-        }
-    }
-}
-
-/// `GithubRepositorySync.objects.filter(project_id=project_id,
-/// workspace__slug=slug).select_related("repository").first()`
-/// (`github.py:1097-1102`, the legacy-first status branch).
-pub fn repository_sync_for_project_query(
-    project_id: uuid::Uuid,
-    workspace_slug: &str,
-) -> Select<github_repository_syncs::Entity> {
-    github_repository_syncs::Entity::find()
-        .select_only()
-        .columns([
-            github_repository_syncs::Column::Id,
-            github_repository_syncs::Column::CreatedAt,
-            github_repository_syncs::Column::UpdatedAt,
-            github_repository_syncs::Column::CreatedById,
-            github_repository_syncs::Column::UpdatedById,
-            github_repository_syncs::Column::DeletedAt,
-            github_repository_syncs::Column::ProjectId,
-            github_repository_syncs::Column::WorkspaceId,
-            github_repository_syncs::Column::RepositoryId,
-            github_repository_syncs::Column::Credentials,
-            github_repository_syncs::Column::ActorId,
-            github_repository_syncs::Column::WorkspaceIntegrationId,
-            github_repository_syncs::Column::LabelId,
-            github_repository_syncs::Column::IsSyncEnabled,
-            github_repository_syncs::Column::LastSyncedAt,
-            github_repository_syncs::Column::LastSyncError,
-        ])
-        .column_as(
-            github_repositories::Column::RepositoryId,
-            "github_repositories__repository_id",
-        )
-        .column_as(
-            github_repositories::Column::Owner,
-            "github_repositories__owner",
-        )
-        .column_as(
-            github_repositories::Column::Name,
-            "github_repositories__name",
-        )
-        .column_as(github_repositories::Column::Url, "github_repositories__url")
-        .join(
-            JoinType::InnerJoin,
-            github_repository_syncs::Relation::Workspaces.def(),
-        )
-        .join(
-            JoinType::InnerJoin,
-            github_repository_syncs::Relation::GithubRepositories.def(),
-        )
-        .filter(github_repository_syncs::Column::DeletedAt.is_null())
-        .filter(github_repository_syncs::Column::ProjectId.eq(project_id))
-        .filter(workspaces::Column::DeletedAt.is_null())
-        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
-        .filter(github_repositories::Column::DeletedAt.is_null())
-        .limit(1)
-}
-
-/// The project's legacy sync, or `None` (fall through to the
-/// `GitRepositoryBinding` fallback, `github.py:1103-1104`).
-pub async fn fetch_repository_sync_for_project(
-    db: &impl ConnectionTrait,
-    project_id: uuid::Uuid,
-    workspace_slug: &str,
-) -> Result<Option<ProjectSyncStatus>, sea_orm::DbErr> {
-    let row = repository_sync_for_project_query(project_id, workspace_slug)
-        .into_model::<ProjectSyncRow>()
-        .one(db)
-        .await?;
-    Ok(row.map(ProjectSyncStatus::from))
-}
-
-/// `GitRepositoryBinding.objects.filter(project_id=project_id,
-/// workspace__slug=slug,
-/// repository__provider="github").select_related("repository").first()`
-/// (`github.py:1104-1112`, the fallback status branch shared by the
-/// GET/PATCH/DELETE fallbacks at `:1157-1161,1179-1183`).
-pub fn github_binding_for_project_query(
-    project_id: uuid::Uuid,
-    workspace_slug: &str,
-) -> Select<crate::entity::git_repository_bindings::Entity> {
-    queries_git::binding_for_project_query(project_id, workspace_slug)
-        .filter(crate::entity::git_repositories::Column::Provider.eq(GITHUB_PROVIDER.to_owned()))
-}
-
-/// The project's github-provider binding, or `None` (the final
-/// `{bound: False}`, `github.py:1113-1114`).
-pub async fn fetch_github_binding_for_project(
-    db: &impl ConnectionTrait,
-    project_id: uuid::Uuid,
-    workspace_slug: &str,
-) -> Result<Option<queries_git::ProjectBinding>, sea_orm::DbErr> {
-    let row = github_binding_for_project_query(project_id, workspace_slug)
-        .into_model::<queries_git::BindingRow>()
-        .one(db)
-        .await?;
-    Ok(row.map(queries_git::ProjectBinding::from))
 }
 
 // ---------------------------------------------------------------------------
@@ -728,29 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn project_status_reads_shape() {
-        let proj = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
-        let sync = repository_sync_for_project_query(proj, "acme")
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(sync.contains(r#"FROM "github_repository_syncs""#), "{sync}");
-        assert!(
-            sync.contains(r#"INNER JOIN "github_repositories""#),
-            "{sync}"
-        );
-        assert!(
-            sync.contains(&format!(r#""project_id" = '{proj}'"#)),
-            "{sync}"
-        );
-        assert!(sync.contains(r#""workspaces"."slug" = 'acme'"#), "{sync}");
-        let bind = github_binding_for_project_query(proj, "acme")
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(bind.contains(r#"FROM "git_repository_bindings""#), "{bind}");
-        assert!(bind.contains("provider"), "{bind}");
-    }
-
-    #[test]
     fn session_lookup_shape() {
         let sql = install_session_by_state_query("s")
             .build(DbBackend::Postgres)
@@ -947,8 +722,6 @@ mod tests {
         "CREATE TEMPORARY TABLE workspace_members (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, workspace_id UUID NOT NULL, member_id UUID NOT NULL, role SMALLINT NOT NULL, is_active BOOLEAN NOT NULL DEFAULT TRUE)",
         "CREATE TEMPORARY TABLE integrations (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, title VARCHAR(400) NOT NULL, provider VARCHAR(400) NOT NULL UNIQUE, network INTEGER NOT NULL, description JSONB NOT NULL, author VARCHAR(400) NOT NULL, webhook_url TEXT NOT NULL, webhook_secret TEXT NOT NULL, redirect_url TEXT NOT NULL, metadata JSONB NOT NULL, verified BOOLEAN NOT NULL, avatar_url TEXT)",
         "CREATE TEMPORARY TABLE workspace_integrations (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, workspace_id UUID NOT NULL, actor_id UUID NOT NULL, integration_id UUID NOT NULL, api_token_id UUID NOT NULL, metadata JSONB NOT NULL, config JSONB NOT NULL)",
-        "CREATE TEMPORARY TABLE github_repositories (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, name VARCHAR(500) NOT NULL, url VARCHAR(500), config JSONB NOT NULL, repository_id BIGINT NOT NULL, owner VARCHAR(500) NOT NULL)",
-        "CREATE TEMPORARY TABLE github_repository_syncs (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, repository_id UUID NOT NULL, credentials JSONB NOT NULL, actor_id UUID NOT NULL, workspace_integration_id UUID NOT NULL, label_id UUID, is_sync_enabled BOOLEAN NOT NULL, last_synced_at TIMESTAMPTZ, last_sync_error TEXT NOT NULL)",
         "CREATE TEMPORARY TABLE git_repositories (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, provider VARCHAR(32) NOT NULL, host_url VARCHAR(500) NOT NULL, external_id VARCHAR(255) NOT NULL, namespace VARCHAR(500) NOT NULL, name VARCHAR(500) NOT NULL, full_name VARCHAR(1000) NOT NULL, web_url VARCHAR(1000) NOT NULL, clone_url_http VARCHAR(1000) NOT NULL, clone_url_ssh VARCHAR(1000) NOT NULL, default_branch VARCHAR(255) NOT NULL, is_private BOOLEAN NOT NULL, metadata JSONB NOT NULL)",
         "CREATE TEMPORARY TABLE git_provider_accounts (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, workspace_id UUID NOT NULL, provider VARCHAR(32) NOT NULL, host_url VARCHAR(500) NOT NULL, auth_type VARCHAR(32) NOT NULL, external_account_id VARCHAR(255) NOT NULL, external_account_login VARCHAR(255) NOT NULL, display_name VARCHAR(255) NOT NULL, capabilities JSONB NOT NULL, credential_config JSONB NOT NULL, workspace_integration_id UUID, status VARCHAR(16) NOT NULL, verified_at TIMESTAMPTZ, suspended_at TIMESTAMPTZ, last_checked_at TIMESTAMPTZ, last_check_error TEXT NOT NULL, metadata JSONB NOT NULL)",
         "CREATE TEMPORARY TABLE git_repository_bindings (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, repository_id UUID NOT NULL, provider_account_id UUID NOT NULL, actor_id UUID NOT NULL, is_sync_enabled BOOLEAN NOT NULL, clone_auth_mode VARCHAR(32) NOT NULL, last_synced_at TIMESTAMPTZ, last_sync_error TEXT NOT NULL, metadata JSONB NOT NULL)",
@@ -1081,57 +854,20 @@ mod tests {
         tx.rollback().await.expect("rollback");
     }
 
-    /// FX-GHA-03 replay: legacy-first project status, then the github
-    /// binding fallback; FX-GHA-01 replay: session-by-state read.
+    /// FX-GHA-01 replay: session-by-state read.
     #[tokio::test]
-    async fn live_project_status_and_session() {
+    async fn live_session() {
         let Some(pool) = scratch_pool().await else {
             return;
         };
         let mut tx = live_tx(&pool).await;
         let ts = live_ts(1_700_000_000);
-        let (ws, proj_sync, proj_bind, proj_none) =
-            (live_uuid(1), live_uuid(2), live_uuid(3), live_uuid(4));
-        let (repo_legacy, sync, repo_git, acct, bind) = (
-            live_uuid(11),
-            live_uuid(12),
-            live_uuid(13),
-            live_uuid(14),
-            live_uuid(15),
-        );
+        let ws = live_uuid(1);
         sqlx::query(
             "INSERT INTO workspaces (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, name, slug) VALUES ($1, $2, $2, NULL, NULL, NULL, 'n', 'acme')",
         )
         .bind(ws).bind(ts)
         .execute(&mut *tx).await.expect("seed ws");
-        // Legacy side: github_repositories + github_repository_syncs.
-        sqlx::query(
-            "INSERT INTO github_repositories (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, name, url, config, repository_id, owner) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, $4, 'repo', 'https://github.com/o/r', '{}', 4242, 'o')",
-        )
-        .bind(repo_legacy).bind(ts).bind(proj_sync).bind(ws)
-        .execute(&mut *tx).await.expect("seed gh repo");
-        sqlx::query(
-            "INSERT INTO github_repository_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, repository_id, credentials, actor_id, workspace_integration_id, label_id, is_sync_enabled, last_synced_at, last_sync_error) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, $4, $5, '{}', $4, $4, NULL, TRUE, NULL, '')",
-        )
-        .bind(sync).bind(ts).bind(proj_sync).bind(ws).bind(repo_legacy)
-        .execute(&mut *tx).await.expect("seed sync");
-        // Fallback side: git chain for a github provider repo.
-        sqlx::query(
-            "INSERT INTO git_repositories (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, provider, host_url, external_id, namespace, name, full_name, web_url, clone_url_http, clone_url_ssh, default_branch, is_private, metadata) VALUES ($1, $2, $2, NULL, NULL, NULL, 'github', 'https://github.com', '77', 'o', 'g', 'o/g', 'https://github.com/o/g', '', '', 'main', TRUE, '{}')",
-        )
-        .bind(repo_git).bind(ts)
-        .execute(&mut *tx).await.expect("seed git repo");
-        sqlx::query(
-            "INSERT INTO git_provider_accounts (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, 'github', 'https://github.com', 'pat', 'e', 'l', 'a', '{}', '{}', NULL, 'degraded', NULL, 'stale', '{}')",
-        )
-        .bind(acct).bind(ts).bind(ws)
-        .execute(&mut *tx).await.expect("seed account");
-        sqlx::query(
-            "INSERT INTO git_repository_bindings (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, repository_id, provider_account_id, actor_id, is_sync_enabled, clone_auth_mode, last_synced_at, last_sync_error, metadata) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, $4, $5, $6, $4, FALSE, 'runner_managed', NULL, 'e', '{}')",
-        )
-        .bind(bind).bind(ts).bind(proj_bind).bind(ws).bind(repo_git).bind(acct)
-        .execute(&mut *tx).await.expect("seed binding");
-        // Install session (FX-GHA-01 read).
         sqlx::query(
             "INSERT INTO git_provider_install_sessions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, state, provider, workspace_id, actor_id, external_account_id, account_login, status, expires_at, completed_at, error) VALUES ($1, $2, $2, NULL, NULL, NULL, 'st_abc', 'github', $3, $3, NULL, '', 'started', $4, NULL, '')",
         )
@@ -1139,49 +875,6 @@ mod tests {
         .execute(&mut *tx).await.expect("seed session");
 
         let conn = crate::orm_tx::TxConn::new(&mut tx);
-        // Legacy-first hit.
-        let hit = fetch_repository_sync_for_project(&conn, proj_sync, "acme")
-            .await
-            .expect("sync")
-            .expect("a row");
-        assert_eq!(hit.sync.id, sync);
-        assert!(hit.sync.is_sync_enabled);
-        assert_eq!(hit.repository.repository_id, 4242);
-        assert_eq!(hit.repository.owner, "o");
-        assert_eq!(
-            hit.repository.url.as_deref(),
-            Some("https://github.com/o/r")
-        );
-        // No legacy row for the bound project -> fallback None on the sync read...
-        assert_eq!(
-            fetch_repository_sync_for_project(&conn, proj_bind, "acme")
-                .await
-                .expect("sync"),
-            None
-        );
-        // ...but the github binding fallback hits (private repo preserved).
-        let fb = fetch_github_binding_for_project(&conn, proj_bind, "acme")
-            .await
-            .expect("binding")
-            .expect("a row");
-        assert_eq!(fb.binding.id, bind);
-        assert_eq!(fb.repository.full_name, "o/g");
-        assert!(fb.repository.is_private);
-        assert_eq!(fb.provider_account.status, "degraded");
-        assert_eq!(fb.provider_account.last_check_error, "stale");
-        // Nothing bound at all -> both miss (the {bound: False} branch).
-        assert_eq!(
-            fetch_repository_sync_for_project(&conn, proj_none, "acme")
-                .await
-                .expect("s"),
-            None
-        );
-        assert_eq!(
-            fetch_github_binding_for_project(&conn, proj_none, "acme")
-                .await
-                .expect("b"),
-            None
-        );
         // Session read.
         let sess = fetch_install_session_by_state(&conn, "st_abc")
             .await

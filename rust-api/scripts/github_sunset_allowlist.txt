@@ -1,0 +1,11 @@
+# github_sunset_guard.py allowlist: files allowed to keep a legacy github_*
+# table/model mention. Format: `path | reason`. The list only shrinks:
+# remove the entry in the same PR that removes the last hit.
+# Paths are relative to rust-api/.
+crates/db/src/app_issues/mod.rs | re-export of legacy GithubPullRequestLink; removed with models_links in NEWPIDASH-210 part 3 after PDASHOSS01-358 merges
+crates/db/src/app_issues/models_links.rs | legacy github_pull_request_link mod + GITHUB_* consts; deleted in NEWPIDASH-210 part 3
+crates/db/src/integrations/github_models.rs | legacy model definitions; deleted in NEWPIDASH-210 part 3 after PDASHOSS01-358 merges
+crates/db/src/integrations/mod.rs | re-exports for github_models; removed in part 3 with the file
+crates/db/src/tasks_cleanup/deletion_queries.rs | cascade sweep still deletes legacy rows until the drop-tables follow-up (PDASHOSS01-353 out of scope)
+crates/services/src/v1_openapi/doc.rs | OpenAPI schema name GithubPullRequestLink is wire compatibility, not table access
+crates/services/src/v1_work_items/columns.rs | github_pull_request_link nullable mod pinning F18-05 fixture; removed in NEWPIDASH-210 part 3
