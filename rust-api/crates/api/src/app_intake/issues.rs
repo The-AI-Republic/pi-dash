@@ -141,6 +141,7 @@ pub struct IssueRow {
     pub assigned_runner_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub complexity_score: i32,
     pub workpad: String,
 }
@@ -182,6 +183,7 @@ impl IssueRow {
             assigned_runner_id: row.try_get("assigned_runner_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
+            work_type: row.try_get("work_type")?,
             complexity_score: row.try_get("complexity_score")?,
             workpad: row.try_get("workpad")?,
         })
@@ -226,6 +228,7 @@ impl IssueRow {
             assigned_pod_id: self.assigned_pod_id,
             assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
         }
     }
 }
@@ -323,6 +326,7 @@ fn issue_row_from(model: issue_entity::Model) -> IssueRow {
         assigned_runner_id: model.assigned_runner_id,
         created_via: model.created_via,
         agent_executor: model.agent_executor,
+        work_type: model.work_type,
         complexity_score: model.complexity_score,
         workpad: model.workpad,
     }
@@ -454,6 +458,7 @@ struct AnnotatedIssueRow {
     assigned_runner_id: Option<Uuid>,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     complexity_score: i32,
     workpad: String,
     label_ids: Vec<Uuid>,
@@ -499,6 +504,7 @@ impl AnnotatedIssueRow {
                 assigned_runner_id: self.assigned_runner_id,
                 created_via: self.created_via,
                 agent_executor: self.agent_executor,
+                work_type: self.work_type,
                 complexity_score: self.complexity_score,
                 workpad: self.workpad,
             },
@@ -552,6 +558,7 @@ pub async fn fetch_issue_annotated(
             issue_entity::Column::AssignedRunnerId,
             issue_entity::Column::CreatedVia,
             issue_entity::Column::AgentExecutor,
+            issue_entity::Column::WorkType,
             issue_entity::Column::ComplexityScore,
             issue_entity::Column::Workpad,
         ])
@@ -634,6 +641,7 @@ struct DetailRow {
     i_assigned_runner_id: Option<Uuid>,
     i_created_via: Option<String>,
     i_agent_executor: Option<String>,
+    i_work_type: Option<String>,
     i_complexity_score: i32,
     i_workpad: String,
     label_ids: Vec<Uuid>,
@@ -695,6 +703,7 @@ impl DetailRow {
             assigned_runner_id: self.i_assigned_runner_id,
             created_via: self.i_created_via,
             agent_executor: self.i_agent_executor,
+            work_type: self.i_work_type,
             complexity_score: self.i_complexity_score,
             workpad: self.i_workpad,
         };
@@ -765,6 +774,7 @@ pub async fn fetch_detail(
         )
         .column_as(issue_entity::Column::CreatedVia, "i_created_via")
         .column_as(issue_entity::Column::AgentExecutor, "i_agent_executor")
+        .column_as(issue_entity::Column::WorkType, "i_work_type")
         .column_as(issue_entity::Column::ComplexityScore, "i_complexity_score")
         .column_as(issue_entity::Column::Workpad, "i_workpad")
         .column_as(label_ids_annotation(), "label_ids")
@@ -1401,6 +1411,7 @@ pub struct ValidatedIssue {
     pub type_id: Option<Option<Uuid>>,
     pub assigned_pod_id: Option<Option<Uuid>>,
     pub agent_executor: Option<Option<String>>,
+    pub work_type: Option<Option<String>>,
     pub git_work_branch: Option<String>,
     pub created_via: Option<Option<String>>,
     pub assignee_ids: Option<Vec<Uuid>>,
@@ -1684,6 +1695,13 @@ pub async fn validate_issue_fields(
             out.agent_executor =
                 validate_str_choice(errors, "agent_executor", value, AGENT_EXECUTORS, false)
                     .map(|choice| normalize_executor_write(Some(choice)));
+        }
+    }
+    if let Some(value) = input.get("work_type") {
+        if value.is_null() {
+            out.work_type = Some(None);
+        } else {
+            out.work_type = validate_char(errors, "work_type", value, 32, true, false).map(Some);
         }
     }
     if let Some(value) = input.get("git_work_branch") {
@@ -1974,6 +1992,19 @@ pub async fn validate_issue_object(
             }
             // Store the normalized value (`attrs["agent_executor"]`).
             translated_executor = translated.stored;
+        }
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state
+    // (`None`); a truthy key must be registered.
+    // The `""` → `None` normalization lands at the save.
+    if let Some(Some(work_type)) = validated.work_type.as_ref() {
+        if !work_type.is_empty() && !pidash_services::prompting::work_types::is_known(work_type) {
+            push_error(
+                errors,
+                "work_type",
+                pidash_services::prompting::work_types::unknown_work_type_message(),
+            );
         }
     }
 
@@ -2359,6 +2390,11 @@ pub async fn apply_issue_update(
         .created_via
         .clone()
         .unwrap_or_else(|| issue.created_via.clone());
+    fields.work_type = validated
+        .work_type
+        .clone()
+        .map(|work_type| work_type.filter(|work_type| !work_type.is_empty()))
+        .unwrap_or_else(|| issue.work_type.clone());
     fields.updated_at = now;
     let prev_state = issue.state_id;
     let m2m_audit = (issue.created_by_id, issue.updated_by_id);
@@ -3278,6 +3314,7 @@ pub async fn render_issue_detail(
         "agent_executor".to_owned(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_owned(), opt_string(&issue.work_type));
     map.insert(
         "label_ids".to_owned(),
         label_ids
@@ -5322,6 +5359,7 @@ pub async fn collection_create(
         assigned_pod_id: validated.assigned_pod_id,
         assigned_runner_id: None,
         agent_executor: validated.agent_executor.clone(),
+        work_type: validated.work_type.clone(),
     };
     // The m2m plan resolves pre-save (pure reads of validated input).
     let assignees = validated.assignee_ids.clone().unwrap_or_default();
@@ -5668,6 +5706,7 @@ struct ValidatedCreate {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     deleted_at: Option<DateTime<Utc>>,
@@ -6036,6 +6075,13 @@ async fn validate_issue_create(
             None
         }
     };
+    let work_type = match opt_limited_string(issue_data, "work_type", 32) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("work_type".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
     // `parent`: the auto-generated twin (`Meta.exclude` keeps the model
     // field, so DRF adds it beside the declared `parent_id`). Same
     // source, validated under its own key with the default-manager
@@ -6253,6 +6299,7 @@ async fn validate_issue_create(
         git_work_branch,
         created_via,
         agent_executor,
+        work_type,
         estimate_point_id,
         type_id,
         deleted_at,
@@ -6872,6 +6919,7 @@ struct CreatedRows {
     assigned_runner_id: Option<Uuid>,
     assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_id: Option<Uuid>,
@@ -7014,6 +7062,7 @@ async fn render_created_detail(
         .await
         .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
+        work_type: m.work_type,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
         created_by_id: m.created_by_id,
@@ -7113,6 +7162,7 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         "agent_executor".to_owned(),
         opt_string(&rows.agent_executor),
     );
+    issue.insert("work_type".to_owned(), opt_string(&rows.work_type));
     issue.insert(
         "label_ids".to_owned(),
         serde_json::Value::Array(rows.label_ids.iter().map(uuid_string).collect()),

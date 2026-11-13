@@ -25,3 +25,4 @@ pub mod renderer;
 pub mod seed;
 pub mod shape;
 pub mod validation;
+pub mod work_types;

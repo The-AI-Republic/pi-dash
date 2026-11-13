@@ -1725,6 +1725,15 @@ const FIELD_TABLE: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max_length: Some(32),
+            allow_blank: true,
+            branch_regex: false,
+        },
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::UuidPk(PkQueryset::Issues),
         allow_null: true,
@@ -2566,6 +2575,12 @@ async fn run_validate(
         Some(Validated::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match validated.get("work_type") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> = match validated.get("description_stripped") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2597,6 +2612,7 @@ async fn run_validate(
         assigned_pod,
         assigned_runner,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -3487,7 +3503,7 @@ impl FromQueryResult for AnnotatedIssueRow {
     }
 }
 
-/// One looked-up issue: the 34 storable columns, the scalar annotations
+/// One looked-up issue: the 35 storable columns, the scalar annotations
 /// (each `None`/empty when its leg is absent), and the joined state pair
 /// for the ticker leg.
 struct CoreIssueRow {
@@ -3859,6 +3875,7 @@ async fn render_detail_map(
         assigned_pod_id: assigned_pod_id.as_deref(),
         assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
+        work_type: save.work_type.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
         assignee_ids: Some(assignee_refs),
@@ -4091,6 +4108,7 @@ fn assemble_new_issue(
         assigned_runner_id: v_uuid(validated, "assigned_runner_id"),
         // The normalized write (#2903): deprecated choices land local.
         agent_executor: filtered.agent_executor.clone().flatten(),
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,
@@ -4142,6 +4160,11 @@ fn apply_validated_to_existing(
         // `attrs["agent_executor"]` holds the normalized write (#2903):
         // deprecated values land as local_runner.
         row.agent_executor = filtered.agent_executor.clone().flatten();
+    }
+    if validated.contains_key("work_type") {
+        row.work_type = v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned);
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -4431,6 +4454,7 @@ async fn render_put_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),

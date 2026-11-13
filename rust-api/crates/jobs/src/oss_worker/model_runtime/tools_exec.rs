@@ -1581,6 +1581,7 @@ async fn op_create_project_issue(
         // web app and v1 surfaces own the write path); always NULL here.
         assigned_runner_id: None,
         agent_executor: None,
+        work_type: None,
     };
     // Inert: the fire is skipped (the caller drives it post-commit).
     let fire = domain_issues::FireSpec {

@@ -76,12 +76,18 @@
           "run",
           "tick",
           "unavailable_capabilities",
+          "work_type",
           "workpad_body",
           "workspace"
         ],
         "workpad_body": ""
       },
-      "human_triggers": ["comment_and_run", "direct", "run_ai", "state_transition"],
+      "human_triggers": [
+        "comment_and_run",
+        "direct",
+        "run_ai",
+        "state_transition"
+      ],
       "run_is_human_triggered_tick": false,
       "scheduler_context": {
         "has_issue_key": false,
@@ -122,7 +128,10 @@
       "actor_label_none": "Unknown",
       "ancestor_chain_len_3": 3,
       "ancestor_cycle_terminates_len": 2,
-      "closed_state_groups": ["cancelled", "completed"],
+      "closed_state_groups": [
+        "cancelled",
+        "completed"
+      ],
       "comment_labels": {
         "agent_bot": "AI agent: Helper (submitted by a@b.c)",
         "agent_human_token": "AI agent: Helper (submitted by H)",
@@ -149,7 +158,10 @@
         "extra_toolsets": false,
         "extra_toolsets_schema_tool": ""
       },
-      "extra_toolsets_on_shape": ["extra_toolsets", "extra_toolsets_schema_tool"],
+      "extra_toolsets_on_shape": [
+        "extra_toolsets",
+        "extra_toolsets_schema_tool"
+      ],
       "humanize_interval": {
         "0": "0 hours",
         "10800": "3 hours",

@@ -939,6 +939,7 @@ const SPAN_MODELS: &[SpanModel] = &[
             "created_at",
             "cycle_view",
             "default_agent_executor",
+            "default_work_type",
             "deleted_at",
             "description",
             "description_html",
@@ -1030,6 +1031,7 @@ const SPAN_MODELS: &[SpanModel] = &[
             "start_date",
             "target_date",
             "updated_at",
+            "work_type",
             "workpad",
         ],
         fks: &[
@@ -2418,6 +2420,7 @@ async fn expand_issue(
     let git_work_branch = row.git_work_branch.clone();
     let created_via = row.created_via.clone();
     let agent_executor = row.agent_executor.clone();
+    let work_type = row.work_type.clone();
     let created_by = row.created_by_id.map(|id| id.to_string());
     let updated_by = row.updated_by_id.map(|id| id.to_string());
     let project = Some(row.project_id.to_string());
@@ -2484,6 +2487,7 @@ async fn expand_issue(
         git_work_branch: &git_work_branch,
         created_via: created_via.as_deref(),
         agent_executor: agent_executor.as_deref(),
+        work_type: work_type.as_deref(),
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         project: project.as_deref().unwrap_or(""),

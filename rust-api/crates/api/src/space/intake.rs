@@ -335,6 +335,7 @@ struct IssueRow {
     assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
     workpad: String,
+    work_type: Option<String>,
 }
 
 impl IssueRow {
@@ -375,6 +376,7 @@ impl IssueRow {
             assigned_runner_id: row.try_get("assigned_runner_id")?,
             agent_executor: row.try_get("agent_executor")?,
             workpad: row.try_get("workpad")?,
+            work_type: row.try_get("work_type")?,
         })
     }
 
@@ -417,6 +419,7 @@ impl IssueRow {
             assigned_pod_id: self.assigned_pod_id,
             assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
         }
     }
 }
@@ -476,6 +479,7 @@ async fn fetch_issue(
                 assigned_runner_id: m.assigned_runner_id,
                 agent_executor: m.agent_executor,
                 workpad: m.workpad,
+                work_type: m.work_type,
             })
         })
         .transpose()
@@ -1431,6 +1435,7 @@ fn render_app_detail(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert("created_by".to_string(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_string(), opt_uuid(&issue.updated_by_id));
     map.insert("project".to_string(), uuid_string(&issue.project_id));
@@ -1584,6 +1589,7 @@ fn render_app_issue_create(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert("created_by".to_string(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_string(), opt_uuid(&issue.updated_by_id));
     map.insert("project".to_string(), uuid_string(&issue.project_id));
@@ -1692,6 +1698,7 @@ fn render_issue_snapshot(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert(
         "created_at".to_string(),
         serde_json::Value::String(render_dt(&issue.created_at, timezone)),
@@ -2305,6 +2312,7 @@ async fn collection_create(
         assigned_pod_id: None,
         assigned_runner_id: None,
         agent_executor: None,
+        work_type: None,
     };
     let fire = fire_spec(&actor.id, now);
     let Some(orm) = state.orm() else {
@@ -2946,6 +2954,7 @@ mod tests {
                 assigned_runner_id: None,
                 agent_executor: None,
                 workpad: String::new(),
+                work_type: None,
             },
             state: None,
             project: ProjectRow {

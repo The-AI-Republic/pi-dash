@@ -449,6 +449,7 @@ class Seed:
             default_agent_executor="",
             dedicated_runner_lost_action="fail_to_backlog",
             agent_test_default_interval_seconds=0,
+            default_work_type="software",
             created_at=_now(),
             updated_at=_now(),
         )
@@ -961,7 +962,7 @@ def create_project(
             agent_review_default_interval_seconds, default_agent_executor,
             dedicated_runner_lost_action,
             agent_test_default_interval_seconds, created_at, updated_at,
-            created_by_id)
+            created_by_id, default_work_type)
         VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
@@ -2773,6 +2774,7 @@ def project(conn, workspace_id, name: str = "Contract Project", **over) -> dict:
         "default_agent_executor": "",
         "dedicated_runner_lost_action": "fail_to_backlog",
         "agent_test_default_interval_seconds": 0,
+        "default_work_type": "software",
     }
     values.update(over)
     return insert_row(conn, "projects", values)

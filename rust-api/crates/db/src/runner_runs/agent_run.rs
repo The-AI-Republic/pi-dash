@@ -69,6 +69,7 @@ pub const COLUMNS: &[&str] = &[
     "trigger",
     "prompt_manifest",
     "phase_kind",
+    "work_type",
     "run_config",
     "required_capabilities",
     "thread_id",
@@ -98,6 +99,9 @@ pub const CANCEL_REASON_MAX_LENGTH: usize = 512;
 pub const TRIGGER_MAX_LENGTH: usize = 24;
 /// `phase_kind` bound (`models.py:989`, `max_length=32`).
 pub const PHASE_KIND_MAX_LENGTH: usize = 32;
+/// `work_type` bound (PDASHOSS01-234, `max_length=32`): the effective
+/// work type stamped at run creation.
+pub const WORK_TYPE_MAX_LENGTH: usize = 32;
 /// `thread_id` bound (`models.py:992`, `max_length=128`).
 pub const THREAD_ID_MAX_LENGTH: usize = 128;
 /// `llm_model` bound (`models.py:1015`, `max_length=128`).
@@ -456,6 +460,7 @@ pub struct AgentRun {
     pub trigger: String,
     pub prompt_manifest: Option<serde_json::Value>,
     pub phase_kind: String,
+    pub work_type: String,
     pub run_config: serde_json::Value,
     pub required_capabilities: serde_json::Value,
     pub thread_id: String,
@@ -500,7 +505,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 40);
+        assert_eq!(COLUMNS.len(), 41);
     }
 
     #[test]
@@ -685,6 +690,7 @@ mod tests {
             "cancel_reason",
             "prompt",
             "phase_kind",
+            "work_type",
             "thread_id",
             "llm_model",
         ] {
@@ -700,6 +706,7 @@ mod tests {
             ("cancel_reason", CANCEL_REASON_MAX_LENGTH),
             ("trigger", TRIGGER_MAX_LENGTH),
             ("phase_kind", PHASE_KIND_MAX_LENGTH),
+            ("work_type", WORK_TYPE_MAX_LENGTH),
             ("thread_id", THREAD_ID_MAX_LENGTH),
             ("llm_model", LLM_MODEL_MAX_LENGTH),
         ] {

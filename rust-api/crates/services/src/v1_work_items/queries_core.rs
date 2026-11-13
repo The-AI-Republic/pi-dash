@@ -892,6 +892,7 @@ pub const ORDERABLE_ISSUE_COLUMNS: &[&str] = &[
     "created_via",
     "agent_executor",
     "complexity_score",
+    "work_type",
 ];
 
 /// Django field names orderable by bare name, mapped to their columns
@@ -2297,6 +2298,6 @@ mod tests {
                 "attachment_count"
             ]
         );
-        assert_eq!(ORDERABLE_ISSUE_COLUMNS.len(), 34);
+        assert_eq!(ORDERABLE_ISSUE_COLUMNS.len(), 35);
     }
 }

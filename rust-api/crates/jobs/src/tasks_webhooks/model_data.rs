@@ -396,6 +396,7 @@ pub struct ProjectRow {
     pub agent_test_default_interval_seconds: i32,
     pub agent_ticking_enabled: bool,
     pub default_agent_executor: String,
+    pub default_work_type: String,
     pub created_by_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
     pub workspace_id: Uuid,
@@ -454,6 +455,7 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
         agent_test_default_interval_seconds: m.agent_test_default_interval_seconds,
         agent_ticking_enabled: m.agent_ticking_enabled,
         default_agent_executor: m.default_agent_executor,
+        default_work_type: m.default_work_type,
         created_by_id: m.created_by_id,
         updated_by_id: m.updated_by_id,
         workspace_id: m.workspace_id,
@@ -568,6 +570,10 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
         "default_agent_executor".to_owned(),
         Value::String(row.default_agent_executor.clone()),
     );
+    out.insert(
+        "default_work_type".to_owned(),
+        Value::String(row.default_work_type.clone()),
+    );
     out.insert("created_by".to_owned(), opt_uuid(&row.created_by_id));
     out.insert("updated_by".to_owned(), opt_uuid(&row.updated_by_id));
     out.insert("workspace".to_owned(), uuid_value(&row.workspace_id));
@@ -616,6 +622,7 @@ pub struct IssueRow {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
     pub project_id: Uuid,
@@ -666,6 +673,7 @@ async fn fetch_issue(
         git_work_branch: m.git_work_branch,
         created_via: m.created_via,
         agent_executor: m.agent_executor,
+        work_type: m.work_type,
         created_by_id: m.created_by_id,
         updated_by_id: m.updated_by_id,
         project_id: m.project_id,
@@ -889,6 +897,7 @@ pub fn render_issue(
     );
     out.insert("created_via".to_owned(), opt_str(&row.created_via));
     out.insert("agent_executor".to_owned(), opt_str(&row.agent_executor));
+    out.insert("work_type".to_owned(), opt_str(&row.work_type));
     out.insert("created_by".to_owned(), opt_uuid(&row.created_by_id));
     out.insert("updated_by".to_owned(), opt_uuid(&row.updated_by_id));
     out.insert("project".to_owned(), uuid_value(&row.project_id));
@@ -1911,6 +1920,7 @@ mod tests {
                 .unwrap() as i32,
             agent_ticking_enabled: g["agent_ticking_enabled"].as_bool().unwrap(),
             default_agent_executor: g["default_agent_executor"].as_str().unwrap().to_owned(),
+            default_work_type: g["default_work_type"].as_str().unwrap().to_owned(),
             created_by_id: uid_opt(&g["created_by"]),
             updated_by_id: uid_opt(&g["updated_by"]),
             workspace_id: uid(&g["workspace"]),
@@ -1971,6 +1981,7 @@ mod tests {
             git_work_branch: g["git_work_branch"].as_str().unwrap().to_owned(),
             created_via: str_opt(&g["created_via"]),
             agent_executor: str_opt(&g["agent_executor"]),
+            work_type: str_opt(&g["work_type"]),
             created_by_id: uid_opt(&g["created_by"]),
             updated_by_id: uid_opt(&g["updated_by"]),
             project_id: uid(&g["project"]),

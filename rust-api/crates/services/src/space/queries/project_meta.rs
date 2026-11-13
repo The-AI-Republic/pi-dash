@@ -305,6 +305,7 @@ pub const PROJECT_COLUMNS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "module_view",
     "cycle_view",
     "issue_views_view",
@@ -532,7 +533,7 @@ mod tests {
     #[test]
     fn project_get_selects_full_project_row() {
         let sql = project_get_sql();
-        assert_eq!(PROJECT_COLUMNS.len(), 46);
+        assert_eq!(PROJECT_COLUMNS.len(), 47);
         assert!(sql.contains("\"projects\".\"members_can_edit_states\""));
         assert!(sql.ends_with(
             "FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1)"

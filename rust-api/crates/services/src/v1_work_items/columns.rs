@@ -52,7 +52,7 @@
 /// `issues` nullable columns (`app_issues::models_core::issue`, F18-05
 /// `Issue`, `db/models/issue.py`), in fixture ordinal order.
 pub mod issue {
-    /// Columns whose F18-05 entry has `nullable: true` (19 of 34).
+    /// Columns whose F18-05 entry has `nullable: true` (20 of 35).
     pub const NULLABLE: &[&str] = &[
         "start_date",
         "target_date",
@@ -73,6 +73,7 @@ pub mod issue {
         "assigned_pod_id",
         "created_via",
         "agent_executor",
+        "work_type",
     ];
 }
 
@@ -535,6 +536,7 @@ mod tests {
             created_via: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
         }
     }
 

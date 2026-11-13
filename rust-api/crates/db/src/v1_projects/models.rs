@@ -139,6 +139,7 @@ pub mod project {
         "agent_test_default_interval_seconds",
         "agent_ticking_enabled",
         "default_agent_executor",
+        "default_work_type",
     ];
 
     /// Partial unique index names (`Meta.constraints`, `:233-249`).
@@ -270,6 +271,7 @@ pub mod project {
         pub agent_test_default_interval_seconds: i64,
         pub agent_ticking_enabled: bool,
         pub default_agent_executor: String,
+        pub default_work_type: String,
     }
 
     /// Default member role for project membership contexts.
@@ -1144,6 +1146,7 @@ mod tests {
                 "agent_test_default_interval_seconds",
                 "agent_ticking_enabled",
                 "default_agent_executor",
+                "default_work_type",
             ]
         );
         assert_eq!(project::TABLE, "projects");
@@ -1631,6 +1634,7 @@ mod tests {
             agent_test_default_interval_seconds: project::DEFAULT_AGENT_INTERVAL_SECONDS,
             agent_ticking_enabled: true,
             default_agent_executor: "local_runner".to_string(),
+            default_work_type: "general".to_string(),
         };
         let value = serde_json::to_value(&project_row).unwrap();
         assert_eq!(value["identifier"], serde_json::json!("ENG"));

@@ -130,7 +130,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{json, Value};
 
-use super::{composer, recipes};
+use super::{composer, recipes, work_types};
 
 /// Upper bound on inlined children / related items per group
 /// (`context.py:72-77`).
@@ -956,6 +956,10 @@ pub struct IssueContextInput {
     pub project_id: String,
     pub project_name: String,
     pub project_description: Option<String>,
+    /// `issue.work_type` — the per-issue work-type override (NULL inherits).
+    pub issue_work_type: Option<String>,
+    /// `issue.project.default_work_type`.
+    pub project_default_work_type: Option<String>,
     pub repo: Value,
     pub code_reviews: Value,
     pub parent: Option<ParentView>,
@@ -982,6 +986,16 @@ pub struct IssueContextInput {
     pub comments_section: String,
     pub parent_done_payload: String,
     pub workpad_body: String,
+}
+
+/// `{key, title}` of the issue's effective work type (`context.py`
+/// `_work_type_context`).
+fn work_type_context(issue_work_type: Option<&str>, project_default: Option<&str>) -> Value {
+    let key = work_types::effective_work_type(issue_work_type, project_default);
+    let title = work_types::get_work_type(key)
+        .map(|work_type| work_type.title)
+        .unwrap_or_default();
+    json!({"key": key, "title": title})
 }
 
 fn or_empty(value: &Option<String>) -> &str {
@@ -1055,6 +1069,12 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             "name": input.project_name,
             "description": or_empty(&input.project_description),
         },
+        // The effective work type composed with (PDASHOSS01-234) — exposed so
+        // sections can name it ("work type: software") without re-deriving it.
+        "work_type": work_type_context(
+            input.issue_work_type.as_deref(),
+            input.project_default_work_type.as_deref(),
+        ),
         "repo": input.repo,
         "code_reviews": input.code_reviews,
         "parent": parent,
@@ -1265,6 +1285,11 @@ pub struct TurnOutput {
 /// path with a versioned manifest; anything else (including `None`,
 /// matching `getattr(run, "executor_kind", "local_runner")`) composes with
 /// overrides and stamps the bare list.
+///
+/// `work_type` is the issue's effective work type
+/// (`work_types.effective_work_type(issue)`); it fills the local recipe's
+/// slots and is ignored by the cloud path.
+#[allow(clippy::too_many_arguments)]
 pub fn build_first_turn(
     kind: &str,
     context: &Value,
@@ -1273,6 +1298,7 @@ pub fn build_first_turn(
     user_id: Option<&str>,
     executor_kind: Option<&str>,
     tool_catalog_version: i64,
+    work_type: Option<&str>,
 ) -> Result<TurnOutput, composer::PromptComposeError> {
     if executor_kind == Some("cloud_agent") {
         let composed = composer::compose_cloud(kind, context)?;
@@ -1295,6 +1321,7 @@ pub fn build_first_turn(
             context,
             None,
             executor_kind,
+            work_type,
         )?;
         let sections = composed.manifest_dicts();
         Ok(TurnOutput {
@@ -1343,6 +1370,7 @@ pub fn build_scheduler_turn(
             context,
             None,
             executor_kind,
+            None,
         )?;
         let sections = composed.manifest_dicts();
         Ok(TurnOutput {
@@ -1821,6 +1849,8 @@ mod tests {
             project_id: "project-1".to_owned(),
             project_name: "Project".to_owned(),
             project_description: None,
+            issue_work_type: None,
+            project_default_work_type: Some("software".to_owned()),
             repo: repo_context(
                 &ProjectRepoView {
                     url: None,
@@ -2350,6 +2380,7 @@ mod tests {
             None,
             None,
             1,
+            None,
         )
         .expect("turn");
         assert!(!out.text.is_empty());
@@ -2399,6 +2430,7 @@ mod tests {
             None,
             Some("cloud_agent"),
             2,
+            None,
         )
         .expect("turn");
         assert!(!out.text.is_empty());

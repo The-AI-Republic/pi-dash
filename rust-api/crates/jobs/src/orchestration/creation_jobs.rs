@@ -255,6 +255,7 @@ struct IssueRow {
     assigned_pod_id: Option<Uuid>,
     assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     git_work_branch: String,
     workpad: String,
     name: String,
@@ -276,6 +277,7 @@ impl From<IssueRow> for IssueView {
             assigned_pod_id: row.assigned_pod_id,
             assigned_runner_id: row.assigned_runner_id,
             agent_executor: row.agent_executor,
+            work_type: row.work_type,
             git_work_branch: Some(row.git_work_branch),
             workpad: Some(row.workpad),
             name: Some(row.name),
@@ -298,6 +300,7 @@ struct ProjectRow {
     repo_url: String,
     base_branch: String,
     default_agent_executor: String,
+    default_work_type: String,
     project_lead_id: Option<Uuid>,
     default_assignee_id: Option<Uuid>,
     agent_default_max_ticks: i32,
@@ -317,6 +320,7 @@ impl From<ProjectRow> for ProjectView {
             repo_url: Some(row.repo_url),
             base_branch: Some(row.base_branch),
             default_agent_executor: row.default_agent_executor,
+            default_work_type: row.default_work_type,
             project_lead_id: row.project_lead_id,
             default_assignee_id: row.default_assignee_id,
             pool: i64::from(row.agent_default_max_ticks),
@@ -363,6 +367,7 @@ fn issue_columns() -> Vec<issues::Column> {
         issues::Column::AssignedPodId,
         issues::Column::AssignedRunnerId,
         issues::Column::AgentExecutor,
+        issues::Column::WorkType,
         issues::Column::GitWorkBranch,
         issues::Column::Workpad,
         issues::Column::Name,
@@ -383,6 +388,7 @@ fn project_columns() -> Vec<projects::Column> {
         projects::Column::RepoUrl,
         projects::Column::BaseBranch,
         projects::Column::DefaultAgentExecutor,
+        projects::Column::DefaultWorkType,
         projects::Column::ProjectLeadId,
         projects::Column::DefaultAssigneeId,
         projects::Column::AgentDefaultMaxTicks,
@@ -849,6 +855,7 @@ where
             terminal_hooks_applied_at: Set(None),
             terminal_capacity_released_at: Set(None),
             phase_kind: Set(row.phase_kind.clone()),
+            work_type: Set(row.work_type.clone()),
             agent_metadata: Set(serde_json::json!({})),
             usage: Set(serde_json::json!({})),
             // Generated columns (the `JSONKey*Field`s): left out of the
@@ -2651,10 +2658,10 @@ mod tests {
              logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
              agent_default_max_ticks, agent_review_default_interval_seconds, \
              agent_test_default_interval_seconds, agent_ticking_enabled, \
-             default_agent_executor, workspace_id) \
+             default_agent_executor, default_work_type, workspace_id) \
              VALUES ($1, $2, $2, 'FX6', 'FX6', '', 2, false, false, false, true, false, false, \
              false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/fx6.git', \
-             'main', 10800, 10, 10800, 10800, true, 'local_runner', $3)",
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', 'software', $3)",
         )
         .bind(project)
         .bind(at)
@@ -3198,7 +3205,7 @@ mod tests {
         assert_eq!(row.3, None);
         assert_eq!(row.6, "review");
         assert!(row.11.contains("You are reviewing"));
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 10);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 11);
         cleanup(
             &pool,
             graph,
@@ -3373,7 +3380,7 @@ mod tests {
         assert_eq!(row.3, Some(runner));
         assert_eq!(row.5, "comment_and_run");
         assert!(!row.11.is_empty());
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 16);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 17);
         cleanup(
             &pool,
             graph,
@@ -3603,7 +3610,7 @@ mod tests {
             })
         );
         assert!(!row.11.is_empty());
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 16);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 17);
         cleanup(
             &pool,
             graph,

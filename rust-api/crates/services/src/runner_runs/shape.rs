@@ -917,6 +917,7 @@ mod tests {
             trigger: "direct".to_owned(),
             prompt_manifest: None,
             phase_kind: String::new(),
+            work_type: String::new(),
             run_config: json!({}),
             required_capabilities: json!([]),
             thread_id: text(&body["thread_id"]),

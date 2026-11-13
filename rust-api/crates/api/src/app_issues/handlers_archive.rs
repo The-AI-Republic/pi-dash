@@ -614,6 +614,7 @@ struct DetailOwned {
     assigned_runner_id: Option<String>,
     assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: String,
     updated_at: String,
     created_by: Option<String>,
@@ -690,6 +691,7 @@ impl DetailOwned {
             )
             .await?,
             agent_executor: json_str_opt(row, "agent_executor"),
+            work_type: json_str_opt(row, "work_type"),
             created_at: json_drf(row, "created_at")?,
             updated_at: json_drf(row, "updated_at")?,
             created_by: json_str_opt(row, "created_by_id"),
@@ -735,6 +737,7 @@ impl DetailOwned {
             assigned_pod_id: self.assigned_pod_id.as_deref(),
             assigned_runner_id: self.assigned_runner_id.as_deref(),
             agent_executor: self.agent_executor.as_deref(),
+            work_type: self.work_type.as_deref(),
             module_ids: None,
             label_ids: None,
             assignee_ids: None,
@@ -914,6 +917,7 @@ struct WriteRow {
     assigned_pod_id: Option<String>,
     assigned_runner_id: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     created_by: Option<String>,
@@ -1183,6 +1187,7 @@ fn write_row((issue, state): (issues::Model, Option<states::Model>)) -> WriteRow
         assigned_pod_id: id_text(issue.assigned_pod_id),
         assigned_runner_id: id_text(issue.assigned_runner_id),
         agent_executor: issue.agent_executor,
+        work_type: issue.work_type,
         created_at: at(issue.created_at),
         updated_at: at(issue.updated_at),
         created_by: id_text(issue.created_by_id),
@@ -1225,6 +1230,7 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         assigned_pod_id: row.assigned_pod_id.as_deref(),
         assigned_runner_id: row.assigned_runner_id.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
@@ -1621,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_25_keys_in_meta_order() {
+    fn current_instance_is_26_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -1642,6 +1648,7 @@ mod tests {
             assigned_pod_id: None,
             assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: None,
             label_ids: None,
             assignee_ids: None,
@@ -1672,7 +1679,7 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 25);
+        assert_eq!(parsed.len(), 26);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));
@@ -1708,6 +1715,7 @@ mod tests {
             assigned_pod_id: None,
             assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: None,
             label_ids: None,
             assignee_ids: None,

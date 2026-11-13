@@ -1189,6 +1189,7 @@ struct ProjectRow {
     agent_ticking_enabled: bool,
     default_agent_executor: String,
     dedicated_runner_lost_action: String,
+    default_work_type: String,
     members_can_edit_states: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -1244,6 +1245,7 @@ struct ProjectRowOrm {
     agent_ticking_enabled: bool,
     default_agent_executor: String,
     dedicated_runner_lost_action: String,
+    default_work_type: String,
     members_can_edit_states: bool,
     created_at: sea_orm::prelude::DateTimeWithTimeZone,
     updated_at: sea_orm::prelude::DateTimeWithTimeZone,
@@ -1299,6 +1301,7 @@ fn project_row_from(orm: ProjectRowOrm) -> ProjectRow {
         agent_ticking_enabled: orm.agent_ticking_enabled,
         default_agent_executor: orm.default_agent_executor,
         dedicated_runner_lost_action: orm.dedicated_runner_lost_action,
+        default_work_type: orm.default_work_type,
         members_can_edit_states: orm.members_can_edit_states,
         created_at: orm.created_at.with_timezone(&Utc),
         updated_at: orm.updated_at.with_timezone(&Utc),
@@ -1379,6 +1382,7 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::AgentTickingEnabled,
         proj_entity::Column::DefaultAgentExecutor,
         proj_entity::Column::DedicatedRunnerLostAction,
+        proj_entity::Column::DefaultWorkType,
         proj_entity::Column::MembersCanEditStates,
         proj_entity::Column::CreatedAt,
         proj_entity::Column::UpdatedAt,
@@ -2070,6 +2074,7 @@ async fn render_list_row(
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
         dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
+        default_work_type: row.default_work_type.clone(),
         agent_executor_options: options.to_vec(),
         next_work_item_sequence: sequence,
         members_can_edit_states: row.members_can_edit_states,
@@ -2185,6 +2190,7 @@ async fn render_current_instance(
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
         dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
+        default_work_type: row.default_work_type.clone(),
         members_can_edit_states: row.members_can_edit_states,
     };
     let value = serde_json::to_value(&read).map_err(|_| Denial::ServerError)?;
@@ -3732,6 +3738,7 @@ struct Validated {
     agent_ticking_enabled: Option<bool>,
     default_agent_executor: Option<String>,
     dedicated_runner_lost_action: Option<String>,
+    default_work_type: Option<String>,
     members_can_edit_states: Option<bool>,
     /// Writable on update (`update()` persists it; `save()` overwrites
     /// only `updated_by` — `models/base.py`). On create the crum
@@ -3807,6 +3814,7 @@ const WRITE_FIELDS: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -4220,6 +4228,23 @@ async fn validate_one_field(
                 Err(message) => return fail(message),
             }
         }
+        // `CharField(max_length=32, blank=True)`, then
+        // `validate_default_work_type` — a `ProjectSerializer` method, so
+        // the PUT (`ProjectListSerializer`) skips it (PDASHOSS01-234).
+        "default_work_type" => match validate_char(value, Some(32), true) {
+            Ok(text) => {
+                if mode != ValidateMode::Full
+                    && !text.is_empty()
+                    && !pidash_services::prompting::work_types::is_known(&text)
+                {
+                    return fail(
+                        pidash_services::prompting::work_types::unknown_work_type_message(),
+                    );
+                }
+                out.default_work_type = Some(text);
+            }
+            Err(messages) => return fail_many(messages),
+        },
         "members_can_edit_states" => match validate_bool(value) {
             Ok(flag) => out.members_can_edit_states = Some(flag),
             Err(message) => return fail(message),
@@ -4675,6 +4700,14 @@ async fn insert_project(
     // `save()` runs inside `transaction.atomic()`, clearing the previous
     // default *before* the insert — the partial unique index forbids two
     // live defaults even momentarily.
+    // `Project.save()` on create: a blank `default_work_type` resolves from
+    // the repo binding (PDASHOSS01-234).
+    let default_work_type = match validated.default_work_type.as_deref() {
+        Some(work_type) if !work_type.is_empty() => work_type,
+        _ => pidash_services::prompting::work_types::default_for_new_project(
+            validated.repo_url.as_deref(),
+        ),
+    };
     let logo_props = validated
         .logo_props
         .clone()
@@ -4745,6 +4778,7 @@ async fn insert_project(
                 .as_deref()
                 .unwrap_or(pidash_services::domain::projects::DEDICATED_RUNNER_LOST_ACTION_DEFAULT),
             members_can_edit_states: validated.members_can_edit_states.unwrap_or(true),
+            default_work_type,
             created_by: *actor_id,
             created_at: now,
             updated_at: now,
@@ -5061,6 +5095,10 @@ async fn apply_update(
         members_can_edit_states: validated
             .members_can_edit_states
             .unwrap_or(instance.members_can_edit_states),
+        default_work_type: validated
+            .default_work_type
+            .as_deref()
+            .unwrap_or(&instance.default_work_type),
         workspace_id: validated.workspace.unwrap_or(instance.workspace_id),
         deleted_at: validated.deleted_at.unwrap_or(None),
         updated_at: now,
@@ -5681,6 +5719,7 @@ fn paginate_order_column(key: &str) -> Result<proj_entity::Column, Denial> {
         "agent_ticking_enabled" => proj_entity::Column::AgentTickingEnabled,
         "default_agent_executor" => proj_entity::Column::DefaultAgentExecutor,
         "dedicated_runner_lost_action" => proj_entity::Column::DedicatedRunnerLostAction,
+        "default_work_type" => proj_entity::Column::DefaultWorkType,
         "created_by" => proj_entity::Column::CreatedById,
         "updated_by" => proj_entity::Column::UpdatedById,
         _ => return Err(Denial::ServerError),
@@ -5908,6 +5947,7 @@ fn order_column(key: &str) -> Result<&'static str, Denial> {
         "agent_test_default_interval_seconds" => Ok("p.agent_test_default_interval_seconds"),
         "agent_ticking_enabled" => Ok("p.agent_ticking_enabled"),
         "default_agent_executor" => Ok("p.default_agent_executor"),
+        "default_work_type" => Ok("p.default_work_type"),
         "created_by" => Ok("p.created_by_id"),
         "updated_by" => Ok("p.updated_by_id"),
         "is_favorite" => Ok("is_favorite"),
@@ -7461,7 +7501,7 @@ mod tests {
         assert!(position("identifier") < position("workspace"));
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 44);
+        assert_eq!(WRITE_FIELDS.len(), 45);
     }
 
     #[test]

@@ -1292,6 +1292,7 @@ async fn render_moved_issue(
         assigned_pod_id: assigned_pod_id.as_deref(),
         assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
