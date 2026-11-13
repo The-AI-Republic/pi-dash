@@ -1526,6 +1526,22 @@ fn presigned_post(
         py_json_string(&credential),
         py_json_string(&amz_date),
     );
+    // NEWPIDASH-204: session token for temporary (role) credentials — must be
+    // in both the policy conditions and the returned fields, like boto3.
+    let (conditions, token_field) = if !storage.session_token.is_empty() {
+        let escaped = py_json_string(&storage.session_token);
+        let base = conditions.trim_end_matches(']');
+        let new_conditions = format!("{}, {{\"x-amz-security-token\": {}}}]", base, escaped);
+        (
+            new_conditions,
+            Some((
+                "x-amz-security-token".to_owned(),
+                storage.session_token.clone(),
+            )),
+        )
+    } else {
+        (conditions, None)
+    };
     let policy_json = format!(
         "{{\"expiration\": {}, \"conditions\": {conditions}}}",
         py_json_string(&expiration),
@@ -1558,6 +1574,9 @@ fn presigned_post(
     fields.insert("x-amz-credential".to_owned(), Value::String(credential));
     fields.insert("x-amz-date".to_owned(), Value::String(amz_date));
     fields.insert("policy".to_owned(), Value::String(policy_b64));
+    if let Some((k, v)) = token_field {
+        fields.insert(k, Value::String(v));
+    }
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
@@ -1625,6 +1644,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "access-key".to_owned(),
             secret_access_key: "secret-key".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("https://minio.internal:9000".to_owned()),

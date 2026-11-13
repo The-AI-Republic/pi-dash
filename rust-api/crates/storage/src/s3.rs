@@ -2,8 +2,10 @@
 //!
 //! Mirrors `S3Storage` (`settings/storage.py`) the way the D-02 presign
 //! helpers do (`crates/api/src/space/assets.rs:1020-1078`): pure-HMAC SigV4,
-//! no AWS SDK, no network. Endpoint/region/bucket/credentials come from the
-//! same [`StorageSettings`](pidash_db::config::StorageSettings) surface.
+//! no AWS SDK. Signing itself is pure; credential *resolution* may hit
+//! IMDS (see [`crate::aws_credentials`]) but the signers only take the
+//! resolved [`AwsCredentials`]. Endpoint/region/bucket come from
+//! [`StorageSettings`](pidash_db::config::StorageSettings).
 //!
 //! Endpoint parity: [`resolve_server_endpoint`] resolves exactly like
 //! `S3Storage(request)` with the default `is_server=False` (the constructor
@@ -15,6 +17,10 @@
 use hmac::{Hmac, Mac};
 use pidash_db::config::StorageSettings;
 use sha2::{Digest, Sha256};
+
+use crate::aws_credentials::{
+    capped_presign_expires_secs, is_placeholder_credentials, AwsCredentials, CredentialSource,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -52,16 +58,89 @@ pub enum StorageError {
 ///
 /// Not a Python behavior port (Python fails lazily on first use) — a
 /// convenience so the caller can take the fallback branch before any I/O.
+///
+/// The placeholder keys `access-key` / `secret-key` are local-MinIO only
+/// (`USE_MINIO=1`); outside MinIO they are treated as "not configured" and
+/// fail here with a clear message instead of a misleading
+/// `InvalidAccessKeyId` from AWS (NEWPIDASH-204).
 pub fn validate_storage(storage: &StorageSettings) -> Result<(), StorageError> {
     if storage.bucket_name.is_empty() {
         return Err(StorageError::Config("bucket name is empty".to_owned()));
     }
+    if is_placeholder_credentials(&storage.access_key_id, &storage.secret_access_key)
+        && !storage.use_minio
+    {
+        return Err(StorageError::Config(
+            "access credentials are not configured (placeholder keys are only valid with USE_MINIO=1)"
+                .to_owned(),
+        ));
+    }
     if storage.access_key_id.is_empty() || storage.secret_access_key.is_empty() {
         return Err(StorageError::Config(
-            "access credentials are empty".to_owned(),
+            "access credentials are not configured (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are unset and no instance role is available)"
+                .to_owned(),
         ));
     }
     Ok(())
+}
+
+/// Resolve the credentials to sign with for `storage`, applying boto3's
+/// chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` first, then the EC2
+/// instance role) and keeping the placeholder keys only for `USE_MINIO=1`.
+///
+/// Should be called per request: role credentials rotate about hourly, so
+/// they must not be cached in `StorageSettings`. The static path returns the
+/// boot-time keys (plus `AWS_SESSION_TOKEN`); the instance-role path hits
+/// the process-wide IMDS cache (`pidash_storage::aws_credentials`).
+pub async fn resolve_storage_credentials(
+    storage: &StorageSettings,
+) -> Result<AwsCredentials, StorageError> {
+    let is_placeholder =
+        is_placeholder_credentials(&storage.access_key_id, &storage.secret_access_key);
+    let has_static = !storage.access_key_id.is_empty()
+        && !storage.secret_access_key.is_empty()
+        && !(is_placeholder && !storage.use_minio);
+    if has_static {
+        return Ok(AwsCredentials {
+            access_key: storage.access_key_id.clone(),
+            secret_key: storage.secret_access_key.clone(),
+            session_token: storage.session_token.clone(),
+            expires_at: None,
+        });
+    }
+    if storage.use_minio && is_placeholder {
+        return Ok(AwsCredentials {
+            access_key: storage.access_key_id.clone(),
+            secret_key: storage.secret_access_key.clone(),
+            session_token: storage.session_token.clone(),
+            expires_at: None,
+        });
+    }
+    // No usable static keys: fall through to the credential chain.
+    let source = CredentialSource::from_env();
+    source.check_static().map_err(StorageError::Config)?;
+    source.resolve().await.map_err(StorageError::Config)
+}
+
+/// Resolve credentials without a `StorageSettings` (export uploader and
+/// bucket commands read their env directly): the same boto3 chain as
+/// [`resolve_storage_credentials`].
+pub async fn resolve_default_credentials() -> Result<AwsCredentials, StorageError> {
+    let source = CredentialSource::from_env();
+    source.check_static().map_err(StorageError::Config)?;
+    source.resolve().await.map_err(StorageError::Config)
+}
+
+/// Cap a presigned-URL expiry so it does not outlive temporary (role)
+/// credentials. Re-exported for callers that presign with role creds:
+/// `requested` is the caller-requested expiry, `creds` the resolved creds,
+/// `now` the signing instant (as `DateTime<Utc>`).
+pub fn capped_expires_secs(
+    requested: u64,
+    creds: &AwsCredentials,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    capped_presign_expires_secs(requested, creds, now)
 }
 
 /// Resolved endpoint for signing: base URL, signed `host`, path style.
@@ -141,9 +220,10 @@ pub fn resolve_server_endpoint(
 ///
 /// Send with the HTTP client as `method url` carrying exactly these headers:
 /// `authorization`, `x-amz-date`, `x-amz-content-sha256`, plus
-/// `content-type` when present and every [`SignedRequest::extra_headers`]
-/// entry. Any added, dropped, or re-cased signed header invalidates the
-/// signature.
+/// `content-type` when present, `x-amz-security-token` when
+/// [`SignedRequest::security_token`] is `Some`, and every
+/// [`SignedRequest::extra_headers`] entry. Any added, dropped, or re-cased
+/// signed header invalidates the signature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignedRequest {
     /// `PUT` or `DELETE`.
@@ -158,6 +238,10 @@ pub struct SignedRequest {
     pub content_sha256: String,
     /// Value for the `Content-Type` header (PUT only).
     pub content_type: Option<String>,
+    /// `X-Amz-Security-Token` header value for temporary (role) credentials;
+    /// `None` for long-lived keys. Must be sent as `x-amz-security-token` and
+    /// is included in the SigV4 canonical request when present.
+    pub security_token: Option<String>,
     /// Extra signed headers to send verbatim (`(lowercase-name, value)`).
     pub extra_headers: Vec<(String, String)>,
 }
@@ -167,7 +251,9 @@ pub struct SignedRequest {
 /// Mirrors `S3Storage.upload_file` (`storage.py:186-207`): the object is
 /// stored with `ContentType` and addressed by key. Returns the object key's
 /// URL and headers — the caller executes the PUT and treats any failure as
-/// [`StorageError`].
+/// [`StorageError`]. Credentials come from `storage` (static env keys);
+/// for per-request role credentials use [`sign_put_with_creds`] with
+/// [`resolve_storage_credentials`].
 // Eight positional inputs mirror the D-02 presign-helper shape; grouping
 // them would only rename the tuple.
 #[allow(clippy::too_many_arguments)]
@@ -181,21 +267,68 @@ pub fn sign_put(
     amz_datetime: &str,
     date_stamp: &str,
 ) -> Result<SignedRequest, StorageError> {
+    let creds = AwsCredentials {
+        access_key: storage.access_key_id.clone(),
+        secret_key: storage.secret_access_key.clone(),
+        session_token: storage.session_token.clone(),
+        expires_at: None,
+    };
+    sign_put_with_creds(
+        storage,
+        &creds,
+        scheme,
+        host,
+        object_key,
+        content_type,
+        payload,
+        amz_datetime,
+        date_stamp,
+    )
+}
+
+/// Sign a PUT with explicit credentials (per-request role creds). The
+/// `x-amz-security-token` header is signed and returned on the
+/// [`SignedRequest`] when `creds.session_token` is non-empty.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_put_with_creds(
+    storage: &StorageSettings,
+    creds: &AwsCredentials,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    content_type: &str,
+    payload: &[u8],
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(payload);
     let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
+    let token = creds.session_token.as_str();
+    let has_token = !token.is_empty();
     // SigV4 requires canonical headers sorted by name (botocore sorts too).
-    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
-    let canonical = format!(
-        "PUT\n{path}\n\ncontent-type:{content_type}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
-        endpoint.signed_host,
-    );
-    let authorization = authorization(
-        storage,
+    let (canonical, signed_headers) = if has_token {
+        let signed = "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+        let canonical = format!(
+            "PUT\n{path}\n\ncontent-type:{content_type}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\nx-amz-security-token:{token}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (canonical, signed.to_owned())
+    } else {
+        let signed = "content-type;host;x-amz-content-sha256;x-amz-date";
+        let canonical = format!(
+            "PUT\n{path}\n\ncontent-type:{content_type}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (canonical, signed.to_owned())
+    };
+    let authorization = authorization_with_creds(
+        creds,
+        &storage.region,
         &canonical,
         amz_datetime,
         date_stamp,
-        signed_headers,
+        &signed_headers,
     );
     Ok(SignedRequest {
         method: "PUT",
@@ -204,6 +337,11 @@ pub fn sign_put(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: Some(content_type.to_owned()),
+        security_token: if has_token {
+            Some(token.to_owned())
+        } else {
+            None
+        },
         extra_headers: Vec::new(),
     })
 }
@@ -226,17 +364,57 @@ pub fn sign_put_extra(
     amz_datetime: &str,
     date_stamp: &str,
 ) -> Result<SignedRequest, StorageError> {
+    let creds = AwsCredentials {
+        access_key: storage.access_key_id.clone(),
+        secret_key: storage.secret_access_key.clone(),
+        session_token: storage.session_token.clone(),
+        expires_at: None,
+    };
+    sign_put_extra_with_creds(
+        storage,
+        &creds,
+        scheme,
+        host,
+        object_key,
+        content_type,
+        payload,
+        extra,
+        amz_datetime,
+        date_stamp,
+    )
+}
+
+/// Sign a PUT with extra headers and explicit credentials.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_put_extra_with_creds(
+    storage: &StorageSettings,
+    creds: &AwsCredentials,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    content_type: &str,
+    payload: &[u8],
+    extra: &[(&str, &str)],
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(payload);
     let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
+    let token = creds.session_token.clone();
+    let has_token = !token.is_empty();
     let mut names: Vec<&str> = vec!["content-type", "host", "x-amz-content-sha256", "x-amz-date"];
     names.extend(extra.iter().map(|(name, _)| *name));
+    if has_token {
+        names.push("x-amz-security-token");
+    }
     names.sort_unstable();
     let value_of = |name: &str| match name {
         "content-type" => content_type.to_owned(),
         "host" => endpoint.signed_host.clone(),
         "x-amz-content-sha256" => payload_hash.clone(),
         "x-amz-date" => amz_datetime.to_owned(),
+        "x-amz-security-token" => token.clone(),
         other => extra
             .iter()
             .find(|(key, _)| *key == other)
@@ -249,8 +427,9 @@ pub fn sign_put_extra(
         .collect::<String>();
     let signed_headers = names.join(";");
     let canonical = format!("PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-    let authorization = authorization(
-        storage,
+    let authorization = authorization_with_creds(
+        creds,
+        &storage.region,
         &canonical,
         amz_datetime,
         date_stamp,
@@ -263,6 +442,7 @@ pub fn sign_put_extra(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: Some(content_type.to_owned()),
+        security_token: if has_token { Some(token) } else { None },
         extra_headers: extra
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
@@ -285,20 +465,60 @@ pub fn sign_head(
     amz_datetime: &str,
     date_stamp: &str,
 ) -> Result<SignedRequest, StorageError> {
+    let creds = AwsCredentials {
+        access_key: storage.access_key_id.clone(),
+        secret_key: storage.secret_access_key.clone(),
+        session_token: storage.session_token.clone(),
+        expires_at: None,
+    };
+    sign_head_with_creds(
+        storage,
+        &creds,
+        scheme,
+        host,
+        object_key,
+        amz_datetime,
+        date_stamp,
+    )
+}
+
+/// Sign HEAD with explicit credentials.
+pub fn sign_head_with_creds(
+    storage: &StorageSettings,
+    creds: &AwsCredentials,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(&[]);
     let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical = format!(
-        "HEAD\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
-        endpoint.signed_host,
-    );
-    let authorization = authorization(
-        storage,
+    let token = creds.session_token.as_str();
+    let has_token = !token.is_empty();
+    let (canonical, signed_headers) = if has_token {
+        let signed = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+        let canonical = format!(
+            "HEAD\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\nx-amz-security-token:{token}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (canonical, signed.to_owned())
+    } else {
+        let signed = "host;x-amz-content-sha256;x-amz-date";
+        let canonical = format!(
+            "HEAD\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (canonical, signed.to_owned())
+    };
+    let authorization = authorization_with_creds(
+        creds,
+        &storage.region,
         &canonical,
         amz_datetime,
         date_stamp,
-        signed_headers,
+        &signed_headers,
     );
     Ok(SignedRequest {
         method: "HEAD",
@@ -307,6 +527,11 @@ pub fn sign_head(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: None,
+        security_token: if has_token {
+            Some(token.to_owned())
+        } else {
+            None
+        },
         extra_headers: Vec::new(),
     })
 }
@@ -324,20 +549,60 @@ pub fn sign_delete(
     amz_datetime: &str,
     date_stamp: &str,
 ) -> Result<SignedRequest, StorageError> {
+    let creds = AwsCredentials {
+        access_key: storage.access_key_id.clone(),
+        secret_key: storage.secret_access_key.clone(),
+        session_token: storage.session_token.clone(),
+        expires_at: None,
+    };
+    sign_delete_with_creds(
+        storage,
+        &creds,
+        scheme,
+        host,
+        object_key,
+        amz_datetime,
+        date_stamp,
+    )
+}
+
+/// Sign DELETE with explicit credentials.
+pub fn sign_delete_with_creds(
+    storage: &StorageSettings,
+    creds: &AwsCredentials,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> Result<SignedRequest, StorageError> {
     let payload_hash = sha256_hex(&[]);
     let endpoint = resolve_server_endpoint(storage, scheme, host)?;
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical = format!(
-        "DELETE\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
-        endpoint.signed_host,
-    );
-    let authorization = authorization(
-        storage,
+    let token = creds.session_token.as_str();
+    let has_token = !token.is_empty();
+    let (canonical, signed_headers) = if has_token {
+        let signed = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+        let canonical = format!(
+            "DELETE\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\nx-amz-security-token:{token}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (canonical, signed.to_owned())
+    } else {
+        let signed = "host;x-amz-content-sha256;x-amz-date";
+        let canonical = format!(
+            "DELETE\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (canonical, signed.to_owned())
+    };
+    let authorization = authorization_with_creds(
+        creds,
+        &storage.region,
         &canonical,
         amz_datetime,
         date_stamp,
-        signed_headers,
+        &signed_headers,
     );
     Ok(SignedRequest {
         method: "DELETE",
@@ -346,6 +611,11 @@ pub fn sign_delete(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: None,
+        security_token: if has_token {
+            Some(token.to_owned())
+        } else {
+            None
+        },
         extra_headers: Vec::new(),
     })
 }
@@ -374,7 +644,9 @@ pub struct PresignEndpoint {
 /// botocore's `SigV4QueryAuth` signs `e3b0c44...`, not
 /// `UNSIGNED-PAYLOAD`), and the hex signature appended as
 /// `X-Amz-Signature`. Verified byte-for-byte against botocore vectors
-/// (see tests).
+/// (see tests). For temporary (role) credentials use
+/// [`presign_get_url_with_token`] or [`presign_get_url_with_creds`] so
+/// `X-Amz-Security-Token` is carried on the URL.
 #[allow(clippy::too_many_arguments)]
 pub fn presign_get_url(
     endpoint: &PresignEndpoint,
@@ -387,12 +659,53 @@ pub fn presign_get_url(
     date_stamp: &str,
     expires_secs: u64,
 ) -> String {
+    presign_get_url_with_token(
+        endpoint,
+        bucket,
+        object_key,
+        access_key,
+        secret_key,
+        "",
+        region,
+        amz_datetime,
+        date_stamp,
+        expires_secs,
+    )
+}
+
+/// Mint a presigned GET URL carrying a session token (`X-Amz-Security-Token`)
+/// for temporary credentials. The token is part of the canonical query and
+/// therefore covered by the signature, mirroring botocore's query auth with
+/// `aws_session_token`.
+#[allow(clippy::too_many_arguments)]
+pub fn presign_get_url_with_token(
+    endpoint: &PresignEndpoint,
+    bucket: &str,
+    object_key: &str,
+    access_key: &str,
+    secret_key: &str,
+    session_token: &str,
+    region: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+    expires_secs: u64,
+) -> String {
     let scope = format!("{date_stamp}/{region}/s3/aws4_request");
     let credential = format!("{access_key}/{scope}");
-    let query = format!(
-        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={amz_datetime}&X-Amz-Expires={expires_secs}&X-Amz-SignedHeaders=host",
+    let base_query = format!(
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={amz_datetime}&X-Amz-Expires={expires_secs}",
         uri_encode(&credential),
     );
+    // When a session token is present it sorts between Expires and
+    // SignedHeaders (`X-Amz-Security-Token` < `X-Amz-SignedHeaders`).
+    let query = if session_token.is_empty() {
+        format!("{base_query}&X-Amz-SignedHeaders=host")
+    } else {
+        format!(
+            "{base_query}&X-Amz-Security-Token={}&X-Amz-SignedHeaders=host",
+            uri_encode(session_token),
+        )
+    };
     let path = if endpoint.path_style {
         format!("/{bucket}/{}", uri_encode_path(object_key))
     } else {
@@ -417,6 +730,37 @@ pub fn presign_get_url(
     )
 }
 
+/// Mint a presigned GET URL with credentials resolved per request
+/// (role creds rotate; expiry is capped so the URL does not outlive them).
+/// `requested_expires_secs` is capped against the credential expiry via
+/// [`capped_expires_secs`]; pass `now` as the signing instant.
+#[allow(clippy::too_many_arguments)]
+pub fn presign_get_url_with_creds(
+    endpoint: &PresignEndpoint,
+    bucket: &str,
+    object_key: &str,
+    creds: &AwsCredentials,
+    region: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+    requested_expires_secs: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let expires_secs = capped_presign_expires_secs(requested_expires_secs, creds, now);
+    presign_get_url_with_token(
+        endpoint,
+        bucket,
+        object_key,
+        &creds.access_key,
+        &creds.secret_key,
+        &creds.session_token,
+        region,
+        amz_datetime,
+        date_stamp,
+        expires_secs,
+    )
+}
+
 fn canonical_path(endpoint: &ResolvedEndpoint, bucket: &str, object_key: &str) -> String {
     if endpoint.path_style {
         format!("/{bucket}/{}", uri_encode_path(object_key))
@@ -425,6 +769,7 @@ fn canonical_path(endpoint: &ResolvedEndpoint, bucket: &str, object_key: &str) -
     }
 }
 
+#[allow(dead_code)]
 fn authorization(
     storage: &StorageSettings,
     canonical_request: &str,
@@ -432,19 +777,42 @@ fn authorization(
     date_stamp: &str,
     signed_headers: &str,
 ) -> String {
-    let region = storage.region.as_str();
+    let creds = AwsCredentials {
+        access_key: storage.access_key_id.clone(),
+        secret_key: storage.secret_access_key.clone(),
+        session_token: storage.session_token.clone(),
+        expires_at: None,
+    };
+    authorization_with_creds(
+        &creds,
+        &storage.region,
+        canonical_request,
+        amz_datetime,
+        date_stamp,
+        signed_headers,
+    )
+}
+
+fn authorization_with_creds(
+    creds: &AwsCredentials,
+    region: &str,
+    canonical_request: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+    signed_headers: &str,
+) -> String {
     let scope = format!("{date_stamp}/{region}/s3/aws4_request");
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_datetime}\n{scope}\n{}",
         sha256_hex(canonical_request.as_bytes())
     );
     let signature = hex(&hmac_sha256(
-        &signing_key(&storage.secret_access_key, date_stamp, region),
+        &signing_key(&creds.secret_key, date_stamp, region),
         string_to_sign.as_bytes(),
     ));
     format!(
         "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
-        storage.access_key_id,
+        creds.access_key,
     )
 }
 
@@ -526,6 +894,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "AKIDEXAMPLE".to_owned(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
+            session_token: String::new(),
             bucket_name: "examplebucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("https://s3.us-east-1.amazonaws.com".to_owned()),
@@ -856,6 +1225,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "ak".to_owned(),
             secret_access_key: "sk".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
@@ -887,5 +1257,223 @@ mod tests {
             req.extra_headers,
             vec![("x-amz-acl".to_owned(), "public-read".to_owned())]
         );
+    }
+
+    #[test]
+    fn sign_put_with_session_token_includes_header() {
+        let storage = test_storage();
+        // Static temporary keys (e.g. STS): token is signed and returned.
+        let creds = crate::aws_credentials::AwsCredentials {
+            access_key: storage.access_key_id.clone(),
+            secret_key: storage.secret_access_key.clone(),
+            session_token: "tok-123".to_owned(),
+            expires_at: None,
+        };
+        let req = sign_put_with_creds(
+            &storage,
+            &creds,
+            "https",
+            "unused.example",
+            "ab12cd34-user-avatar.png",
+            "image/png",
+            b"hello",
+            "20260928T120000Z",
+            "20260928",
+        )
+        .expect("signs with token");
+        assert_eq!(req.security_token.as_deref(), Some("tok-123"));
+        assert!(
+            req.authorization.contains("x-amz-security-token"),
+            "{}",
+            req.authorization
+        );
+        // Without token the header is absent and the vector is unchanged.
+        let creds_no_token = crate::aws_credentials::AwsCredentials {
+            access_key: storage.access_key_id.clone(),
+            secret_key: storage.secret_access_key.clone(),
+            session_token: String::new(),
+            expires_at: None,
+        };
+        let req2 = sign_put_with_creds(
+            &storage,
+            &creds_no_token,
+            "https",
+            "unused.example",
+            "ab12cd34-user-avatar.png",
+            "image/png",
+            b"hello",
+            "20260928T120000Z",
+            "20260928",
+        )
+        .expect("signs without token");
+        assert_eq!(req2.security_token, None);
+        assert!(!req2.authorization.contains("x-amz-security-token"));
+    }
+
+    #[test]
+    fn presign_get_url_carries_session_token() {
+        let url = presign_get_url_with_token(
+            &PresignEndpoint {
+                url_base: "https://uploads.s3.us-west-2.amazonaws.com".to_owned(),
+                signed_host: "uploads.s3.us-west-2.amazonaws.com".to_owned(),
+                path_style: false,
+            },
+            "uploads",
+            "ws-1/export.zip",
+            "ak",
+            "sk",
+            "tok-xyz",
+            "us-west-2",
+            "20261017T065234Z",
+            "20261017",
+            3600,
+        );
+        assert!(url.contains("X-Amz-Security-Token=tok-xyz"), "{url}");
+        // Verify the token is part of the canonical query (signed).
+        // The signature must differ from the no-token signature.
+        let url_no_token = presign_get_url(
+            &PresignEndpoint {
+                url_base: "https://uploads.s3.us-west-2.amazonaws.com".to_owned(),
+                signed_host: "uploads.s3.us-west-2.amazonaws.com".to_owned(),
+                path_style: false,
+            },
+            "uploads",
+            "ws-1/export.zip",
+            "ak",
+            "sk",
+            "us-west-2",
+            "20261017T065234Z",
+            "20261017",
+            3600,
+        );
+        assert_ne!(url, url_no_token);
+    }
+
+    #[test]
+    fn validate_storage_rejects_placeholder_outside_minio() {
+        let placeholder = StorageSettings {
+            use_minio: false,
+            access_key_id: "access-key".to_owned(),
+            secret_access_key: "secret-key".to_owned(),
+            ..test_storage()
+        };
+        assert!(validate_storage(&placeholder).is_err());
+        let minio_placeholder = StorageSettings {
+            use_minio: true,
+            access_key_id: "access-key".to_owned(),
+            secret_access_key: "secret-key".to_owned(),
+            ..test_storage()
+        };
+        assert!(validate_storage(&minio_placeholder).is_ok());
+        // Real keys pass even outside MinIO.
+        let real = StorageSettings {
+            use_minio: false,
+            access_key_id: "AKIAREAL".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            ..test_storage()
+        };
+        assert!(validate_storage(&real).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_storage_credentials_falls_back_to_instance_role() {
+        use crate::aws_credentials::tests::{imds_router, serve, FakeImds};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        // Fake IMDS with a role; no AWS_* env keys.
+        let state = FakeImds {
+            fetches: Arc::new(AtomicUsize::new(0)),
+            tokens: Arc::new(AtomicUsize::new(0)),
+            lifetime_secs: 3600,
+            with_role: true,
+        };
+        let base = serve(imds_router(state.clone())).await;
+        // Point the credential provider at the fake by building a source
+        // that uses it directly via InstanceRoleProvider::new.
+        // We test the full chain: storage with empty keys + IMDS override.
+        let prev = std::env::var("AWS_EC2_METADATA_SERVICE_ENDPOINT").ok();
+        std::env::set_var("AWS_EC2_METADATA_SERVICE_ENDPOINT", &base);
+        // Ensure no static keys leak from the test environment.
+        let prev_ak = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let prev_sk = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        // Also disable shared config interference by clearing AWS_SESSION_TOKEN.
+        let prev_tok = std::env::var("AWS_SESSION_TOKEN").ok();
+        std::env::remove_var("AWS_SESSION_TOKEN");
+
+        let storage = StorageSettings {
+            use_minio: false,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            session_token: String::new(),
+            ..test_storage()
+        };
+        // The creds are fetched at most once and carry the token.
+        let creds = resolve_storage_credentials(&storage)
+            .await
+            .expect("role creds");
+        assert!(creds.access_key.starts_with("ASIAFAKE"));
+        assert!(!creds.session_token.is_empty());
+        assert!(creds.expires_at.is_some());
+        // Signing with them sends the token header.
+        let signed = sign_put_with_creds(
+            &storage,
+            &creds,
+            "https",
+            "unused.example",
+            "k",
+            "text/plain",
+            b"hi",
+            "20260928T120000Z",
+            "20260928",
+        )
+        .expect("signs");
+        assert_eq!(signed.security_token, Some(creds.session_token.clone()));
+        // Presigned URL carries the token and capped expiry.
+        let now = chrono::Utc::now();
+        let url = presign_get_url_with_creds(
+            &PresignEndpoint {
+                url_base: "https://b.s3.amazonaws.com".to_owned(),
+                signed_host: "b.s3.amazonaws.com".to_owned(),
+                path_style: false,
+            },
+            "b",
+            "k",
+            &creds,
+            "us-east-1",
+            "20260928T120000Z",
+            "20260928",
+            7 * 24 * 60 * 60,
+            now,
+        );
+        assert!(url.contains("X-Amz-Security-Token="), "{url}");
+        // Capped expiry: role creds live 3600s, so the 7-day request is capped.
+        assert!(
+            url.contains("X-Amz-Expires=3600") || url.contains("X-Amz-Expires=3599"),
+            "{url}"
+        );
+
+        // Cache: second resolve does not refetch.
+        let _ = resolve_storage_credentials(&storage).await.expect("cached");
+        assert_eq!(state.fetches.load(Ordering::SeqCst), 1);
+
+        // Restore env.
+        if let Some(v) = prev {
+            std::env::set_var("AWS_EC2_METADATA_SERVICE_ENDPOINT", v);
+        } else {
+            std::env::remove_var("AWS_EC2_METADATA_SERVICE_ENDPOINT");
+        }
+        if let Some(v) = prev_ak {
+            std::env::set_var("AWS_ACCESS_KEY_ID", v);
+        }
+        if let Some(v) = prev_sk {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", v);
+        }
+        if let Some(v) = prev_tok {
+            std::env::set_var("AWS_SESSION_TOKEN", v);
+        }
     }
 }

@@ -10,8 +10,8 @@
 //! domain callers (notably the D-17 OAuth callback, PIDASHCONV-475) build a
 //! [`s3::SignedRequest`] here and execute it with their own HTTP client
 //! (`reqwest` already lives in `pidash-api`), instead of growing a parallel
-//! signer. The crate itself never touches the network, so every constructor
-//! below is pure and unit-testable.
+//! signer. Signing is pure; credential *resolution* (instance-role IMDS) is
+//! the only network touch and lives in [`aws_credentials`].
 //!
 //! Python failure contract (translate, don't redesign): every S3 exception
 //! path in `storage.py` is swallowed and the avatar caller falls back to the
@@ -39,14 +39,21 @@
 #![forbid(unsafe_code)]
 
 pub mod avatar;
+pub mod aws_credentials;
 pub mod s3;
 
 pub use avatar::{
     avatar_asset_name, avatar_attributes, avatar_extension, avatar_object_key, chunk_fits,
     content_length_allowed, head_to_storage_metadata, ENTITY_TYPE_USER_AVATAR,
 };
+pub use aws_credentials::{
+    capped_presign_expires_secs, is_placeholder_credentials, AwsCredentials, CredentialSource,
+    PLACEHOLDER_ACCESS_KEY, PLACEHOLDER_SECRET_KEY,
+};
 pub use s3::{
-    presign_get_url, resolve_server_endpoint, sha256_hex, sign_delete, sign_head, sign_put,
-    sign_put_extra, validate_storage, PresignEndpoint, ResolvedEndpoint, SignedRequest,
-    StorageError,
+    capped_expires_secs, presign_get_url, presign_get_url_with_creds, presign_get_url_with_token,
+    resolve_default_credentials, resolve_server_endpoint, resolve_storage_credentials, sha256_hex,
+    sign_delete, sign_delete_with_creds, sign_head, sign_head_with_creds, sign_put, sign_put_extra,
+    sign_put_extra_with_creds, sign_put_with_creds, validate_storage, PresignEndpoint,
+    ResolvedEndpoint, SignedRequest, StorageError,
 };
