@@ -8,6 +8,7 @@ bound them as TEXT params, so Postgres raised 42883 and the list 500d.
 """
 
 import json
+import uuid
 
 import pytest
 
@@ -233,3 +234,153 @@ def test_us_datetime_six_digit_fraction_accepted(clients, seed):
         member, base,
         {"and": [{"created_at": "05/01/2026 08:00:00.123456"}]})
     assert resp.status_code == 200, resp.text
+
+
+@pytest.fixture()
+def negated_relation_issues(clients, seed, db_conn):
+    """NEWPIDASH-194: U (no links), Xonly (X), XY (X+Y + L2), Lonly (L2).
+
+    Project IS holds seed I1 (X) + I2/I3 (bare) plus these four, so NOT
+    assertions are subset-based (Xonly/XY excluded, U/Lonly kept).
+    Issues are API-created like `dated_issues`; assignee/label rows are
+    SQL so the test controls live links exactly. Deleted on teardown.
+    """
+    admin = clients["admin"]
+    base = _base(seed["ws_slug"], seed["project"])
+    x = seed["member"]
+    y = seed["admin"]
+    made = []
+    label_id = str(uuid.uuid4())
+    try:
+        for name in ("NR U", "NR X", "NR XY", "NR L"):
+            resp = admin.post(f"{base}/issues/", json={"name": name})
+            assert resp.status_code == 201, resp.text
+            made.append(resp.json()["id"])
+        u, xonly, xy, lonly = made
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO labels (created_at, updated_at, id, name,"
+                " description, created_by_id, project_id, updated_by_id,"
+                " workspace_id, color, sort_order)"
+                " VALUES (NOW(), NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    label_id,
+                    "NR L2",
+                    "",
+                    seed["admin"],
+                    seed["project"],
+                    seed["admin"],
+                    seed["ws"],
+                    "#ff0000",
+                    0.0,
+                ),
+            )
+            # Xonly: X only. XY: X + Y + L2. Lonly: L2 only. U: none.
+            for issue_id, assignee in ((xonly, x), (xy, x), (xy, y)):
+                cur.execute(
+                    "INSERT INTO issue_assignees (created_at, updated_at, id,"
+                    " assignee_id, created_by_id, issue_id, project_id,"
+                    " updated_by_id, workspace_id)"
+                    " VALUES (NOW(), NOW(), %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        str(uuid.uuid4()),
+                        assignee,
+                        seed["admin"],
+                        issue_id,
+                        seed["project"],
+                        seed["admin"],
+                        seed["ws"],
+                    ),
+                )
+            for issue_id in (xy, lonly):
+                cur.execute(
+                    "INSERT INTO issue_labels (created_at, updated_at, id,"
+                    " created_by_id, issue_id, label_id, project_id,"
+                    " updated_by_id, workspace_id)"
+                    " VALUES (NOW(), NOW(), %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        str(uuid.uuid4()),
+                        seed["admin"],
+                        issue_id,
+                        label_id,
+                        seed["project"],
+                        seed["admin"],
+                        seed["ws"],
+                    ),
+                )
+        yield {"u": u, "xonly": xonly, "xy": xy, "lonly": lonly,
+               "x": x, "y": y, "label": label_id}
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM issue_labels WHERE issue_id = ANY(%s)",
+                (made,),
+            )
+            cur.execute(
+                "DELETE FROM issue_assignees WHERE issue_id = ANY(%s)",
+                (made,),
+            )
+            cur.execute("DELETE FROM labels WHERE id = %s", (label_id,))
+        for issue_id in made:
+            admin.delete(f"{base}/issues/{issue_id}/")
+
+
+def test_not_assignee_keeps_unassigned_excludes_x_and_xy(
+    clients, seed, negated_relation_issues
+):
+    """NEWPIDASH-194: NOT assignee X is Django split_exclude (NOT EXISTS):
+    U and Lonly (no X link) stay, Xonly and XY (both carry X) drop out.
+    Pre-fix Rust applied NOT per INNER-joined row, returning XY's Y row
+    and dropping U/Lonly."""
+    member = clients["member"]
+    base = _base(seed["ws_slug"], seed["project"])
+    ids = _ids(_filtered(
+        member, base,
+        {"not": {"assignee_id__in": negated_relation_issues["x"]}},
+    ).json())
+    assert negated_relation_issues["u"] in ids
+    assert negated_relation_issues["lonly"] in ids
+    assert negated_relation_issues["xonly"] not in ids
+    assert negated_relation_issues["xy"] not in ids
+
+
+def test_not_label_keeps_unlabelled_excludes_labelled(
+    clients, seed, negated_relation_issues
+):
+    """NEWPIDASH-194: NOT label L2 keeps U + Xonly, excludes XY + Lonly."""
+    member = clients["member"]
+    base = _base(seed["ws_slug"], seed["project"])
+    ids = _ids(_filtered(
+        member, base,
+        {"not": {"label_id__in": negated_relation_issues["label"]}},
+    ).json())
+    assert negated_relation_issues["u"] in ids
+    assert negated_relation_issues["xonly"] in ids
+    assert negated_relation_issues["xy"] not in ids
+    assert negated_relation_issues["lonly"] not in ids
+
+
+def test_or_assignee_label_matches_either_branch(
+    clients, seed, negated_relation_issues
+):
+    """NEWPIDASH-194: OR over two relations is Django LEFT OUTER joins:
+    Xonly (assignee only, no label) and Lonly (label only) both match.
+    Pre-fix Rust INNER-joined both tables, so only XY (both) matched."""
+    # Drive through the member client: PROJECT list is DISTINCT, so each
+    # matching issue appears once; Xonly has no label row and Lonly has
+    # no assignee row, so either INNER join drops one of them.
+    member = clients["member"]
+    base = _base(seed["ws_slug"], seed["project"])
+    resp = _filtered(
+        member, base,
+        {"or": [
+            {"assignee_id": negated_relation_issues["x"]},
+            {"label_id": negated_relation_issues["label"]},
+        ]},
+    )
+    assert resp.status_code == 200, resp.text
+    ids = _ids(resp.json())
+    assert negated_relation_issues["xonly"] in ids
+    assert negated_relation_issues["lonly"] in ids
+    assert negated_relation_issues["xy"] in ids
+    assert negated_relation_issues["u"] not in ids

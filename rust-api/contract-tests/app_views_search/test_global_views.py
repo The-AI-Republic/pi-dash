@@ -345,6 +345,81 @@ def test_view_issues_filters_assignee_id_relation_filter(
     assert body["total_count"] == 1
 
 
+def _negated_ws_fixture(seed, tenant_a, project_a):
+    """NEWPIDASH-194: U (none), Xonly (X), XY (X+Y + L2), Lonly (L2).
+
+    Tenant A's workspace/project is fresh per test (Seed.cleanup wipes
+    it), so the workspace list holds exactly these four. X is the tenant
+    user; Y is a fresh user.
+    """
+    ws = tenant_a["workspace"]["id"]
+    x = tenant_a["user"]["id"]
+    y = seed.user()["id"]
+    label = seed.label(ws, project_a)
+    u = seed.issue(ws, project_a, name="NR U")
+    xonly = seed.issue(ws, project_a, name="NR X")
+    xy = seed.issue(ws, project_a, name="NR XY")
+    lonly = seed.issue(ws, project_a, name="NR L")
+    seed.issue_assignee(ws, project_a, xonly, x)
+    seed.issue_assignee(ws, project_a, xy, x)
+    seed.issue_assignee(ws, project_a, xy, y)
+    seed.issue_label(ws, project_a, xy, label)
+    seed.issue_label(ws, project_a, lonly, label)
+    return {"u": u, "xonly": xonly, "xy": xy, "lonly": lonly,
+            "x": x, "y": y, "label": label}
+
+
+def test_view_issues_not_assignee_keeps_unassigned_excludes_x_and_xy(
+    api, seed, tenant_a, project_a, auth_a
+):
+    # NEWPIDASH-194: NOT assignee X on the workspace list is Django
+    # split_exclude (NOT EXISTS): U + Lonly stay, Xonly + XY drop out.
+    # Pre-fix Rust applied NOT per INNER-joined row over the workspace
+    # list, returning XY's Y row and dropping the unlinked issues.
+    fx = _negated_ws_fixture(seed, tenant_a, project_a)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a,
+        params={"filters": json.dumps({"not": {"assignee_id__in": fx["x"]}})},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ids = {e["id"] for e in body["results"]}
+    assert ids == {fx["u"], fx["lonly"]}, body["results"]
+    assert body["total_count"] == 2
+
+
+def test_view_issues_or_assignee_label_matches_either_branch(
+    api, seed, tenant_a, project_a, auth_a
+):
+    # NEWPIDASH-194: OR over two relations keeps either-branch matches
+    # with no row in the other table (Xonly has no label, Lonly has no
+    # assignee). Pre-fix Rust INNER-joined both tables, so only XY
+    # matched. Each issue carries one link per table here, so the
+    # workspace list (no DISTINCT) returns one row per match.
+    fx = _negated_ws_fixture(seed, tenant_a, project_a)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a,
+        params={
+            "filters": json.dumps(
+                {"or": [
+                    {"assignee_id": fx["x"]},
+                    {"label_id": fx["label"]},
+                ]}
+            )
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ids = {e["id"] for e in body["results"]}
+    assert ids == {fx["xonly"], fx["lonly"], fx["xy"]}, ids
+    # XY has two assignee rows, so the workspace list (no DISTINCT)
+    # returns it twice; the other two match once each.
+    assert body["total_count"] == 4
+    assert len(body["results"]) == 4
+
+
 def test_favorite_create_and_delete(api, seed, tenant_a, project_a, auth_a):
     view_id = seed.issue_view(
         tenant_a["workspace"]["id"], tenant_a["user"]["id"],

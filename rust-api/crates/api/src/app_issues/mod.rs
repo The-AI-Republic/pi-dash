@@ -815,63 +815,20 @@ pub fn filter_denial(error: pidash_db::filter::FilterError) -> Denial {
     Denial::BadFilter(message, code.to_owned())
 }
 
-/// A rich leaf's `IssueFilterSet` name: `field` plus the lookup suffix
-/// (`exact` has none).
-pub(crate) fn leaf_name(field: &str, lookup: pidash_db::filter::Lookup) -> String {
-    let suffix = match lookup {
-        pidash_db::filter::Lookup::Exact => return field.to_owned(),
-        pidash_db::filter::Lookup::In => "in",
-        pidash_db::filter::Lookup::Gt => "gt",
-        pidash_db::filter::Lookup::Gte => "gte",
-        pidash_db::filter::Lookup::Lt => "lt",
-        pidash_db::filter::Lookup::Lte => "lte",
-        pidash_db::filter::Lookup::Contains => "contains",
-        pidash_db::filter::Lookup::IContains => "icontains",
-        pidash_db::filter::Lookup::StartsWith => "startswith",
-        pidash_db::filter::Lookup::IStartsWith => "istartswith",
-        pidash_db::filter::Lookup::EndsWith => "endswith",
-        pidash_db::filter::Lookup::IEndsWith => "iendswith",
-        pidash_db::filter::Lookup::IExact => "iexact",
-        pidash_db::filter::Lookup::IsNull => "isnull",
-        pidash_db::filter::Lookup::Range => "range",
-    };
-    format!("{field}__{suffix}")
-}
-
-/// Compile one `filters`-param tree against `IssueFilterSet`: structure
-/// and shapes via the kernel tree, every leaf through
-/// [`pidash_db::filterset`] (the `_build_leaf_q` equivalent — the leaf
-/// dict goes to the FilterSet, not to bare columns). `tz` is the request
-/// user's zone, for naive datetime inputs.
+/// Compile one `filters`-param tree against `IssueFilterSet`, Django's
+/// way: a relation leaf under an odd `not` becomes `NOT EXISTS` (the
+/// `_build_leaf_q` leaf through the FilterSet, negated via
+/// `split_exclude`), relation leaves under `or` stay join predicates over
+/// LEFT joins, and plain occurrences are join predicates over INNER
+/// joins. Only the condition is returned here; kernels that promote
+/// joins call [`pidash_db::filterset::compile_tree`] directly for the
+/// per-alias INNER/LEFT classification. `tz` is the request user's zone,
+/// for naive datetime inputs.
 pub fn compile_filter_tree(
     tree: &pidash_db::filter::FilterTree,
     tz: &chrono_tz::Tz,
 ) -> Result<Condition, pidash_db::filter::FilterError> {
-    use pidash_db::filter::FilterTree;
-    match tree {
-        FilterTree::And(children) => {
-            let mut cond = Condition::all();
-            for child in children {
-                cond = cond.add(compile_filter_tree(child, tz)?);
-            }
-            Ok(cond)
-        }
-        FilterTree::Or(children) => {
-            let mut cond = Condition::any();
-            for child in children {
-                cond = cond.add(compile_filter_tree(child, tz)?);
-            }
-            Ok(cond)
-        }
-        FilterTree::Not(child) => Ok(compile_filter_tree(child, tz)?.not()),
-        FilterTree::Leaf(leaves) => {
-            let provided: Vec<(String, Value)> = leaves
-                .iter()
-                .map(|leaf| (leaf_name(&leaf.field, leaf.lookup), leaf.value.clone()))
-                .collect();
-            pidash_db::filterset::build_combined(&provided, tz)
-        }
-    }
+    Ok(pidash_db::filterset::compile_tree(tree, tz)?.condition)
 }
 
 /// The `filters` query param compiled to a [`Condition`], or `None` when
@@ -889,6 +846,30 @@ pub fn complex_filter(query: &QueryMap, tz: &chrono_tz::Tz) -> Result<Option<Con
             .map(Some)
             .map_err(filter_denial),
         None => Ok(None),
+    }
+}
+
+/// The relation aliases a rich filter tree references with a plain
+/// positive occurrence (outside any `or`/`not`) — the aliases whose join
+/// must be INNER. Text kernels call this alongside `complex_filter`
+/// (same `query`, same `tz`): `complex_filter` already surfaced every
+/// parse/compile error as a 400 before join emission runs, so a reparse
+/// failure here is unreachable in practice and yields the empty set.
+/// Aliases under `or` only take LEFT; aliases under an odd `not` are
+/// compiled to `NOT EXISTS` and need no join.
+pub fn rich_inner_aliases(
+    query: &QueryMap,
+    tz: &chrono_tz::Tz,
+) -> std::collections::BTreeSet<&'static str> {
+    let raw = query_last(query, "filters").unwrap_or_default();
+    if raw.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+    match pidash_db::filter::FilterTree::parse_param_opt(&raw) {
+        Ok(Some(tree)) => pidash_db::filterset::compile_tree(&tree, tz)
+            .map(|compiled| compiled.inner)
+            .unwrap_or_default(),
+        _ => std::collections::BTreeSet::new(),
     }
 }
 
