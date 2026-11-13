@@ -85,6 +85,24 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
+        // Credential presence at startup: surface the same warning the
+        // pre-pickup gate uses, so an operator sees it without waiting for an
+        // Assign to be rejected. Presence-only; never validated.
+        for runner_cfg in &config.runners {
+            // Managed Codex runners carry Pi Dash-managed auth and skip the
+            // presence check, like Engine.
+            if crate::agent::auth::is_managed_codex(&runner_cfg.codex) {
+                continue;
+            }
+            if !crate::agent::auth::has_credentials(runner_cfg.agent.kind) {
+                tracing::warn!(
+                    runner = %runner_cfg.name,
+                    agent = %runner_cfg.agent.kind.display_name(),
+                    "credentials missing on this runner; runs will be refused at pickup until fixed: {}",
+                    crate::agent::auth::fix_hint(runner_cfg.agent.kind)
+                );
+            }
+        }
         // Daemon-level state has no single runner_id any more — runners
         // come and go under one connection. Per-instance state still
         // holds its own runner_id (set in RunnerInstance::new).
@@ -1860,6 +1878,60 @@ enum ChatCommand {
 }
 
 impl RunnerLoop {
+    /// Decide whether an `Assign` to this runner should be NACKed before
+    /// `Accept` for a credential reason. Returns `Some(reason)` when the
+    /// assign must be turned down without starting the agent.
+    ///
+    /// Pure helper so the Assign-reject decision is unit-testable without
+    /// driving the whole loop. The production call site passes
+    /// `crate::agent::auth::has_credentials(kind)` and `is_managed_codex`.
+    /// Managed Codex runners carry Pi Dash-managed auth and skip the
+    /// presence check, like `Engine`.
+    fn agent_auth_missing_rejection(
+        agent_kind: AgentKind,
+        has_credentials: bool,
+        managed_codex: bool,
+    ) -> Option<FailureReason> {
+        match agent_kind {
+            AgentKind::OpenClaw | AgentKind::Engine => None,
+            AgentKind::Codex if managed_codex => None,
+            _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
+            _ => None,
+        }
+    }
+
+    /// Backwards-compatible alias for the Muse-only name.
+    #[allow(dead_code)]
+    fn muse_assign_rejection(
+        agent_kind: AgentKind,
+        has_credentials: bool,
+    ) -> Option<FailureReason> {
+        Self::agent_auth_missing_rejection(agent_kind, has_credentials, false)
+    }
+
+    /// The detail string and warning fix hint for an auth-missing NACK.
+    /// Names the agent, runner, machine (`hostname`), and exact fix per
+    /// the issue example: “Claude Code on runner X (machine Y) has no
+    /// credentials: …”.
+    fn agent_auth_missing_detail(
+        agent_kind: AgentKind,
+        runner_name: &str,
+        machine: &str,
+    ) -> String {
+        format!(
+            "assign rejected: {} credentials missing on runner {runner_name} (machine {machine}): {}",
+            agent_kind.display_name(),
+            crate::agent::auth::fix_hint(agent_kind)
+        )
+    }
+
+    /// Backwards-compatible wrapper for the Muse-only call site.
+    #[allow(dead_code)]
+    fn muse_auth_missing_detail(runner_name: &str) -> String {
+        let machine = hostname().unwrap_or_else(|| "unknown".to_string());
+        Self::agent_auth_missing_detail(AgentKind::MuseCode, runner_name, &machine)
+    }
+
     /// NACK an `Assign` this runner cannot take right now. The cloud frees a
     /// runner the moment its previous run goes terminal in the database,
     /// which can precede the local agent actually stopping (most commonly a
@@ -1873,11 +1945,18 @@ impl RunnerLoop {
     /// loop. Delivery failure is logged only — the session-open redeliver
     /// path remains the backstop for a lost NACK.
     fn nack_assign(&self, run_id: uuid::Uuid, detail: String) {
+        self.nack_assign_with(run_id, detail, FailureReason::AssignRejectedBusy);
+    }
+
+    /// Same as [`nack_assign`](Self::nack_assign) but with an explicit
+    /// `FailureReason`. Used for `AgentAuthMissing` where the cloud re-queues
+    /// identically to `AssignRejectedBusy` but distinguishes the case.
+    fn nack_assign_with(&self, run_id: uuid::Uuid, detail: String, reason: FailureReason) {
         let out = self.out.clone();
         tokio::spawn(async move {
             let msg = ClientMsg::RunFailed {
                 run_id,
-                reason: FailureReason::AssignRejectedBusy,
+                reason,
                 detail: Some(detail),
                 ended_at: Utc::now(),
                 tokens: None,
@@ -2094,6 +2173,35 @@ impl RunnerLoop {
                                 current.run_id
                             ),
                         );
+                        continue;
+                    }
+                    // Pre-pickup credential check: without the agent's
+                    // credentials the agent would fail at
+                    // `run.lifecycle.started` before any work, and the failure
+                    // would burn the issue's tick budget. Reject the Assign
+                    // before `Accept` (and before spawning the agent) so the
+                    // cloud re-queues it for another runner.
+                    // Managed Codex runners carry Pi Dash-managed auth and
+                    // skip the presence check, like Engine.
+                    if let Some(reason) = Self::agent_auth_missing_rejection(
+                        self.runner_config.agent.kind,
+                        crate::agent::auth::has_credentials(self.runner_config.agent.kind),
+                        crate::agent::auth::is_managed_codex(&self.runner_config.codex),
+                    ) {
+                        let machine = hostname().unwrap_or_else(|| "unknown".to_string());
+                        let detail = Self::agent_auth_missing_detail(
+                            self.runner_config.agent.kind,
+                            &self.runner_config.name,
+                            &machine,
+                        );
+                        tracing::warn!(
+                            %run_id,
+                            runner = %self.runner_config.name,
+                            agent = %self.runner_config.agent.kind.display_name(),
+                            "assign rejected: {} credentials missing on this runner; refusing pickup before Accept (not starting agent)",
+                            self.runner_config.agent.kind.display_name(),
+                        );
+                        self.nack_assign_with(run_id, detail, reason);
                         continue;
                     }
                     let cancel = tokio_util::sync::CancellationToken::new();
@@ -6736,5 +6844,81 @@ mod tests {
             ),
             "unexpected status 503 Service Unavailable: boom, url: https://x/v1/responses, request id: r1"
         );
+    }
+
+    #[test]
+    fn muse_assign_with_missing_credentials_is_rejected_with_agent_auth_missing() {
+        // The pre-pickup gate: every supported kind + no creds → reject;
+        // with creds → accept; OpenClaw/Engine never blocked.
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, true, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::ClaudeCode, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::CursorAgent, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::OpenClaw, false, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Engine, false, false),
+            None
+        );
+        // Managed Codex (Pi Dash-managed auth) skips the presence check
+        // even without user credentials, like Engine.
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false, true),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, true, true),
+            None
+        );
+        // Backwards-compatible alias still works for Muse.
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+    }
+
+    #[test]
+    fn muse_auth_missing_detail_names_runner_and_fix() {
+        let detail = RunnerLoop::muse_auth_missing_detail("build-box");
+        assert!(
+            detail.contains("build-box"),
+            "detail names runner: {detail}"
+        );
+        assert!(detail.contains("muse login"), "detail has fix: {detail}");
+        assert!(detail.contains("META_API_KEY"), "detail has fix: {detail}");
+        // Machine is included for the issue example format.
+        assert!(detail.contains("machine"), "detail names machine: {detail}");
+    }
+
+    #[test]
+    fn agent_auth_missing_detail_names_agent_runner_machine_and_fix() {
+        let detail =
+            RunnerLoop::agent_auth_missing_detail(AgentKind::ClaudeCode, "build-box", "my-machine");
+        assert!(detail.contains("Claude Code"), "names agent: {detail}");
+        assert!(detail.contains("build-box"), "names runner: {detail}");
+        assert!(detail.contains("my-machine"), "names machine: {detail}");
+        assert!(detail.contains("ANTHROPIC_API_KEY"), "names fix: {detail}");
     }
 }

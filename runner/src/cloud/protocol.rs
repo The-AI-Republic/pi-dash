@@ -536,6 +536,15 @@ pub enum FailureReason {
     /// re-queue the run for a fresh dispatch; older clouds fail it — either
     /// way it is not silently stuck.
     AssignRejectedBusy,
+    /// The runner rejected an `Assign` before sending `Accept` because the
+    /// agent's credentials are missing (for example Muse's `META_API_KEY` or
+    /// `~/.config/muse/auth.json`, Claude's `ANTHROPIC_API_KEY`, etc.)
+    /// and starting the agent would fail at `run.lifecycle.started` and burn
+    /// a tick. The cloud re-queues the run for another runner without
+    /// charging the issue's tick budget, matching `AssignRejectedBusy`'s
+    /// requeue semantics but with a distinct wire name (`agent_auth_missing`)
+    /// so the case is distinguishable in telemetry.
+    AgentAuthMissing,
 }
 
 #[cfg(test)]
@@ -552,6 +561,18 @@ mod tests {
         let back: FailureReason =
             serde_json::from_value(serde_json::json!("assign_rejected_busy")).unwrap();
         assert_eq!(back, FailureReason::AssignRejectedBusy);
+    }
+
+    /// The `agent_auth_missing` NACK reuses the same requeue path as
+    /// `assign_rejected_busy` on both clouds; its wire name must stay stable
+    /// so the cloud can branch on it without failing the run.
+    #[test]
+    fn agent_auth_missing_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::AgentAuthMissing).unwrap();
+        assert_eq!(json, serde_json::json!("agent_auth_missing"));
+        let back: FailureReason =
+            serde_json::from_value(serde_json::json!("agent_auth_missing")).unwrap();
+        assert_eq!(back, FailureReason::AgentAuthMissing);
     }
 
     #[test]

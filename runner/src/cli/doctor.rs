@@ -83,6 +83,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             "acpx",
             "grok",
             "muse",
+            false,
         )
         .await;
     } else {
@@ -98,6 +99,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 &r.openclaw.binary,
                 &r.grok.binary,
                 &r.muse_code.binary,
+                crate::agent::auth::is_managed_codex(&r.codex),
             )
             .await;
         }
@@ -205,6 +207,7 @@ async fn run_agent_checks(
     openclaw_binary: &str,
     grok_binary: &str,
     muse_binary: &str,
+    codex_managed: bool,
 ) {
     let tag = |base: &str| match prefix {
         Some(p) => format!("{base}@{p}"),
@@ -226,19 +229,33 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            match check_codex_auth(codex_binary).await {
-                Ok(detail) => checks.push(Check {
+            // Codex presence check: OPENAI_API_KEY or ~/.codex/auth.json
+            // under the daemon's home. Shared with the pre-pickup gate.
+            // Managed runners carry Pi Dash-managed auth and skip the
+            // presence check, like Engine.
+            if codex_managed {
+                checks.push(Check {
                     name: tag("codex-auth"),
                     ok: true,
-                    detail,
-                    blocker: true,
-                }),
-                Err(e) => checks.push(Check {
+                    detail: "Pi Dash-managed Codex credentials (via desktop host)".to_string(),
+                    blocker: false,
+                });
+            } else {
+                let has_creds = crate::agent::auth::has_codex_credentials();
+                checks.push(Check {
                     name: tag("codex-auth"),
-                    ok: false,
-                    detail: e.to_string(),
-                    blocker: true,
-                }),
+                    ok: has_creds,
+                    detail: if has_creds {
+                        "Codex credentials present (OPENAI_API_KEY or ~/.codex/auth.json)"
+                            .to_string()
+                    } else {
+                        format!(
+                            "missing Codex credentials: {}",
+                            crate::agent::auth::CODEX_FIX_HINT
+                        )
+                    },
+                    blocker: false,
+                });
             }
         }
         crate::config::schema::AgentKind::ClaudeCode => {
@@ -256,13 +273,18 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
+            let has_creds = crate::agent::auth::has_claude_credentials();
             checks.push(Check {
                 name: tag("claude-auth"),
-                ok: true,
-                detail: format!(
-                    "assumed ok (run `{} /login` if runs fail with auth errors)",
-                    claude_binary
-                ),
+                ok: has_creds,
+                detail: if has_creds {
+                    "Claude credentials present (ANTHROPIC_API_KEY or saved login)".to_string()
+                } else {
+                    format!(
+                        "missing Claude credentials: {}",
+                        crate::agent::auth::CLAUDE_FIX_HINT
+                    )
+                },
                 blocker: false,
             });
         }
@@ -281,17 +303,18 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            // cursor-agent auth is interactive (`cursor-agent login`) or via the
-            // CURSOR_API_KEY env var; there's no cheap non-interactive probe, so
-            // surface a hint rather than block.
+            let has_creds = crate::agent::auth::has_cursor_credentials();
             checks.push(Check {
                 name: tag("cursor-auth"),
-                ok: true,
-                detail: format!(
-                    "assumed ok (run `{} login` or set CURSOR_API_KEY if runs fail \
-                     with auth errors)",
-                    cursor_binary
-                ),
+                ok: has_creds,
+                detail: if has_creds {
+                    "Cursor credentials present (CURSOR_API_KEY or saved login)".to_string()
+                } else {
+                    format!(
+                        "missing Cursor credentials: {}",
+                        crate::agent::auth::CURSOR_FIX_HINT
+                    )
+                },
                 blocker: false,
             });
         }
@@ -350,16 +373,18 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            // grok auth is via the `XAI_API_KEY` env var or an interactive
-            // `grok` login; there's no cheap non-interactive probe, so surface
-            // a hint rather than block.
+            let has_creds = crate::agent::auth::has_grok_credentials();
             checks.push(Check {
                 name: tag("grok-auth"),
-                ok: true,
-                detail: format!(
-                    "assumed ok (set XAI_API_KEY or run `{grok_binary}` login if runs \
-                     fail with auth errors)"
-                ),
+                ok: has_creds,
+                detail: if has_creds {
+                    "Grok credentials present (XAI_API_KEY or saved login)".to_string()
+                } else {
+                    format!(
+                        "missing Grok credentials: {}",
+                        crate::agent::auth::GROK_FIX_HINT
+                    )
+                },
                 blocker: false,
             });
         }
@@ -378,12 +403,26 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            // Muse Code auth is via the `META_API_KEY` env var; there's no cheap
-            // non-interactive probe, so surface a hint rather than block.
+            // Muse Code auth is a presence check only: `META_API_KEY` in the
+            // environment the daemon spawns `muse` with, or a non-empty
+            // `~/.config/muse/auth.json` under the same home. See
+            // `agent::auth` (delegated to `muse_code::auth`). No API call is
+            // made; presence is enough to accept a run, absence means
+            // `muse exec` would fail at `run.lifecycle.started` and burn a
+            // tick.
+            let has_creds = crate::agent::auth::has_muse_credentials();
             checks.push(Check {
                 name: tag("muse-auth"),
-                ok: true,
-                detail: "assumed ok (set META_API_KEY if runs fail with auth errors)".to_string(),
+                ok: has_creds,
+                detail: if has_creds {
+                    "Muse credentials present (META_API_KEY or ~/.config/muse/auth.json)"
+                        .to_string()
+                } else {
+                    format!(
+                        "missing Muse credentials: {}",
+                        crate::agent::auth::MUSE_FIX_HINT
+                    )
+                },
                 blocker: false,
             });
         }
@@ -415,22 +454,6 @@ async fn check_version(binary: &str) -> Result<String> {
         String::from_utf8_lossy(&out.stdout).trim(),
         binary
     ))
-}
-
-async fn check_codex_auth(binary: &str) -> Result<String> {
-    // codex has `account` as a subcommand in newer releases; fall back to `whoami`.
-    let mut cmd = login_shell_command(binary, &["account", "status"], None);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = cmd.output().await.ok();
-    if let Some(o) = out
-        && o.status.success()
-    {
-        return Ok(String::from_utf8_lossy(&o.stdout).trim().to_string());
-    }
-    anyhow::bail!(
-        "unable to confirm Codex auth; run `{} login` before starting the runner",
-        binary
-    )
 }
 
 async fn check_git() -> Result<String> {
@@ -629,6 +652,7 @@ mod tests {
             "acpx-missing",
             "grok-missing",
             "muse-missing",
+            false,
         )
         .await;
         run_agent_checks(
@@ -641,6 +665,7 @@ mod tests {
             "acpx-missing",
             "grok-missing",
             "muse-missing",
+            false,
         )
         .await;
         run_agent_checks(
@@ -653,6 +678,7 @@ mod tests {
             "acpx-missing",
             "grok-missing",
             "muse-missing",
+            false,
         )
         .await;
         run_agent_checks(
@@ -665,6 +691,7 @@ mod tests {
             "acpx-missing",
             "grok-missing",
             "muse-missing",
+            false,
         )
         .await;
         run_agent_checks(
@@ -677,6 +704,7 @@ mod tests {
             "acpx-missing",
             "grok-missing",
             "muse-missing",
+            false,
         )
         .await;
         let mut muse_checks: Vec<Check> = Vec::new();
@@ -690,6 +718,7 @@ mod tests {
             "acpx-missing",
             "grok-missing",
             "muse-missing",
+            false,
         )
         .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
@@ -704,5 +733,31 @@ mod tests {
         assert!(grok_checks.iter().any(|c| c.name == "grok-auth"));
         assert!(muse_checks.iter().any(|c| c.name == "muse"));
         assert!(muse_checks.iter().any(|c| c.name == "muse-auth"));
+    }
+
+    #[tokio::test]
+    async fn managed_codex_reports_ok_without_user_credentials() {
+        // Managed runners carry Pi Dash-managed auth; doctor must not
+        // fail codex-auth when the user's own credentials are missing.
+        let mut checks: Vec<Check> = Vec::new();
+        run_agent_checks(
+            &mut checks,
+            None,
+            AgentKind::Codex,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
+            "acpx-missing",
+            "grok-missing",
+            "muse-missing",
+            true,
+        )
+        .await;
+        let codex_auth = checks
+            .iter()
+            .find(|c| c.name == "codex-auth")
+            .expect("codex-auth check present");
+        assert!(codex_auth.ok, "managed codex-auth must be ok");
+        assert!(codex_auth.detail.contains("managed"));
     }
 }

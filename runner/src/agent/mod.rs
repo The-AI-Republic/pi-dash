@@ -3,6 +3,7 @@
 //! `interrupt`, `shutdown`) through [`AgentBridge`], so the supervisor does
 //! not have to know which underlying CLI is driving a run.
 
+pub mod auth;
 pub mod package;
 
 use anyhow::Result;
