@@ -136,7 +136,8 @@ impl AppTransitionHook {
         });
         let deps = HookDeps {
             pool: self.pool.clone(),
-            managed: settings.managed_runner.clone(),
+            managed: settings.pidash_agent.clone(),
+
             redis: client_from_settings(settings),
             runner: settings.runner.clone(),
             assistant_seam: self.state.assistant_seam().clone(),
@@ -183,7 +184,7 @@ impl IssueTransitionHook for AppTransitionHook {
 #[cfg(test)]
 pub(crate) mod test_support {
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-    use pidash_services::run_creation::executor_policy::UserFlags;
+    use pidash_services::issuing::resolution::UserFlags;
     use pidash_services::domain::identity::AgentUserCollisionError;
     use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use pidash_services::orchestration::creation::{

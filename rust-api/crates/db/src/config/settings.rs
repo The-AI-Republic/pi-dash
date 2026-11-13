@@ -97,7 +97,7 @@ pub struct Settings {
     pub loop_tuning: LoopSettings,
     pub storage: StorageSettings,
     pub runner: RunnerSettings,
-    pub managed_runner: ManagedRunnerSettings,
+    pub pidash_agent: PidashAgentSettings,
     pub default_agent_executor: String,
     pub session: SessionSettings,
     pub urls: UrlSettings,

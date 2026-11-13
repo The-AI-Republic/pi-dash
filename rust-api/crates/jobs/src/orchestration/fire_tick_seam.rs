@@ -60,7 +60,7 @@ use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::run_creation::{ExecutionFieldsError, LlmProfile};
+use pidash_services::issuing::{ExecutionFieldsError, LlmProfile};
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::{
@@ -81,7 +81,7 @@ use pidash_types::orchestration::{
 };
 
 use super::creation_jobs::{LiveCreationStore, StoreDeps};
-use crate::run_dispatch::{dispatch_agent_run, DispatchDecision};
+use crate::issuing::{dispatch_agent_run, DispatchDecision};
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 // ---------------------------------------------------------------------------
@@ -1233,7 +1233,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::config::{ManagedRunnerSettings};
+    use pidash_db::config::{PidashAgentSettings};
     use pidash_services::orchestration::dispatch::BOUNCE_BODY_DEFAULT;
     use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
@@ -1486,8 +1486,8 @@ mod tests {
     /// like R3b/R4/W5.
     const JITTER: f64 = 846.3222537664747;
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

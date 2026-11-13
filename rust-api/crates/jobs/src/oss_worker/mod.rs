@@ -183,7 +183,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         ctx.seed_dir.clone(),
-        ctx.settings.managed_runner.clone(),
+        ctx.settings.pidash_agent.clone(),
         ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
@@ -285,7 +285,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         std::sync::Arc::new(crate::orchestration::LiveFireTickSeam::new(
             ctx.pools.primary().clone(),
-            ctx.settings.managed_runner.clone(),
+            ctx.settings.pidash_agent.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
             ctx.assistant_seam.clone(),
@@ -296,7 +296,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         crate::orchestration::live_scheduler_dispatch(
             ctx.pools.primary().clone(),
-            ctx.settings.managed_runner.clone(),
+            ctx.settings.pidash_agent.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
             ctx.assistant_seam.clone(),
@@ -313,7 +313,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         dyn pidash_services::domain::transition::IssueTransitionHook,
     > = std::sync::Arc::new(crate::issue_transition::WorkerTransitionHook::new(
         ctx.pools.primary().clone(),
-        ctx.settings.managed_runner.clone(),
+        ctx.settings.pidash_agent.clone(),
         redis.clone(),
         ctx.settings.runner.clone(),
         ctx.assistant_seam.clone(),

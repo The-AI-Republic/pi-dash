@@ -6743,7 +6743,7 @@ async fn run_issue_create_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: viewer.as_ref(),
     };
     let probes = ValidateProbes {

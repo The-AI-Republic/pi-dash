@@ -34,7 +34,7 @@ use crate::runner_runs::sweeps_chat::{
 use crate::runner_runs::sweeps_runs::{
     InlineTerminalEffects, SendOfflineError, SweepsError, SweepsRunsOutbox,
 };
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings, Settings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings, Settings};
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_services::domain::identity::get_agent_system_user;
 use pidash_services::extensions::AssistantModelSeam;
@@ -52,7 +52,7 @@ pub struct RunnerSeams {
     pool: PgPool,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
@@ -72,7 +72,7 @@ impl RunnerSeams {
             pool,
             redis,
             runner: settings.runner.clone(),
-            managed: settings.managed_runner.clone(),
+            managed: settings.pidash_agent.clone(),
             assistant_seam,
         }
     }

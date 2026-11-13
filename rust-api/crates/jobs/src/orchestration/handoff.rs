@@ -27,8 +27,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
+use pidash_db::issuing::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
     agent_run, agent_run_event, dev_machine, git_code_review_links,
     git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
@@ -38,7 +38,7 @@ use pidash_db::entity::{
 use pidash_db::orm_tx::TxConn;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::dispatch::{
+use pidash_services::issuing::{
     ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::AssistantModelSeam;

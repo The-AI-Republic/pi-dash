@@ -34,11 +34,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::run_creation::executor_policy::UserFlags;
-use pidash_services::run_creation::LlmProfile;
+use pidash_services::issuing::resolution::UserFlags;
+use pidash_services::issuing::LlmProfile;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
@@ -62,7 +62,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::run_dispatch::{dispatch_agent_run, DispatchDecision};
+use crate::issuing::{dispatch_agent_run, DispatchDecision};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
 
 /// Drain finalized runs' publish pairs in order. The api binary implements
@@ -196,6 +196,7 @@ where
             }
         }
     }
+
     Ok(outcome)
 }
 
@@ -790,7 +791,7 @@ impl WorkerTransitionHook {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
-        managed: ManagedRunnerSettings,
+        managed: PidashAgentSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
         assistant_seam: Arc<dyn AssistantModelSeam>,

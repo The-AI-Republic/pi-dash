@@ -40,8 +40,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
+use pidash_db::issuing::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, assistant_user_llm_config, issue_agent_ticker, issues, projects, states,
 };
@@ -65,7 +65,7 @@ use super::creation_jobs::{
 use super::fire_tick_seam::{
     emit_logs, maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
 };
-use crate::dispatch::DispatchDecision;
+use crate::issuing::DispatchDecision;
 use crate::queue::enqueue;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
@@ -196,7 +196,7 @@ async fn drain_terminal_effects(
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     redis: Option<&redis::Client>,
     runner: &RunnerSettings,
     run_id: Uuid,
@@ -238,7 +238,7 @@ pub async fn complete_project_move_handoff_live(
 /// unread on this path (`left_bucket` never retimes) — `0.0`.
 pub async fn maybe_apply_deferred_pause_live(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
@@ -326,7 +326,7 @@ pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx:
 /// through `pidash-sdk::ops`.
 pub async fn post_run_orchestration(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
@@ -365,7 +365,7 @@ pub async fn post_run_orchestration(
 pub async fn post_run_orchestration_in_tx<'t>(
     tx: Transaction<'t>,
     pool: &'t PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) -> Transaction<'t> {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
@@ -803,8 +803,8 @@ mod tests {
             .expect("pool connects")
     }
 
-    fn settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

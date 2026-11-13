@@ -58,7 +58,7 @@
 //! over the edge semantics: duplicate required capabilities, `""` overrides, catalog
 //! contents, plan key order).
 
-use pidash_db::config::ManagedRunnerSettings;
+use pidash_db::config::PidashAgentSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
 use pidash_types::issuing::AgentExecutorKind;
 use serde::{Deserialize, Serialize};

@@ -46,8 +46,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{ManagedRunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::config::{PidashAgentSettings};
+use pidash_db::issuing::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
     git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
@@ -58,7 +58,7 @@ use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
 use pidash_db::runner_runs::agent_run as run_bag;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::{
+use pidash_services::issuing::{
     ExecutionFieldsError, ExecutionInputs, LlmProfile, ProjectScope, UserFlags,
 };
 use pidash_services::orchestration::creation::{
@@ -85,7 +85,7 @@ use pidash_compat::datetime::render_isoformat;
 /// family; the `cloud` drain argument died with the cloud drain.)
 pub struct StoreDeps<H, P> {
     /// Managed settings (the `managed_runner_enabled` kill switch).
-    pub managed: ManagedRunnerSettings,
+    pub managed: PidashAgentSettings,
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
     pub has_usable_llm_config: H,
     /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`).
@@ -100,7 +100,7 @@ pub struct StoreDeps<H, P> {
 pub struct LiveCreationStore<'c, H, P> {
     tx: Transaction<'c>,
     pool: &'c PgPool,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     has_usable_llm_config: H,
     llm_profile: P,
     dispatches: Vec<Uuid>,
@@ -2324,8 +2324,8 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

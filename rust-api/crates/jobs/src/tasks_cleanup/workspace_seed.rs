@@ -1231,7 +1231,7 @@ fn page_view_props() -> Value {
 pub struct PgSeedStore {
     pool: sqlx::PgPool,
     now: DateTime<Utc>,
-    managed: pidash_db::config::ManagedRunnerSettings,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
@@ -1239,7 +1239,7 @@ impl PgSeedStore {
     pub fn new(
         pool: sqlx::PgPool,
         now: DateTime<Utc>,
-        managed: pidash_db::config::ManagedRunnerSettings,
+        managed: pidash_db::config::PidashAgentSettings,
         assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Self {
         Self {
@@ -1875,7 +1875,7 @@ impl SeedStore for PgSeedStore {
             creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
         };
         use crate::orchestration::{LiveCreationStore, StoreDeps};
-        use pidash_db::agent_runs::status::AgentRunTrigger;
+        use pidash_db::issuing::status::AgentRunTrigger;
         use pidash_services::orchestration::creation::{
             resolve_fallback_creator, resolve_pod_for_issue,
         };
@@ -2162,7 +2162,7 @@ impl SeedStore for PgSeedStore {
                 // dispatch never fails the save.
                 for run_id in dispatches {
                     if let Err(error) =
-                        crate::run_dispatch::dispatch_agent_run(pool, run_id, now).await
+                        crate::issuing::dispatch_agent_run(pool, run_id, now).await
                     {
                         tracing::error!(
                             %error,
@@ -2509,7 +2509,7 @@ pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
     seed_data_dir: PathBuf,
-    managed: pidash_db::config::ManagedRunnerSettings,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
     let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {
