@@ -5,13 +5,13 @@
     "AGENT_USERNAME": "pi_dash_agent",
     "AGENT_USER_EMAIL": "agent@example.com",
     "AGENT_USER_FIRST_NAME": "Pi Dash",
-    "AGENT_USER_LAST_NAME": "Agent"
+    "AGENT_USER_LAST_NAME": "Bot"
   },
   "created_row": {
     "username": "pi_dash_agent",
     "email": "agent@example.com",
     "first_name": "Pi Dash",
-    "last_name": "Agent",
+    "last_name": "Bot",
     "is_bot": true,
     "has_usable_password": false
   },
