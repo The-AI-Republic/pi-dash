@@ -4975,14 +4975,10 @@ fn compile_text_predicate(
         "issue__target_date" => "\"issues\".\"target_date\"",
         _ => return Ok(None),
     };
-    // Explicit bounds must parse as dates: Django's `get_prep_value`
-    // raises `ValidationError` (400 invalid detail) on garbage.
-    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
-    }
     if operator == "=" {
-        // Single-value form on a date term: Django's `contains`
-        // lookup, i.e. LIKE with metacharacters escaped.
+        // Bare token: Django __contains is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates). The single-value form
+        // LIKEs the date text with metacharacters escaped.
         let escaped = text
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -4990,6 +4986,11 @@ fn compile_text_predicate(
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
+    }
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
     }
     let holder = placeholder(next);
     binds.push(OwnedBind::Text(text.to_owned()));
