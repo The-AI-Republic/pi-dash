@@ -2495,3 +2495,83 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
 }
+
+// ---------------------------------------------------------------------------
+// `pidash project runners` — the cloud view of a project's runners
+// (PDASHOSS01-245). The CLI passes the project reference (identifier, slug
+// or UUID) through to the token-auth v1 runners route; the server resolves
+// identifiers and 404s unknown projects (EXIT_NOT_FOUND via the 404 mapping).
+// ---------------------------------------------------------------------------
+
+const RUNNERS_PAGE: &str = r#"[{"id":"00000000-0000-0000-0000-0000000000r1","name":"mac-mini","status":"online","last_heartbeat_at":"2026-09-27T12:00:00Z"}]"#;
+const RUNNERS_PROJECT_ID: &str = "00000000-0000-0000-0000-0000000000aa";
+
+fn runners_args() -> pidash::cli::project::RunnersArgs {
+    pidash::cli::project::RunnersArgs {
+        project: Some("ENG".to_string()),
+        project_positional: None,
+        pod: None,
+        include_bundled: false,
+        assignable_for: None,
+    }
+}
+
+#[tokio::test]
+async fn project_runners_prints_the_cloud_list() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(RUNNERS_PAGE))).await;
+    let client = client(&fake);
+    let runners =
+        pidash::cli::project::list_project_runners(&client, &runners_args(), RUNNERS_PROJECT_ID)
+            .await
+            .expect("runner list");
+    assert_eq!(runners[0]["name"], "mac-mini");
+    assert_eq!(runners[0]["status"], "online");
+    assert_eq!(runners[0]["last_heartbeat_at"], "2026-09-27T12:00:00Z");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "expected a single runners GET");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/runners/"
+    );
+    assert_eq!(recorded[0].api_key.as_deref(), Some("test-token"));
+}
+
+#[tokio::test]
+async fn project_runners_forwards_pod_and_include_bundled_filters() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok("[]"))).await;
+    let client = client(&fake);
+    let mut args = runners_args();
+    args.pod = Some("00000000-0000-0000-0000-0000000000dd".into());
+    args.include_bundled = true;
+    pidash::cli::project::list_project_runners(&client, &args, RUNNERS_PROJECT_ID)
+        .await
+        .expect("runner list");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/runners/\
+         ?pod=00000000-0000-0000-0000-0000000000dd&include_bundled=true"
+    );
+}
+
+#[tokio::test]
+async fn project_runners_unknown_project_exits_not_found() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 404,
+        status_text: "Not Found",
+        body: r#"{"detail":"Project not found"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = pidash::cli::project::list_project_runners(&client, &runners_args(), "NOPE")
+        .await
+        .expect_err("unknown project must fail");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "one runners GET, answered 404");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/NOPE/runners/"
+    );
+}
