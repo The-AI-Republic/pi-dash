@@ -15,9 +15,9 @@
 //!
 //! * Finalize: lock the non-terminal row (`FOR UPDATE` + expected
 //!   filters), merge `done_payload` over the locked row, write,
-//!   maybe append the cloud-only terminal event, register
-//!   `_publish_effects` on commit. First-writer-wins: a second
-//!   concurrent finalize finds no row and reports `false`.
+//!   register `_publish_effects` on commit. First-writer-wins: a
+//!   second concurrent finalize finds no row and reports `false`.
+//!   (P3 step C deleted the cloud-only terminal-event append.)
 //! * Terminal effects: lock issue-then-run (matching issue moves and
 //!   `complete_project_move_handoff` — the order that prevents a
 //!   Postgres deadlock), run hooks once behind the
