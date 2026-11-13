@@ -30,8 +30,7 @@ export const RUN_DETAIL_LOADING_TEXT = "Fetching this run’s transcript…";
 export const RUN_DETAIL_UNAVAILABLE_TEXT =
   "No run with this id is reachable here. Check the address, or pick another run from the list.";
 export const RUN_CANCEL_TITLE = "Cancel run?";
-export const RUN_CANCEL_CLOUD_BODY =
-  "The cloud agent stops at its next safe interruption point, so it may take a moment to finish.";
+export const RUN_CANCEL_CLOUD_BODY = "This retired Cloud agent run can no longer be cancelled.";
 export const RUN_CANCEL_LOCAL_BODY =
   "The runner receives a stop request and ends the run as soon as it can acknowledge it.";
 export const RUN_CANCEL_FAILED_TITLE = "Couldn't cancel run";

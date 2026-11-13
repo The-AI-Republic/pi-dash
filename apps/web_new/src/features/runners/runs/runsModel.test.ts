@@ -75,10 +75,10 @@ describe("runsPageSearch", () => {
 
 describe("executor presentation", () => {
   it("separates the cloud agent from every local executor", () => {
-    expect(executorLabel("cloud_agent")).toBe("Cloud executor");
+    expect(executorLabel("cloud_agent")).toBe("Cloud agent run (retired)");
     expect(executorLabel("local_runner")).toBe("Local runner");
     expect(executorLabel("managed_runner")).toBe("Built-in engine");
-    expect(executorTone("cloud_agent")).toBe("accent");
+    expect(executorTone("cloud_agent")).toBe("neutral");
     expect(executorTone("managed_runner")).toBe("neutral");
   });
 });
@@ -161,6 +161,6 @@ describe("run executor label from the runner", () => {
     expect(runExecutorLabel({ executor_kind: "local_runner", runner: "r-own" }, runners)).toBe("Local runner");
     expect(runExecutorLabel({ executor_kind: "local_runner", runner: "gone" }, runners)).toBe("Local runner");
     expect(runExecutorLabel({ executor_kind: "managed_runner", runner: null }, undefined)).toBe("Built-in engine");
-    expect(runExecutorLabel({ executor_kind: "cloud_agent", runner: null }, runners)).toBe("Cloud executor");
+    expect(runExecutorLabel({ executor_kind: "cloud_agent", runner: null }, runners)).toBe("Cloud agent run (retired)");
   });
 });

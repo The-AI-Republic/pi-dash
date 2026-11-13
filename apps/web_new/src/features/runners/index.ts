@@ -24,7 +24,7 @@ export { CliSetupPanel, CLI_SETUP_HEADING, CLI_SETUP_INTRO } from "./components/
 // the app shell) owns sign-out registration; the hooks below are its API.
 export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes } from "./runtime/approvalModes.js";
 export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
-export { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
+export { isPidashAgentAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
 export {
   canSignOutComputer,
   compatibleHello,
