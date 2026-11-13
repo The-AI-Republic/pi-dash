@@ -350,6 +350,7 @@ struct RunRow {
     prompt: String,
     prompt_manifest: Option<Value>,
     ended_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
 }
 
 fn issue_columns() -> Vec<issues::Column> {
@@ -413,6 +414,7 @@ fn run_columns() -> Vec<agent_run::Column> {
         agent_run::Column::Prompt,
         agent_run::Column::PromptManifest,
         agent_run::Column::EndedAt,
+        agent_run::Column::StartedAt,
     ]
 }
 
@@ -447,6 +449,7 @@ fn map_run_row(row: RunRow) -> Result<RunView, CreationError> {
         prompt: row.prompt,
         prompt_manifest: row.prompt_manifest,
         ended_at: row.ended_at.map(|at| at.with_timezone(&Utc)),
+        started_at: row.started_at.map(|at| at.with_timezone(&Utc)),
     })
 }
 
@@ -481,6 +484,7 @@ fn map_run_model(model: agent_run::Model) -> Result<RunView, CreationError> {
         prompt: model.prompt,
         prompt_manifest: model.prompt_manifest,
         ended_at: model.ended_at.map(|at| at.with_timezone(&Utc)),
+        started_at: model.started_at.map(|at| at.with_timezone(&Utc)),
     })
 }
 

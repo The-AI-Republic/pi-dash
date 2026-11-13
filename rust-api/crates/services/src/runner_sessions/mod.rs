@@ -70,7 +70,9 @@ pub use drain::{
     next_for_runner_stmt, plan_assignment, select_runner_in_pod_stmt, AssignmentFacts,
     AssignmentPlan, DispatchFacts, DrainEffect, NEXT_QUEUED_RUN_FOR_POD_SQL, POD_COLUMNS,
 };
-pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
+pub use live_drains::{
+    claim_next_assignable, drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore,
+};
 pub use offline_recovery::{
     clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, offline_stamp_patch,
     paused_runner_pin_ids_select, paused_runner_pin_lock_select, release_pin_lock_select,

@@ -2221,6 +2221,7 @@ mod tests {
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
+            started_at: None,
         }
     }
 

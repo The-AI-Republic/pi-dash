@@ -56,9 +56,10 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// `04b6d3784` #386, `1998bc658` #447), then db 0170→0172 and runner
 /// 0033→0038 (c0ee3148b: #2903, #2910, #2912, #2907), then db 0172→0173 and
 /// runner 0038→0039 (PDASHOSS01-297 dedicated-runner assignment, `42f93b62b`),
-/// then db 0173→0174 (PR #3144, `ea5db8e3d`): `db/0174` depends on
-/// `runner/0039` across apps, but Django's `leaf_nodes()` only counts
-/// same-app children, so `runner/0039` stays a leaf — Django (4.2 loader,
+/// then db 0173→0174 (PR #3144, `ea5db8e3d`) and runner 0039→0040
+/// (PDASHOSS01-272 pod pin wait budget, #898 deferred): `db/0174` depends on
+/// `runner/0040` across apps, but Django's `leaf_nodes()` only counts
+/// same-app children, so `runner/0040` stays a leaf — Django (4.2 loader,
 /// verified live) still reports the same nine leaves with `db/0174`:
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
@@ -72,7 +73,7 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0039_issue_assigned_runner"),
+    ("runner", "0040_pod_pin_wait_budget_secs"),
     ("sessions", "0001_initial"),
 ];
 
@@ -339,7 +340,7 @@ mod tests {
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),
-                ("runner", "0039_issue_assigned_runner"),
+                ("runner", "0040_pod_pin_wait_budget_secs"),
                 ("sessions", "0001_initial"),
             ]
         );

@@ -204,6 +204,130 @@ pub enum DrainError {
 }
 
 // ---------------------------------------------------------------------------
+// Claim (`next_assignable_for_runner`, PDASHOSS01-272)
+// ---------------------------------------------------------------------------
+
+/// `next_assignable_for_runner(runner, pod)`: the next run `runner`
+/// should take, breaking an over-budget pin when that is the run that
+/// wins. Every drain executor claims through this one function, so the
+/// pin wait budget cannot drift between them.
+/// All eight arguments are genuinely distinct inputs; there is no
+/// natural bundle, so the arg-count lint is allowed here.
+#[allow(clippy::too_many_arguments)]
+pub async fn claim_next_assignable<C: ConnectionTrait>(
+    db: &C,
+    pod_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    visibility: i32,
+    facts: &DispatchFacts,
+    provisioning: &str,
+    instance_budget_secs: i64,
+) -> Result<Option<sea_orm::prelude::QueryResult>, DrainError> {
+    // Desktop-bundled runners never take a released pin.
+    let is_desktop = drain_kernel::is_desktop_provisioning(provisioning);
+    let mut releasable: Vec<Uuid> = Vec::new();
+    let mut budget_secs = 0i64;
+    if !is_desktop && visibility == pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
+        let takes_shared = if facts.is_engine {
+            facts.pod_member && !facts.paused
+        } else {
+            facts.pod_member
+        };
+        if takes_shared {
+            // Pod override via SeaORM query builder (no raw SQL).
+            use sea_orm::sea_query::{Alias, Expr, Query};
+            let pod_stmt = Query::select()
+                .column((Alias::new("pod"), "pin_wait_budget_secs"))
+                .from(Alias::new("pod"))
+                .and_where(Expr::col((Alias::new("pod"), "id")).eq(pod_id))
+                .to_owned();
+            let pod_row = db.query_one(DbBackend::Postgres.build(&pod_stmt)).await?;
+            let pod_override: Option<i32> = match pod_row {
+                Some(row) => row.try_get("", "pin_wait_budget_secs").unwrap_or(None),
+                None => None,
+            };
+            budget_secs = drain_kernel::effective_pin_wait_budget_secs(
+                pod_override.map(i64::from),
+                instance_budget_secs,
+            );
+            if budget_secs > 0 {
+                let now = now_micros();
+                let cutoff = now - chrono::Duration::seconds(budget_secs);
+                let threshold = alive_threshold(now);
+                if let Some(stmt) = drain_kernel::releasable_overbudget_pin_ids_stmt(
+                    visibility, pod_id, runner_id, owner_id, cutoff, threshold, facts,
+                ) {
+                    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+                    for row in rows {
+                        let id: Uuid = row.try_get("", "id")?;
+                        releasable.push(id);
+                    }
+                }
+            }
+        }
+    }
+    let next_stmt_opt = if releasable.is_empty() {
+        drain_kernel::next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, facts)
+    } else {
+        drain_kernel::next_for_runner_stmt_with_releasable(
+            visibility,
+            pod_id,
+            runner_id,
+            owner_id,
+            facts,
+            &releasable,
+        )
+    };
+    let Some(next_stmt) = next_stmt_opt else {
+        return Ok(None);
+    };
+    let run = db.query_one(DbBackend::Postgres.build(&next_stmt)).await?;
+    let Some(run) = run else {
+        return Ok(None);
+    };
+    let pinned_runner_id: Option<Uuid> = run.try_get("", "pinned_runner_id")?;
+    if drain_kernel::is_overbudget_takeover(pinned_runner_id, runner_id) {
+        let run_id: Uuid = run.try_get("", "id")?;
+        let parent_run_id: Option<Uuid> = run.try_get("", "parent_run_id")?;
+        let created_at: DateTime<Utc> = run.try_get("", "created_at")?;
+        if let Some(parent_id) = parent_run_id {
+            // Clear parent thread_id (Python: only when non-empty).
+            use sea_orm::sea_query::Expr as SeaExpr;
+            let _ = agent_run::Entity::update_many()
+                .col_expr(agent_run::Column::ThreadId, SeaExpr::value(""))
+                .filter(agent_run::Column::Id.eq(parent_id))
+                .filter(agent_run::Column::ThreadId.ne(""))
+                .exec(db)
+                .await?;
+        }
+        // Clear the pin itself.
+        agent_run::Entity::update_many()
+            .col_expr(
+                agent_run::Column::PinnedRunnerId,
+                sea_orm::sea_query::Expr::value(Option::<Uuid>::None),
+            )
+            .filter(agent_run::Column::Id.eq(run_id))
+            .exec(db)
+            .await?;
+        if let Some(previous) = pinned_runner_id {
+            let waited_secs = (now_micros() - created_at).num_seconds();
+            tracing::info!(
+                "{}",
+                drain_kernel::released_pin_log(
+                    &run_id,
+                    &previous,
+                    &runner_id,
+                    budget_secs,
+                    waited_secs
+                )
+            );
+        }
+    }
+    Ok(Some(run))
+}
+
+// ---------------------------------------------------------------------------
 // Executors
 // ---------------------------------------------------------------------------
 
@@ -351,19 +475,19 @@ async fn drain_for_runner(
     let visibility: i16 = locked.try_get("", "visibility")?;
     let facts =
         dispatch_facts_of(&txn, runner_id, &provisioning, &pod_dispatch, machine_id).await?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
-        i32::from(visibility),
+    // Claims through the budgeted helper (PDASHOSS01-272).
+    let run_opt = claim_next_assignable(
+        &txn,
         pod_id,
         runner_id,
         owner_id,
+        i32::from(visibility),
         &facts,
-    ) else {
-        txn.commit().await?;
-        return Ok(false);
-    };
-    let run = txn.query_one(DbBackend::Postgres.build(&next_stmt)).await?;
-    let Some(run) = run else {
+        &provisioning,
+        runner.pin_wait_budget_secs,
+    )
+    .await?;
+    let Some(run) = run_opt else {
         txn.commit().await?;
         return Ok(false);
     };
@@ -447,17 +571,19 @@ async fn drain_pod(
         let visibility: i16 = runner_row.try_get("", "visibility")?;
         let facts =
             dispatch_facts_of(&txn, runner_id, &provisioning, &pod_dispatch, machine_id).await?;
-        let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
-            i32::from(visibility),
+        // Budgeted claim per runner (PDASHOSS01-272).
+        let run_opt = claim_next_assignable(
+            &txn,
             pod_id,
             runner_id,
             owner_id,
+            i32::from(visibility),
             &facts,
-        ) else {
-            continue;
-        };
-        let run = txn.query_one(DbBackend::Postgres.build(&next_stmt)).await?;
-        let Some(run) = run else {
+            &provisioning,
+            runner.pin_wait_budget_secs,
+        )
+        .await?;
+        let Some(run) = run_opt else {
             continue;
         };
         let run_id: Uuid = run.try_get("", "id")?;
@@ -519,6 +645,7 @@ mod tests {
             min_runner_version: None,
             agent_stall_threshold_secs: 360,
             agent_observability_stale_secs: 90,
+            pin_wait_budget_secs: 600,
         }
     }
 

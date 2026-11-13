@@ -447,6 +447,194 @@ pub fn next_for_runner_stmt(
     Some(query)
 }
 
+/// `Pod.pin_wait_budget_secs` (`PDASHOSS01-272`): the override `NULL`
+/// inherits the instance default via [`effective_pin_wait_budget_secs`].
+/// `0` disables auto-release.
+pub const POD_PIN_WAIT_BUDGET_SQL: &str =
+    "SELECT \"pod\".\"pin_wait_budget_secs\" FROM \"pod\" WHERE \"pod\".\"id\" = $1";
+
+/// `Pod.effective_pin_wait_budget_secs()`: the pod override when set,
+/// else the instance-wide `RUNNER_PIN_WAIT_BUDGET_SECS`. `0` disables
+/// auto-release.
+pub fn effective_pin_wait_budget_secs(pod_override: Option<i64>, instance_default: i64) -> i64 {
+    pod_override.unwrap_or(instance_default)
+}
+
+/// `is_engine` (`provisioning == "desktop_bundled"`): a desktop-bundled
+/// runner serves only work pinned to it, so it never takes a released
+/// pin.
+pub fn is_desktop_provisioning(provisioning: &str) -> bool {
+    provisioning == "desktop_bundled"
+}
+
+/// The `NOT EXISTS` a busy run on the *pinned* runner (alias `U1` with
+/// `runner_id = agent_run.pinned_runner_id`).
+fn pinned_busy_exists() -> SimpleExpr {
+    let statuses: Vec<SimpleExpr> = BUSY_STATUSES
+        .iter()
+        .map(|status| status.value().into())
+        .collect();
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("agent_run"), Alias::new("U1"))
+        .and_where(col("U1", "status").is_in(statuses))
+        .and_where(col("U1", "runner_id").eq(col("agent_run", "pinned_runner_id")))
+        .limit(1u64)
+        .to_owned();
+    Expr::exists(sub)
+}
+
+/// `releasable_overbudget_pin_ids` (`matcher.py`, PDASHOSS01-272):
+/// candidates unlocked because of the LEFT JOIN; the lock is taken by
+/// [`next_for_runner_stmt_with_releasable`].
+pub fn releasable_overbudget_pin_ids_stmt(
+    visibility: i32,
+    pod_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    cutoff: DateTime<Utc>,
+    threshold: DateTime<Utc>,
+    facts: &DispatchFacts,
+) -> Option<SelectStatement> {
+    if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
+        return None;
+    }
+    let usability = runs_usable_by_runner_predicate(
+        visibility,
+        owner_id,
+        "agent_run",
+        facts.is_engine,
+        facts.team_runs,
+    )?;
+    let mut query = Query::select().to_owned();
+    query.column((Alias::new("agent_run"), "id"));
+    query.from(Alias::new("agent_run"));
+    // LEFT OUTER JOIN runner "pinned" ON pinned.id = agent_run.pinned_runner_id
+    query.join_as(
+        sea_query::JoinType::LeftJoin,
+        Alias::new("runner"),
+        Alias::new("pinned"),
+        Expr::col((Alias::new("pinned"), "id"))
+            .equals((Alias::new("agent_run"), "pinned_runner_id")),
+    );
+    query.and_where(col("agent_run", "pod_id").eq(pod_id));
+    query.and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()));
+    query.and_where(col("agent_run", "executor_kind").eq(AgentExecutorKind::LocalRunner.value()));
+    query.and_where(col("agent_run", "pinned_runner_id").is_not_null());
+    query.and_where(col("agent_run", "created_at").lt(cutoff));
+    query.and_where(col("agent_run", "pinned_runner_id").ne(runner_id));
+    // Exclude dedicated pins (never releasable)
+    query.and_where(col("agent_run", "pin_kind").ne("dedicated"));
+    // NOT (pinned is online, heartbeat-fresh, unpaused and idle):
+    // keep rows where the pinned runner is NOT (online AND fresh
+    // AND not paused AND NOT busy). Equivalent to:
+    // status != 'online' OR heartbeat IS NULL OR heartbeat < threshold
+    // OR paused_at IS NOT NULL OR EXISTS busy.
+    // Python also checks paused_at IS NULL for idle, so a paused
+    // pinned runner is releasable.
+    query.cond_where(
+        Condition::any()
+            .add(col("pinned", "status").ne("online"))
+            .add(col("pinned", "last_heartbeat_at").is_null())
+            .add(col("pinned", "last_heartbeat_at").lt(threshold))
+            .add(col("pinned", "paused_at").is_not_null())
+            .add(pinned_busy_exists()),
+    );
+    query.cond_where(usability);
+    query.order_by(("agent_run", "created_at"), Order::Asc);
+    Some(query)
+}
+
+/// [`next_for_runner_stmt`] widened with the over-budget releasable
+/// pins (PDASHOSS01-272): the pin scope gains `OR agent_run.id IN
+/// (releasable)`, tier 1 next to the unpinned pod queue.
+pub fn next_for_runner_stmt_with_releasable(
+    visibility: i32,
+    pod_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    facts: &DispatchFacts,
+    releasable: &[Uuid],
+) -> Option<SelectStatement> {
+    let usability = runs_usable_by_runner_predicate(
+        visibility,
+        owner_id,
+        "agent_run",
+        facts.is_engine,
+        facts.team_runs,
+    )?;
+    let mut query = Query::select().to_owned();
+    for column in AGENT_RUN_COLUMNS {
+        query.column((Alias::new("agent_run"), *column));
+    }
+    query
+        .expr_as(
+            runner_visible_issue_exists(owner_id, "agent_run"),
+            Alias::new("_runner_visible_issue"),
+        )
+        .expr_as(
+            runner_visible_scheduler_exists(owner_id, "agent_run"),
+            Alias::new("_runner_visible_scheduler"),
+        )
+        .expr_as(
+            rank_expr(runner_id, facts.last_dedicated),
+            Alias::new("_is_mine"),
+        )
+        .from(Alias::new("agent_run"))
+        .and_where(col("agent_run", "executor_kind").is_in([
+            AgentExecutorKind::LocalRunner.value(),
+            AgentExecutorKind::ManagedRunner.value(),
+        ]))
+        .and_where(col("agent_run", "pod_id").eq(pod_id))
+        .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()));
+    // eligible, widened with releasable when the runner takes shared work
+    let mut eligible = eligible_condition(runner_id, facts);
+    let takes_shared = if facts.is_engine {
+        facts.pod_member && !facts.paused
+    } else {
+        facts.pod_member
+    };
+    if !releasable.is_empty() && takes_shared {
+        let local = AgentExecutorKind::LocalRunner.value();
+        let releasable_arm = Condition::all()
+            .add(col("agent_run", "executor_kind").eq(local))
+            .add(col("agent_run", "id").is_in(releasable.iter().copied()));
+        eligible = Condition::any().add(eligible).add(releasable_arm);
+    }
+    query
+        .cond_where(eligible)
+        .cond_where(usability)
+        .order_by(Alias::new("_is_mine"), Order::Asc)
+        .order_by(("agent_run", "created_at"), Order::Asc)
+        .limit(1u64)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    Some(query)
+}
+
+/// `next_assignable_for_runner`: a claimed run pinned to a runner
+/// other than the claimant can only have come from the releasable
+/// list, so it is the over-budget takeover and its pin must be
+/// cleared.
+pub fn is_overbudget_takeover(pinned_runner_id: Option<Uuid>, runner_id: Uuid) -> bool {
+    pinned_runner_id.is_some_and(|pinned| pinned != runner_id)
+}
+
+/// `next_assignable_for_runner` info line on a released pin.
+pub fn released_pin_log(
+    run_id: &Uuid,
+    previous_runner_id: &Uuid,
+    runner_id: &Uuid,
+    budget_secs: i64,
+    waited_secs: i64,
+) -> String {
+    format!(
+        "next_assignable_for_runner: released pin run={run_id} from runner={previous_runner_id} to runner={runner_id} after {budget_secs}s budget (waited {waited_secs}s)"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // By-id lookups (`matcher.py:242-251`, `:298-304`)
 // ---------------------------------------------------------------------------

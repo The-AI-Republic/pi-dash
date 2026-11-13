@@ -104,6 +104,7 @@ struct RunViewRow {
     prompt: String,
     prompt_manifest: Option<Value>,
     ended_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
 }
 
 /// Map one [`RunViewRow`] onto the services view. The trigger
@@ -140,6 +141,7 @@ fn run_view(row: RunViewRow) -> Result<RunView, CreationError> {
         prompt: row.prompt,
         prompt_manifest: row.prompt_manifest,
         ended_at: row.ended_at.map(|ended| ended.with_timezone(&Utc)),
+        started_at: row.started_at.map(|started| started.with_timezone(&Utc)),
     })
 }
 
@@ -164,6 +166,7 @@ fn run_view_row_from_model(model: agent_run::Model) -> RunViewRow {
         prompt: model.prompt,
         prompt_manifest: model.prompt_manifest,
         ended_at: model.ended_at,
+        started_at: model.started_at,
     }
 }
 

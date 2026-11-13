@@ -763,6 +763,7 @@ fn twin_map_run_view(row: &QueryResult) -> Result<RunView, CreationError> {
         prompt: get(row, "prompt")?,
         prompt_manifest: get(row, "prompt_manifest")?,
         ended_at: get(row, "ended_at")?,
+        started_at: get(row, "started_at")?,
     })
 }
 

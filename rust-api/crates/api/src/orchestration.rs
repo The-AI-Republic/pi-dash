@@ -42,8 +42,8 @@ use pidash_services::domain::issues_move::MoveDrainError;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_sessions::drain::{
-    drain_pod_idle_list_stmt, drain_pod_log, next_for_runner_stmt, plan_assignment,
-    AssignmentFacts, DispatchFacts, DrainEffect,
+    drain_pod_idle_list_stmt, drain_pod_log, plan_assignment, AssignmentFacts, DispatchFacts,
+    DrainEffect,
 };
 use pidash_services::runner_sessions::guards::alive_threshold;
 use pidash_services::runner_sessions::pubsub::{send_to_runner, PubsubStore};
@@ -334,15 +334,20 @@ pub(crate) async fn drain_pod_by_id(
                 }
             }
         };
-        let Some(next_stmt) = next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, &facts)
-        else {
-            continue;
-        };
-        let run = txn
-            .query_one(DbBackend::Postgres.build(&next_stmt))
-            .await
-            .map_err(map)?;
-        let Some(run) = run else {
+        // Budgeted claim through the shared helper (PDASHOSS01-272).
+        let run_opt = pidash_services::runner_sessions::live_drains::claim_next_assignable(
+            &txn,
+            pod_id,
+            runner_id,
+            owner_id,
+            visibility,
+            &facts,
+            &provisioning,
+            pubsub.runner.pin_wait_budget_secs,
+        )
+        .await
+        .map_err(|error| MoveDrainError(error.to_string()))?;
+        let Some(run) = run_opt else {
             continue;
         };
         let run_id: Uuid = run.try_get("", "id").map_err(map)?;

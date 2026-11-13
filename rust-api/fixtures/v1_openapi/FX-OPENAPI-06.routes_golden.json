@@ -48,6 +48,7 @@
   "/api/v1/runner/runs/{run_id}/stream/upgrade/": ["post"],
   "/api/v1/runners/{runner_id}/": ["delete"],
   "/api/v1/users/me/": ["get"],
+  "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": ["post"],
   "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/": ["post"],
   "/api/v1/workspaces/{slug}/assets/": ["post"],
   "/api/v1/workspaces/{slug}/assets/{asset_id}/": ["get", "patch"],

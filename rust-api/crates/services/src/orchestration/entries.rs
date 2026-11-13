@@ -1644,6 +1644,7 @@ mod tests {
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
+            started_at: None,
         }
     }
 
@@ -2002,6 +2003,7 @@ mod tests {
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
+                started_at: None,
             };
             self.runs.insert(row.id, run.clone());
             Ok(run)
@@ -2318,6 +2320,7 @@ mod tests {
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
+                started_at: None,
             };
             self.runs.insert(row.id, run.clone());
             Ok(run)

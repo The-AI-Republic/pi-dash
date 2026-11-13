@@ -21,7 +21,7 @@ WEB = "/api/runners"
 pytestmark = pytest.mark.contract
 
 POD_KEYS = {
-    "id", "name", "description", "is_default", "workspace", "project",
+    "id", "name", "description", "is_default", "pin_wait_budget_secs", "workspace", "project",
     "project_identifier", "created_by", "runner_count", "created_at", "updated_at",
 }
 
@@ -130,6 +130,62 @@ def test_web_pod_rename_shape(settings, seeder, daemon_world):
         )
     assert response.status_code == 200, response.text
     assert response.json()["description"] == "renamed by web"
+
+
+def test_web_pod_detail_exposes_pin_wait_budget(user_client, daemon_world):
+    """PDASHOSS01-272: NULL until set — the pod inherits the instance default."""
+    response = user_client.get(f"{WEB}/pods/{daemon_world['pod']['id']}/")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["pin_wait_budget_secs"] is None
+    # Wire order: the field follows ``is_default`` (serializer Meta.fields).
+    keys = list(body)
+    assert keys[keys.index("is_default") + 1] == "pin_wait_budget_secs"
+
+
+def test_web_pod_patch_sets_and_clears_pin_wait_budget(settings, seeder, daemon_world):
+    pod_id = daemon_world["pod"]["id"]
+    with _admin_client(settings, seeder, daemon_world) as client:
+        for raw, stored in [(120, 120), ("45", 45), (" 7 ", 7), (0, 0), (None, None), ("", None)]:
+            response = web_patch(client, f"{WEB}/pods/{pod_id}/", {"pin_wait_budget_secs": raw})
+            assert response.status_code == 200, (raw, response.text)
+            assert response.json()["pin_wait_budget_secs"] == stored, raw
+            assert (
+                seeder.db.fetchval("SELECT pin_wait_budget_secs FROM pod WHERE id = %s", (pod_id,))
+                == stored
+            ), raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        (-1, "pin_wait_budget_secs cannot be negative"),
+        ("-5", "pin_wait_budget_secs cannot be negative"),
+        ("soon", "pin_wait_budget_secs must be an integer number of seconds"),
+        (True, "pin_wait_budget_secs must be an integer number of seconds"),
+        (False, "pin_wait_budget_secs must be an integer number of seconds"),
+        (12.9, "pin_wait_budget_secs must be an integer number of seconds"),
+        ("12.9", "pin_wait_budget_secs must be an integer number of seconds"),
+        ([], "pin_wait_budget_secs must be an integer number of seconds"),
+        ({}, "pin_wait_budget_secs must be an integer number of seconds"),
+        (2147483648, "pin_wait_budget_secs must be at most 2147483647 seconds"),
+    ],
+)
+def test_web_pod_patch_rejects_bad_pin_wait_budget(settings, seeder, daemon_world, raw, error):
+    pod_id = daemon_world["pod"]["id"]
+    seeder.db.execute("UPDATE pod SET pin_wait_budget_secs = 300 WHERE id = %s", (pod_id,))
+    with _admin_client(settings, seeder, daemon_world) as client:
+        response = web_patch(
+            client,
+            f"{WEB}/pods/{pod_id}/",
+            {"description": "must not land", "pin_wait_budget_secs": raw},
+        )
+    assert response.status_code == 400, response.text
+    assert response.json() == {"error": error}
+    row = seeder.db.fetchone(
+        "SELECT pin_wait_budget_secs, description FROM pod WHERE id = %s", (pod_id,)
+    )
+    assert row == {"pin_wait_budget_secs": 300, "description": ""}, row
 
 
 def test_web_pod_rename_denies_member(user_client, daemon_world):

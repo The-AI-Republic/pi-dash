@@ -502,10 +502,7 @@ pub fn migrate_seed_enabled(app_label: Option<&str>, skip_seed_env: bool) -> boo
             return false;
         }
     }
-    if skip_seed_env {
-        return false;
-    }
-    true
+    !skip_seed_env
 }
 
 #[cfg(test)]

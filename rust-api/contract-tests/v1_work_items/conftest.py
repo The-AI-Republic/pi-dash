@@ -52,9 +52,11 @@ def db(settings):
 
 
 @pytest.fixture()
-def seeder(db):
+def seeder(db, settings):
     tracker = SeedTracker(db)
-    seeder = Seeder(db, tracker, tag=uuid.uuid4().hex[:10])
+    # ``secret_key``: the release-pin cases seed a runner, whose enrollment
+    # hash needs the server's SECRET_KEY (``_harness.tokens``).
+    seeder = Seeder(db, tracker, tag=uuid.uuid4().hex[:10], secret_key=settings.secret_key)
     yield seeder
     tracker.cleanup()
 
