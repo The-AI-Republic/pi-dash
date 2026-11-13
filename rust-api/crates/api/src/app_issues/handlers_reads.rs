@@ -2033,7 +2033,9 @@ async fn sub_issues_get_inner(
             render_sub_grouped_assignees_str(&rows, &shaped)
         }
         Some(param) => {
-            if !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
+            // Django only raises KeyError when indexing a row; an empty
+            // page (cursor past the end) yields an empty grouped payload.
+            if !rows.is_empty() && !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
                 return Err(
                     Denial::BadError("The required key does not exist.".to_owned()).into_response(),
                 );
