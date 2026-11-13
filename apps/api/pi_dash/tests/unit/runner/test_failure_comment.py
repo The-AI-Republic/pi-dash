@@ -73,6 +73,21 @@ def issue(workspace, project, state, create_user):
     )
 
 
+def _arm_clock(issue, project):
+    """Put the issue in the ticking bucket with an armed clock — the state
+    the failure policy acts on (a Todo issue has no running clock)."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    issue.state = State.objects.create(name="In Progress", project=project, group="started")
+    issue.save(update_fields=["state"])
+    # Entering the bucket may already have created (and armed) the ticker.
+    ticker, _ = IssueAgentTicker.objects.update_or_create(
+        issue=issue,
+        defaults={"enabled": True, "disarm_reason": "", "next_run_at": timezone.now(), "pending_entry": False},
+    )
+    return ticker
+
+
 def _make_runner(user, workspace, pod, name="r1"):
     return Runner.objects.create(
         owner=user,
@@ -518,11 +533,12 @@ def test_completed_finalize_leaves_failure_reason_blank(
 
 @pytest.mark.unit
 def test_needs_human_failure_comment_names_the_fix_and_the_stopped_clock(
-    db, create_user, workspace, pod, issue
+    db, create_user, workspace, project, pod, issue
 ):
     """An expired-login failure tells the user what to do — the reason
     label and the re-authenticate action, not only the raw stderr — and
     says the automatic clock is stopped until they act."""
+    _arm_clock(issue, project)
     runner = _make_runner(create_user, workspace, pod)
     run = _make_run(create_user, workspace, pod, runner, issue)
 
@@ -546,10 +562,11 @@ def test_needs_human_failure_comment_names_the_fix_and_the_stopped_clock(
 
 @pytest.mark.unit
 def test_transient_network_failure_posts_no_comment(
-    db, create_user, workspace, pod, issue
+    db, create_user, workspace, project, pod, issue
 ):
     """A free-retry failure is being retried silently on a short backoff;
     posting it each attempt would be noise."""
+    _arm_clock(issue, project)
     runner = _make_runner(create_user, workspace, pod)
     run = _make_run(create_user, workspace, pod, runner, issue)
 
@@ -564,6 +581,78 @@ def test_transient_network_failure_posts_no_comment(
     run.refresh_from_db()
     assert run.failure_reason == "agent_error.provider_network"
     assert IssueComment.objects.filter(issue=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_needs_human_failure_without_a_running_clock_claims_no_pause(
+    db, create_user, workspace, pod, issue
+):
+    """No armed clock (a Todo issue, a one-off Run AI): the policy stops
+    nothing, so the comment must not tell the user runs are paused or to
+    press a Re-tick button that is not offered."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    body = IssueComment.objects.get(issue=issue).comment_html
+    assert "Provider authentication or access failed" in body
+    assert "Re-authenticate" in body
+    assert "paused" not in body
+    assert "Re-tick" not in body
+
+
+@pytest.mark.unit
+def test_transient_failure_without_a_running_clock_is_reported(
+    db, create_user, workspace, pod, issue
+):
+    """Nothing will free-retry a run whose issue has no armed clock, so its
+    failure must reach the thread instead of vanishing silently."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="connection reset by peer",
+        runner_failure_reason="agent_crash",
+    )
+
+    assert IssueComment.objects.filter(issue=issue).count() == 1
+
+
+@pytest.mark.unit
+def test_infra_failure_that_hits_the_backstop_is_reported(
+    db, create_user, workspace, project, pod, issue
+):
+    """Daemon-restart failures stay off the thread while they are being
+    retried — but the one that trips the repeated-failure backstop stops
+    the clock, and the user must be told."""
+    _arm_clock(issue, project)
+    runner = _make_runner(create_user, workspace, pod)
+    for _ in range(3):
+        _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+    AgentRun.objects.filter(work_item=issue).update(failure_reason="daemon_restart")
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="daemon shutdown requested",
+        runner_failure_reason="daemon_restart",
+    )
+
+    body = IssueComment.objects.get(issue=issue).comment_html
+    assert "Runner daemon restarted" in body
+    assert "Re-tick" in body
 
 
 @pytest.mark.unit

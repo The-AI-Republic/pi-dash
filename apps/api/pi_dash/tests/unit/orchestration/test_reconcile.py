@@ -987,3 +987,35 @@ def test_failed_run_that_already_yielded_keeps_its_outcome(seeded, issue, states
     assert decision.reason == "waiting_on_human:keep-ticking"
     assert decision.ticker.enabled is True
     assert decision.ticker.disarm_reason == TickerDisarmReason.NONE
+
+
+@pytest.mark.unit
+def test_needs_human_failure_stops_the_clock_over_a_pending_entry(
+    seeded, issue, states, runner_for_workspace
+):
+    """An owed entry would only repeat a failure a retry cannot fix: the
+    needs-human stop wins and drops it, rather than firing one more doomed
+    run before the clock stops."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=2, enabled=True, next_run_at=timezone.now(), pending_entry=True, pending_entry_free=True)
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.provider_auth_or_access")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "failed:agent_error.provider_auth_or_access:needs-human-stopped"
+    t = decision.ticker
+    assert t.enabled is False
+    assert t.disarm_reason == TickerDisarmReason.FAILURE_NEEDS_HUMAN
+    assert t.pending_entry is False
+
+
+@pytest.mark.unit
+def test_free_retry_defers_to_a_pending_entry(seeded, issue, states, runner_for_workspace):
+    """A transient failure with an entry already owed keeps that entry
+    instead of stacking a free retry on top of it."""
+    _move(issue, states, "in_progress")
+    before = timezone.now()
+    _ticker(issue, used=2, enabled=True, next_run_at=before, pending_entry=True, pending_entry_free=True)
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.provider_network")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason.endswith(":pending-entry-kept")
+    assert decision.ticker.pending_entry is True
+    assert decision.ticker.next_run_at == before  # not pushed back by a backoff

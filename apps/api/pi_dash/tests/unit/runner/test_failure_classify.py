@@ -55,6 +55,17 @@ AGENT_TEXT_CASES = [
         RunFailureReason.AGENT_PROVIDER_QUOTA,
     ),
     ("5-hour limit reached ∙ resets 3am", RunFailureReason.AGENT_PROVIDER_QUOTA),
+    # Exhausted quota sent as HTTP 429 — must beat the capacity rule's 429.
+    (
+        "Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check "
+        "your plan and billing details.', 'type': 'insufficient_quota'}}",
+        RunFailureReason.AGENT_PROVIDER_QUOTA,
+    ),  # OpenAI
+    (
+        "stream error: unexpected status 429 Too Many Requests: You've hit your usage limit. Upgrade to Pro",
+        RunFailureReason.AGENT_PROVIDER_QUOTA,
+    ),  # Codex
+    ("Claude AI usage limit reached|1794549365", RunFailureReason.AGENT_PROVIDER_QUOTA),  # Claude Code
     # provider_capacity_or_rate_limit
     ("429 Too Many Requests", RunFailureReason.AGENT_PROVIDER_CAPACITY),
     ("overloaded_error: Overloaded", RunFailureReason.AGENT_PROVIDER_CAPACITY),
@@ -133,6 +144,29 @@ FALSE_POSITIVE_CASES = [
     # 5000 contains 500 — not a server error
     ("retried for 5000 ms, giving up; exit code 1", RunFailureReason.AGENT_PROCESS_FAILURE),
 ]
+
+
+# Over-broad keyword false positives: words that appear in ordinary agent
+# output (file paths, task subjects, unrelated I/O errors) must not land in a
+# needs-human bucket — a false needs-human stops the clock.
+KEYWORD_FALSE_POSITIVE_CASES = [
+    # "oauth" in a source path is not an auth failure
+    ("thread 'main' panicked at src/oauth_client.rs:42: index out of bounds", RunFailureReason.AGENT_PROCESS_FAILURE),
+    # "billing" as the task's subject is not a quota failure
+    (
+        "claude exited with status 1: error_during_execution while editing billing/invoice.py",
+        RunFailureReason.AGENT_PROCESS_FAILURE,
+    ),
+    # a missing *file* is not a missing *executable*
+    ("Error: failed to read prompt file: No such file or directory (os error 2)", RunFailureReason.AGENT_UNKNOWN),
+]
+
+
+@pytest.mark.parametrize(
+    "text,expected", KEYWORD_FALSE_POSITIVE_CASES, ids=[c[0][:48] for c in KEYWORD_FALSE_POSITIVE_CASES]
+)
+def test_keyword_false_positives(text, expected):
+    assert classify(text, runner_reason="agent_crash") == expected
 
 
 @pytest.mark.parametrize("text,expected", FALSE_POSITIVE_CASES, ids=[c[0][:48] for c in FALSE_POSITIVE_CASES])
