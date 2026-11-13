@@ -573,43 +573,57 @@ def test_global_create_null_filters_companion_predicates(api, seed, tenant_a, au
 
     Django `issue_filters(payload, "POST")` for these 8 nulls stores the
     7-key companion set below; pre-fix Rust dropped every null key and
-    stored `{}`.
+    stored `{}`. PATCH, PUT and a filters-less PATCH (recompute from the
+    stored null filters) share the same kernel and must agree.
     """
+    null_filters = {
+        "labels": None,
+        "assignees": None,
+        "cycle": None,
+        "module": None,
+        "subscriber": None,
+        "type": None,
+        "name": None,
+        "state": None,
+    }
+    expected_query = {
+        "label_issue__deleted_at__isnull": True,
+        "issue_assignee__deleted_at__isnull": True,
+        "name__icontains": None,
+        "state__group__in": [
+            "backlog",
+            "unstarted",
+            "started",
+            "review",
+            "test",
+            "completed",
+            "cancelled",
+        ],
+        "issue_cycle__deleted_at__isnull": True,
+        "issue_module__deleted_at__isnull": True,
+        "issue_subscribers__deleted_at__isnull": True,
+    }
     r = api.post(
         _global_url(tenant_a), headers=auth_a,
-        json={
-            "name": "null-filters",
-            "filters": {
-                "labels": None,
-                "assignees": None,
-                "cycle": None,
-                "module": None,
-                "subscriber": None,
-                "type": None,
-                "name": None,
-                "state": None,
-            },
-        },
+        json={"name": "null-filters", "filters": null_filters},
     )
     assert r.status_code == 201, r.text
     body = r.json()
     try:
-        assert body["query"] == {
-            "label_issue__deleted_at__isnull": True,
-            "issue_assignee__deleted_at__isnull": True,
-            "name__icontains": None,
-            "state__group__in": [
-                "backlog",
-                "unstarted",
-                "started",
-                "review",
-                "test",
-                "completed",
-                "cancelled",
-            ],
-            "issue_cycle__deleted_at__isnull": True,
-            "issue_module__deleted_at__isnull": True,
-            "issue_subscribers__deleted_at__isnull": True,
-        }, body["query"]
+        assert body["query"] == expected_query, body["query"]
+        detail = f"{_global_url(tenant_a)}{body['id']}/"
+        r = api.patch(
+            detail, headers=auth_a, json={"name": "null-filters", "filters": null_filters},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["query"] == expected_query, r.json()["query"]
+        r = api.put(
+            detail, headers=auth_a, json={"name": "null-filters", "filters": null_filters},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["query"] == expected_query, r.json()["query"]
+        r = api.patch(detail, headers=auth_a, json={"name": "null-filters-2"})
+        assert r.status_code == 200, r.text
+        assert r.json()["query"] == expected_query, r.json()["query"]
     finally:
         api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
