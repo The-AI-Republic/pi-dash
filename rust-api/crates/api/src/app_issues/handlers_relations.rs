@@ -108,8 +108,8 @@ use pidash_services::app_issues::relation_mapper::get_actual_relation;
 use pidash_services::domain::relations as relation_domain;
 
 use pidash_db::entity::{
-    git_code_review_links, issue_links, issue_relations, issues, project_members, projects, users,
-    workspaces,
+    git_code_review_links, github_pull_request_links, issue_links, issue_relations, issues,
+    project_members, projects, users, workspaces,
 };
 use sea_orm::sea_query::{Condition, Expr};
 use sea_orm::{
@@ -2985,38 +2985,37 @@ async fn link_dupe_exists(
 /// (it only requires the project to have a membership row; no
 /// `deleted_at` guard — bug 7), archived guard, `-created_at`. Same scope
 /// shape as `queries_core::link_list_select`.
-/// PDASHOSS01-355: reads git_code_review_links (provider='github') and maps
-/// namespace->namespace, external_iid->external_iid for the GitHub shape.
+/// Legacy table read (pre-PDASHOSS01-355) to match Django's current
+/// dual-write state until 6/6 (PDASHOSS01-359). Rust generic-only read
+/// diverges on contract seed (legacy PR vs generic reviews).
 fn pr_link_list_select(
     slug: &str,
     project_id: Uuid,
     issue_id: Uuid,
-) -> sea_orm::Select<git_code_review_links::Entity> {
-    git_code_review_links::Entity::find()
+) -> sea_orm::Select<github_pull_request_links::Entity> {
+    github_pull_request_links::Entity::find()
         .distinct()
         .join(
             JoinType::InnerJoin,
-            git_code_review_links::Entity::belongs_to(project_members::Entity)
-                .from(git_code_review_links::Column::ProjectId)
+            github_pull_request_links::Entity::belongs_to(project_members::Entity)
+                .from(github_pull_request_links::Column::ProjectId)
                 .to(project_members::Column::ProjectId)
                 .into(),
         )
         .join(
             JoinType::InnerJoin,
-            git_code_review_links::Relation::Projects.def(),
+            github_pull_request_links::Relation::Projects.def(),
         )
         .join(
             JoinType::InnerJoin,
-            git_code_review_links::Relation::Workspaces.def(),
+            github_pull_request_links::Relation::Workspaces.def(),
         )
-        .filter(git_code_review_links::Column::DeletedAt.is_null())
-        .filter(git_code_review_links::Column::IssueId.eq(issue_id))
-        .filter(git_code_review_links::Column::ProjectId.eq(project_id))
+        .filter(github_pull_request_links::Column::DeletedAt.is_null())
+        .filter(github_pull_request_links::Column::IssueId.eq(issue_id))
+        .filter(github_pull_request_links::Column::ProjectId.eq(project_id))
         .filter(projects::Column::ArchivedAt.is_null())
         .filter(workspaces::Column::Slug.eq(slug))
-        .filter(git_code_review_links::Column::Provider.eq("github"))
-        .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
-        .order_by_desc(git_code_review_links::Column::CreatedAt)
+        .order_by_desc(github_pull_request_links::Column::CreatedAt)
 }
 
 /// `GitCodeReviewLinkViewSet.get_queryset` (`git_code_review.py:33-44`),
@@ -3092,28 +3091,20 @@ struct ReviewLinkOwned {
     created_by_id: Option<uuid::Uuid>,
 }
 
-impl From<git_code_review_links::Model> for PrLinkOwned {
-    fn from(row: git_code_review_links::Model) -> Self {
-        // PDASHOSS01-355: map generic fields to GitHub shape.
-        let external_iid = row.external_iid.parse::<i32>().unwrap_or(0);
-        let state = if row.state == "merged" {
-            "closed"
-        } else {
-            row.state.as_str()
-        }
-        .to_owned();
+impl From<github_pull_request_links::Model> for PrLinkOwned {
+    fn from(row: github_pull_request_links::Model) -> Self {
         Self {
             id: row.id.to_string(),
             issue_id: row.issue_id.to_string(),
-            namespace: row.namespace,
+            namespace: row.repo_owner,
             repo_name: row.repo_name,
-            external_iid,
+            external_iid: row.pr_number,
             url: row.url,
             title: row.title,
-            state,
+            state: row.state,
             merged: row.merged,
             draft: row.draft,
-            remote_updated_at: row.remote_updated_at.as_ref().map(rfc3339),
+            remote_updated_at: row.pr_updated_at.map(|d| rfc3339(&d)),
             created_at: rfc3339(&row.created_at),
             updated_at: rfc3339(&row.updated_at),
             created_by_id: row.created_by_id,
@@ -4148,12 +4139,34 @@ async fn pr_create(
 /// Re-read one PR link for the create response (the serializer reads
 /// the saved instance, whose audit columns the store stamped).
 async fn fetch_pr_owned(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<PrLinkOwned, Denial> {
-    git_code_review_links::Entity::find_by_id(*id)
+    let row = git_code_review_links::Entity::find_by_id(*id)
         .one(&orm(pool))
         .await
         .map_err(db_denial)?
-        .map(PrLinkOwned::from)
-        .ok_or(Denial::ServerError)
+        .ok_or(Denial::ServerError)?;
+    let external_iid = row.external_iid.parse::<i32>().unwrap_or(0);
+    let state = if row.state == "merged" {
+        "closed"
+    } else {
+        row.state.as_str()
+    }
+    .to_owned();
+    Ok(PrLinkOwned {
+        id: row.id.to_string(),
+        issue_id: row.issue_id.to_string(),
+        namespace: row.namespace,
+        repo_name: row.repo_name,
+        external_iid,
+        url: row.url,
+        title: row.title,
+        state,
+        merged: row.merged,
+        draft: row.draft,
+        remote_updated_at: row.remote_updated_at.as_ref().map(rfc3339),
+        created_at: rfc3339(&row.created_at),
+        updated_at: rfc3339(&row.updated_at),
+        created_by_id: row.created_by_id,
+    })
 }
 
 /// `DELETE github-pull-requests/{pk}/` (`github_pr.py:66-73`):
@@ -4197,37 +4210,78 @@ async fn pr_destroy(
     let Some(row) = row else {
         return Denial::NotFound.into_response();
     };
-    let store = PoolPrStore::new(ctx.pool.clone(), PrLinksSurface::Relations);
-    let link = PrLinkRow {
-        id: ctx.pk,
-        project_id: ctx.project_id,
-        issue_id: ctx.issue_id,
-        repo_owner: row.namespace.clone(),
-        repo_name: row.repo_name.clone(),
-        pr_number: i64::from(row.external_iid),
-        url: row.url.clone(),
-        title: row.title.clone(),
-        state: row.state.clone(),
-        merged: row.merged,
-        draft: row.draft,
-        pr_updated_at: row.remote_updated_at.clone(),
-    };
     let now = chrono::Utc::now();
-    let outcome = match pidash_services::app_issues::pr_links::detach_pull_request_link(
-        &store,
-        &link,
-        &now,
-        Some(ctx.user_id),
-    )
-    .await
+    // Django detach_pull_request_link: delete legacy link, then delete
+    // matching provider-neutral review when it hangs off the same issue.
+    // Reverted to legacy (pre-PDASHOSS01-355) to match Django dual-write state.
+    let db = orm(&ctx.pool);
+    if github_pull_request_links::Entity::update_many()
+        .col_expr(
+            github_pull_request_links::Column::DeletedAt,
+            Expr::value(now),
+        )
+        .col_expr(
+            github_pull_request_links::Column::UpdatedAt,
+            Expr::value(now),
+        )
+        .col_expr(
+            github_pull_request_links::Column::UpdatedById,
+            Expr::value(ctx.user_id),
+        )
+        .filter(github_pull_request_links::Column::Id.eq(ctx.pk))
+        .exec(&db)
+        .await
+        .is_err()
     {
-        Ok(outcome) => outcome,
+        return Denial::ServerError.into_response();
+    }
+    // Enqueue legacy soft-delete.
+    let pr_message = pidash_jobs::TaskMessage::new(
+        pidash_services::app_issues::pr_links::SOFT_DELETE_TASK,
+        Vec::new(),
+        serde_json::json!({"model": "githubpullrequestlink", "id": ctx.pk.to_string()}),
+    );
+    enqueue_message(&ctx.pool, pr_message).await;
+    // Cascade to matching review (provider github, same namespace/repo/number).
+    let review = git_code_review_links::Entity::find()
+        .filter(git_code_review_links::Column::DeletedAt.is_null())
+        .filter(git_code_review_links::Column::Provider.eq("github"))
+        .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+        .filter(git_code_review_links::Column::Namespace.eq(row.namespace.clone()))
+        .filter(git_code_review_links::Column::RepoName.eq(row.repo_name.clone()))
+        .filter(git_code_review_links::Column::ExternalIid.eq(row.external_iid.to_string()))
+        .filter(git_code_review_links::Column::IssueId.eq(ctx.issue_id))
+        .order_by_desc(git_code_review_links::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError);
+    match review {
+        Ok(Some(review_row)) => {
+            // Django only deletes when review hangs off the same issue (it does here).
+            if git_code_review_links::Entity::update_many()
+                .col_expr(git_code_review_links::Column::DeletedAt, Expr::value(now))
+                .col_expr(git_code_review_links::Column::UpdatedAt, Expr::value(now))
+                .col_expr(
+                    git_code_review_links::Column::UpdatedById,
+                    Expr::value(ctx.user_id),
+                )
+                .filter(git_code_review_links::Column::Id.eq(review_row.id))
+                .exec(&db)
+                .await
+                .is_err()
+            {
+                return Denial::ServerError.into_response();
+            }
+            let review_message = pidash_jobs::TaskMessage::new(
+                pidash_services::app_issues::pr_links::SOFT_DELETE_TASK,
+                Vec::new(),
+                serde_json::json!({"model": "gitcodereviewlink", "id": review_row.id.to_string()}),
+            );
+            enqueue_message(&ctx.pool, review_message).await;
+        }
+        Ok(None) => {}
         Err(_) => return Denial::ServerError.into_response(),
-    };
-    // The recorded fan-out, verbatim and in Python order.
-    for task in outcome.enqueues {
-        let message = pidash_jobs::TaskMessage::new(task.task, task.args, task.kwargs);
-        enqueue_message(&ctx.pool, message).await;
     }
     empty_response(StatusCode::NO_CONTENT)
 }
@@ -4241,7 +4295,7 @@ async fn fetch_scoped_pr(
     pk: &uuid::Uuid,
 ) -> Result<Option<PrLinkOwned>, Denial> {
     let row = pr_link_list_select(slug, *project_id, *issue_id)
-        .filter(git_code_review_links::Column::Id.eq(*pk))
+        .filter(github_pull_request_links::Column::Id.eq(*pk))
         .limit(1)
         .one(&orm(pool))
         .await
