@@ -51,8 +51,9 @@
 //!   (the URL kwarg never reaches the view signature).
 //! - Q2: `end_date = None` on POST raises `TypeError` (`None >= now`)
 //!   → generic 500, not the 400 guard.
-//! - Q3: the archived `total_issues` count and `assignee_ids` omit the
-//!   bridge `deleted_at` guard the base queryset has (F-C27-04 R2/R4).
+//! - Q3 (fixed by NEWPIDASH-219, DIFF-19): the archived `total_issues`
+//!   count and `assignee_ids` now carry the bridge `deleted_at` guards
+//!   the base queryset has; the ported omission (F-C27-04 R2/R4) is gone.
 //! - Q4: archived detail of a missing row is a 500 (`None[...]`),
 //!   unlike the base retrieve's `{"error":"Cycle not found"}` 404.
 //! - Q5: the estimate subqueries run on `Issue.issue_objects`, so the
@@ -583,25 +584,29 @@ fn group_predicate(group: &str) -> String {
 }
 
 /// One group-count annotation over the archived bridge. The bridge
-/// `deleted_at` guard the base queryset has is OMITTED (ported quirk Q3);
-/// the issue archived/draft/deleted guards stay.
+/// `deleted_at` guard the base queryset has is present (NEWPIDASH-219,
+/// DIFF-19); the issue archived/draft/deleted guards stay.
 fn count_annotation(group: Option<&str>) -> String {
     let predicate = group.map(group_predicate).unwrap_or_default();
     format!(
         "(SELECT COUNT(DISTINCT i.id) FROM cycle_issues ci \
           JOIN issues i ON i.id = ci.issue_id \
           LEFT JOIN states st ON st.id = i.state_id \
-         WHERE ci.cycle_id = c.id \
+         WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL \
            AND i.archived_at IS NULL AND i.is_draft = FALSE AND i.deleted_at IS NULL \
            {predicate})"
     )
 }
 
-/// `assignee_ids` annotation (`archive.py:224-233`): no bridge or issue
-/// guards at all — only the `NOT NULL` filter (ported quirk Q3).
+/// `assignee_ids` annotation (`archive.py:224-233`): the assignee bridge
+/// carries the `deleted_at IS NULL` guard the base queryset has
+/// (NEWPIDASH-219, DIFF-19). The cycle-bridge side stays without an
+/// explicit guard exactly like the live annotation (neither Django's
+/// `ArrayAgg` nor `SELECT_BASE` filters `ci.deleted_at` here), so
+/// archived `assignee_ids` answers what the live detail answered.
 fn assignee_ids_annotation() -> String {
     "(SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id) \
-       FILTER (WHERE ia.assignee_id IS NOT NULL), '{}') \
+       FILTER (WHERE ia.assignee_id IS NOT NULL AND ia.deleted_at IS NULL), '{}') \
       FROM cycle_issues ci \
       JOIN issues i ON i.id = ci.issue_id \
       JOIN issue_assignees ia ON ia.issue_id = i.id \
@@ -2121,8 +2126,10 @@ mod tests {
 
     #[test]
     fn sql_ports_the_archive_asymmetries() {
-        // Q3: no bridge deleted guard on the archive counts / arrays.
-        assert!(!archived_list_sql().contains("ci.deleted_at"));
+        // Q3-removed (NEWPIDASH-219, DIFF-19): archive counts carry the
+        // cycle-bridge guard and assignee_ids the assignee-bridge guard.
+        assert!(archived_list_sql().contains("ci.deleted_at IS NULL"));
+        assert!(archived_list_sql().contains("ia.deleted_at IS NULL"));
         // The estimate subqueries keep the live-bridge guard they always had.
         assert!(estimate_annotation(None, "x").contains("ci.deleted_at IS NULL"));
         // Q5: the `issue_objects` manager exclusions on the estimate path,
