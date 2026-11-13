@@ -30,7 +30,6 @@ import {
   DisplayControl,
   IssuesLayoutRoot,
   LazyIssueFilters,
-  ListPageQuickActions,
   ListSkeleton,
   SavedViewEmptyCard,
   ViewLayoutBody,
@@ -50,6 +49,7 @@ import {
   type WorkItemCreateProject,
 } from "../../issues/index.js";
 import { useProjectRow } from "../../auth/index.js";
+import { useMe } from "../../../core/session/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { hasEstimateLink } from "../../../shared/lib/estimateLink.js";
 import { projectViewDetailQueryOptions } from "../api/detail.js";
@@ -58,6 +58,7 @@ import { projectViewsQueryOptions } from "../api/queries.js";
 import { replaceProjectViewRow } from "../lib/projectViewActions.js";
 import { projectViewHref, projectViewsListHref, sortProjectViewsDefault } from "../lib/projectViews.js";
 import { SavedViewHeader } from "./SavedViewHeader.js";
+import { SavedViewHeaderMenu } from "./SavedViewHeaderMenu.js";
 import { SavedViewMissingState } from "./SavedViewMissingState.js";
 import { saveAsTitle, savedViewDocumentTitle } from "./model.js";
 import type { SavedViewDetailParams } from "./preload.js";
@@ -89,6 +90,7 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
   const client = getAppClient();
   const navigate = useNavigate();
   const weekStart = useWeekStart();
+  const me = useMe();
 
   const projects = useQuery(projectsQueryOptions(client, params.ws));
   const project = projects.data?.find((entry) => entry.id === params.projectId) ?? null;
@@ -138,6 +140,7 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
       projectName={project?.name ?? null}
       projectIdentifier={project?.identifier ?? null}
       memberRole={project?.member_role ?? null}
+      viewerId={me.data?.id ?? null}
       projectArchived={project?.archived_at != null}
       cycleView={project?.cycle_view === true}
       moduleView={project?.module_view === true}
@@ -167,6 +170,7 @@ interface SavedViewBodyProps {
   projectName: string | null;
   projectIdentifier: string | null;
   memberRole: number | null;
+  viewerId: string | null;
   projectArchived: boolean;
   cycleView: boolean;
   moduleView: boolean;
@@ -191,6 +195,7 @@ function SavedViewBody({
   projectName,
   projectIdentifier,
   memberRole,
+  viewerId,
   projectArchived,
   cycleView,
   moduleView,
@@ -336,7 +341,15 @@ function SavedViewBody({
         <>
           {addWorkItem}
           {locked ? null : displayControl}
-          <ListPageQuickActions />
+          <SavedViewHeaderMenu
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            view={view}
+            viewerId={viewerId}
+            projectRole={memberRole}
+            hideCycle={!cycleView}
+            hideModule={!moduleView}
+          />
         </>
       }
       displayControl={locked ? undefined : displayControl}
