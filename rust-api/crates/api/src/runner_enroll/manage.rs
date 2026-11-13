@@ -1286,6 +1286,7 @@ async fn render_runner_parts(
 }
 
 /// `#assignable_for` context, when the list was asked for it (§7.4).
+#[allow(clippy::too_many_arguments)]
 async fn render_runner_parts_ctx(
     pool: &PgPool,
     runner: &RunnerOwned,
@@ -1359,7 +1360,11 @@ async fn render_runner_parts_ctx(
 /// Serialize one R1/R2 join row: the runner + dev-machine + pod blocks
 /// decode positionally; `projects.identifier` reads by name (the only
 /// `identifier` column across the four tables).
-async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow, tz: &Tz) -> Result<String, Response> {
+async fn render_runner_row(
+    pool: &PgPool,
+    row: &RunnerJoinRow,
+    tz: &Tz,
+) -> Result<String, Response> {
     render_runner_row_ctx(pool, row, None, None, tz).await
 }
 
@@ -1551,75 +1556,12 @@ pub async fn dev_machine_patch(
         Ok(workspace_id) => workspace_id,
         Err(response) => return response,
     };
-    let filters = DirectoryFilters {
-        project: query_param(&params, "project"),
-        pod: query_param(&params, "pod"),
-        include_bundled: manage_reads::include_bundled(
-            crate::license::query_last(&params, "include_bundled").as_deref(),
-        ),
+    let role = match workspace_role(&pool, workspace_id, user_id).await {
+        Ok(role) => role,
+        Err(response) => return response,
     };
-    // The web panel renders UTC (plain DRF `APIView`, no
-    // `TimezoneMixin`); Django's `ValidationError` on a garbage filter is
-    // unhandled here, so it 500s.
-    match project_runners_body(&pool, user_id, workspace_id, &filters, &chrono_tz::UTC).await {
-        Ok(body) => json_response(StatusCode::OK, body),
-        Err(DirectoryError::Forbidden) => forbidden(),
-        Err(DirectoryError::InvalidFilter | DirectoryError::Server) => server_error(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shared runner directory (`runner/services/runner_directory.py`)
-// ---------------------------------------------------------------------------
-
-/// Raw `?project=` / `?pod=` / `include_bundled` inputs of one
-/// [`project_runners_body`] read (`project_runners_queryset` kwargs). The
-/// filters stay unparsed: Django validates them at queryset evaluation,
-/// after the membership gate.
-pub(crate) struct DirectoryFilters {
-    /// `project_id=` — `None` or empty disables the filter.
-    pub project: Option<String>,
-    /// `pod_id=` — `None` or empty disables the filter.
-    pub pod: Option<String>,
-    /// [`manage_reads::include_bundled`] of the raw query value.
-    pub include_bundled: bool,
-}
-
-/// Why a [`project_runners_body`] read failed. Each surface maps these
-/// onto its own bodies, like each Django view catches (or does not
-/// catch) the helper's exceptions.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DirectoryError {
-    /// Caller is not a workspace member (`PermissionDenied`).
-    Forbidden,
-    /// A filter value is not a UUID (Django's `ValidationError`).
-    InvalidFilter,
-    /// Database or decode failure.
-    Server,
-}
-
-/// `project_runners_queryset` + `RunnerSerializer(many=True)`
-/// (`runner/services/runner_directory.py`): the one "which runners can
-/// this user see" read shared by the web AI Workers panel
-/// ([`runners_list`]) and the token-auth CLI list
-/// ([`crate::v1_cli_auth::project_runners`]), so the two cannot drift.
-///
-/// Membership gate first (`is_workspace_member`), then the filters
-/// parse, then R1 (owner+private visibility, `?pod=`, bundled
-/// exclusion, `?project=`, `-updated_at`). Returns the rendered JSON
-/// array with datetimes in `tz`.
-pub(crate) async fn project_runners_body(
-    pool: &PgPool,
-    user_id: Uuid,
-    workspace_id: Uuid,
-    filters: &DirectoryFilters,
-    tz: &Tz,
-) -> Result<String, DirectoryError> {
-    let role = workspace_role(pool, workspace_id, user_id)
-        .await
-        .map_err(|_| DirectoryError::Server)?;
     if !membership::is_workspace_member(role) {
-        return Err(DirectoryError::Forbidden);
+        return forbidden();
     }
     // Parse the controls from the JSON body (unknown-key/label/bool
     // validation). A non-object body already 500'd at the workspace
@@ -1791,6 +1733,103 @@ pub(crate) async fn project_runners_body(
 }
 
 // ---------------------------------------------------------------------------
+// Shared runner directory (`runner/services/runner_directory.py`)
+// ---------------------------------------------------------------------------
+
+/// Raw `?project=` / `?pod=` / `include_bundled` inputs of one
+/// [`project_runners_body`] read (`project_runners_queryset` kwargs). The
+/// filters stay unparsed: Django validates them at queryset evaluation,
+/// after the membership gate.
+pub(crate) struct DirectoryFilters {
+    /// `project_id=` — `None` or empty disables the filter.
+    pub project: Option<String>,
+    /// `pod_id=` — `None` or empty disables the filter.
+    pub pod: Option<String>,
+    /// [`manage_reads::include_bundled`] of the raw query value.
+    pub include_bundled: bool,
+}
+
+/// Why a [`project_runners_body`] read failed. Each surface maps these
+/// onto its own bodies, like each Django view catches (or does not
+/// catch) the helper's exceptions.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryError {
+    /// Caller is not a workspace member (`PermissionDenied`).
+    Forbidden,
+    /// A filter value is not a UUID (Django's `ValidationError`).
+    InvalidFilter,
+    /// Database or decode failure.
+    Server,
+}
+
+/// `project_runners_queryset` + `RunnerSerializer(many=True)`
+/// (`runner/services/runner_directory.py`): the "which runners can
+/// this user see" read behind the token-auth CLI list
+/// ([`crate::v1_cli_auth::project_runners`]). The session-auth web
+/// panel ([`runners_list`]) reads through the same
+/// `manage_reads::runner_list` query with the same visibility rules
+/// but keeps its own scope (`runner_list_scope`) and
+/// `assignable_for` handling, so it renders rows directly.
+///
+/// Membership gate first (`is_workspace_member`), then the filters
+/// parse, then R1 (owner+private visibility, `?pod=`, bundled
+/// exclusion, `?project=`, `-updated_at`). Returns the rendered JSON
+/// array with datetimes in `tz`.
+pub(crate) async fn project_runners_body(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    filters: &DirectoryFilters,
+    tz: &Tz,
+) -> Result<String, DirectoryError> {
+    let role = workspace_role(pool, workspace_id, user_id)
+        .await
+        .map_err(|_| DirectoryError::Server)?;
+    if !membership::is_workspace_member(role) {
+        return Err(DirectoryError::Forbidden);
+    }
+    // Filter UUIDs parse at queryset evaluation — after the member
+    // gate, so a non-member with a garbage filter still answers 403.
+    let parse = |raw: &Option<String>| -> Result<Option<Uuid>, DirectoryError> {
+        match raw.as_deref().filter(|raw| !raw.is_empty()) {
+            None => Ok(None),
+            Some(raw) => raw
+                .parse::<Uuid>()
+                .map(Some)
+                .map_err(|_| DirectoryError::InvalidFilter),
+        }
+    };
+    let pod_id = parse(&filters.pod)?;
+    let project_id = parse(&filters.project)?;
+    let exclude_bundled = !filters.include_bundled;
+    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
+    let rows = manage_reads::runner_list(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
+        visibility,
+        pod_id,
+        if exclude_bundled {
+            Some("desktop_bundled")
+        } else {
+            None
+        },
+        project_id,
+    )
+    .await
+    .map_err(|_| DirectoryError::Server)?;
+    let mut bodies = Vec::with_capacity(rows.len());
+    for row in &rows {
+        bodies.push(
+            render_runner_row(pool, row, tz)
+                .await
+                .map_err(|_| DirectoryError::Server)?,
+        );
+    }
+    Ok(format!("[{}]", bodies.join(",")))
+}
+
+// ---------------------------------------------------------------------------
 // Runner list (`runners.py:340-413`)
 // ---------------------------------------------------------------------------
 
@@ -1865,17 +1904,13 @@ pub async fn runners_list(
     };
     // Filter UUIDs parse at queryset evaluation — after the member
     // gate, so a non-member with a garbage filter still answers 403.
-    let parse = |raw: &Option<String>| -> Result<Option<Uuid>, DirectoryError> {
-        match raw.as_deref().filter(|raw| !raw.is_empty()) {
-            None => Ok(None),
-            Some(raw) => raw
-                .parse::<Uuid>()
-                .map(Some)
-                .map_err(|_| DirectoryError::InvalidFilter),
+    let mut pod_id = None;
+    if let Some(raw) = query_param(&params, "pod") {
+        match parse_uuid(&raw) {
+            Ok(id) => pod_id = Some(id),
+            Err(response) => return response,
         }
-    };
-    let pod_id = parse(&filters.pod)?;
-    let project_id = parse(&filters.project)?;
+    }
     // Engine runners are listed like any other runner (#2910);
     // `?include_bundled` is ignored (preserved for CLI compat).
     // `?assignable_for=<issue-id | "new">` (design §7.4): the per-row
@@ -1913,12 +1948,14 @@ pub async fn runners_list(
     };
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
-        match render_runner_row_ctx(&pool, row, Some(user_id), assignable_for, &tz).await {
+        match render_runner_row_ctx(&pool, row, Some(user_id), assignable_for, &chrono_tz::UTC)
+            .await
+        {
             Ok(body) => bodies.push(body),
             Err(response) => return response,
         }
     }
-    Ok(format!("[{}]", bodies.join(",")))
+    json_response(StatusCode::OK, format!("[{}]", bodies.join(",")))
 }
 
 // ---------------------------------------------------------------------------
@@ -3634,6 +3671,7 @@ mod tests {
             name: "r1".to_owned(),
             host_label: "h".to_owned(),
             provisioning: "manual".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
             visibility: 0,
             enrolled_at: None,
             capabilities: serde_json::json!([]),

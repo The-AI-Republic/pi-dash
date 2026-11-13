@@ -125,7 +125,11 @@ mod tests {
     #[tokio::test]
     async fn owned_delete_answers_401_anonymous() {
         assert_eq!(
-            status("DELETE", "/api/v1/runners/12345678-1234-1234-1234-123456789012/").await,
+            status(
+                "DELETE",
+                "/api/v1/runners/12345678-1234-1234-1234-123456789012/"
+            )
+            .await,
             StatusCode::UNAUTHORIZED
         );
     }

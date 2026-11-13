@@ -83,11 +83,13 @@ def test_lists_project_runners_with_status_and_heartbeat(api, seed, db, tenant_a
     assert row["pod_detail"]["project"] == project_id
     assert row["pod_detail"]["project_identifier"] == identifier
     assert list(row) == [
-        "id", "name", "status", "host_label", "provisioning", "os", "arch",
-        "runner_version", "dev_metadata", "protocol_version", "capabilities",
-        "last_heartbeat_at", "owner", "dev_machine", "dev_machine_detail",
-        "visibility", "pod", "pod_detail", "live_state", "enrolled_at",
-        "revoked_at", "revoked_reason", "created_at", "updated_at",
+        "id", "name", "status", "host_label", "is_engine", "engine_paused",
+        "dispatch_paused", "machine_display_name", "provisioning",
+        "pod_dispatch", "os", "arch", "runner_version", "dev_metadata",
+        "protocol_version", "capabilities", "last_heartbeat_at", "owner",
+        "dev_machine", "dev_machine_detail", "visibility", "pod",
+        "pod_detail", "live_state", "enrolled_at", "revoked_at",
+        "revoked_reason", "paused_at", "paused_by", "created_at", "updated_at",
     ]
     for secret_field in ("refresh_token_hash", "enrollment_token_hash"):
         assert secret_field not in row

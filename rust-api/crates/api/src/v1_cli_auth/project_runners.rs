@@ -3,11 +3,12 @@
 //!
 //! Ports `ProjectRunnersEndpoint.get` (`api/views/runner.py`, route
 //! `api-project-runners` in `api/urls/runner.py`; PDASHOSS01-245). The
-//! visibility and filter rules live in the shared
+//! visibility and filter rules live in the
 //! [`project_runners_body`](crate::runner_enroll::manage) read — the Rust
 //! twin of `runner/services/runner_directory.project_runners_queryset` —
-//! which the session-auth web list (`GET /api/runners/`) also calls, so
-//! the two surfaces cannot drift apart.
+//! which reads through the same `manage_reads::runner_list` query (with
+//! the same visibility rules) as the session-auth web list
+//! (`GET /api/runners/`).
 //!
 //! Handler order mirrors DRF `initial()` + the view body:
 //!
@@ -57,13 +58,6 @@ pub const FORBIDDEN_BODY: &str = r#"{"error":"forbidden"}"#;
 /// `BaseAPIView.handle_exception`'s `ValidationError` branch.
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// `Project.objects.filter(pk=project_id, workspace__slug=slug,
-/// deleted_at__isnull=True).first()` projected to `workspace_id` (the
-/// only column the view reads; the manager scope and the explicit
-/// `deleted_at__isnull` collapse to one conjunct, and `pk` is unique so
-/// `.first()`'s ordering is moot). `$1` = project id, `$2` = slug.
-const PROJECT_LOOKUP_SQL: &str = r#"SELECT "projects"."workspace_id" FROM "projects" INNER JOIN "workspaces" ON ("projects"."workspace_id" = "workspaces"."id") WHERE ("projects"."deleted_at" IS NULL AND "projects"."id" = $1 AND "workspaces"."slug" = $2) LIMIT 1"#;
-
 fn json_response(status: StatusCode, body: &str) -> Response {
     Response::builder()
         .status(status)
@@ -95,7 +89,8 @@ async fn project_runners_inner(
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let Some(workspace_id) = project_workspace(&pre.pool, project_id, slug).await? else {
+    let Some(workspace_id) = project_workspace(&pre.pool, project_id, pre.workspace_id).await?
+    else {
         return Ok(json_response(StatusCode::NOT_FOUND, NOT_FOUND_BODY));
     };
     let filters = DirectoryFilters {
@@ -124,17 +119,28 @@ async fn project_runners_inner(
 }
 
 /// Step 4: the project's workspace, or `None` for a miss.
+/// `Project.objects.filter(pk=project_id, workspace__slug=slug,
+/// deleted_at__isnull=True).first()` — the workspace arrives from
+/// `preamble`'s slug lookup (slugs are unique, so the join collapses)
+/// and the project must be in it and not soft-deleted.
 async fn project_workspace(
     pool: &PgPool,
     project_id: Uuid,
-    slug: &str,
+    workspace_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, Denial> {
-    sqlx::query_scalar(PROJECT_LOOKUP_SQL)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project = projects::Entity::find_by_id(project_id)
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .one(&db)
         .await
-        .map_err(|error| crate::v1_schedulers::db_error(error, "project-runners-project"))
+        .map_err(|error| crate::v1_schedulers::db_error(error, "project-runners-project"))?;
+    Ok(project.map(|project| project.workspace_id))
 }
 
 #[cfg(test)]
@@ -153,14 +159,8 @@ mod tests {
         );
     }
 
-    /// The lookup keeps every conjunct of the Django filter (manager
-    /// scope + `pk` + `workspace__slug` + the explicit
-    /// `deleted_at__isnull`).
-    #[test]
-    fn project_lookup_scopes_workspace_and_soft_delete() {
-        assert!(PROJECT_LOOKUP_SQL.contains(r#""projects"."id" = $1"#));
-        assert!(PROJECT_LOOKUP_SQL.contains(r#""workspaces"."slug" = $2"#));
-        assert!(PROJECT_LOOKUP_SQL.contains(r#""projects"."deleted_at" IS NULL"#));
-        assert!(PROJECT_LOOKUP_SQL.ends_with("LIMIT 1"));
-    }
+    // The step-4 lookup's conjuncts (project `pk` + workspace +
+    // `deleted_at IS NULL`) are covered behaviorally by the contract
+    // suite (`contract-tests/v1_cli_auth/test_project_runners.py`)
+    // against both servers; there is no SQL string left to pin here.
 }
