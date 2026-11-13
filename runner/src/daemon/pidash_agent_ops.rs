@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 
 use crate::config::schema::AgentKind;
 use crate::daemon::supervisor::RunnerSpawnCtx;
-use crate::engine::provision::{AddEngineRunner, add_engine_runner};
-use crate::engine::workdir;
+use crate::pidash_agent::provision::{AddPidashAgentRunner, add_engine_runner};
+use crate::pidash_agent::workdir;
 use crate::ipc::protocol::{EngineRunnerInfo, EngineSettings};
 
 impl RunnerSpawnCtx {
@@ -23,7 +23,7 @@ impl RunnerSpawnCtx {
     ) -> Result<EngineRunnerInfo> {
         let _engine_ops = self.engine_ops_lock.lock().await;
         let status = self.engine.status();
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace,
             project,
             working_dir,
@@ -47,9 +47,9 @@ impl RunnerSpawnCtx {
             .iter()
             .find(|r| r.name == runner)
             .ok_or_else(|| anyhow::anyhow!("no configured runner named {runner:?}"))?;
-        if block.agent.kind != AgentKind::Engine {
+        if block.agent.kind != AgentKind::PidashAgent {
             anyhow::bail!(
-                "runner {runner:?} is not a built-in engine runner; use `pidash runner remove {runner}`"
+                "runner {runner:?} is not a Pi Dash Agent runner; use `pidash runner remove {runner}`"
             );
         }
         let token = self

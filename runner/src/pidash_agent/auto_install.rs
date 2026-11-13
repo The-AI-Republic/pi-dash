@@ -19,7 +19,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::RUNNER_VERSION;
-use crate::config::schema::EngineSection;
+use crate::config::schema::PidashAgentSection;
 
 /// Whether this executable is the one a cargo-dist install receipt is for.
 fn is_updater_managed() -> bool {
@@ -46,13 +46,13 @@ fn retry_delay(attempt: u32) -> Duration {
 /// Install the engine of this release if the install is updater-managed,
 /// then resolve it so this daemon can use it without a restart. Retries with
 /// backoff until the engine resolves.
-pub async fn install_missing(config: EngineSection) {
+pub async fn install_missing(config: PidashAgentSection) {
     let managed = tokio::task::spawn_blocking(is_updater_managed)
         .await
         .unwrap_or(false);
     if !managed {
         tracing::info!(
-            "built-in engine not installed and this pidash has no install receipt; run `pidash engine install`"
+            "Pi Dash Agent not installed and this pidash has no install receipt; run `pidash engine install`"
         );
         return;
     }
@@ -72,7 +72,7 @@ pub async fn install_missing(config: EngineSection) {
                 tracing::info!(
                     installed = ?outcome.installed,
                     already_present = ?outcome.already_present,
-                    "built-in engine installed"
+                    "Pi Dash Agent installed"
                 );
                 Ok(())
             }
@@ -106,17 +106,17 @@ where
         match install().await {
             Ok(()) if resolve() => return attempt + 1,
             Ok(()) => {
-                tracing::warn!("the built-in engine was installed but does not resolve; retrying")
+                tracing::warn!("the Pi Dash Agent was installed but does not resolve; retrying")
             }
             Err(err) => tracing::warn!(
                 error = %format!("{err:#}"),
-                "installing the built-in engine failed; retrying, or run `pidash engine install`"
+                "installing the Pi Dash Agent failed; retrying, or run `pidash engine install`"
             ),
         }
         let delay = retry_delay(attempt);
         tracing::info!(
             retry_in_secs = delay.as_secs(),
-            "built-in engine install retry scheduled"
+            "Pi Dash Agent install retry scheduled"
         );
         sleep(delay).await;
         attempt = attempt.saturating_add(1);

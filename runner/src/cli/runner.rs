@@ -238,7 +238,7 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// the cloud to create a runner under this host. Older configs with a
 /// user-scoped API token are upgraded when the cloud returns a machine token.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
-    if args.agent == AgentKind::Engine {
+    if args.agent == AgentKind::PidashAgent {
         return add_engine(&args, paths).await;
     }
     let runner_name = args
@@ -450,17 +450,17 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
 }
 
 /// `pidash runner add --agent engine --project <p> [--working-dir <d>]`:
-/// turn the built-in engine on for a project (design §5). Through the
+/// turn the Pi Dash Agent on for a project (design §5). Through the
 /// running daemon (`EngineRunnerAdd`, no restart) when one answers;
 /// otherwise enrolled here and loaded when the service starts.
 async fn add_engine(args: &AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     use crate::ipc::protocol::{Request, Response};
     if args.name.is_some() {
-        eprintln!("note: --name is ignored for the built-in engine; Pi Dash names engine runners");
+        eprintln!("note: --name is ignored for the Pi Dash Agent; Pi Dash names Pi Dash Agent runners");
     }
     if args.model.is_some() || args.reasoning_effort.is_some() {
         eprintln!(
-            "note: --model / --reasoning-effort are ignored for the built-in engine; its model comes from Pi Dash"
+            "note: --model / --reasoning-effort are ignored for the Pi Dash Agent; its model comes from Pi Dash"
         );
     }
     if args.pod.is_some() {
@@ -508,14 +508,14 @@ async fn add_engine(args: &AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             }
         }
         Err(_) => {
-            let status = crate::engine::provision::status_without_daemon(paths).await?;
-            let req = crate::engine::provision::AddEngineRunner {
+            let status = crate::pidash_agent::provision::status_without_daemon(paths).await?;
+            let req = crate::pidash_agent::provision::AddPidashAgentRunner {
                 workspace: workspace.clone(),
                 project: args.project.clone(),
                 working_dir,
             };
             let (_, info) =
-                crate::engine::provision::add_engine_runner(paths, &req, &status).await?;
+                crate::pidash_agent::provision::add_engine_runner(paths, &req, &status).await?;
             let first = file::load_config(paths)?.runners.len() == 1;
             if first {
                 println!("Installing the service so the daemon starts automatically.");
@@ -776,8 +776,8 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     // The server row of a local-only or offline removal stays live; record
     // it before the block goes so the engine reconcile loop doesn't re-add
     // the runner (it would otherwise see a live engine row with no block).
-    if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::Engine {
-        crate::engine::tombstones::add(
+    if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::PidashAgent {
+        crate::pidash_agent::tombstones::add(
             paths,
             runner_id,
             cfg.runners[idx].workspace_slug.as_deref(),

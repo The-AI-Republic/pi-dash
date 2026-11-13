@@ -22,8 +22,8 @@ pub struct Config {
     pub cli: Option<CliSection>,
     /// `[engine]`: the built-in agent engine. Empty (and not written) unless
     /// a developer overrides the engine binary.
-    #[serde(default, skip_serializing_if = "EngineSection::is_default")]
-    pub engine: EngineSection,
+    #[serde(default, skip_serializing_if = "PidashAgentSection::is_default")]
+    pub engine: PidashAgentSection,
     /// `[auth]`: where the daemon and engine credentials are stored
     /// (`config::secrets`). Not written while it holds only defaults.
     #[serde(default, skip_serializing_if = "AuthSection::is_default")]
@@ -32,8 +32,8 @@ pub struct Config {
 
 /// Top-level `[engine]` table (`src/engine/locate.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineSection {
-    /// Development override for the built-in engine executable, e.g. a local
+pub struct PidashAgentSection {
+    /// Development override for the Pi Dash Agent executable, e.g. a local
     /// Codex build. When set it must exist; the installed
     /// `engine/<version>/` layouts next to `pidash` are then not searched.
     /// A leading `~/` is expanded.
@@ -122,7 +122,7 @@ pub const SECRETS_IN_KEYRING: &str = "keyring";
 /// The engine credential (`ec_…`, design §4.3): one per machine, 14 days
 /// from issue. Its only use is `POST /api/v1/runner/engine/model-token/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineCredential {
+pub struct PidashAgentCredential {
     /// The raw `ec_` value. Empty in the file when the secret is in the
     /// keychain.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -131,7 +131,7 @@ pub struct EngineCredential {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-impl EngineSection {
+impl PidashAgentSection {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -200,7 +200,7 @@ pub struct CliSection {
     /// The machine's engine credential (design §4.3), issued by `pidash
     /// auth login` or `pidash login --engine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_credential: Option<EngineCredential>,
+    pub engine_credential: Option<PidashAgentCredential>,
 
     /// Local mirror of the server's engine sign-in state for this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -603,11 +603,15 @@ pub enum AgentKind {
     /// (`muse exec --json --prompt-file <PATH>`), whose JSONL event stream the
     /// runner drives one turn per subprocess.
     MuseCode,
-    /// The built-in engine (`pidash-agent-engine`, the open-source Codex
+    /// Pi Dash Agent (`pidash-agent-engine`, the open-source Codex
     /// shipped with the CLI; design §5). Driven by the Codex driver; the
     /// daemon supplies the binary, a private `CODEX_HOME` and the model
-    /// token itself, so the block holds no paths.
-    Engine,
+    /// token itself, so the block holds no paths. Pinned (P6): the
+    /// serialized value stays `engine` (section 8); only the Rust name
+    /// changed.
+    #[serde(rename = "engine")]
+    #[value(name = "engine")]
+    PidashAgent,
 }
 
 impl AgentKind {
@@ -621,7 +625,7 @@ impl AgentKind {
             AgentKind::OpenClaw => "OpenClaw",
             AgentKind::Grok => "Grok",
             AgentKind::MuseCode => "Muse Code",
-            AgentKind::Engine => "Built-in engine",
+            AgentKind::PidashAgent => "Pi Dash Agent",
         }
     }
 
@@ -642,7 +646,22 @@ impl AgentKind {
             AgentKind::Grok => "grok",
             // Muse Code ships as the `muse` CLI; the runner drives `muse exec`.
             AgentKind::MuseCode => "muse",
-            AgentKind::Engine => crate::engine::ENGINE_BINARY_NAME,
+            AgentKind::PidashAgent => crate::pidash_agent::ENGINE_BINARY_NAME,
+        }
+    }
+
+    /// The `agent_versions` map key (wire: `engine` for the Pi Dash
+    /// Agent, section 8). Replaces the `format!("{:?}", kind)` probe
+    /// so the key stays `engine` after the variant rename.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "codex",
+            AgentKind::ClaudeCode => "claudecode",
+            AgentKind::CursorAgent => "cursoragent",
+            AgentKind::OpenClaw => "openclaw",
+            AgentKind::Grok => "grok",
+            AgentKind::MuseCode => "musecode",
+            AgentKind::PidashAgent => "engine",
         }
     }
 
@@ -657,7 +676,7 @@ impl AgentKind {
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
             AgentKind::Grok => "https://x.ai/cli",
             AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
-            AgentKind::Engine => "https://github.com/The-AI-Republic/pi-dash",
+            AgentKind::PidashAgent => "https://github.com/The-AI-Republic/pi-dash",
         }
     }
 
@@ -704,7 +723,7 @@ impl AgentKind {
             AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => None,
             // Ships with pidash (`pidash engine install`), never fetched
             // from a vendor.
-            AgentKind::Engine => None,
+            AgentKind::PidashAgent => None,
         }
     }
 
@@ -721,7 +740,7 @@ impl AgentKind {
             AgentKind::OpenClaw => None,
             AgentKind::Grok => Some("set XAI_API_KEY  (or run `grok` and log in)"),
             AgentKind::MuseCode => Some("set META_API_KEY"),
-            AgentKind::Engine => Some("pidash login --engine"),
+            AgentKind::PidashAgent => Some("pidash login --engine"),
         }
     }
 }
@@ -1280,7 +1299,7 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(!text.contains("[engine]"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.engine, EngineSection::default());
+        assert_eq!(back.engine, PidashAgentSection::default());
 
         let mut cfg = config_with(vec![]);
         cfg.engine.binary = Some(PathBuf::from("/opt/codex/bin/codex"));
@@ -1291,6 +1310,31 @@ mod tests {
             back.engine.binary,
             Some(PathBuf::from("/opt/codex/bin/codex"))
         );
+    }
+
+    #[test]
+    fn agent_kind_engine_serializes_as_engine_and_reads_back() {
+        // §6.3 pin (section 8): existing configs say `kind = "engine"`.
+        let text = serde_json::to_string(&AgentKind::PidashAgent).unwrap();
+        assert_eq!(text, "\"engine\"");
+        let kind: AgentKind = serde_json::from_str("\"engine\"").unwrap();
+        assert_eq!(kind, AgentKind::PidashAgent);
+        // Other kinds keep their spellings.
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Codex).unwrap(),
+            "\"codex\""
+        );
+        assert_eq!(AgentKind::PidashAgent.as_str(), "engine");
+        assert_eq!(AgentKind::Codex.as_str(), "codex");
+        assert_eq!(AgentKind::ClaudeCode.as_str(), "claudecode");
+        assert_eq!(AgentKind::MuseCode.as_str(), "musecode");
+    }
+
+    #[test]
+    fn agent_kind_engine_parses_from_the_agent_flag() {
+        use clap::ValueEnum;
+        let kind = AgentKind::from_str("engine", false).unwrap();
+        assert_eq!(kind, AgentKind::PidashAgent);
     }
 
     #[test]

@@ -159,11 +159,11 @@ impl Supervisor {
         // cloud-driven `create_runner` hot-add path.
         // The machine's built-in engine (design §4.3): credential, profile,
         // in-memory model token and machine-level state.
-        let engine = crate::engine::manager::EngineManager::new(
+        let engine = crate::pidash_agent::manager::PidashAgentManager::new(
             transport.as_ref().map(|t| t.cloud_url()),
             paths.clone(),
             tokens.clone(),
-            crate::engine::locate::resolved().map(|e| e.binary.clone()),
+            crate::pidash_agent::locate::resolved().map(|e| e.binary.clone()),
         );
         let engine_handle = transport.as_ref().map(|_| {
             let engine = engine.clone();
@@ -172,7 +172,7 @@ impl Supervisor {
         });
         let spawn_ctx = RunnerSpawnCtx {
             engine: engine.clone(),
-            local_chat: Arc::new(crate::ipc::engine_chat::EngineChatProfile::new(
+            local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
                 config.daemon.dev_machine_id,
             )),
             transport: transport.clone(),
@@ -269,7 +269,7 @@ impl Supervisor {
             let ctx = spawn_ctx.clone();
             let shutdown = state.shutdown_notified();
             Some(tokio::spawn(async move {
-                crate::daemon::engine_reconcile::run(ctx, shutdown).await
+                crate::daemon::pidash_agent_reconcile::run(ctx, shutdown).await
             }))
         };
 
@@ -397,9 +397,9 @@ async fn build_runner_instance(
 #[derive(Clone)]
 pub(crate) struct RunnerSpawnCtx {
     /// The machine's built-in engine (PIDESKAPP-121).
-    pub(crate) engine: Arc<crate::engine::manager::EngineManager>,
+    pub(crate) engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
     /// The machine-level engine profile local chat runs on (design §12.1).
-    pub(crate) local_chat: Arc<crate::ipc::engine_chat::EngineChatProfile>,
+    pub(crate) local_chat: Arc<crate::ipc::pidash_agent_chat::PidashAgentChatProfile>,
     transport: Option<SharedHttpTransport>,
     /// Workspace → dev-machine token (design §4.9). Replaces the single
     /// `shared_machine_token`; shared with the machine control session.
@@ -1024,7 +1024,7 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
         crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
-        crate::config::schema::AgentKind::Engine => crate::engine::agent::binary_display(),
+        crate::config::schema::AgentKind::PidashAgent => crate::pidash_agent::agent::binary_display(),
     }
 }
 
@@ -1631,7 +1631,7 @@ fn attach_body_for_instance(
     working_dir: Option<std::path::PathBuf>,
 ) -> AttachBody {
     let mut agent_versions = HashMap::new();
-    let kind_key = format!("{:?}", inst.config.agent.kind).to_ascii_lowercase();
+    let kind_key = inst.config.agent.kind.as_str().to_owned();
     // The agent binary's own version when we managed to probe it, falling back
     // to the runner's version so the key is never absent (older cloud builds
     // read it positionally). `try_read` keeps this function sync and lock-free:
@@ -1788,7 +1788,7 @@ struct RunnerLoop {
     local_chat_active: Arc<std::sync::atomic::AtomicBool>,
     /// The machine's built-in engine, for the current profile lane the
     /// free-quota classifier is tied to. Threaded into each `AssignWorker`.
-    engine: Arc<crate::engine::manager::EngineManager>,
+    engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
 }
 
 struct CurrentRun {
@@ -3738,7 +3738,7 @@ struct AssignWorker {
     /// The machine's built-in engine, for the current profile lane the
     /// free-quota classifier is tied to. Read live per event, so a profile
     /// refresh mid-run still gates correctly.
-    engine: Arc<crate::engine::manager::EngineManager>,
+    engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
 }
 
 struct RunMetadata {
@@ -3774,8 +3774,8 @@ impl AssignWorker {
     /// so the two aren't conflated in telemetry.
     fn crash_reason(&self) -> FailureReason {
         match self.runner_config.agent.kind {
-            // The built-in engine is Codex, driven by the same driver.
-            AgentKind::Codex | AgentKind::Engine => FailureReason::CodexCrash,
+            // The Pi Dash Agent is Codex, driven by the same driver.
+            AgentKind::Codex | AgentKind::PidashAgent => FailureReason::CodexCrash,
             AgentKind::ClaudeCode
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
@@ -4061,12 +4061,12 @@ impl AssignWorker {
             {
                 Outcome::Done { status_label } => break status_label,
                 Outcome::Retry { code } => {
-                    if attempt >= crate::engine::free_quota::MAX_RETRIES {
+                    if attempt >= crate::pidash_agent::free_quota::MAX_RETRIES {
                         // The backoff budget is spent: fail with a clear
                         // message instead of failing on the first busy notice.
-                        let detail = crate::engine::free_quota::retry_exhausted_detail(
+                        let detail = crate::pidash_agent::free_quota::retry_exhausted_detail(
                             code,
-                            crate::engine::free_quota::MAX_RETRIES,
+                            crate::pidash_agent::free_quota::MAX_RETRIES,
                         );
                         let enriched = self.build_failure_detail(&detail, &bridge).await;
                         hist.append(&HistoryEntry::Footer {
@@ -4089,7 +4089,7 @@ impl AssignWorker {
                         break "failed".to_string();
                     }
                     attempt += 1;
-                    let delay = crate::engine::free_quota::backoff(attempt);
+                    let delay = crate::pidash_agent::free_quota::backoff(attempt);
                     tracing::info!(%run_id, %code, attempt, ?delay, "free-quota backoff: retrying the turn");
                     tokio::select! {
                         _ = self.cancel.cancelled() => break "cancelled".to_string(),
@@ -4517,16 +4517,16 @@ impl AssignWorker {
                     crate::codex::gateway::gateway_will_retry_notice(&method, &params)
                 {
                     let mut base: Option<String> = None;
-                    match crate::engine::free_quota::classify(&self.engine_lane(), status, &text) {
+                    match crate::pidash_agent::free_quota::classify(&self.engine_lane(), status, &text) {
                         // OpenHub free-lane stop codes: the run fails with
                         // the code's clear reason, keeping resets_at.
-                        Some(crate::engine::free_quota::Disposition::Stop(reason)) => {
+                        Some(crate::pidash_agent::free_quota::Disposition::Stop(reason)) => {
                             base = Some(reason);
                         }
                         // Free-lane retry codes: stop the engine's futile
                         // rapid retry, back off, and restart the turn. The
                         // run itself never fails on these notices.
-                        Some(crate::engine::free_quota::Disposition::Retry { code }) => {
+                        Some(crate::pidash_agent::free_quota::Disposition::Retry { code }) => {
                             bridge.interrupt().await.ok();
                             run_events.flush_before_lifecycle(&self.out).await;
                             hist.append(&HistoryEntry::Lifecycle {
@@ -4762,12 +4762,12 @@ impl AssignWorker {
                 // existing cleaning.
                 let disposition = crate::codex::gateway::gateway_status_text(&raw_base).and_then(
                     |(status, text)| {
-                        crate::engine::free_quota::classify(&self.engine_lane(), status, &text)
+                        crate::pidash_agent::free_quota::classify(&self.engine_lane(), status, &text)
                     },
                 );
                 let base = match disposition {
-                    Some(crate::engine::free_quota::Disposition::Stop(reason)) => reason,
-                    Some(crate::engine::free_quota::Disposition::Retry { code }) => {
+                    Some(crate::pidash_agent::free_quota::Disposition::Stop(reason)) => reason,
+                    Some(crate::pidash_agent::free_quota::Disposition::Retry { code }) => {
                         run_events.flush_before_lifecycle(&self.out).await;
                         hist.append(&HistoryEntry::Lifecycle {
                             ts: Utc::now(),
@@ -4923,13 +4923,13 @@ mod tests {
         insts: &[&RunnerInstance],
     ) -> RunnerSpawnCtx {
         RunnerSpawnCtx {
-            engine: crate::engine::manager::EngineManager::new(
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
                 transport.as_ref().map(|t| t.cloud_url()),
                 paths.clone(),
                 tokens.clone(),
                 None,
             ),
-            local_chat: Arc::new(crate::ipc::engine_chat::EngineChatProfile::new(
+            local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
                 daemon.dev_machine_id,
             )),
             transport,
@@ -5568,7 +5568,7 @@ mod tests {
                 runner_paths,
                 daemon_paths: paths,
                 runner_config: config.clone(),
-                engine: crate::engine::manager::EngineManager::new(
+                engine: crate::pidash_agent::manager::PidashAgentManager::new(
                     None,
                     engine_paths,
                     WorkspaceTokens::default(),
@@ -6289,7 +6289,7 @@ mod tests {
         use crate::codex::app_server::AppServer;
         use crate::codex::bridge::Bridge;
         use crate::config::schema::CliSection;
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         use tokio::process::Command;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -6302,7 +6302,7 @@ mod tests {
         runner_paths.ensure().unwrap();
 
         let engine = match lane {
-            None => crate::engine::manager::EngineManager::new(
+            None => crate::pidash_agent::manager::PidashAgentManager::new(
                 None,
                 paths_for(tmp.path()),
                 WorkspaceTokens::default(),
@@ -6311,7 +6311,7 @@ mod tests {
             Some(lane) => {
                 let lane = lane.to_string();
                 let handler: test_server::Handler = Arc::new(move |req| {
-                    if req.path == crate::engine::api::PROFILE_PATH {
+                    if req.path == crate::pidash_agent::api::PROFILE_PATH {
                         (
                             200,
                             serde_json::json!({
@@ -6331,7 +6331,7 @@ mod tests {
                     workspace_slug: Some("acme".into()),
                     ..Default::default()
                 };
-                let manager = crate::engine::manager::EngineManager::new(
+                let manager = crate::pidash_agent::manager::PidashAgentManager::new(
                     Some(&server.url),
                     paths_for(tmp.path()),
                     WorkspaceTokens::from_cli(Some(&cli)),

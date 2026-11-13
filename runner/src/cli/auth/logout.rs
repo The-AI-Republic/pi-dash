@@ -23,7 +23,7 @@ pub struct Args {
     #[arg(long)]
     pub workspace: Option<String>,
 
-    /// Sign out only the built-in engine: revoke this computer's engine
+    /// Sign out only the Pi Dash Agent: revoke this computer's engine
     /// credential. The daemon and its runners stay signed in; engine
     /// runners pause until `pidash login --engine`. The desktop app does not
     /// renew an engine signed out this way.
@@ -50,7 +50,7 @@ pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<b
             .find(|t| t.starts_with("mt_"));
         match machine_token {
             Some(mt) if !cfg.daemon.cloud_url.is_empty() => {
-                let api = crate::engine::api::EngineApi::new(&cfg.daemon.cloud_url)?;
+                let api = crate::pidash_agent::api::PidashAgentApi::new(&cfg.daemon.cloud_url)?;
                 if let Err(e) = api.revoke_credential(&mt).await {
                     // Still forget it locally, so the user is not stuck.
                     tracing::warn!("revoking the engine credential failed: {e}");
@@ -97,10 +97,10 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         crate::service::reload::notify_credentials_changed(paths).await;
         if held {
             println!(
-                "Signed out the built-in engine. Run `pidash login --engine` to sign it in again."
+                "Signed out the Pi Dash Agent. Run `pidash login --engine` to sign it in again."
             );
         } else {
-            println!("The built-in engine was not signed in; recorded it as signed out.");
+            println!("The Pi Dash Agent was not signed in; recorded it as signed out.");
         }
         return Ok(());
     }
@@ -160,7 +160,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 // revoke it with, it is forgotten locally (with a warning).
                 if cfg.is_some() && sign_out_engine(paths, args.local_only).await? {
                     crate::service::reload::notify_credentials_changed(paths).await;
-                    println!("Not logged in to any workspace; signed out the built-in engine.");
+                    println!("Not logged in to any workspace; signed out the Pi Dash Agent.");
                 } else {
                     println!("Not logged in — nothing to revoke.");
                 }
@@ -224,7 +224,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
         None => {
             runner_ops::clear_cli_token(paths).context("clearing tokens from config.toml")?;
-            println!("Logged out (the built-in engine too).");
+            println!("Logged out (the Pi Dash Agent too).");
         }
     }
     crate::service::reload::notify_credentials_changed(paths).await;
@@ -259,7 +259,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        CliSection, Config, DaemonConfig, EngineCredential, EngineSignInState,
+        CliSection, Config, DaemonConfig, PidashAgentCredential, EngineSignInState,
     };
 
     fn paths(root: &std::path::Path) -> Paths {
@@ -283,7 +283,7 @@ mod tests {
             },
             runners: vec![],
             cli: Some(CliSection {
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_left_behind".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),
@@ -328,7 +328,7 @@ mod tests {
             cli: Some(CliSection {
                 token: Some("mt_acme".into()),
                 workspace_slug: Some("acme".into()),
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_live".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),
@@ -342,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn signing_out_the_last_workspace_signs_the_engine_out_first() {
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(tmp.path());
@@ -362,7 +362,7 @@ mod tests {
         let reqs = server.requests.lock().unwrap().clone();
         let engine_revoke = reqs
             .iter()
-            .position(|r| r.path == crate::engine::api::CREDENTIAL_REVOKE_PATH)
+            .position(|r| r.path == crate::pidash_agent::api::CREDENTIAL_REVOKE_PATH)
             .expect("the engine credential was revoked");
         let token_revoke = reqs
             .iter()
@@ -380,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn signing_out_one_of_two_workspaces_leaves_the_engine_signed_in() {
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(tmp.path());
@@ -408,7 +408,7 @@ mod tests {
 
         assert!(
             server
-                .requests_to(crate::engine::api::CREDENTIAL_REVOKE_PATH)
+                .requests_to(crate::pidash_agent::api::CREDENTIAL_REVOKE_PATH)
                 .is_empty()
         );
         let cli = file::load_config(&p).unwrap().cli.unwrap();
@@ -457,7 +457,7 @@ mod tests {
     async fn a_broken_machine_token_item_is_revoked_before_it_is_forgotten() {
         use crate::config::schema::CredentialsStoreMode;
         use crate::config::secrets::{self, ITEM_WORKSPACE_PREFIX, MemoryKeyring};
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         for workspace in [Some("beta"), None] {
             let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
             let tmp = tempfile::tempdir().unwrap();
