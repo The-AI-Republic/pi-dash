@@ -3346,7 +3346,7 @@ async fn review_list(
 // ---------------------------------------------------------------------------
 
 use pidash_services::app_issues::pr_links::{
-    AttachError as PrAttachError, PrLinkRow, StoreError as PrStoreError,
+    AttachError as PrAttachError, StoreError as PrStoreError,
 };
 use pidash_services::integrations::accounts::{
     GitStore, NewProviderAccount, StoreError as GitStoreError,
@@ -4114,6 +4114,13 @@ async fn pr_create(
             return Denial::ServerError.into_response();
         }
     };
+    // Dual-write legacy row for list visibility (Django dual-write interim).
+    // attach wrote generic; list reads legacy, so ensure the mirror exists.
+    if let Err(denial) =
+        ensure_legacy_pr_link(&pool, project_id, issue_id, user_id, &link, &now).await
+    {
+        return denial.into_response();
+    }
     let tz = match actor_timezone(&pool, &user_id).await {
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
@@ -4167,6 +4174,75 @@ async fn fetch_pr_owned(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<PrLinkOw
         updated_at: rfc3339(&row.updated_at),
         created_by_id: row.created_by_id,
     })
+}
+
+/// Dual-write legacy `github_pull_request_links` mirror for the app-issues
+/// list (pre-PDASHOSS01-355 read path). Django's interim keeps both tables
+/// (`attach_pull_request` creates legacy then mirrors to generic); Rust's
+/// attach now writes generic only, so the handler ensures the legacy row
+/// exists when a new PR is attached. Idempotent by (owner, name, number).
+async fn ensure_legacy_pr_link(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    issue_id: Uuid,
+    user_id: Uuid,
+    link: &pidash_services::app_issues::pr_links::PrLinkRow,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Result<(), Denial> {
+    use sea_orm::ActiveModelTrait as _;
+    let db = orm(pool);
+    let pr_number_i32 = i32::try_from(link.pr_number).map_err(|_| Denial::ServerError)?;
+    // Legacy row exists? Django would have existed via the legacy check.
+    let existing: Option<github_pull_request_links::Model> =
+        github_pull_request_links::Entity::find()
+            .filter(github_pull_request_links::Column::DeletedAt.is_null())
+            .filter(github_pull_request_links::Column::RepoOwner.eq(link.repo_owner.clone()))
+            .filter(github_pull_request_links::Column::RepoName.eq(link.repo_name.clone()))
+            .filter(github_pull_request_links::Column::PrNumber.eq(pr_number_i32))
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    let workspace_id = pidash_services::read::workspace_of(pool, &project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let legacy_state = if link.state == "merged" {
+        "closed".to_owned()
+    } else {
+        link.state.clone()
+    };
+    let pr_updated_at = link
+        .pr_updated_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+    let now_fixed = now.fixed_offset();
+    github_pull_request_links::ActiveModel {
+        id: Set(link.id),
+        created_at: Set(now_fixed),
+        updated_at: Set(now_fixed),
+        deleted_at: Set(None),
+        repo_owner: Set(link.repo_owner.clone()),
+        repo_name: Set(link.repo_name.clone()),
+        pr_number: Set(pr_number_i32),
+        url: Set(link.url.clone()),
+        title: Set(link.title.clone()),
+        state: Set(legacy_state),
+        merged: Set(link.merged),
+        draft: Set(link.draft),
+        pr_updated_at: Set(pr_updated_at),
+        created_by_id: Set(Some(user_id)),
+        issue_id: Set(issue_id),
+        project_id: Set(project_id),
+        updated_by_id: Set(None),
+        workspace_id: Set(workspace_id),
+    }
+    .insert(&db)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(())
 }
 
 /// `DELETE github-pull-requests/{pk}/` (`github_pr.py:66-73`):
@@ -4235,13 +4311,8 @@ async fn pr_destroy(
     {
         return Denial::ServerError.into_response();
     }
-    // Enqueue legacy soft-delete.
-    let pr_message = pidash_jobs::TaskMessage::new(
-        pidash_services::app_issues::pr_links::SOFT_DELETE_TASK,
-        Vec::new(),
-        serde_json::json!({"model": "githubpullrequestlink", "id": ctx.pk.to_string()}),
-    );
-    enqueue_message(&ctx.pool, pr_message).await;
+    // Enqueue legacy soft-delete (`soft_delete_related_objects` shape).
+    enqueue_soft_delete(&ctx.pool, "githubpullrequestlink", &ctx.pk).await;
     // Cascade to matching review (provider github, same namespace/repo/number).
     let review = git_code_review_links::Entity::find()
         .filter(git_code_review_links::Column::DeletedAt.is_null())
@@ -4273,12 +4344,7 @@ async fn pr_destroy(
             {
                 return Denial::ServerError.into_response();
             }
-            let review_message = pidash_jobs::TaskMessage::new(
-                pidash_services::app_issues::pr_links::SOFT_DELETE_TASK,
-                Vec::new(),
-                serde_json::json!({"model": "gitcodereviewlink", "id": review_row.id.to_string()}),
-            );
-            enqueue_message(&ctx.pool, review_message).await;
+            enqueue_soft_delete(&ctx.pool, "gitcodereviewlink", &review_row.id).await;
         }
         Ok(None) => {}
         Err(_) => return Denial::ServerError.into_response(),
