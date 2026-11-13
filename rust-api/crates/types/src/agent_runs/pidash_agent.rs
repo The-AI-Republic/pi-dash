@@ -37,7 +37,7 @@ impl ManagedRunnerReason {
     pub const LLM_CONFIG_MISSING: &'static str = "llm_config_missing";
     /// The viewer's session predates the gateway scopes and cannot acquire them.
     pub const GATEWAY_SCOPES_MISSING: &'static str = "gateway_scopes_missing";
-    /// The viewer's provider is BYOK, which the desktop engine does not serve
+    /// The viewer's provider is BYOK, which the Pi Dash Agent does not serve
     /// in the MVP (no stored key is ever returned to a client).
     pub const BYOK_UNSUPPORTED: &'static str = "byok_not_supported_on_desktop";
     /// The desktop is connected but has not enrolled a runner for this project

@@ -521,7 +521,7 @@ pub async fn daemon_engine_status() -> Result<EngineStatusInfo, String> {
     }
 }
 
-/// The owner's "Pause the built-in engine" switch for this computer
+/// The owner's "Pause the Pi Dash Agent" switch for this computer
 /// (design §8). The daemon asks the server and answers with the engine
 /// status, pause state included.
 #[tauri::command]
@@ -556,7 +556,7 @@ pub async fn daemon_engine_settings_set(
     }
 }
 
-/// Turn the built-in engine on for a project (design §5).
+/// Turn the Pi Dash Agent on for a project (design §5).
 #[tauri::command]
 pub async fn daemon_engine_runner_add(
     workspace: String,
@@ -601,7 +601,7 @@ pub struct LocalRunner {
     pub workspace_slug: Option<String>,
     pub project_slug: Option<String>,
     pub working_dir: PathBuf,
-    /// `agent.kind`: `engine` for the built-in engine.
+    /// `agent.kind`: `engine` for the Pi Dash Agent.
     pub agent: String,
 }
 

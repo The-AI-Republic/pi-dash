@@ -76,7 +76,7 @@ pub struct RunUsability {
 /// Mirror of the annotated `.filter(Q(...) | Q(...) | ...)` for private
 /// runners; non-private runners see nothing.
 ///
-/// Built-in engine runners without `engine_team_runs` use the narrower
+/// Pi Dash Agent runners without `engine_team_runs` use the narrower
 /// PO-3 rule: owner-created runs, plus automatic runs on owner issues or
 /// from owner-authored bindings. Engines with `engine_team_runs` fall
 /// back to the ordinary own-agent rule.

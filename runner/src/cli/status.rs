@@ -42,7 +42,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         },
     };
 
-    // The machine-level built-in engine state (design §4.3), from the
+    // The machine-level Pi Dash Agent state (design §4.3), from the
     // daemon when it answers.
     let engine = if daemon.is_some() {
         engine_status(&socket).await

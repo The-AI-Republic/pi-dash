@@ -1,4 +1,4 @@
-//! `pidash engine` — the built-in agent engine that ships with the CLI.
+//! `pidash engine` — the Pi Dash Agent engine that ships with the CLI.
 //!
 //! - `pidash engine install` places this release's `engine/<version>/`
 //!   directory next to `pidash`. The cargo-dist shell and PowerShell

@@ -99,7 +99,7 @@ struct TokenSuccess {
     #[serde(default)]
     user_email: Option<String>,
     /// Issued with the daemon credential when the instance can serve the
-    /// built-in engine (design §4.3).
+    /// Pi Dash Agent (design §4.3).
     #[serde(default)]
     engine_credential: Option<IssuedPidashAgentCredential>,
     #[serde(

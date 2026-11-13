@@ -93,10 +93,10 @@ pub struct PidashAgentProfile {
     pub top_up_url: String,
 }
 
-/// Describe the model endpoint the desktop engine may call
+/// Describe the model endpoint the Pi Dash Agent may call
 /// (`pidash_agent_profile_for_user`, `model_provider.py:71-89`).
 ///
-/// CE has exactly one lane, BYOK, and the desktop engine deliberately does
+/// CE has exactly one lane, BYOK, and the Pi Dash Agent deliberately does
 /// not serve it: the stored key is decrypted only inside a server process
 /// at the moment of use and the API has no read path for it, so honouring
 /// BYOK on the desktop would add the first endpoint returning a stored key
@@ -155,7 +155,7 @@ impl std::fmt::Display for PidashAgentUnavailable {
 
 impl std::error::Error for PidashAgentUnavailable {}
 
-/// Return the desktop engine's model credential
+/// Return the Pi Dash Agent's model credential
 /// (`pidash_agent_credential_for_user`, `model_provider.py:92-108`).
 ///
 /// CE has no lane the desktop can use, so there is nothing to hand out.

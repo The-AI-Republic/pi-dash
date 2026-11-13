@@ -19,7 +19,7 @@
 //!   touches, XACK, plan), the sliced eviction-aware wait, PEL-marker
 //!   discipline, 200 envelope.
 //!
-//! # Built-in engine additions (#2910, NEWPIDASH-50)
+//! # Pi Dash Agent additions (#2910, NEWPIDASH-50)
 //!
 //! * Open stores the authenticating token id (`machine_token_id`). The
 //!   one session serves every workspace on the machine (§4.9): any

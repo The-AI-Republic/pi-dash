@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Dispatch rules for built-in engine runners (#2903, `dispatch_rules.py`).
+//! Dispatch rules for Pi Dash Agent runners (#2903, `dispatch_rules.py`).
 //!
 //! Minimal port: releasing queued locality pins when an engine stops
 //! taking pod work, and the pause flip effects. Drains run after

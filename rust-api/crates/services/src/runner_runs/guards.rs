@@ -386,7 +386,7 @@ pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> Simpl
 /// owner, involving their owner (issue created by, or assigned through a
 /// live `IssueAssignee` row), or scheduler work authored by their owner.
 ///
-/// Built-in engine runners without `engine_team_runs` use the narrower
+/// Pi Dash Agent runners without `engine_team_runs` use the narrower
 /// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
 /// (`trigger NOT IN HUMAN_TRIGGERS`) on owner issues or from
 /// owner-authored bindings — the `owner_id` arm is dropped.

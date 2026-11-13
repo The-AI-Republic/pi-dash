@@ -465,7 +465,7 @@ fn pod_dispatch_value(value: Option<&JVal>) -> Option<String> {
     }
 }
 
-/// Whether a runner is a built-in engine runner (`provisioning` check,
+/// Whether a runner is a Pi Dash Agent runner (`provisioning` check,
 /// `Runner.is_pidash_agent`, `models.py` #2903).
 fn is_pidash_agent_runner(executor: &RunnerOwned) -> bool {
     executor.provisioning == "desktop_bundled"
