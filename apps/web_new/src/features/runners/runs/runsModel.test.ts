@@ -77,7 +77,7 @@ describe("executor presentation", () => {
   it("separates the cloud agent from every local executor", () => {
     expect(executorLabel("cloud_agent")).toBe("Cloud agent run (retired)");
     expect(executorLabel("local_runner")).toBe("Local runner");
-    expect(executorLabel("managed_runner")).toBe("Built-in engine");
+    expect(executorLabel("managed_runner")).toBe("Pi Dash Agent");
     expect(executorTone("cloud_agent")).toBe("neutral");
     expect(executorTone("managed_runner")).toBe("neutral");
   });
@@ -150,17 +150,17 @@ describe("run executor label from the runner", () => {
 
   it("names a run on an engine by its machine", () => {
     expect(runExecutorLabel({ executor_kind: "local_runner", runner: "r-engine" }, runners)).toBe(
-      "Built-in engine · Work laptop"
+      "Pi Dash Agent · Work laptop"
     );
     expect(runExecutorLabel({ executor_kind: "managed_runner", runner: "r-engine" }, runners)).toBe(
-      "Built-in engine · Work laptop"
+      "Pi Dash Agent · Work laptop"
     );
   });
 
   it("falls back to the kind label for own-agent, unknown or unassigned runners", () => {
     expect(runExecutorLabel({ executor_kind: "local_runner", runner: "r-own" }, runners)).toBe("Local runner");
     expect(runExecutorLabel({ executor_kind: "local_runner", runner: "gone" }, runners)).toBe("Local runner");
-    expect(runExecutorLabel({ executor_kind: "managed_runner", runner: null }, undefined)).toBe("Built-in engine");
+    expect(runExecutorLabel({ executor_kind: "managed_runner", runner: null }, undefined)).toBe("Pi Dash Agent");
     expect(runExecutorLabel({ executor_kind: "cloud_agent", runner: null }, runners)).toBe("Cloud agent run (retired)");
   });
 });

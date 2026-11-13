@@ -169,7 +169,7 @@ describe("DevMachinesScreen", () => {
     });
     setup({ onUpdate, machines: [machine("one", { engine_paused_by_owner: false })], runners: [engineRunner("one")] });
     fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Pause the built-in engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause the Pi Dash Agent" }));
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith("one", { engine_paused_by_owner: true }));
     await waitFor(() =>
       expect(notifyError).toHaveBeenCalledWith(MACHINE_ACTION_FAILED_TITLE, MACHINE_SETTING_FAILED_BODY.forbidden)
@@ -177,14 +177,14 @@ describe("DevMachinesScreen", () => {
   });
 
   it("removes one engine from its project through a confirmation", async () => {
-    const onRemoveEngine = vi.fn(async (_id: string) => undefined);
-    setup({ onRemoveEngine, machines: [machine("one")], runners: [engineRunner("one")] });
+    const onRemovePidashAgent = vi.fn(async (_id: string) => undefined);
+    setup({ onRemovePidashAgent, machines: [machine("one")], runners: [engineRunner("one")] });
     fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove the built-in engine from P" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove the Pi Dash Agent from P" }));
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent("folder on the computer is kept");
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove from project" }));
-    await waitFor(() => expect(onRemoveEngine).toHaveBeenCalledWith("engine-one"));
+    await waitFor(() => expect(onRemovePidashAgent).toHaveBeenCalledWith("engine-one"));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 

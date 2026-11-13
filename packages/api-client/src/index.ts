@@ -754,11 +754,11 @@ export {
 } from "./contracts/assistant-registry.js";
 export type { McpServerInput, McpServerPatch } from "./contracts/assistant-registry.js";
 export {
-  AgentProfile,
+  PidashAgentProfile,
   AgentToken,
   desktopSessionRequiredFrom,
-  getAgentProfile,
-  postAgentToken,
+  getPidashAgentProfile,
+  postPidashAgentToken,
 } from "./contracts/assistant-desktop.js";
 export type { PostAgentTokenOptions } from "./contracts/assistant-desktop.js";
 export {
@@ -1286,8 +1286,8 @@ export {
   DevMachine,
   DevMachineList,
   DevMachineMini,
-  ENGINE_AUTO_PAUSE_REASONS,
-  ENGINE_SIGN_IN_STATES,
+  PIDASH_AGENT_AUTO_PAUSE_REASONS,
+  PIDASH_AGENT_SIGN_IN_STATES,
   MergeResult,
   ReplaceCandidate,
   ReplaceCandidates,
@@ -1299,15 +1299,15 @@ export {
   mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
-  signOutDevMachineEngine,
+  signOutDevMachinePidashAgent,
   updateDevMachine,
 } from "./contracts/dev-machines.js";
 export type {
   CreateRunnerOnMachineInput,
   CreateRunnerStatusValue,
   DevMachinePatch,
-  EngineAutoPauseReason,
-  EngineSignInState,
+  PidashAgentAutoPauseReason,
+  PidashAgentSignInState,
 } from "./contracts/dev-machines.js";
 export {
   Runner,

@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { LocalChatApi, LocalChatFrame, LocalChatSessionRecord } from "../../../core/platform/index.js";
 import {
   BUILTIN_CHAT_ID,
-  builtinRunnerRow,
+  pidashAgentRunnerRow,
   chatRoleFor,
   createFrameFolder,
   createLocalChatTransport,
@@ -185,8 +185,8 @@ describe("row mapping", () => {
     expect(message.session).toBe("s-1");
   });
 
-  it("presents the built-in engine as an always-online runner", () => {
-    const runner = builtinRunnerRow();
+  it("presents the Pi Dash Agent as an always-online runner", () => {
+    const runner = pidashAgentRunnerRow();
     expect(runner.id).toBe(BUILTIN_CHAT_ID);
     expect(runner.status).toBe("online");
     expect(runner.enrolled_at).not.toBeNull();

@@ -148,13 +148,13 @@ describe("DevMachinesTable", () => {
     expect(screen.queryByTestId("dev-machine-details")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: MACHINE_DETAILS_SHOW }));
     const details = screen.getByTestId("dev-machine-details");
-    expect(within(details).getByRole("region", { name: "Built-in engine" })).toHaveTextContent("PROJ");
+    expect(within(details).getByRole("region", { name: "Pi Dash Agent" })).toHaveTextContent("PROJ");
     expect(within(details).getByRole("region", { name: "Own-agent runners" })).toHaveTextContent("claude-box · WEB");
     expect(details).not.toHaveTextContent("elsewhere");
     expect(details).not.toHaveTextContent("gone-agent");
     // An older server reports no engine controls, so only rename is offered.
     expect(within(details).getByRole("button", { name: "Rename" })).toBeInTheDocument();
-    expect(within(details).queryByRole("button", { name: "Pause the built-in engine" })).not.toBeInTheDocument();
+    expect(within(details).queryByRole("button", { name: "Pause the Pi Dash Agent" })).not.toBeInTheDocument();
     expect(within(details).queryByRole("switch")).not.toBeInTheDocument();
     expect(within(details).queryByRole("button", { name: "Sign out the engine" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: MACHINE_DETAILS_HIDE }));
@@ -171,17 +171,17 @@ describe("DevMachinesTable", () => {
     };
     setup({ machines: [machine("one", engine)], onSetting, runners: [runner("e1", "one", "desktop_bundled", "P")] });
     fireEvent.click(screen.getByRole("button", { name: MACHINE_DETAILS_SHOW }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume the built-in engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume the Pi Dash Agent" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "pause", paused: false }));
     fireEvent.click(screen.getByRole("switch"));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "team-runs", enabled: true }));
     fireEvent.click(screen.getByRole("button", { name: "Sign out the engine" }));
-    expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "sign-out-engine" }));
+    expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "sign-out-pidash-agent" }));
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "rename" }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove the built-in engine from P" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove the Pi Dash Agent from P" }));
     expect(onSetting).toHaveBeenLastCalledWith(
-      expect.objectContaining({ kind: "remove-engine", runner: expect.objectContaining({ id: "e1" }) })
+      expect.objectContaining({ kind: "remove-pidash-agent", runner: expect.objectContaining({ id: "e1" }) })
     );
   });
 

@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const contracts = vi.hoisted(() => ({
   getSttConfig: vi.fn(),
-  getAgentProfile: vi.fn(),
+  getPidashAgentProfile: vi.fn(),
 }));
 const platformState = vi.hoisted(() => ({
   api: null as unknown,
@@ -151,7 +151,7 @@ beforeEach(() => {
     has_api_key: false,
     last_verified_at: null,
   });
-  contracts.getAgentProfile.mockResolvedValue({
+  contracts.getPidashAgentProfile.mockResolvedValue({
     managed_runner_enabled: true,
     lane: "local",
     base_url: "",
@@ -168,7 +168,7 @@ afterEach(() => {
   resetLocalChatTransportForTests();
   resetAppClient();
   globalThis.localStorage.clear();
-  contracts.getAgentProfile.mockReset();
+  contracts.getPidashAgentProfile.mockReset();
 });
 
 function approvalFrame(): LocalChatFrame {

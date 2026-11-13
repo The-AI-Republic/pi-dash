@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // The one-time notices after moving to Pi Dash on this computer (design
 // §13): the older builds' task folders left on disk, and the projects whose
-// built-in engine now takes pod work (PO-11), each with a switch to turn
+// Pi Dash Agent now takes pod work (PO-11), each with a switch to turn
 // that off. "Got it" dismisses what was shown, for good.
 
 import { Button, Dialog, Switch } from "@pidash/kit";
@@ -109,7 +109,7 @@ export function MigrationNoticesDialog(props: { account: string }): React.ReactE
           {notices.pod_member_projects.length > 0 ? (
             <section className="flex flex-col gap-(--space-2)">
               <p className="text-body text-(--text)">
-                The built-in engine on this computer now takes work from these projects&apos; pods. Your issues set to
+                The Pi Dash Agent on this computer now takes work from these projects&apos; pods. Your issues set to
                 “Runner” there can go to it and spend your wallet, also while the app is closed. Turn pod work off to
                 have it run only the issues pinned to it.
               </p>

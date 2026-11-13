@@ -2449,10 +2449,13 @@ describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
   });
 
   it("reads rail section headers trimmed", async () => {
-    const headers = stubLocator({ count: vi.fn(async () => 2), innerText: vi.fn(async () => " Built-in ") });
+    const headers = stubLocator({ count: vi.fn(async () => 2), innerText: vi.fn(async () => " Pi Dash Agent ") });
     const rail = stubLocator({ locator: vi.fn(() => headers) });
     const page = pageStub({ getByTestId: vi.fn(() => rail) });
-    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual(["Built-in", "Built-in"]);
+    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual([
+      "Pi Dash Agent",
+      "Pi Dash Agent",
+    ]);
     expect(rail.locator).toHaveBeenCalledWith("div.uppercase");
   });
 

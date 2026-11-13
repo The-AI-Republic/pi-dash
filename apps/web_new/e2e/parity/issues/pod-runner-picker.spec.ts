@@ -466,7 +466,7 @@ test(
       await test.step("no executor row is offered", async () => {
         await driver.propertyOpenPicker("Runs on");
         const options = await driver.pickerOptionTexts();
-        expect(options.some((option) => /cloud agent|pi dash agent/i.test(option))).toBe(false);
+        expect(options.some((option) => /cloud agent/i.test(option))).toBe(false);
         await driver.pickerPressEscape();
       });
 

@@ -11,7 +11,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const contracts = vi.hoisted(() => ({ getAgentProfile: vi.fn() }));
+const contracts = vi.hoisted(() => ({ getPidashAgentProfile: vi.fn() }));
 const platformState = vi.hoisted(() => ({ localChat: true }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -31,7 +31,7 @@ vi.mock("../../../core/platform/index.js", () => ({
 
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
 const { testClient } = await import("./harness.js");
-const { LOCAL_CONTACT_LABEL, LOCAL_CONTACT_NAME, hasLocalChat, localContactAvailability, useLocalContact } =
+const { LOCAL_CONTACT_LABEL, PIDASH_AGENT_NAME, hasLocalChat, pidashAgentContactAvailability, usePidashAgentContact } =
   await import("./localContact.js");
 
 const Provider = QueryClientProvider as unknown as React.ComponentType<{
@@ -42,7 +42,7 @@ const Provider = QueryClientProvider as unknown as React.ComponentType<{
 function setup() {
   const client = testClient();
   const wrapper = ({ children }: { children: React.ReactNode }) => <Provider client={client}>{children}</Provider>;
-  return renderHook(() => useLocalContact(), { wrapper });
+  return renderHook(() => usePidashAgentContact(), { wrapper });
 }
 
 function profile(available: boolean, reason_code = ""): { available: boolean; reason_code: string } {
@@ -51,22 +51,22 @@ function profile(available: boolean, reason_code = ""): { available: boolean; re
 
 beforeEach(() => {
   createAppClient("https://api.test", {} as never);
-  contracts.getAgentProfile.mockResolvedValue(profile(true));
+  contracts.getPidashAgentProfile.mockResolvedValue(profile(true));
   platformState.localChat = false;
 });
 
 afterEach(() => {
-  contracts.getAgentProfile.mockReset();
+  contracts.getPidashAgentProfile.mockReset();
   resetAppClient();
 });
 
-describe("localContactAvailability", () => {
+describe("pidashAgentContactAvailability", () => {
   it("translates an available answer and a refusal", () => {
-    expect(localContactAvailability(profile(true))).toEqual({ unavailableReason: null });
-    expect(localContactAvailability(profile(false, "managed_runner_disabled"))).toEqual({
-      unavailableReason: "The built-in agent is switched off on this server.",
+    expect(pidashAgentContactAvailability(profile(true))).toEqual({ unavailableReason: null });
+    expect(pidashAgentContactAvailability(profile(false, "managed_runner_disabled"))).toEqual({
+      unavailableReason: "The Pi Dash Agent is switched off on this server.",
     });
-    expect(localContactAvailability(profile(false, "odd_code"))).toEqual({ unavailableReason: "odd_code" });
+    expect(pidashAgentContactAvailability(profile(false, "odd_code"))).toEqual({ unavailableReason: "odd_code" });
   });
 });
 
@@ -78,27 +78,27 @@ describe("hasLocalChat", () => {
   });
 });
 
-describe("useLocalContact", () => {
+describe("usePidashAgentContact", () => {
   it("offers no contact and reads nothing without the capability", () => {
     const { result } = setup();
     expect(result.current).toEqual([]);
-    expect(contracts.getAgentProfile).not.toHaveBeenCalled();
+    expect(contracts.getPidashAgentProfile).not.toHaveBeenCalled();
   });
 
   it("offers a linked contact when the agent is available", async () => {
     platformState.localChat = true;
-    contracts.getAgentProfile.mockResolvedValue(profile(true));
+    contracts.getPidashAgentProfile.mockResolvedValue(profile(true));
     const { result } = setup();
     await waitFor(() => expect(result.current[0]?.unavailableReason).toBeNull());
     expect(result.current).toEqual([
-      { id: "pidash-builtin", name: LOCAL_CONTACT_NAME, label: LOCAL_CONTACT_LABEL, unavailableReason: null },
+      { id: "pidash-builtin", name: PIDASH_AGENT_NAME, label: LOCAL_CONTACT_LABEL, unavailableReason: null },
     ]);
   });
 
   it("offers the contact disabled with the server's reason while the check is out", async () => {
     platformState.localChat = true;
     let answer: (value: { available: boolean; reason_code: string }) => void = () => undefined;
-    contracts.getAgentProfile.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    contracts.getPidashAgentProfile.mockReturnValue(new Promise((resolve) => (answer = resolve)));
     const { result } = setup();
     // Before the answer lands there is no reason: the entry reads as available
     // until the server says otherwise.
@@ -113,14 +113,14 @@ describe("useLocalContact", () => {
 
   it("reads a failed check as unavailable in the failure's own words", async () => {
     platformState.localChat = true;
-    contracts.getAgentProfile.mockRejectedValue(new Error("Desktop session required"));
+    contracts.getPidashAgentProfile.mockRejectedValue(new Error("Desktop session required"));
     const { result } = setup();
     await waitFor(() => expect(result.current[0]?.unavailableReason).toBe("Desktop session required"));
   });
 
   it("reads an unreadable failure as a plain unavailability", async () => {
     platformState.localChat = true;
-    contracts.getAgentProfile.mockRejectedValue({ code: 500 });
+    contracts.getPidashAgentProfile.mockRejectedValue({ code: 500 });
     const { result } = setup();
     await waitFor(() => expect(result.current[0]?.unavailableReason).toBe("The built-in agent is unavailable."));
   });

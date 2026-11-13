@@ -105,7 +105,7 @@ test(
           .toEqual(expect.arrayContaining([online.name, offline.name]));
         const links = await driver.desktopRuntimeRailChatLinks();
         expect(links.map((link) => link.href).join("\n")).not.toContain("pidash-builtin");
-        expect(await driver.desktopRuntimeRailSectionHeaders()).not.toContain("Built-in");
+        expect(await driver.desktopRuntimeRailSectionHeaders()).not.toContain("Pi Dash Agent");
       });
 
       await test.step("the desktop availability gate refuses the web session", async () => {

@@ -7,7 +7,7 @@
 // limits and messages, the short-code shaper, the visibility options, the
 // automated-run policy math, the emblem value shapes and the parsed failure
 // codes. There is no executor choice: projects run on runners and the
-// default pod decides who runs the work (built-in engine design §6), so the
+// default pod decides who runs the work (Pi Dash Agent design §6), so the
 // tab neither shows nor writes `default_agent_executor`.
 
 import { isApiError, type ProjectSettingsDetail, type ProjectUpdateInput } from "@pidash/api-client";

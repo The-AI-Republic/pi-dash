@@ -24,8 +24,8 @@
 // the message rendering runs in the desktop build.
 import { test, expect } from "../fixtures";
 import {
-  cloudAgentProfileRaw,
-  cloudAgentTokenRaw,
+  pidashAgentProfileRaw,
+  pidashAgentTokenRaw,
   cloudAssistantCreateByokRaw,
   cloudCsrfRaw,
   cloudDesktopAccessToken,
@@ -53,10 +53,10 @@ test(
   { tag: specTags(["CLOUD-040"]) },
   async () => {
     const session = await cloudDevLogin(uniqueEmail("parity-440-agent"), "Agent Refused");
-    const profile = await cloudAgentProfileRaw(session.cookie);
+    const profile = await pidashAgentProfileRaw(session.cookie);
     expect(profile.status).toBe(403);
     expect(profile.payload["error"]).toBe("desktop_session_required");
-    const token = await cloudAgentTokenRaw(session.cookie);
+    const token = await pidashAgentTokenRaw(session.cookie);
     expect(token.status).toBe(403);
     expect(token.payload["error"]).toBe("desktop_session_required");
   }
@@ -70,7 +70,7 @@ test(
     const session = await cloudDevLogin(email, "Agent Classify");
     const desktopCookie = `pidash_access=${await cloudDesktopAccessToken(email)}`;
 
-    const missing = await cloudAgentProfileRaw(desktopCookie);
+    const missing = await pidashAgentProfileRaw(desktopCookie);
     expect(missing.status).toBe(200);
     expect(missing.payload["available"]).toBe(false);
     expect(missing.payload["reason_code"]).toBe("llm_config_missing");
@@ -84,14 +84,14 @@ test(
     });
     expect(created.status).toBe(201);
 
-    const byok = await cloudAgentProfileRaw(desktopCookie);
+    const byok = await pidashAgentProfileRaw(desktopCookie);
     expect(byok.status).toBe(200);
     expect(byok.payload["available"]).toBe(false);
     expect(byok.payload["lane"]).toBe("byok");
     expect(byok.payload["reason_code"]).toBe("byok_not_supported_on_desktop");
 
     // The credential endpoint answers with the same code the profile showed.
-    const token = await cloudAgentTokenRaw(desktopCookie);
+    const token = await pidashAgentTokenRaw(desktopCookie);
     expect(token.status).toBe(409);
     expect(token.payload["error"]).toBe("byok_not_supported_on_desktop");
   }

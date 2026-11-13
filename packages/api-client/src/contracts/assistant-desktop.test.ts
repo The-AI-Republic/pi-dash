@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
 import { ApiError } from "../errors.js";
-import { desktopSessionRequiredFrom, getAgentProfile, postAgentToken } from "./assistant-desktop.js";
+import { desktopSessionRequiredFrom, getPidashAgentProfile, postPidashAgentToken } from "./assistant-desktop.js";
 
 function stubClient(impl: {
   getJson?: ApiClient["getJson"];
@@ -38,7 +38,7 @@ describe("desktop profile and token", () => {
         };
       }) as ApiClient["getJson"],
     });
-    const profile = await getAgentProfile(client);
+    const profile = await getPidashAgentProfile(client);
     expect(calls).toEqual(["/api/users/me/ai-assistant/agent-profile/"]);
     expect(profile.available).toBe(true);
   });
@@ -55,7 +55,7 @@ describe("desktop profile and token", () => {
         return { data: { token: "tok", expires_at: "2026-10-16T15:32:05+00:00" }, status: 200, url };
       }) as ApiClient["sendJson"],
     });
-    const token = await postAgentToken(client);
+    const token = await postPidashAgentToken(client);
     expect(calls[0]?.url).toBe("/api/users/me/ai-assistant/agent-token/");
     expect(calls[0]?.json).toEqual({});
     expect(calls[0]?.headers).toBeUndefined();
@@ -70,7 +70,7 @@ describe("desktop profile and token", () => {
         return { data: { token: "tok", expires_at: "2026-10-16T15:32:05+00:00" }, status: 200, url };
       }) as ApiClient["sendJson"],
     });
-    await postAgentToken(client, { csrfToken: "cloud-csrf" });
+    await postPidashAgentToken(client, { csrfToken: "cloud-csrf" });
     expect(calls[0]?.headers).toEqual({ "X-CSRFTOKEN": "cloud-csrf" });
   });
 });
