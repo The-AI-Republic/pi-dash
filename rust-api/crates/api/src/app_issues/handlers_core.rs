@@ -132,9 +132,7 @@ use pidash_services::dispatch::admission::{
     managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
     HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
-};
+use pidash_services::dispatch::policy::{managed_runner_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -2681,11 +2679,10 @@ async fn run_validate(
             match AgentExecutorKind::from_value(executor) {
                 None => executor_returns = true,
                 Some(kind) => {
-                    if kind == AgentExecutorKind::CloudAgent
-                        && !cloud_agent_is_configured(&state.settings().cloud_agent)
-                    {
-                        executor_returns = true;
-                    } else if kind == AgentExecutorKind::ManagedRunner {
+                    // P1 (agent naming convention): a `cloud_agent` write
+                    // on this non-pod path is normalized, not gated on
+                    // CLOUD_AGENT_ENABLED — it must not block the run.
+                    if kind == AgentExecutorKind::ManagedRunner {
                         let project = match instance {
                             Some(row) => Some(row.resolved_project()),
                             None => match project_id {

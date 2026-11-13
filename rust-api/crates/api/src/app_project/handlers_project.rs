@@ -4648,7 +4648,10 @@ async fn insert_project(
         Some(executor) => executor.to_owned(),
         None => {
             let candidate = state.settings().default_agent_executor.clone();
-            if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
+            // P1 (agent naming convention): `DEFAULT_AGENT_EXECUTOR=cloud_agent`
+            // no longer creates a cloud-default project — it falls through
+            // to `local_runner`.
+            if ["local_runner", "managed_runner"].contains(&candidate.as_str()) {
                 candidate
             } else {
                 "local_runner".to_owned()

@@ -136,9 +136,7 @@ use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::dispatch::admission::{
     self as admission_q, LlmProfile, ManagedRunnerProbe, HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
-};
+use pidash_services::dispatch::policy::{managed_runner_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -6635,9 +6633,10 @@ async fn run_issue_create_validate(
     if !pod_pure_fail {
         if let Some(Some(executor)) = agent_executor {
             if let Some(kind) = AgentExecutorKind::from_value(executor) {
-                let cloud_blocked = kind == AgentExecutorKind::CloudAgent
-                    && !cloud_agent_is_configured(&state.settings().cloud_agent);
-                if !cloud_blocked && kind == AgentExecutorKind::ManagedRunner {
+                // P1 (agent naming convention): a `cloud_agent` write
+                // on this non-pod path is normalized, not gated on
+                // CLOUD_AGENT_ENABLED.
+                if kind == AgentExecutorKind::ManagedRunner {
                     fetched_project = fetch_issue_project(pool, project_id)
                         .await
                         .map_err(|_| db_error())?;

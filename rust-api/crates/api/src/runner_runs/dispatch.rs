@@ -684,16 +684,11 @@ fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
             json_response(StatusCode::CONFLICT, body)
         }
         ExecutionFieldsError::Resolve(resolve) => {
+            // P1: only `UnknownExecutor` remains — cloud resolves to local.
             let (error, code) = match resolve {
                 pidash_services::dispatch::policy::ResolveExecutorError::UnknownExecutor => (
                     "unknown agent executor".to_owned(),
                     "unknown agent executor".to_owned(),
-                ),
-                pidash_services::dispatch::policy::ResolveExecutorError::CloudAgent(
-                    unavailable,
-                ) => (
-                    unavailable.message().to_owned(),
-                    unavailable.code().to_owned(),
                 ),
             };
             let body = serde_json::to_value(&ErrorCode {
