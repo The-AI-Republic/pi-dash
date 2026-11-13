@@ -14,7 +14,7 @@
 //! Anything else in a schema is a [`SpecError`] (fail-closed: the golden
 //! is the contract, so an unknown shape is a bug, never a guess).
 
-use super::schemas::ToolSchema;
+use super::usage_table::ToolSchema;
 use pidash_types::dispatch::output::{CloudAgentOutput, Outcome};
 use serde_json::{Map, Value};
 
@@ -686,8 +686,8 @@ fn validate_output_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oss_worker::model_runtime::provider::{retry_message, RetryContent};
-    use crate::oss_worker::model_runtime::schemas::Golden;
+    use crate::cloud_agent::provider::{retry_message, RetryContent};
+    use crate::cloud_agent::usage_table::Golden;
 
     /// Render through the production retry path
     /// (`provider::retry_message`), the way the loop renders tool and

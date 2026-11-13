@@ -36,7 +36,7 @@
 //!   `min(0.5 * 2^n, 8) * (1 - 0.25 * rand)`; `retry-after-ms` or
 //!   `retry-after` (seconds, float, or HTTP-date) honoured when within
 //!   `(0, 60]`.
-//! * Usage extraction delegates to [`crate::oss_worker::model_runtime::usage`]; the
+//! * Usage extraction delegates to [`crate::cloud_agent::usage`]; the
 //!   per-lane `details` shapes are read from each model's `_map_usage`.
 
 use serde_json::{Map, Value};
@@ -405,6 +405,41 @@ pub fn transform_anthropic_schema(schema: &Value) -> Value {
     transform_anthropic_node(schema)
 }
 
+/// Transform one tool schema for the lane and infer `strict`
+/// (`_customize_tool_def` through the model profile; the turn path never
+/// sets `strict`). The assistant's leg conversion calls this so the
+/// caller holds no engine logic (agent naming convention P2).
+pub fn wire_tool_for(lane: &Lane, name: &str, description: &str, parameters: &Value) -> WireTool {
+    if matches!(lane, Lane::Anthropic { .. }) {
+        WireTool {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            parameters: transform_anthropic_schema(parameters),
+            strict: None,
+        }
+    } else {
+        let (parameters, _compatible) = transform_openai_schema(parameters);
+        WireTool {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            parameters,
+            strict: None,
+        }
+    }
+}
+
+/// Convert a batch of `(name, description, parameters)` schemas for
+/// the lane, in order (agent naming convention P2, section 4.3).
+pub fn wire_tools_for(
+    lane: &Lane,
+    schemas: &[(String, String, Value)],
+) -> Vec<WireTool> {
+    schemas
+        .iter()
+        .map(|(name, description, parameters)| wire_tool_for(lane, name, description, parameters))
+        .collect()
+}
+
 fn transform_anthropic_node(node: &Value) -> Value {
     let Value::Object(map) = node else {
         return node.clone();
@@ -550,7 +585,7 @@ pub enum RetryContent {
     /// request).
     Text(String),
     /// Pydantic error details (tool-arg or output validation).
-    Errors(Vec<crate::oss_worker::model_runtime::validation::ValidationDetail>),
+    Errors(Vec<crate::cloud_agent::validation::ValidationDetail>),
 }
 
 /// A response-side part (`ModelResponsePart` subset: no files or
@@ -585,7 +620,7 @@ pub enum HistoryMessage {
     #[allow(dead_code)]
     Response {
         parts: Vec<ResponsePart>,
-        usage: crate::oss_worker::model_runtime::usage::RequestUsage,
+        usage: crate::cloud_agent::usage::RequestUsage,
         model_name: String,
         finish: Option<Finish>,
         provider_details: Option<Map<String, Value>>,
@@ -646,7 +681,7 @@ pub fn retry_message(content: &RetryContent, tool_name: Option<&str>) -> String 
             let pretty =
                 serde_json::to_string_pretty(&Value::Array(errors)).unwrap_or("[]".to_owned());
             // `json.dumps(..., ensure_ascii=True)`.
-            let body = crate::oss_worker::model_runtime::validation::ensure_ascii(&pretty);
+            let body = crate::cloud_agent::validation::ensure_ascii(&pretty);
             let plural = details.len() != 1;
             format!(
                 "{} validation error{}:\n```json\n{body}\n```",
@@ -664,10 +699,10 @@ pub fn retry_message(content: &RetryContent, tool_name: Option<&str>) -> String 
 /// drops `ctx` only. `url` is already excluded at collection
 /// (`error.errors(include_url=False, include_context=False)`).
 fn render_retry_error(
-    detail: &crate::oss_worker::model_runtime::validation::ValidationDetail,
+    detail: &crate::cloud_agent::validation::ValidationDetail,
     no_tool: bool,
 ) -> Value {
-    use crate::oss_worker::model_runtime::validation::LocSeg;
+    use crate::cloud_agent::validation::LocSeg;
     let mut error = Map::new();
     error.insert(
         "type".to_owned(),
@@ -1224,7 +1259,7 @@ fn py_printable(candidate: char) -> bool {
 #[derive(Debug)]
 pub struct ParsedResponse {
     pub parts: Vec<ResponsePart>,
-    pub usage: crate::oss_worker::model_runtime::usage::RequestUsage,
+    pub usage: crate::cloud_agent::usage::RequestUsage,
     pub model_name: String,
     pub finish: Option<Finish>,
     pub provider_details: Option<Map<String, Value>>,
@@ -1295,7 +1330,7 @@ fn openai_thinking_part(message: &Map<String, Value>) -> Option<ResponsePart> {
 pub fn parse_openai_response(
     lane: &Lane,
     payload: &Value,
-    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
+    extract: &crate::cloud_agent::usage::ProviderTable,
 ) -> Result<ParsedResponse, ProviderError> {
     let invalid = |detail: &str| {
         ProviderError::InvalidResponse(format!(
@@ -1451,8 +1486,8 @@ fn number_to_datetime(epoch: i64) -> String {
 fn openai_request_usage(
     lane: &Lane,
     body: &Map<String, Value>,
-    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
-) -> crate::oss_worker::model_runtime::usage::RequestUsage {
+    extract: &crate::cloud_agent::usage::ProviderTable,
+) -> crate::cloud_agent::usage::RequestUsage {
     let usage = body.get("usage").and_then(Value::as_object);
     extract.extract_openai(&lane.provider_url(), lane.model_name(), usage)
 }
@@ -1462,7 +1497,7 @@ fn openai_request_usage(
 pub fn parse_anthropic_response(
     lane: &Lane,
     payload: &Value,
-    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
+    extract: &crate::cloud_agent::usage::ProviderTable,
 ) -> Result<ParsedResponse, ProviderError> {
     let invalid = || {
         ProviderError::InvalidResponse(format!(
@@ -1571,10 +1606,10 @@ pub fn parse_anthropic_response(
 fn anthropic_request_usage(
     lane: &Lane,
     body: &Map<String, Value>,
-    extract: &crate::oss_worker::model_runtime::usage::ProviderTable,
-) -> crate::oss_worker::model_runtime::usage::RequestUsage {
+    extract: &crate::cloud_agent::usage::ProviderTable,
+) -> crate::cloud_agent::usage::RequestUsage {
     let Value::Object(usage) = body.get("usage").unwrap_or(&Value::Null) else {
-        return crate::oss_worker::model_runtime::usage::RequestUsage::zeros();
+        return crate::cloud_agent::usage::RequestUsage::zeros();
     };
     extract.extract_anthropic(&lane.provider_url(), usage)
 }
@@ -1592,7 +1627,7 @@ pub struct Turn<'a> {
     pub max_tokens: i64,
     /// Per-request timeout, seconds (`model_settings["timeout"]`).
     pub timeout_secs: u64,
-    pub extract: &'a crate::oss_worker::model_runtime::usage::ProviderTable,
+    pub extract: &'a crate::cloud_agent::usage::ProviderTable,
 }
 
 /// POST one turn and parse the response (`request`,
@@ -1743,8 +1778,7 @@ async fn post_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oss_worker::model_runtime::schemas::Golden;
-    use crate::oss_worker::model_runtime::usage::ProviderTable;
+    use crate::cloud_agent::usage::ProviderTable;
 
     /// The captured turn-1 OpenAI request (`wirecap.json`,
     /// `Agent(OpenAIModel, output_type=Sum)` + `add` tool, no
@@ -1813,7 +1847,7 @@ mod tests {
                     args: ToolArgs::Raw("{\"a\": 2, \"b\": \"3\"}".to_owned()),
                     call_id: "call_1".to_owned(),
                 })],
-                usage: crate::oss_worker::model_runtime::usage::RequestUsage::zeros(),
+                usage: crate::cloud_agent::usage::RequestUsage::zeros(),
                 model_name: String::new(),
                 finish: Some(Finish::ToolCall),
                 provider_details: None,
@@ -1866,7 +1900,14 @@ mod tests {
         // `wiretools.json`: strict holds exactly for the six
         // default-free, fully-required tools (plus the synthetic
         // cases above); every other tool infers false.
-        let golden = Golden::load().expect("golden parses");
+        //
+        // P2: reads the test-only `provider-catalog` fixture (the
+        // 13 catalog schemas + the output schema, extracted from
+        // fx-disp-08) so the retired fixture's sections can drop in
+        // P3 without losing this pin.
+        const CATALOG: &str =
+            include_str!("../../../../fixtures/cloud_agent/provider-catalog.golden.json");
+        let catalog: Value = serde_json::from_str(CATALOG).expect("catalog parses");
         let mut strict_tools: Vec<&str> = Vec::new();
         for name in [
             "pidash_add_current_issue_comment",
@@ -1883,10 +1924,10 @@ mod tests {
             "pidash_unrelate_issues",
             "pidash_update_current_issue_workpad",
         ] {
-            let schema = golden.function_schema(name).unwrap_or_else(|| {
-                panic!("golden has {name}");
-            });
-            let (_, compatible) = transform_openai_schema(&schema.parameters);
+            let schema = catalog["function_schemas"][name]
+                .get("parameters")
+                .unwrap_or_else(|| panic!("catalog has {name}"));
+            let (_, compatible) = transform_openai_schema(schema);
             if compatible {
                 strict_tools.push(name);
             }
@@ -1902,7 +1943,10 @@ mod tests {
                 "pidash_update_current_issue_workpad",
             ]
         );
-        let (_, output_compatible) = transform_openai_schema(&golden.output_schema().parameters);
+        let output_parameters = catalog["output_schema"]
+            .get("parameters")
+            .expect("catalog has output parameters");
+        let (_, output_compatible) = transform_openai_schema(output_parameters);
         assert!(!output_compatible);
     }
 
@@ -1935,7 +1979,7 @@ mod tests {
                         call_id: "toolu_1".to_owned(),
                     }),
                 ],
-                usage: crate::oss_worker::model_runtime::usage::RequestUsage::zeros(),
+                usage: crate::cloud_agent::usage::RequestUsage::zeros(),
                 model_name: String::new(),
                 finish: Some(Finish::ToolCall),
                 provider_details: None,
@@ -1999,9 +2043,9 @@ mod tests {
         // (`loopprobe.json` `output_retry_then_ok`).
         let text = retry_message(
             &RetryContent::Errors(vec![
-                crate::oss_worker::model_runtime::validation::ValidationDetail {
+                crate::cloud_agent::validation::ValidationDetail {
                     error_type: "missing",
-                    loc: vec![crate::oss_worker::model_runtime::validation::LocSeg::Field(
+                    loc: vec![crate::cloud_agent::validation::LocSeg::Field(
                         "sum".to_owned(),
                     )],
                     msg: "Field required".to_owned(),
@@ -2018,8 +2062,9 @@ mod tests {
 
     #[test]
     fn parse_openai_tool_response() {
-        let golden = Golden::load().expect("golden parses");
-        let table = ProviderTable::load(&golden).expect("table compiles");
+        let table = crate::cloud_agent::usage_table::load()
+            .map(|doc| ProviderTable::load(&doc).expect("table compiles"))
+            .expect("fixture parses");
         let lane = Lane::OpenAICompatible {
             model: "gpt-4o-mini".to_owned(),
             base_url: "https://api.openai.com/v1".to_owned(),
@@ -2064,8 +2109,9 @@ mod tests {
     fn empty_tool_ids_regenerate() {
         // `t.tool_call_id or generate_tool_call_id()`
         // (`_utils.py:419`): empty ids regenerate like missing ones.
-        let golden = Golden::load().expect("golden parses");
-        let table = ProviderTable::load(&golden).expect("table compiles");
+        let table = crate::cloud_agent::usage_table::load()
+            .map(|doc| ProviderTable::load(&doc).expect("table compiles"))
+            .expect("fixture parses");
         let openai = Lane::OpenAICompatible {
             model: "m".to_owned(),
             base_url: "https://t/v1".to_owned(),
@@ -2100,8 +2146,9 @@ mod tests {
         // `if not response.created: ... = int(now)`
         // (`openai.py:1068-1069`): the `timestamp` detail is always
         // present, on both the refusal and the normal arms.
-        let golden = Golden::load().expect("golden parses");
-        let table = ProviderTable::load(&golden).expect("table compiles");
+        let table = crate::cloud_agent::usage_table::load()
+            .map(|doc| ProviderTable::load(&doc).expect("table compiles"))
+            .expect("fixture parses");
         let lane = Lane::OpenAICompatible {
             model: "m".to_owned(),
             base_url: "https://t/v1".to_owned(),
@@ -2155,8 +2202,9 @@ mod tests {
 
     #[test]
     fn parse_openai_refusal_and_edges() {
-        let golden = Golden::load().expect("golden parses");
-        let table = ProviderTable::load(&golden).expect("table compiles");
+        let table = crate::cloud_agent::usage_table::load()
+            .map(|doc| ProviderTable::load(&doc).expect("table compiles"))
+            .expect("fixture parses");
         let lane = Lane::OpenAICompatible {
             model: "m".to_owned(),
             base_url: "https://t/v1".to_owned(),
@@ -2193,8 +2241,9 @@ mod tests {
 
     #[test]
     fn parse_anthropic_message_response() {
-        let golden = Golden::load().expect("golden parses");
-        let table = ProviderTable::load(&golden).expect("table compiles");
+        let table = crate::cloud_agent::usage_table::load()
+            .map(|doc| ProviderTable::load(&doc).expect("table compiles"))
+            .expect("fixture parses");
         let lane = Lane::Anthropic {
             model: "claude-test".to_owned(),
             api_key: "k".to_owned(),
@@ -2310,8 +2359,9 @@ mod tests {
     }
 
     fn parse_message(message: &str) -> ParsedResponse {
-        let golden = Golden::load().expect("golden parses");
-        let table = ProviderTable::load(&golden).expect("table compiles");
+        let table = crate::cloud_agent::usage_table::load()
+            .map(|doc| ProviderTable::load(&doc).expect("table compiles"))
+            .expect("fixture parses");
         let payload: Value = serde_json::from_str(&format!(
             r#"{{"id":"c","model":"m","choices":[{{"index":0,"message":{message},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}}}"#,
         ))

@@ -17,9 +17,22 @@
 //!   order, then provider id, then the lane fallback (`openai` /
 //!   `anthropic`); every step's failure falls through to zeros+details.
 
-use super::schemas::Golden;
-use crate::dispatch_execute::UsageLimits;
 use serde_json::{Map, Value};
+
+/// Usage limits for one invocation (`runtime.py:56-63`): each key reads
+/// the run plan's `limits` first, falling back to the setting. `None` is
+/// an explicit plan `null` — pydantic's unlimited.
+///
+/// Moved here from `dispatch::execute` in P2; `dispatch_execute` and
+/// `dispatch::execute` re-export it for remaining readers until P3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageLimits {
+    pub request_limit: Option<i64>,
+    pub tool_calls_limit: Option<i64>,
+    pub input_tokens_limit: Option<i64>,
+    pub output_tokens_limit: Option<i64>,
+    pub total_tokens_limit: Option<i64>,
+}
 
 /// A usage counter value: integers stay integers, floats stay floats
 /// (providers report ints; floats survive end to end when they appear).
@@ -402,13 +415,13 @@ pub struct ProviderTable {
 }
 
 impl ProviderTable {
-    /// Compile the golden provider table (patterns in snapshot order).
-    pub fn load(golden: &Golden) -> Result<Self, ProviderTableError> {
-        let providers = golden
-            .document()
-            .get("usage_providers")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ProviderTableError("missing `usage_providers`".to_string()))?;
+    /// Compile the provider table from the loaded usage fixture
+    /// (patterns in snapshot order). No `Golden` parameter: the
+    /// engine reads the document `usage_table::load()` provides.
+    pub fn load(document: &super::usage_table::UsageDocument) -> Result<Self, ProviderTableError> {
+        let providers = document
+            .usage_providers()
+            .map_err(|err| ProviderTableError(err.0))?;
         let mut entries = Vec::with_capacity(providers.len());
         for provider in providers {
             let id = provider
@@ -758,19 +771,15 @@ mod tests {
     use super::*;
 
     fn table() -> ProviderTable {
-        let golden = Golden::load().expect("golden parses");
-        ProviderTable::load(&golden).expect("table compiles")
+        let document = crate::cloud_agent::usage_table::load().expect("fixture parses");
+        ProviderTable::load(&document).expect("table compiles")
     }
 
-    /// Replay every golden usage vector through the extractor.
+    /// Replay every usage vector through the extractor.
     #[test]
     fn usage_vectors_replay_matches_golden() {
-        let golden = Golden::load().expect("golden parses");
-        let vectors = golden
-            .document()
-            .get("usage_vectors")
-            .and_then(Value::as_array)
-            .expect("usage vectors");
+        let document = crate::cloud_agent::usage_table::load().expect("fixture parses");
+        let vectors = document.usage_vectors().expect("usage vectors");
         assert_eq!(vectors.len(), 66, "vector count");
         let table = table();
         for vector in vectors {

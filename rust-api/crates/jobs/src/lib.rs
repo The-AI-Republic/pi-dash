@@ -25,6 +25,10 @@ pub mod admission;
 pub mod app_pages;
 /// Assistant turn pipeline + stale-turn sweep (D-06, PIDASHCONV-254).
 pub mod assistant;
+/// Cloud agent: the chat engine (model loop, provider streaming,
+/// usage limits, key resolution). Assistant code imports it; it
+/// imports nothing from the assistant (agent naming convention P2).
+pub mod cloud_agent;
 /// Creation + dispatch tasks (D-11 L6, PIDASHCONV-487): the executor-aware
 /// creation seam, the lease-and-offer dispatch engine with transactional
 /// enqueue, and the bounded run-event append. Lives at

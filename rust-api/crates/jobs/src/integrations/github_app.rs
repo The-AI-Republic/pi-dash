@@ -754,7 +754,7 @@ impl GithubRestClient {
         // strings themselves).
         let sha = match sha_value {
             Value::String(sha) => sha.clone(),
-            other => super::provider::py_repr(other),
+            other => crate::cloud_agent::provider::py_repr(other),
         };
         let url = format!(
             "{}/repos/{owner}/{name}/commits/{sha}/check-runs",

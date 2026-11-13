@@ -1,27 +1,80 @@
-//! Golden tool-schema loader (`fx-disp-08-model-runtime.golden.json`).
+//! Usage-table loader (`fixtures/cloud_agent/usage-providers.golden.json`).
 //!
-//! The model runtime sends the exact tool/parameter schemas pydantic-ai
-//! 1.107.0 generates: the golden records them from the real `Agent` tool
-//! defs (function tools), a FastMCP `list_tools` capture over
-//! AST-asserted replica wrappers (MCP leg), and a wire capture
-//! (`final_result`). This module loads the embedded golden and serves
-//! schema lookups; [`super::validation`] validates calls against the
-//! loaded schemas and [`super::provider`] serializes them onto the wire.
+//! The chat engine reads only the `usage_providers` section at boot
+//! (agent naming convention P2, section 4.4); the `usage_vectors`
+//! section backs the usage replay tests. [`load`] requires exactly
+//! those two sections: the retired path's schemas live in the
+//! legacy `fx-disp-08` golden, which P3 deletes with its tests.
 //!
-//! Key order inside `parameters` objects is significant on the wire
-//! (function tools carry `additionalProperties:false` FIRST, the output
-//! tool LAST); the bin's `serde_json` `preserve_order` feature keeps the
-//! golden's document order through parse and re-emit.
+//! The legacy loader ([`Golden`]) is kept in this module until P3:
+//! the retired battery tests still read it. Nothing live calls it;
+//! [`load`] is the boot path.
 
 use serde_json::Value;
-use std::collections::HashMap;
 
-/// The embedded golden document (D-11 fixture, PIDASHCONV-866).
-const GOLDEN: &str =
-    include_str!("../../../../../fixtures/dispatch/fx-disp-08-model-runtime.golden.json");
+/// The cloud-agent usage fixture: `usage_providers` (run time) and
+/// `usage_vectors` (usage replay tests).
+const USAGE_GOLDEN: &str =
+    include_str!("../../../../fixtures/cloud_agent/usage-providers.golden.json");
 
-/// Golden load failure: the embedded fixture is corrupt or has drifted
-/// from the shape the runtime expects. Fail-closed at worker boot.
+/// Usage-table load failure: the embedded fixture is corrupt or has
+/// drifted from the shape the engine expects. Fail-closed at boot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageTableError(pub String);
+
+impl std::fmt::Display for UsageTableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "usage table invalid: {}", self.0)
+    }
+}
+
+impl std::error::Error for UsageTableError {}
+
+/// The loaded usage fixture document ([`load`]).
+#[derive(Debug, Clone)]
+pub struct UsageDocument {
+    document: Value,
+}
+
+impl UsageDocument {
+    /// The provider rows (`usage_providers`).
+    pub fn usage_providers(&self) -> Result<&Vec<Value>, UsageTableError> {
+        self.document
+            .get("usage_providers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| UsageTableError("missing `usage_providers`".to_string()))
+    }
+
+    /// The replay vectors (`usage_vectors`).
+    pub fn usage_vectors(&self) -> Result<&Vec<Value>, UsageTableError> {
+        self.document
+            .get("usage_vectors")
+            .and_then(Value::as_array)
+            .ok_or_else(|| UsageTableError("missing `usage_vectors`".to_string()))
+    }
+}
+
+/// Parse and validate the cloud-agent usage fixture. Requires exactly
+/// the two sections the engine and its tests use; anything else is
+/// drift and fails closed.
+pub fn load() -> Result<UsageDocument, UsageTableError> {
+    let document: Value =
+        serde_json::from_str(USAGE_GOLDEN).map_err(|err| UsageTableError(err.to_string()))?;
+    let doc = UsageDocument { document };
+    let _ = doc.usage_providers()?;
+    let _ = doc.usage_vectors()?;
+    Ok(doc)
+}
+
+// ---------------------------------------------------------------------------
+// Legacy golden loader (fx-disp-08): retired-path tests only, until P3.
+// ---------------------------------------------------------------------------
+
+/// The legacy embedded golden document (D-11 fixture, PIDASHCONV-866).
+const LEGACY_GOLDEN: &str =
+    include_str!("../../../../fixtures/dispatch/fx-disp-08-model-runtime.golden.json");
+
+/// Legacy golden load failure (P3 deletes this loader with the fixture).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoldenError(pub String);
 
@@ -44,31 +97,31 @@ pub struct ToolSchema {
     pub parameters: Value,
 }
 
-/// The loaded golden: schema maps plus the usage-extractor table.
+/// The loaded legacy golden: schema maps plus the usage-extractor table.
 #[derive(Debug, Clone)]
 pub struct Golden {
-    function_schemas: HashMap<String, ToolSchema>,
-    mcp_schemas: HashMap<String, ToolSchema>,
+    function_schemas: std::collections::HashMap<String, ToolSchema>,
+    mcp_schemas: std::collections::HashMap<String, ToolSchema>,
     output_schema: ToolSchema,
     document: Value,
 }
 
 impl Golden {
-    /// Parse and index the embedded golden.
+    /// Parse and index the legacy embedded golden (P3 deletes).
     pub fn load() -> Result<Self, GoldenError> {
         let document: Value =
-            serde_json::from_str(GOLDEN).map_err(|err| GoldenError(err.to_string()))?;
+            serde_json::from_str(LEGACY_GOLDEN).map_err(|err| GoldenError(err.to_string()))?;
         let section = |key: &str| {
             document
                 .get(key)
                 .and_then(Value::as_object)
                 .ok_or_else(|| GoldenError(format!("missing object section `{key}`")))
         };
-        let mut function_schemas = HashMap::new();
+        let mut function_schemas = std::collections::HashMap::new();
         for (name, def) in section("function_schemas")? {
             function_schemas.insert(name.clone(), tool_schema(name, def)?);
         }
-        let mut mcp_schemas = HashMap::new();
+        let mut mcp_schemas = std::collections::HashMap::new();
         for (name, def) in section("mcp_schemas")? {
             mcp_schemas.insert(name.clone(), tool_schema(name, def)?);
         }
@@ -133,6 +186,13 @@ fn tool_schema(name: &str, def: &Value) -> Result<ToolSchema, GoldenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_fixture_loads_with_both_sections() {
+        let doc = load().expect("usage fixture parses");
+        assert_eq!(doc.usage_providers().expect("providers").len(), 43);
+        assert_eq!(doc.usage_vectors().expect("vectors").len(), 66);
+    }
 
     #[test]
     fn golden_loads_with_expected_counts() {
