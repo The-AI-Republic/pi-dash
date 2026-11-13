@@ -11,7 +11,6 @@
 //!
 //! * [`complete_project_move_handoff_live`]: prefetches the source
 //!   run's creator presence, builds [`StoreDeps`] over the shared
-//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache],
 //!   and runs the jobs handoff driver.
 //! * [`maybe_apply_deferred_pause_live`]: same shape for the
 //!   deferred cap-hit pause (the pause path never reads presence,
@@ -54,9 +53,7 @@ use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
-#[cfg(test)]
-use pidash_services::extensions::NoExtraToolsets;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
@@ -68,7 +65,6 @@ use super::creation_jobs::{
 use super::fire_tick_seam::{
     emit_logs, maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
 };
-use crate::admission::RedisAdmissionCache;
 use crate::dispatch::DispatchDecision;
 use crate::queue::enqueue;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
@@ -193,7 +189,6 @@ async fn drain_terminal_effects(
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
 /// source run's creator presence, the installed assistant seam's
-/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`],
 /// and `now`. The shared Redis client and runner settings feed the
 /// replacement run's pod drain. Answers the replacement run id
 /// (`None` on every early-out: unknown run, non-terminal source, no
@@ -206,7 +201,6 @@ pub async fn complete_project_move_handoff_live(
     redis: Option<&redis::Client>,
     runner: &RunnerSettings,
     run_id: Uuid,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> Result<Option<Uuid>, CreationJobsError> {
     let actor = run_creator(pool, run_id).await?;
@@ -216,11 +210,8 @@ pub async fn complete_project_move_handoff_live(
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: gate_fn(verdicts),
-        toolsets,
         llm_profile: profile_fn(presence),
-        now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_handoff(pool, deps, run_id, Utc::now()).await?;
     // The driver's `dispatch_agent_run` only *returns* the decision
@@ -252,17 +243,13 @@ pub async fn maybe_apply_deferred_pause_live(
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-        toolsets,
         llm_profile: profile_fn(presence),
-        now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_pause(pool, deps, Utc::now(), 0.0, run_id).await?;
     emit_logs(&outcome.outcome.logs);
@@ -345,7 +332,6 @@ pub async fn post_run_orchestration(
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     run_id: Uuid,
 ) {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
@@ -355,9 +341,7 @@ pub async fn post_run_orchestration(
             "orchestration.error: run-ended reconcile failed"
         );
     }
-    if let Err(error) =
-        maybe_apply_deferred_pause_live(pool, cloud, managed, run_id, toolsets).await
-    {
+    if let Err(error) = maybe_apply_deferred_pause_live(pool, cloud, managed, run_id).await {
         tracing::error!(
             ?error,
             run_id = %run_id,
@@ -388,8 +372,6 @@ pub async fn post_run_orchestration_in_tx<'t>(
     pool: &'t PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
-    cache: RedisAdmissionCache,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     run_id: Uuid,
 ) -> Transaction<'t> {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
@@ -402,17 +384,14 @@ pub async fn post_run_orchestration_in_tx<'t>(
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache,
         // The pause path creates no runs: the presence closures are
         // unread (`maybe_apply_deferred_pause_live`), so the keyless
         // answers mirror it.
         has_usable_llm_config: |_actor: Uuid| false,
-        toolsets,
         llm_profile: |_actor: Option<Uuid>| LlmProfile {
             available: false,
             reason_code: String::new(),
         },
-        now_unix_secs: Utc::now().timestamp(),
     };
     let mut store = LiveCreationStore::new(tx, pool, deps);
     match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
@@ -438,7 +417,7 @@ pub async fn post_run_orchestration_in_tx<'t>(
             "orchestration.error: deferred-pause failed"
         ),
     }
-    let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
+    let (mut tx, _pool, _dispatches, _terminal_effects) = store.into_parts();
     let work_item_id: Option<Uuid> = {
         let conn = TxConn::new(tx.inner());
         match run_work_item_id(&conn, run_id).await {
@@ -894,7 +873,6 @@ mod tests {
             None,
             &runner,
             Uuid::new_v4(),
-            Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
         .await
@@ -913,7 +891,6 @@ mod tests {
             &cloud,
             &managed,
             Uuid::new_v4(),
-            Arc::new(NoExtraToolsets),
         )
         .await
         .expect("unknown run is Ok");

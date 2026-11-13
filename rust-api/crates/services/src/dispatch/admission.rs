@@ -10,7 +10,6 @@
 //! * `CloudAgentAdmissionError` (`admission.py:15-19`) →
 //!   [`CloudAgentAdmissionError`].
 //! * `_take` / `_consume` (`admission.py:22-58`) → [`take_bucket`] (private) /
-//!   [`consume_admission_token`] over the [`AdmissionCache`] seam.
 //! * `enforce_creation_rate` (`admission.py:61-76`) →
 //!   [`enforce_creation_rate`] + [`admission_bucket`] /
 //!   [`admission_retry_after`] / [`workspace_admission_key`] /
@@ -40,7 +39,6 @@
 //!   reuse L3 (`super::policy`).
 //! * `transaction.on_commit` has no ambient equivalent in services (Porting
 //!   guide: transactions are a wrapper collecting post-commit actions), so the
-//!   caller passes the deferral sink (`&mut dyn FnMut(DeferredConsume)`)
 //!   explicitly; dropping the sink without running it is the rollback path,
 //!   which burns no quota exactly as Python's does.
 //! * EE-overlayable seams arrive as inputs, never reimplemented:
@@ -76,72 +74,8 @@ use serde::{Deserialize, Serialize};
 
 // CloudAgentAdmissionError deleted in P3 step B (admission removal).
 
-// ---------------------------------------------------------------------------
-// Bucket math and keys (`admission.py:63-76`)
-// ---------------------------------------------------------------------------
-
-/// `now // 60` (`admission.py:65`).
-pub fn admission_bucket(now_unix_secs: i64) -> i64 {
-    now_unix_secs.div_euclid(60)
-}
-
-/// `60 - (now % 60)` (`admission.py:64`): always `1..=60`.
-pub fn admission_retry_after(now_unix_secs: i64) -> i64 {
-    60 - now_unix_secs.rem_euclid(60)
-}
-
-/// `cloud-agent:admission:workspace:{id}:{bucket}` (`admission.py:67`).
-pub fn workspace_admission_key(workspace_id: &str, bucket: i64) -> String {
-    format!("cloud-agent:admission:workspace:{workspace_id}:{bucket}")
-}
-
-/// `cloud-agent:admission:user:{id}:{bucket}` (`admission.py:73`).
-pub fn user_admission_key(actor_id: &str, bucket: i64) -> String {
-    format!("cloud-agent:admission:user:{actor_id}:{bucket}")
-}
-
-/// `_consume` overhang (`admission.py:24`): `timeout=retry_after_seconds + 5`.
-pub const CONSUME_TIMEOUT_OVERHANG_SECS: i64 = 5;
-
-// ---------------------------------------------------------------------------
-// Cache seam (`admission.py:22-58`)
-// ---------------------------------------------------------------------------
-
-/// The cache half of `_take` / `_consume` (`admission.py:22-58`).
-///
-/// `bucket_count` is `int(cache.get(key) or 0)` (`:45`): a missing key reads
-/// as `None` (→ 0); a backend failure surfaces as `Err` and fails closed.
-/// `add_or_incr` is `cache.add(key, 1, timeout) or cache.incr(key)` (`:24-25`).
-pub trait AdmissionCache {
-    /// The backend failure type (`_take` fails closed on it).
-    type Error: std::error::Error;
-    /// Current bucket count (`None` = key absent).
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error>;
-    /// Set-if-absent with TTL, else increment.
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), Self::Error>;
-}
-
-/// One `_consume` deferred to `on_commit` (`admission.py:58`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeferredConsume {
-    /// The bucket key to consume.
-    pub key: String,
-    /// `retry_after_seconds + 5` (`admission.py:24`).
-    pub timeout_secs: i64,
-}
-
-/// Best-effort post-commit consumption (`_consume`, `admission.py:22-29`).
-///
-/// Swallows backend failures (Python logs and continues — services has no
-/// logging facade; the swallow is the behavior): the check in `take_bucket`
-/// already failed closed, so a lost increment only under-counts one bucket.
-pub fn consume_admission_token<C: AdmissionCache>(cache: &C, deferred: &DeferredConsume) {
-    let _ = cache.add_or_incr(&deferred.key, deferred.timeout_secs);
-}
-
-// take_bucket + enforce_creation_rate deleted in P3 step B.
-
-// CloudAgentUnavailableBody deleted in P3 step B.
+// Bucket math, key helpers, the admission cache seam, and the
+// Redis implementation died in P4 (admission cascade).
 
 // ---------------------------------------------------------------------------
 // Managed runner availability (`managed_runner/policy.py:27-96`)
@@ -442,113 +376,14 @@ pub fn managed_runner_configuration_check(
     errors
 }
 
-/// `REDIS_URL` env name (config registry; `redis.py` reads
-/// `settings.REDIS_URL` — the `redis_origin.rs` position).
-const REDIS_URL_VAR: &str = "REDIS_URL";
-
-/// Redis-backed [`AdmissionCache`]: the production implementation of
-/// the sync trait. Unified (OVL-06 PIDASHCONV-1544) from the api and
-/// jobs twins, which were byte-identical but had to live apart (jobs
-/// cannot depend on api — crate graph); both now re-export this.
-/// Each call opens a short sync connection (the trait is sync; only
-/// cloud admission paths touch it). Keys go through Django's
-/// [`crate::ops::boot::cache_key`] (`:1:{key}`), so Rust and Django
-/// count the same buckets. An unset or unusable `REDIS_URL` fails
-/// closed like Python's backend failure. Re-exported through
-/// `pidash-sdk::ops`.
-#[derive(Clone, Debug)]
-pub struct RedisAdmissionCache {
-    /// The shared client; `None` fails every bucket read closed.
-    pub client: Option<redis::Client>,
-}
-
-fn cache_unavailable<T>(what: &'static str) -> Result<T, redis::RedisError> {
-    Err(redis::RedisError::from((
-        redis::ErrorKind::Io,
-        what,
-        "redis unavailable".to_owned(),
-    )))
-}
-
-impl RedisAdmissionCache {
-    /// Build for an explicit client (request paths).
-    pub fn new(client: Option<redis::Client>) -> Self {
-        RedisAdmissionCache { client }
-    }
-
-    /// Build from `REDIS_URL`: `None` client when it is unset, empty,
-    /// or unparsable, which fails every bucket read closed.
-    pub fn from_env() -> Self {
-        let client = std::env::var(REDIS_URL_VAR)
-            .ok()
-            .filter(|url| !url.is_empty())
-            .and_then(|url| redis::Client::open(url.as_str()).ok());
-        RedisAdmissionCache { client }
-    }
-}
-
-impl AdmissionCache for RedisAdmissionCache {
-    type Error = redis::RedisError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        let Some(client) = &self.client else {
-            return cache_unavailable("bucket_count");
-        };
-        let mut connection = client.get_connection()?;
-        let value: Option<i64> = redis::cmd("GET")
-            .arg(crate::ops::boot::cache_key(key))
-            .query(&mut connection)?;
-        Ok(value)
-    }
-
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), Self::Error> {
-        let Some(client) = &self.client else {
-            return cache_unavailable("add_or_incr");
-        };
-        let mut connection = client.get_connection()?;
-        // `cache.add(key, 1, timeout) or cache.incr(key)`: set-if-absent
-        // with TTL, else increment.
-        let set: Option<String> = redis::cmd("SET")
-            .arg(crate::ops::boot::cache_key(key))
-            .arg(1)
-            .arg("EX")
-            .arg(timeout_secs)
-            .arg("NX")
-            .query(&mut connection)?;
-        if set.is_none() {
-            let _: i64 = redis::cmd("INCR")
-                .arg(crate::ops::boot::cache_key(key))
-                .query(&mut connection)?;
-        }
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn missing_client_fails_closed() {
-        let cache = RedisAdmissionCache { client: None };
-        assert!(cache.bucket_count("k").is_err());
-        assert!(cache.add_or_incr("k", 60).is_err());
-    }
-
-    #[test]
-    fn refused_connection_fails_closed() {
-        // Discard port: nothing listens, so the sync connect refuses
-        // immediately with no server needed.
-        let client = redis::Client::open("redis://127.0.0.1:9/").expect("url parses");
-        let cache = RedisAdmissionCache {
-            client: Some(client),
-        };
-        assert!(cache.bucket_count("k").is_err());
-        assert!(cache.add_or_incr("k", 60).is_err());
-    }
     use serde_json::Value;
-    use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
+    use std::cell::Cell;
+    
 
     static FIXTURE: &str =
         include_str!("../../../../fixtures/dispatch/fx-disp-04-admission-checks.golden.json");
@@ -584,61 +419,6 @@ mod tests {
         ]
     }
 
-    #[derive(Debug)]
-    struct FakeCacheError;
-
-    impl std::fmt::Display for FakeCacheError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "cache down")
-        }
-    }
-
-    impl std::error::Error for FakeCacheError {}
-
-    /// In-memory [`AdmissionCache`] with injectable backend failures.
-    struct FakeCache {
-        counts: RefCell<HashMap<String, i64>>,
-        fail_get: bool,
-        fail_add: bool,
-    }
-
-    impl FakeCache {
-        fn new() -> Self {
-            FakeCache {
-                counts: RefCell::new(HashMap::new()),
-                fail_get: false,
-                fail_add: false,
-            }
-        }
-
-        fn count(&self, key: &str) -> i64 {
-            self.counts.borrow().get(key).copied().unwrap_or(0)
-        }
-    }
-
-    impl AdmissionCache for FakeCache {
-        type Error = FakeCacheError;
-
-        fn bucket_count(&self, key: &str) -> Result<Option<i64>, FakeCacheError> {
-            if self.fail_get {
-                return Err(FakeCacheError);
-            }
-            Ok(self.counts.borrow().get(key).copied())
-        }
-
-        fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), FakeCacheError> {
-            if self.fail_add {
-                return Err(FakeCacheError);
-            }
-            *self.counts.borrow_mut().entry(key.to_string()).or_insert(0) += 1;
-            Ok(())
-        }
-    }
-
-    /// The fixture's live time example: `bucket=29845934, retry=23` implies
-    /// `now = 29845934*60 + (60-23) = 1790756077`.
-    const FIXTURE_NOW: i64 = 1790756077;
-
     fn active_user() -> UserFlags {
         UserFlags {
             is_active: true,
@@ -650,66 +430,7 @@ mod tests {
 
     // -- bucket math and keys (`admission.py:63-76`) --------------------------
 
-    #[test]
-    fn bucket_math_matches_fixture_example() {
-        let shapes = &fixture()["admission_key_shapes"];
-        assert_eq!(admission_bucket(FIXTURE_NOW), 29845934);
-        assert_eq!(admission_retry_after(FIXTURE_NOW), 23);
-        // Minute boundary: `now % 60 == 0` retries the full 60s.
-        assert_eq!(admission_bucket(1790756040), 29845934);
-        assert_eq!(admission_retry_after(1790756040), 60);
-        assert_eq!(shapes["bucket"], 29845934);
-        assert_eq!(shapes["retry_after_seconds"], 23);
-        assert_eq!(
-            workspace_admission_key("ws-1", 29845934),
-            shapes["workspace_key"]
-                .as_str()
-                .expect("key")
-                .replace("<workspace_id>", "ws-1")
-        );
-        assert_eq!(
-            user_admission_key("actor-1", 29845934),
-            shapes["user_key"]
-                .as_str()
-                .expect("key")
-                .replace("<actor_id>", "actor-1")
-        );
-    }
-
     // -- enforce_creation_rate (`admission.py:61-76`) -------------------------
-
-    #[test]
-    fn consume_is_best_effort_and_rollback_burns_nothing() {
-        // `_consume` swallows backend failures (`admission.py:26-29`).
-        let cache = FakeCache {
-            fail_add: true,
-            ..FakeCache::new()
-        };
-        consume_admission_token(
-            &cache,
-            &DeferredConsume {
-                key: "k".to_string(),
-                timeout_secs: 28,
-            },
-        );
-        // Deferred consumes only burn on commit: dropping them without
-        // consuming leaves the buckets untouched (rollback burns
-        // nothing).
-        let cache = FakeCache::new();
-        let deferred = vec![
-            DeferredConsume {
-                key: workspace_admission_key("ws-1", 29845934),
-                timeout_secs: 28,
-            },
-            DeferredConsume {
-                key: user_admission_key("actor-1", 29845934),
-                timeout_secs: 28,
-            },
-        ];
-        drop(deferred); // rollback: post-commit wrapper never runs
-        assert_eq!(cache.count(&workspace_admission_key("ws-1", 29845934)), 0);
-        assert_eq!(cache.count(&user_admission_key("actor-1", 29845934)), 0);
-    }
 
     // -- CloudAgentUnavailableAPI (`api.py:5-8`) -------------------------------
 

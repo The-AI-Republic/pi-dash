@@ -30,7 +30,7 @@ use axum::routing::Route;
 use tower::{Layer, Service};
 
 use pidash_db::config::Settings;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::user_settings::SettingsSchema;
 
 use super::{connect_serve_pools, queue_schema_pool, settings_from_env, shutdown_signal};
@@ -134,13 +134,7 @@ impl ServeBuilder {
         self
     }
 
-    /// Install the cloud-agent extra-toolsets seam (PIDASHCONV-915). CE
-    /// default: [`NoExtraToolsets`](pidash_services::extensions::NoExtraToolsets).
-    pub fn with_toolsets(mut self, toolsets: Arc<dyn CloudAgentToolsetsSeam>) -> Self {
-        self.state_mods
-            .push(Box::new(move |state| state.with_toolsets(toolsets)));
-        self
-    }
+    // (P4: `with_toolsets` died with the toolsets seam.)
 
     /// Install the overlay's desktop-session gate (PIDASHCONV-917). OSS
     /// serves with the CE session-key gate when none is installed.
@@ -376,16 +370,6 @@ mod tests {
     use super::*;
     use tower::ServiceExt;
 
-    /// Toolsets double with a marker schema-tool name.
-    #[derive(Debug)]
-    struct MarkerToolsets;
-
-    impl CloudAgentToolsetsSeam for MarkerToolsets {
-        fn schema_tool_name(&self) -> &'static str {
-            "acme_get_tool_schema"
-        }
-    }
-
     /// Assistant-seam double with a marker title.
     #[derive(Debug)]
     struct MarkerAssistantSeam;
@@ -470,12 +454,11 @@ mod tests {
         );
     }
 
-    /// Swapping a seam is observable on the built state: toolsets,
-    /// assistant, user-settings schema and desktop gate.
+    /// Swapping a seam is observable on the built state: assistant,
+    /// user-settings schema and desktop gate.
     #[tokio::test]
     async fn seam_swaps_are_observable_on_built_state() {
         let parts = ServeBuilder::for_tests().build();
-        assert_eq!(parts.state.toolsets().schema_tool_name(), "");
         assert!(parts.state.user_settings_schema().is_empty());
         assert!(!parts.state.is_desktop_request(&empty_credential()));
 
@@ -491,15 +474,10 @@ mod tests {
         )
         .expect("extend");
         let parts = ServeBuilder::for_tests()
-            .with_toolsets(Arc::new(MarkerToolsets))
             .with_assistant_seam(Arc::new(MarkerAssistantSeam))
             .with_user_settings_schema(schema)
             .with_desktop_gate(FixedGate(true))
             .build();
-        assert_eq!(
-            parts.state.toolsets().schema_tool_name(),
-            "acme_get_tool_schema"
-        );
         let title = parts
             .state
             .assistant_seam()
@@ -525,19 +503,23 @@ mod tests {
     }
 
     /// `with_state` runs after the typed seam installs.
-    #[test]
-    fn with_state_runs_last() {
+    #[tokio::test]
+    async fn with_state_runs_last() {
         let parts = ServeBuilder::for_tests()
-            .with_toolsets(Arc::new(MarkerToolsets))
-            .with_state(|state| {
-                assert_eq!(state.toolsets().schema_tool_name(), "acme_get_tool_schema");
-                state
-            })
+            .with_assistant_seam(Arc::new(MarkerAssistantSeam))
+            .with_state(|state| state)
             .build();
-        assert_eq!(
-            parts.state.toolsets().schema_tool_name(),
-            "acme_get_tool_schema"
-        );
+        let title = parts
+            .state
+            .assistant_seam()
+            .generate_title(pidash_services::extensions::TitleRequest {
+                user_id: uuid::Uuid::nil(),
+                description: "Fix the thing".to_owned(),
+                byok: None,
+            })
+            .await
+            .expect("marker title");
+        assert_eq!(title, "marker-title");
     }
 
     /// `wrap` layers run outside the stack: a header middleware marks the

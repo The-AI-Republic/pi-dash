@@ -18,7 +18,6 @@
 //!   open the transaction, run the services control flow, commit (or roll
 //!   back when the outcome says so), then drain post-commit dispatch —
 //!   the L6 driver shape, over the same public `dispatch_agent_run` /
-//!   `consume_admission_token` collaborators.
 //! * [`FireTickShim`][]: the
 //!   [`FireTickSeam`][crate::tasks_ticker::FireTickSeam] implementation
 //!   over L1 (ticking state, tick interval) + L2 (active/prior runs) +
@@ -61,9 +60,7 @@ use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::{
-    consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
-};
+use pidash_services::dispatch::{ExecutionFieldsError, LlmProfile};
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::{
@@ -99,7 +96,7 @@ pub enum DispatchJobsError {
     #[error(transparent)]
     Store(#[from] DispatchError),
     #[error("dispatch error: {0}")]
-    Drain(#[from] crate::dispatch::ExecutionFieldsError),
+    Drain(#[from] ExecutionFieldsError),
 }
 
 /// What a dispatch transaction driver did: the services outcome (which
@@ -121,9 +118,8 @@ fn db(error: sqlx::Error) -> DispatchError {
     DispatchError::Db(error.to_string())
 }
 
-impl<C, H, P> DispatchSeam for LiveCreationStore<'_, C, H, P>
+impl<H, P> DispatchSeam for LiveCreationStore<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -774,21 +770,16 @@ pub(crate) fn emit_logs(logs: &[LogLine]) {
 /// Drain post-commit dispatch plus the deferred admission consumes —
 /// the same collaborators as the L6 `drain` (a private helper this
 /// module cannot name), over the same ordering.
-pub(crate) async fn drain_dispatch<C: AdmissionCache>(
+pub(crate) async fn drain_dispatch(
     pool: &PgPool,
     cloud: &pidash_db::config::CloudAgentSettings,
-    cache: &C,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     now: DateTime<Utc>,
 ) -> Result<Vec<(Uuid, DispatchDecision)>, DispatchJobsError> {
     let mut decisions = Vec::with_capacity(dispatches.len());
     for run_id in dispatches {
         let decision = dispatch_agent_run(pool, cloud, run_id, now).await?;
         decisions.push((run_id, decision));
-    }
-    for consume in &deferred {
-        consume_admission_token(cache, consume);
     }
     Ok(decisions)
 }
@@ -801,16 +792,15 @@ macro_rules! dispatch_driver {
     ($name:ident, $svc:path, $out:ty, $rollback:expr $(, $arg:ident : $typ:ty)* $(,)?) => {
         #[doc = concat!("Open the insertion transaction, run [`", stringify!($svc), "`], commit (or roll back when the outcome says so), then drain post-commit dispatch. The caller emits the outcome's collected log lines via `tracing` (see [`emit_logs`]).")]
         #[allow(clippy::too_many_arguments)]
-        pub async fn $name<C, H, P>(
+        pub async fn $name<H, P>(
             pool: &PgPool,
-            deps: StoreDeps<C, H, P>,
+            deps: StoreDeps<H, P>,
             matcher: &dyn PodRunnerMatcher,
             now: DateTime<Utc>,
             jitter_secs: f64,
             $($arg : $typ),*
         ) -> Result<DispatchOutcome<$out>, DispatchJobsError>
         where
-            C: AdmissionCache,
             H: Fn(Uuid) -> bool + Clone + Send + Sync,
             P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
         {
@@ -819,7 +809,7 @@ macro_rules! dispatch_driver {
             let mut store = LiveCreationStore::new(tx, pool, deps);
             let outcome: $out = $svc(&mut store, $($arg,)* matcher, now, jitter_secs).await?;
             let rollback: bool = $rollback(&outcome);
-            let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+            let (tx, pool, dispatches, terminal_effects) = store.into_parts();
             if rollback {
                 tx.rollback().await?;
                 return Ok(DispatchOutcome {
@@ -831,7 +821,7 @@ macro_rules! dispatch_driver {
             }
             tx.commit().await?;
             let dispatch_decisions =
-                drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+                drain_dispatch(pool, &cloud, dispatches, now).await?;
             let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
             Ok(DispatchOutcome {
                 outcome,
@@ -879,9 +869,9 @@ dispatch_driver!(
 /// commit. (Explicit rather than macro-generated: the bounce takes no
 /// matcher.)
 #[allow(clippy::too_many_arguments)]
-pub async fn bounce_issue_no_eligible_runner<C, H, P>(
+pub async fn bounce_issue_no_eligible_runner<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     issue_id: Uuid,
@@ -890,7 +880,6 @@ pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     reason_name: &str,
 ) -> Result<DispatchOutcome<BounceOutcome>, DispatchJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -907,10 +896,10 @@ where
         jitter_secs,
     )
     .await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+        drain_dispatch(pool, &cloud, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -946,9 +935,9 @@ dispatch_driver!(
 /// drain post-commit dispatch. `created_by` is the crum user for the
 /// ticker INSERT (the human caller).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_ai_for_human<C, H, P>(
+pub async fn run_ai_for_human<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     matcher: &dyn PodRunnerMatcher,
     now: DateTime<Utc>,
     jitter_secs: f64,
@@ -958,7 +947,6 @@ pub async fn run_ai_for_human<C, H, P>(
     pod_once: bool,
 ) -> Result<DispatchOutcome<HumanRunAiOutcome>, DispatchJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -976,7 +964,7 @@ where
         pod_once,
     )
     .await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     if outcome.rollback {
         tx.rollback().await?;
         return Ok(DispatchOutcome {
@@ -988,7 +976,7 @@ where
     }
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+        drain_dispatch(pool, &cloud, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -1004,9 +992,9 @@ where
 /// for the activity row; `created_by` is the crum user for it (the HTTP
 /// caller).
 #[allow(clippy::too_many_arguments)]
-pub async fn wait_ticker<C, H, P>(
+pub async fn wait_ticker<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     epoch_secs: f64,
@@ -1016,7 +1004,6 @@ pub async fn wait_ticker<C, H, P>(
     created_by: Option<Uuid>,
 ) -> Result<DispatchOutcome<WaitOutcome>, DispatchJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -1034,10 +1021,10 @@ where
         created_by,
     )
     .await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+        drain_dispatch(pool, &cloud, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     let outcome = DispatchOutcome {
         outcome,
@@ -1052,15 +1039,14 @@ where
 /// Open the insertion transaction, run
 /// [`maybe_apply_deferred_pause`][pidash_services::orchestration::dispatch::maybe_apply_deferred_pause],
 /// commit.
-pub async fn maybe_apply_deferred_pause<C, H, P>(
+pub async fn maybe_apply_deferred_pause<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     run_id: Uuid,
 ) -> Result<DispatchOutcome<PauseOutcome>, DispatchJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -1074,10 +1060,10 @@ where
         jitter_secs,
     )
     .await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+        drain_dispatch(pool, &cloud, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -1098,9 +1084,9 @@ where
 /// methods read live SQL. `new_deps` builds a fresh [`StoreDeps`] per
 /// dispatch (caches are call-scoped, like the L6 drivers); `matcher` is
 /// the D-14 seam (scripted in tests, implemented by D-14 later).
-pub struct FireTickShim<C, H, P> {
+pub struct FireTickShim<H, P> {
     pool: PgPool,
-    new_deps: Arc<dyn Fn() -> StoreDeps<C, H, P> + Send + Sync>,
+    new_deps: Arc<dyn Fn() -> StoreDeps<H, P> + Send + Sync>,
     matcher: Arc<dyn PodRunnerMatcher>,
 }
 
@@ -1112,10 +1098,10 @@ pub struct StateView {
     pub group: String,
 }
 
-impl<C, H, P> FireTickShim<C, H, P> {
+impl<H, P> FireTickShim<H, P> {
     pub fn new(
         pool: PgPool,
-        new_deps: Arc<dyn Fn() -> StoreDeps<C, H, P> + Send + Sync>,
+        new_deps: Arc<dyn Fn() -> StoreDeps<H, P> + Send + Sync>,
         matcher: Arc<dyn PodRunnerMatcher>,
     ) -> Self {
         FireTickShim {
@@ -1155,9 +1141,8 @@ pub fn shim_is_ticking_state(state: Option<&StateView>) -> bool {
     is_ticking_state(state_ref.as_ref())
 }
 
-impl<C, H, P> FireTickSeam for FireTickShim<C, H, P>
+impl<H, P> FireTickSeam for FireTickShim<H, P>
 where
-    C: AdmissionCache + Send + Sync + 'static,
     H: Fn(Uuid) -> bool + Clone + Send + Sync + 'static,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync + 'static,
 {
@@ -1255,12 +1240,11 @@ where
 mod tests {
     use super::*;
     use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-    use pidash_services::extensions::NoExtraToolsets;
     use pidash_services::orchestration::dispatch::BOUNCE_BODY_DEFAULT;
     use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    
 
     // -- offline -----------------------------------------------------------
 
@@ -1557,42 +1541,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct CacheError(String);
-
-    impl std::fmt::Display for CacheError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "cache error: {}", self.0)
-        }
-    }
-
-    impl std::error::Error for CacheError {}
-
-    /// Send-safe scripted cache (no `RefCell` — the shim's dispatch
-    /// future is `Send`-boxed).
-    #[derive(Default)]
-    struct FakeCache {
-        counts: Mutex<HashMap<String, i64>>,
-    }
-
-    impl AdmissionCache for FakeCache {
-        type Error = CacheError;
-
-        fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-            Ok(self.counts.lock().expect("cache lock").get(key).copied())
-        }
-
-        fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-            *self
-                .counts
-                .lock()
-                .expect("cache lock")
-                .entry(key.to_owned())
-                .or_insert(0) += 1;
-            Ok(())
-        }
-    }
-
     fn no_llm(_user: Uuid) -> bool {
         false
     }
@@ -1608,17 +1556,14 @@ mod tests {
         }
     }
 
-    type TestDeps = StoreDeps<FakeCache, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
+    type TestDeps = StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
 
     fn deps() -> TestDeps {
         StoreDeps {
             cloud: django_cloud_settings(),
             managed: django_managed_settings(),
-            cache: FakeCache::default(),
             has_usable_llm_config: no_llm,
-            toolsets: Arc::new(NoExtraToolsets),
             llm_profile: unavailable_profile,
-            now_unix_secs: now().timestamp(),
         }
     }
 
@@ -1947,7 +1892,7 @@ mod tests {
         )
         .await
         .expect("create agent user");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.commit().await.expect("commit agent user");
         id
     }
@@ -2875,7 +2820,7 @@ mod tests {
         )
         .await
         .expect("insert bounce comment");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.commit().await.expect("commit");
         let row: (String, String, Option<Uuid>) = sqlx::query_as(
             "SELECT comment_html, comment_stripped, description_id FROM issue_comments WHERE id = $1",
@@ -2945,7 +2890,7 @@ mod tests {
             .await
             .expect("set default reads Some");
         assert_eq!(some, Some(graph.states["Todo"]));
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
     }
 
@@ -3200,7 +3145,7 @@ mod tests {
         .await
         .expect("resolve");
         assert_eq!(creator, Some(graph.user));
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         // And the cloud preflight proceeds (F1 live).
         let mut cc_deps = deps();
@@ -3523,7 +3468,7 @@ mod tests {
         assert!(active.has_allowed_role);
         assert!(active.is_project_member);
         assert!(active.is_workspace_admin);
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
     }
 

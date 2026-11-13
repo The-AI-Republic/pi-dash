@@ -52,20 +52,14 @@ pub mod state {
     pub use pidash_api::state::AppState; // also imported by the overlay as `pidash_api::AppState`.
     pub use pidash_services::extensions::AgentModelProfile;
     pub use pidash_services::extensions::AssistantModelSeam;
-    pub use pidash_services::extensions::CloudAgentToolsetsSeam;
     pub use pidash_services::extensions::CredentialError;
     pub use pidash_services::extensions::CredentialUnavailable;
     pub use pidash_services::extensions::ExecuteModelInputs;
-    pub use pidash_services::extensions::ExtraToolset;
-    pub use pidash_services::extensions::NoExtraToolsets;
     pub use pidash_services::extensions::ResolvedRunModel;
     pub use pidash_services::extensions::RunModelKey;
     pub use pidash_services::extensions::SeamFuture;
     pub use pidash_services::extensions::TitleError;
     pub use pidash_services::extensions::TitleRequest;
-    pub use pidash_services::extensions::ToolsetsResolution;
-    pub use pidash_services::extensions::ToolsetsRun;
-    pub use pidash_services::extensions::ToolsetsUnavailable;
 }
 
 /// ORM write services (`pidash_services::domain`): the write context
@@ -338,7 +332,6 @@ pub mod ops {
     pub use pidash_ops::run;
     pub use pidash_ops::OpsCommand;
     pub use pidash_services::app_issues::SourceIssueRow;
-    pub use pidash_services::dispatch::admission::RedisAdmissionCache;
     pub use pidash_services::domain::issue_create_sql::advisory_lock_key;
     pub use pidash_services::domain::issue_create_sql::py_stripped;
     pub use pidash_services::domain::issue_create_sql::saved_sequence_id;
@@ -452,7 +445,6 @@ pub mod ops {
 pub mod hooks {
     pub use pidash_jobs::hooks::EnqueueHook;
     pub use pidash_jobs::hooks::HookDeps;
-    pub use pidash_jobs::hooks::LiveMoveAdmissionCache;
     pub use pidash_jobs::hooks::LivePodDrain;
     pub use pidash_jobs::hooks::MoveHook;
     pub use pidash_jobs::hooks::OutboxTaskSink;
@@ -469,7 +461,6 @@ pub mod hooks {
     // fires; FireRequest is the fire input, FireOutcome the fire output, and
     // TransitionOutcome carries created_run / reason.
     pub use pidash_services::domain::activity::TaskEnqueueHook;
-    pub use pidash_services::domain::issues_move::MoveAdmissionCache;
     pub use pidash_services::domain::transition::IssueTransitionHook;
     pub use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
     pub use pidash_types::orchestration::TransitionOutcome;
@@ -858,7 +849,6 @@ pub mod cloud_agent {
 /// Worker, queue and task registry: handler registration, schedules,
 /// and task-name constants.
 pub mod jobs {
-    pub use pidash_jobs::admission::RedisAdmissionCache;
     pub use pidash_jobs::default_schedule;
     // P4: extra_toolsets_allowed died with the retired plane.
     pub use pidash_jobs::integrations::git_sync::TASK_NAMES as GIT_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.

@@ -24,7 +24,6 @@
 //! move's dispatch precedes its cancel send and pod drains,
 //! `issue_move.py:353-372`).
 
-use std::sync::Arc;
 
 use chrono::Utc;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
@@ -32,14 +31,12 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
-use pidash_db::redis::client_from_settings;
+use pidash_db::config::RunnerSettings;
 use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
 use pidash_services::domain::issues_move::MoveDrainError;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_sessions::drain::{
     drain_pod_idle_list_stmt, drain_pod_log, next_for_runner_stmt, plan_assignment,
@@ -49,38 +46,6 @@ use pidash_services::runner_sessions::guards::alive_threshold;
 use pidash_services::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 
 use crate::state::AppState;
-use pidash_services::dispatch::admission::RedisAdmissionCache;
-
-/// The creation runtime facts a span store is built from: executor
-/// settings, the admission cache, and the unix clock for the
-/// capacity/admission verdicts.
-#[derive(Clone)]
-pub(crate) struct SpanCreationDeps {
-    pub(crate) cloud: CloudAgentSettings,
-    pub(crate) managed: ManagedRunnerSettings,
-    pub(crate) cache: RedisAdmissionCache,
-    pub(crate) now_unix_secs: i64,
-    pub(crate) toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    pub(crate) assistant_seam: Arc<dyn AssistantModelSeam>,
-}
-
-impl SpanCreationDeps {
-    /// Build the runtime facts from the request state (the
-    /// `complete_project_move_handoff` position).
-    pub(crate) fn from_state(state: &AppState) -> Self {
-        let settings = state.settings();
-        Self {
-            cloud: settings.cloud_agent.clone(),
-            managed: settings.managed_runner.clone(),
-            cache: RedisAdmissionCache {
-                client: client_from_settings(state.settings()),
-            },
-            now_unix_secs: unix_now_secs(),
-            toolsets: state.toolsets().clone(),
-            assistant_seam: state.assistant_seam().clone(),
-        }
-    }
-}
 
 /// Drain finalized runs' terminal publish pairs after the caller's
 /// span commits: one emit + inline apply per run, each isolated with
@@ -114,13 +79,6 @@ pub(crate) async fn drain_terminal_effects(
     .await;
 }
 
-/// `int(time.time())` (the `project_move_handoff` `unix_now_secs` position).
-fn unix_now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 // Shared with both move drivers (app + v1): one copy of the twins that
 // lived in each move handler file. Failures answer `MoveDrainError`

@@ -8,7 +8,6 @@
 //! closures, and `now`. This module builds those inputs live:
 //!
 //! * The admission cache: the shared
-//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache]
 //!   (PIDASHCONV-1487), built by each fire handler from `REDIS_URL` —
 //!   the same buckets the HTTP plane and the Django worker use.
 //! * [`JobsMatcher`]: the live [`PodRunnerMatcher`]. Mirrors the api
