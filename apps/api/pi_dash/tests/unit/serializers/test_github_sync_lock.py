@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Read-only lock for GitHub-synced issues and comments.
+"""Read-only lock for provider-synced issues and comments.
 
-The lock predicate is "an active GithubIssueSync / GithubCommentSync row
+The lock predicate is "an active GitIssueSync / GitCommentSync row
 exists" — NOT `external_source == "github"`. After unbind, the cascade
-deletes those rows and edits become possible again. See .ai_design/
-github_sync/design.md §6.8.
+deletes those rows and edits become possible again. Legacy
+GithubIssueSync / GithubCommentSync rows are ignored (PDASHOSS01-359):
+migration 0152 backfilled them, so only generic rows consult. See
+.ai_design/github_sync/design.md §6.8.
 """
 
 import pytest
@@ -107,7 +109,7 @@ def git_binding(db, project, workspace, create_user):
 
 
 @pytest.fixture
-def synced_issue(db, project, workspace, state, repo_sync):
+def synced_issue(db, project, workspace, state, git_binding):
     issue = Issue.objects.create(
         project=project,
         workspace=workspace,
@@ -116,21 +118,20 @@ def synced_issue(db, project, workspace, state, repo_sync):
         external_source="github",
         external_id="1",
     )
-    GithubIssueSync.objects.create(
+    GitIssueSync.objects.create(
         project=project,
         workspace=workspace,
-        repository_sync=repo_sync,
+        binding=git_binding,
         issue=issue,
-        repo_issue_id=1,
-        github_issue_id=1,
-        issue_url="u",
-        metadata={},
+        provider="gitlab",
+        external_id="1001",
+        external_iid="7",
     )
     return issue
 
 
 @pytest.fixture
-def synced_comment(db, project, workspace, synced_issue, repo_sync):
+def synced_comment(db, project, workspace, synced_issue, git_binding):
     comment = IssueComment.objects.create(
         project=project,
         workspace=workspace,
@@ -139,13 +140,14 @@ def synced_comment(db, project, workspace, synced_issue, repo_sync):
         external_source="github",
         external_id="100",
     )
-    issue_sync = GithubIssueSync.objects.get(issue=synced_issue)
-    GithubCommentSync.objects.create(
+    issue_sync = GitIssueSync.objects.get(issue=synced_issue)
+    GitCommentSync.objects.create(
         project=project,
         workspace=workspace,
         issue_sync=issue_sync,
         comment=comment,
-        repo_comment_id=100,
+        provider="gitlab",
+        external_id="5001",
     )
     return comment
 
@@ -184,8 +186,8 @@ class TestIssueLock:
         assert serializer.is_valid(), serializer.errors
 
     def test_lock_releases_after_sync_row_deletion(self, synced_issue):
-        # Simulate unbind cascade: delete the GithubIssueSync row.
-        GithubIssueSync.objects.filter(issue=synced_issue).delete()
+        # Simulate unbind cascade: delete the GitIssueSync row.
+        GitIssueSync.objects.filter(issue=synced_issue).delete()
         serializer = IssueCreateSerializer(
             instance=synced_issue,
             data={"name": "New name"},
@@ -194,24 +196,34 @@ class TestIssueLock:
         )
         assert serializer.is_valid(), serializer.errors
 
-    def test_generic_git_sync_row_rejects_name_edit(self, synced_issue, git_binding):
-        GitIssueSync.objects.create(
-            project=synced_issue.project,
-            workspace=synced_issue.workspace,
-            binding=git_binding,
-            issue=synced_issue,
-            provider="gitlab",
-            external_id="1001",
-            external_iid="7",
+    def test_legacy_github_issue_sync_row_ignored(self, db, project, workspace, state, repo_sync):
+        # PDASHOSS01-359: legacy rows are backfilled (0152) and must not
+        # lock; only generic rows consult.
+        issue = Issue.objects.create(
+            project=project,
+            workspace=workspace,
+            name="[github_99] Legacy only",
+            state=state,
+            external_source="github",
+            external_id="99",
+        )
+        GithubIssueSync.objects.create(
+            project=project,
+            workspace=workspace,
+            repository_sync=repo_sync,
+            issue=issue,
+            repo_issue_id=99,
+            github_issue_id=99,
+            issue_url="u",
+            metadata={},
         )
         serializer = IssueCreateSerializer(
-            instance=synced_issue,
+            instance=issue,
             data={"name": "New name"},
             partial=True,
-            context={"project_id": str(synced_issue.project_id), "workspace_id": str(synced_issue.workspace_id)},
+            context={"project_id": str(issue.project_id), "workspace_id": str(issue.workspace_id)},
         )
-        with pytest.raises(ValidationError):
-            serializer.is_valid(raise_exception=True)
+        assert serializer.is_valid(), serializer.errors
 
 
 @pytest.mark.unit
@@ -227,7 +239,7 @@ class TestCommentLock:
             serializer.is_valid(raise_exception=True)
 
     def test_lock_releases_after_sync_row_deletion(self, synced_comment):
-        GithubCommentSync.objects.filter(comment=synced_comment).delete()
+        GitCommentSync.objects.filter(comment=synced_comment).delete()
         serializer = IssueCommentSerializer(
             instance=synced_comment,
             data={"comment_html": "<p>edited</p>"},
@@ -249,28 +261,36 @@ class TestCommentLock:
         )
         assert serializer.is_valid(), serializer.errors
 
-    def test_generic_git_comment_sync_rejects_body_edit(self, synced_comment, git_binding):
-        issue_sync = GitIssueSync.objects.create(
-            project=synced_comment.project,
-            workspace=synced_comment.workspace,
-            binding=git_binding,
-            issue=synced_comment.issue,
-            provider="gitlab",
-            external_id="1001",
-            external_iid="7",
+    def test_legacy_github_comment_sync_row_ignored(self, db, project, workspace, repo_sync, synced_issue):
+        # PDASHOSS01-359: legacy comment rows must not lock.
+        native = IssueComment.objects.create(
+            project=project,
+            workspace=workspace,
+            issue=synced_issue,
+            comment_html="<p>[Github] </p><p>upstream</p>",
+            external_source="github",
+            external_id="200",
         )
-        GitCommentSync.objects.create(
-            project=synced_comment.project,
-            workspace=synced_comment.workspace,
-            issue_sync=issue_sync,
-            comment=synced_comment,
-            provider="gitlab",
-            external_id="5001",
+        legacy_issue_sync = GithubIssueSync.objects.create(
+            project=project,
+            workspace=workspace,
+            repository_sync=repo_sync,
+            issue=synced_issue,
+            repo_issue_id=1,
+            github_issue_id=1,
+            issue_url="u",
+            metadata={},
+        )
+        GithubCommentSync.objects.create(
+            project=project,
+            workspace=workspace,
+            issue_sync=legacy_issue_sync,
+            comment=native,
+            repo_comment_id=200,
         )
         serializer = IssueCommentSerializer(
-            instance=synced_comment,
+            instance=native,
             data={"comment_html": "<p>edited</p>"},
             partial=True,
         )
-        with pytest.raises(ValidationError):
-            serializer.is_valid(raise_exception=True)
+        assert serializer.is_valid(), serializer.errors

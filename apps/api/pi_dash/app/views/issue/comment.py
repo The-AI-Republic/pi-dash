@@ -21,7 +21,6 @@ from pi_dash.app.serializers import IssueCommentSerializer, CommentReactionSeria
 from pi_dash.app.permissions import allow_permission, ROLE
 from pi_dash.db.models import (
     GitCommentSync,
-    GithubCommentSync,
     IssueComment,
     ProjectMember,
     CommentReaction,
@@ -155,9 +154,7 @@ class IssueCommentViewSet(BaseViewSet):
 
         # Block delete on actively-synced Git provider comments. After unbind,
         # cascades delete sync rows and the comment becomes user-managed again.
-        if GitCommentSync.objects.filter(comment=issue_comment).exists() or GithubCommentSync.objects.filter(
-            comment=issue_comment
-        ).exists():
+        if GitCommentSync.objects.filter(comment=issue_comment).exists():
             return Response(
                 {"error": "This comment is synced from a Git provider. Unbind the project's repository to delete."},
                 status=status.HTTP_409_CONFLICT,
