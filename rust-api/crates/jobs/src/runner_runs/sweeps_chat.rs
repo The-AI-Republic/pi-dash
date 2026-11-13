@@ -272,11 +272,14 @@ pub trait RunnerRunsSeams: Send + Sync {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.scheduling.maybe_disarm_on_terminal_signal`
-    /// (D-12), isolated.
+    /// (D-12), isolated. `Ok(true)` asks the caller to clear the run's
+    /// `thread_id` (the fresh-session lever) on its hooks transaction,
+    /// which holds the run row lock — the seam's own connection must not
+    /// write that row.
     fn disarm_on_terminal_signal(
         &self,
         run_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>>;
     /// `orchestration.scheduling.maybe_apply_deferred_pause` (D-12),
     /// isolated.
     fn apply_deferred_pause(
@@ -1236,8 +1239,18 @@ async fn run_hooks_phase(
         run_failure_comment_in_savepoint(tx, seams, run_id, hooks).await?;
     }
     if hooks.orchestration {
-        if let Err(error) = seams.disarm_on_terminal_signal(*run_id).await {
-            tracing::error!(%error, "orchestration.error: run-ended reconcile failed for run {run_id}");
+        match seams.disarm_on_terminal_signal(*run_id).await {
+            Ok(true) => {
+                let conn = TxConn::new(&mut *tx);
+                if let Err(error) = crate::orchestration::clear_run_thread_id(&conn, *run_id).await
+                {
+                    tracing::error!(%error, "orchestration.error: fresh-session thread clear failed for run {run_id}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(%error, "orchestration.error: run-ended reconcile failed for run {run_id}");
+            }
         }
         if let Err(error) = seams.apply_deferred_pause(*run_id).await {
             tracing::error!(%error, "orchestration.error: deferred-pause failed for run {run_id}");
@@ -1308,13 +1321,10 @@ async fn post_failure_comment(
     }
     let failure_reason = reread.failure_reason.clone();
     let ids = map_failure_comment_ids(&reread)?;
-    // Route on the stored canonical reason (PDASHOSS01-183): a free-retry
-    // failure below the backstop is retried silently.
-    let streak = match lifecycle::failure_comment_streak_reason(&failure_reason) {
-        Some(reason) => failure_effects::failure_streak(&conn, ids.issue_id, reason).await?,
-        None => 0,
-    };
-    let clock_stopped = match lifecycle::failure_comment_gate(&failure_reason, streak) {
+    // Route on the stored canonical reason (PDASHOSS01-183), predicting the
+    // `RUN_ENDED` failure policy that follows on this transaction.
+    let effect = failure_effects::failure_clock_effect(&conn, &reread).await?;
+    let clock_stopped = match lifecycle::failure_comment_gate(plan, effect) {
         lifecycle::FailureCommentGate::Suppress => return Ok(()),
         lifecycle::FailureCommentGate::Post { clock_stopped } => clock_stopped,
     };
@@ -2006,6 +2016,8 @@ mod tests {
             issue_project_id: Some(Uuid::nil()),
             issue_workspace_id: Some(Uuid::nil()),
             failure_reason: String::new(),
+            phase_kind: String::new(),
+            issue_state_id: None,
         };
         assert!(map_failure_comment_ids(&full).is_ok());
         let dangling = lifecycle::FailureRereadRow {
@@ -2100,8 +2112,8 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             _run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
+            Box::pin(async move { Ok(false) })
         }
         fn apply_deferred_pause(
             &self,
@@ -2256,9 +2268,9 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
             self.record(json!({"fn": "disarm", "args": [run_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
+            Box::pin(async move { Ok(false) })
         }
         fn apply_deferred_pause(
             &self,

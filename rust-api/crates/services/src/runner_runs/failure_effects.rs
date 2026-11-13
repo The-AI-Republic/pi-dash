@@ -24,7 +24,11 @@
 //! [`clock_stopped_notification_insert_sql`]: super::lifecycle::clock_stopped_notification_insert_sql
 
 use chrono::Utc;
-use pidash_db::entity::{agent_run, issues, notifications, projects, runner, users};
+use pidash_db::entity::{
+    agent_run, issue_agent_ticker, issues, notifications, projects, runner, states, users,
+};
+use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
+use pidash_types::orchestration::StateRef;
 use pidash_types::runner_runs::{failure_streak_from_rows, FAILURE_STREAK_WINDOW};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
@@ -32,9 +36,11 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::orchestration::clock::{self, ClockIssue, FailureClockEffect, ProjectClockPolicy};
+
 use super::lifecycle::{
     clock_stopped_data, clock_stopped_message_html, clock_stopped_receivers, ClockStoppedIssue,
-    ReceiverCandidate, CLOCK_STOPPED_ENTITY_NAME, CLOCK_STOPPED_SENDER,
+    FailureRereadRow, ReceiverCandidate, CLOCK_STOPPED_ENTITY_NAME, CLOCK_STOPPED_SENDER,
 };
 
 /// `consecutive_failure_streak` read (`failure.py`):
@@ -55,17 +61,123 @@ pub async fn failure_streak(
     issue_id: Uuid,
     reason: &str,
 ) -> Result<u32, sea_orm::DbErr> {
-    let rows = agent_run::Entity::find()
+    // Two columns, as `values_list("status", "failure_reason")` reads.
+    let rows: Vec<(String, String)> = agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::Status, agent_run::Column::FailureReason])
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
         .order_by_desc(agent_run::Column::CreatedAt)
         .limit(FAILURE_STREAK_WINDOW as u64)
+        .into_tuple()
         .all(db)
         .await?;
     Ok(failure_streak_from_rows(
         rows.iter()
-            .map(|run| (run.status.as_str(), run.failure_reason.as_str())),
+            .map(|(status, failure_reason)| (status.as_str(), failure_reason.as_str())),
         reason,
     ))
+}
+
+/// `scheduling.failure_clock_effect(issue, run, reason)`: what the failure
+/// policy will do to the issue's clock, read beside the failure comment
+/// (same transaction as the `RUN_ENDED` reconcile that follows, so the
+/// ticker it reads is the one the policy acts on). Reads, in Python's
+/// order, only what the guards reach: nothing for an empty reason; the
+/// ticker; the issue's state and project policy; then the streak.
+pub async fn failure_clock_effect(
+    db: &impl ConnectionTrait,
+    reread: &FailureRereadRow,
+) -> Result<FailureClockEffect, sea_orm::DbErr> {
+    let reason = reread
+        .failure_reason
+        .trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c));
+    let Some(issue_id) = reread.work_item_id else {
+        return Ok(FailureClockEffect::default());
+    };
+    if reason.is_empty() {
+        return Ok(FailureClockEffect::default());
+    }
+    let ticker = issue_agent_ticker::Entity::find()
+        .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+        .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+        .order_by_asc(issue_agent_ticker::Column::Id)
+        .one(db)
+        .await?
+        .map(IssueAgentTicker::from);
+    let Some(ticker) = ticker.filter(|ticker| ticker.enabled) else {
+        return Ok(FailureClockEffect::default());
+    };
+    let state: Option<(String, String)> = match reread.issue_state_id {
+        Some(state_id) => {
+            states::Entity::find_by_id(state_id)
+                .select_only()
+                .columns([states::Column::Name, states::Column::Group])
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        None => None,
+    };
+    let policy = match reread.issue_project_id {
+        Some(project_id) => project_clock_policy(db, project_id).await?,
+        None => ProjectClockPolicy::default(),
+    };
+    let issue = ClockIssue {
+        issue_id,
+        state: state.as_ref().map(|(name, group)| StateRef {
+            group: group.as_str(),
+            name: name.as_str(),
+        }),
+        policy,
+    };
+    if clock::run_ended_guard(&issue, &reread.phase_kind).is_some() {
+        return Ok(FailureClockEffect::default());
+    }
+    let streak = failure_streak(db, issue_id, reason).await?;
+    Ok(clock::failure_clock_effect(
+        Some(&ticker),
+        &issue,
+        &reread.phase_kind,
+        reason,
+        streak,
+    ))
+}
+
+/// The project's clock knobs (`ProjectClockPolicy`), defaults when the
+/// project row is gone.
+async fn project_clock_policy(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+) -> Result<ProjectClockPolicy, sea_orm::DbErr> {
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        Option<bool>,
+        Option<i32>,
+        Option<i32>,
+        Option<i32>,
+        Option<i32>,
+    )> = projects::Entity::find_by_id(project_id)
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+        ])
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(match row {
+        Some((enabled, max, impl_secs, review_secs, test_secs)) => ProjectClockPolicy {
+            agent_ticking_enabled: enabled,
+            agent_default_max_ticks: max,
+            agent_default_interval_seconds: impl_secs.map(i64::from),
+            agent_review_default_interval_seconds: review_secs.map(i64::from),
+            agent_test_default_interval_seconds: test_secs.map(i64::from),
+        },
+        None => ProjectClockPolicy::default(),
+    })
 }
 
 async fn receiver_candidate(

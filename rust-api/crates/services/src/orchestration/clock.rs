@@ -599,6 +599,81 @@ fn untouched_with_thread(
     }
 }
 
+/// `_run_ended_guard` (`scheduling.py`): why `_on_run_ended` ignores the
+/// run's verdict, or `None`. The issue left the bucket, or the run belongs
+/// to a stage the issue has already moved past — either way the finished
+/// run must not touch the clock set for where the issue is now.
+pub fn run_ended_guard(issue: &ClockIssue<'_>, run_phase_kind: &str) -> Option<&'static str> {
+    if !is_ticking_state(issue.state.as_ref()) {
+        return Some("not-in-bucket");
+    }
+    let current_kind = kind_for(template_name_for(issue.state.as_ref()), WORK_KIND_CODING);
+    if !run_phase_kind.is_empty() && run_phase_kind != current_kind {
+        return Some("stage-moved-on");
+    }
+    None
+}
+
+/// `_free_retry_allowed` (`scheduling.py`): within the free-retry cap, on
+/// an armed and allowed clock that owes no entry already.
+fn free_retry_allowed(ticker: &IssueAgentTicker, policy: &ProjectClockPolicy, streak: u32) -> bool {
+    streak <= FREE_RETRY_MAX_ATTEMPTS
+        && ticker.enabled
+        && !ticker.pending_entry
+        && clock_allowed(ticker, policy)
+}
+
+/// `FailureClockEffect` (`scheduling.py`): what the failure policy will do
+/// to the issue's clock for a failed run. Read by the failure comment,
+/// which is posted *before* the run's `RUN_ENDED` reconciles (same
+/// transaction, ticker unchanged in between), so the comment and the
+/// notification never claim a pause or a silent retry the ticker does not
+/// actually make.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailureClockEffect {
+    pub clock_stopped: bool,
+    pub free_retry: bool,
+}
+
+/// `failure_clock_effect(issue, run, reason)` (`scheduling.py`): predict
+/// [`apply_failure_policy`]'s effect for a run failing with `reason`, with
+/// the same guards and without mutating anything. `streak` is
+/// `consecutive_failure_streak(issue, reason)`; it is ignored (and need
+/// not be read) when `reason` is empty or the clock is not armed.
+pub fn failure_clock_effect(
+    ticker: Option<&IssueAgentTicker>,
+    issue: &ClockIssue<'_>,
+    run_phase_kind: &str,
+    reason: &str,
+    streak: u32,
+) -> FailureClockEffect {
+    if reason.is_empty() {
+        return FailureClockEffect::default();
+    }
+    // Only an armed clock is stopped (an already-stopped one, e.g.
+    // CAP_HIT, stays as it is) and only an armed clock gets a free retry.
+    let Some(ticker) = ticker.filter(|ticker| ticker.enabled) else {
+        return FailureClockEffect::default();
+    };
+    if run_ended_guard(issue, run_phase_kind).is_some() {
+        return FailureClockEffect::default();
+    }
+    let policy = policy_for(reason);
+    if streak >= repeated_failure_limit_for(reason) || policy == FailurePolicy::NeedsHuman {
+        return FailureClockEffect {
+            clock_stopped: true,
+            free_retry: false,
+        };
+    }
+    if policy == FailurePolicy::RetryFree && free_retry_allowed(ticker, &issue.policy, streak) {
+        return FailureClockEffect {
+            clock_stopped: false,
+            free_retry: true,
+        };
+    }
+    FailureClockEffect::default()
+}
+
 /// What `_apply_failure_policy` answered: a decision (return it), or
 /// `None` in Python — fall through to the normal keep-ticking path,
 /// possibly after clearing the run's resume handle.
@@ -615,8 +690,9 @@ enum FailurePolicyStep {
 ///   `REPEATED_FAILURE` (a disarmed one — a prior `cap_hit` — survives).
 /// * `NEEDS_HUMAN`: stop an armed clock with `FAILURE_NEEDS_HUMAN`.
 /// * `RETRY_FREE`: within `FREE_RETRY_MAX_ATTEMPTS`, on an armed and
-///   allowed clock, queue a free `tick` entry `FREE_RETRY_BACKOFF_SECONDS`
-///   out — `fire_tick` skips `used` on free claims; otherwise fall through.
+///   allowed clock that owes no entry already, queue a free `tick` entry
+///   `FREE_RETRY_BACKOFF_SECONDS` out — `fire_tick` skips `used` on free
+///   claims; otherwise fall through.
 /// * `FRESH_SESSION`: clear the run's `thread_id` (when set) and fall
 ///   through.
 /// * Everything else — the fail-safe default — falls through.
@@ -665,10 +741,7 @@ fn apply_failure_policy(
             "needs-human",
         )),
         FailurePolicy::RetryFree => {
-            if streak <= FREE_RETRY_MAX_ATTEMPTS
-                && ticker.enabled
-                && clock_allowed(ticker, &issue.policy)
-            {
+            if free_retry_allowed(ticker, &issue.policy, streak) {
                 // A free entry does not spend the pool and the scanner
                 // admits pending rows regardless of cap. `TICK` trigger so
                 // the retry is created as a machine run, not as a person.
@@ -717,16 +790,13 @@ pub fn on_run_ended(
         return untouched(None, "no-ticker");
     };
     let ticker_id = ticker.id;
-    if !is_ticking_state(issue.state.as_ref()) {
-        return untouched(Some(ticker_id), "not-in-bucket");
-    }
     // The guard: a signal from a run whose stage the issue has already
     // left is ignored — `stop_ticking` included — so the clock already set
     // for the next stage survives.
-    let current_kind = kind_for(template_name_for(issue.state.as_ref()), WORK_KIND_CODING);
-    if !run.phase_kind.is_empty() && run.phase_kind != current_kind {
-        return untouched(Some(ticker_id), "stage-moved-on");
+    if let Some(guard) = run_ended_guard(issue, run.phase_kind) {
+        return untouched(Some(ticker_id), guard);
     }
+    let current_kind = kind_for(template_name_for(issue.state.as_ref()), WORK_KIND_CODING);
     let outcome = event.outcome.clone().or_else(|| {
         outcome_for_run(&RunOutcomeRef {
             done_payload: run.done_payload,
@@ -753,18 +823,26 @@ pub fn on_run_ended(
             default_outcome_for_kind(kind).to_string()
         }
     });
-    if ticker.pending_entry {
-        // Something (a human, a queued hand-off) already owes the next run
-        // on this clock; the finished run's opinion does not override it.
-        return untouched(Some(ticker_id), &format!("{outcome}:pending-entry-kept"));
-    }
     let mut clear_run_thread_id = false;
     if failed_without_yield {
+        // Before the pending-entry check: an owed entry would only repeat a
+        // failure a retry cannot fix, so a needs-human / backstop stop wins
+        // over it (`stop_clock` drops the entry). A free retry defers to an
+        // owed entry instead of stacking a second one.
         match apply_failure_policy(ticker, issue, run, now) {
             FailurePolicyStep::Decided(outcome) => return outcome,
             FailurePolicyStep::FallThrough { clear_thread } => clear_run_thread_id = clear_thread,
         }
         // No policy override: fall through to the normal keep-ticking path.
+    }
+    if ticker.pending_entry {
+        // Something (a human, a queued hand-off) already owes the next run
+        // on this clock; the finished run's opinion does not override it.
+        return untouched_with_thread(
+            Some(ticker_id),
+            &format!("{outcome}:pending-entry-kept"),
+            clear_run_thread_id,
+        );
     }
     // `payload.get("stop_ticking") is True`: a strict boolean-true test —
     // a missing key, `false`, `1`, or `"yes"` all keep ticking.
@@ -2606,6 +2684,120 @@ mod tests {
         assert_eq!(row.disarm_reason, "failure_needs_human");
         assert_eq!(row.used, 2, "nothing spent by the stop");
         assert!(!outcome.clear_run_thread_id);
+    }
+
+    #[test]
+    fn needs_human_failure_stops_the_clock_over_a_pending_entry() {
+        let mut row = armed_row(2);
+        row.pending_entry = true;
+        row.pending_entry_free = true;
+        let run = failed_run("agent_error.provider_auth_or_access", "", "", 1);
+        let (outcome, row) = run_ended_with(row, &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.provider_auth_or_access:needs-human-stopped"
+        );
+        assert!(!row.enabled);
+        assert_eq!(row.disarm_reason, "failure_needs_human");
+        assert!(!row.pending_entry, "the doomed owed entry is dropped");
+    }
+
+    #[test]
+    fn free_retry_defers_to_a_pending_entry() {
+        let mut row = armed_row(2);
+        row.pending_entry = true;
+        row.pending_entry_free = true;
+        let run = failed_run("agent_error.provider_network", "", "", 1);
+        let (outcome, row) = run_ended_with(row, &run);
+        assert!(outcome.decision.reason.ends_with(":pending-entry-kept"));
+        assert!(row.pending_entry);
+        assert_eq!(row.next_run_at, Some(now()), "not pushed back by a backoff");
+    }
+
+    #[test]
+    fn context_overflow_clears_the_thread_even_with_a_pending_entry() {
+        let mut row = armed_row(2);
+        row.pending_entry = true;
+        let run = failed_run("agent_error.context_overflow", "", "thread-abc", 1);
+        let (outcome, _) = run_ended_with(row, &run);
+        assert!(outcome.decision.reason.ends_with(":pending-entry-kept"));
+        assert!(outcome.clear_run_thread_id);
+    }
+
+    #[test]
+    fn failure_clock_effect_matches_the_policy_it_predicts() {
+        let issue = clock_issue(Some(in_progress()), fx5_policy());
+        let armed = armed_row(2);
+        let effect = |ticker: Option<&IssueAgentTicker>, reason: &str, streak: u32| {
+            failure_clock_effect(ticker, &issue, "coding-task", reason, streak)
+        };
+        let stopped = FailureClockEffect {
+            clock_stopped: true,
+            free_retry: false,
+        };
+        let retry = FailureClockEffect {
+            clock_stopped: false,
+            free_retry: true,
+        };
+        assert_eq!(
+            effect(Some(&armed), "agent_error.provider_auth_or_access", 1),
+            stopped
+        );
+        assert_eq!(
+            effect(Some(&armed), "agent_error.provider_network", 1),
+            retry
+        );
+        assert_eq!(
+            effect(Some(&armed), "agent_error.provider_network", 4),
+            stopped
+        );
+        assert_eq!(
+            effect(Some(&armed), "agent_error.process_failure", 3),
+            stopped
+        );
+        assert_eq!(
+            effect(Some(&armed), "agent_error.process_failure", 1),
+            FailureClockEffect::default()
+        );
+        // No armed clock: the policy stops nothing and retries nothing.
+        let mut off = armed_row(2);
+        off.enabled = false;
+        for reason in [
+            "agent_error.provider_auth_or_access",
+            "agent_error.provider_network",
+        ] {
+            assert_eq!(effect(Some(&off), reason, 4), FailureClockEffect::default());
+            assert_eq!(effect(None, reason, 4), FailureClockEffect::default());
+        }
+        // An owed entry takes the free retry's place.
+        let mut owed = armed_row(2);
+        owed.pending_entry = true;
+        assert_eq!(
+            effect(Some(&owed), "agent_error.provider_network", 1),
+            FailureClockEffect::default()
+        );
+        // Outside the bucket / a stage the issue moved past.
+        let todo = clock_issue(None, fx5_policy());
+        assert_eq!(
+            failure_clock_effect(
+                Some(&armed),
+                &todo,
+                "",
+                "agent_error.provider_auth_or_access",
+                1
+            ),
+            FailureClockEffect::default()
+        );
+        assert_eq!(
+            failure_clock_effect(
+                Some(&armed),
+                &issue,
+                "review",
+                "agent_error.provider_auth_or_access",
+                1
+            ),
+            FailureClockEffect::default()
+        );
     }
 
     #[test]

@@ -392,12 +392,24 @@ pub async fn post_run_orchestration_in_tx<'t>(
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     run_id: Uuid,
 ) -> Transaction<'t> {
-    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
-        tracing::error!(
+    let mut tx = tx;
+    match disarm_on_terminal_signal_deferred(pool, run_id).await {
+        Ok(outcome) if outcome.clear_run_thread_id => {
+            // On the caller's transaction: it holds the run row lock.
+            if let Err(error) = clear_run_thread_id(&TxConn::new(tx.inner()), run_id).await {
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "orchestration.error: fresh-session thread clear failed"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::error!(
             ?error,
             run_id = %run_id,
             "orchestration.error: run-ended reconcile failed"
-        );
+        ),
     }
     let deps = StoreDeps {
         cloud: cloud.clone(),
@@ -507,6 +519,59 @@ pub enum DisarmError {
 /// work item, or a missing issue answers `false` without a transaction —
 /// the planner's `(false, None)` shape.
 pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bool, DisarmError> {
+    let outcome = disarm_on_terminal_signal_deferred(pool, run_id).await?;
+    if outcome.clear_run_thread_id {
+        // No caller lock on the run row here, so a pool connection can
+        // take the write.
+        clear_run_thread_id(&sea_orm_connection(pool), run_id).await?;
+    }
+    Ok(outcome.stopped)
+}
+
+/// What [`disarm_on_terminal_signal_deferred`] decided and left for the
+/// caller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DisarmOutcome {
+    /// The clock was stopped (`maybe_disarm_on_terminal_signal`'s answer).
+    pub stopped: bool,
+    /// The fresh-session lever (PDASHOSS01-183) fired: the caller must
+    /// clear the run's `thread_id` ([`clear_run_thread_id`]) on *its*
+    /// transaction. The terminal-effects callers hold the run row under
+    /// `FOR UPDATE` while this runs on a second connection, so writing the
+    /// row here would wait on the caller's lock while the caller waits on
+    /// this call — a cross-connection hang Postgres cannot detect, ended
+    /// only by `idle_in_transaction_session_timeout` rolling back the
+    /// caller's hooks transaction. Django clears it inside the same
+    /// `transaction.atomic()`.
+    pub clear_run_thread_id: bool,
+}
+
+/// The fresh-session lever's write (`AgentRun.objects.filter(pk=run.pk)
+/// .update(thread_id="")`): the next continuation builds a fresh-session
+/// Assign instead of resuming the session that will fail again.
+pub async fn clear_run_thread_id(
+    conn: &impl ConnectionTrait,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    agent_run::Entity::update_many()
+        .col_expr(
+            agent_run::Column::ThreadId,
+            sea_orm::sea_query::Expr::value(""),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(conn)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(())
+}
+
+/// [`disarm_on_terminal_signal`] without the run-row write: the ticker
+/// decision and its ticker write commit here; the `thread_id` clear is
+/// returned for the caller to apply where it already holds the run lock.
+pub async fn disarm_on_terminal_signal_deferred(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<DisarmOutcome, DisarmError> {
     let conn = sea_orm_connection(pool);
     #[allow(clippy::type_complexity)]
     let run: Option<(
@@ -542,10 +607,10 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         thread_id,
     )) = run
     else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let Some(work_item_id) = work_item_id else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let status =
         AgentRunStatus::from_value(&status).ok_or(DisarmError::Decode("agent_run.status"))?;
@@ -558,7 +623,7 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         .await
         .map_err(into_sqlx)?;
     let Some((state_id, project_id)) = issue else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let state: Option<(String, String)> = match state_id {
         Some(state_id) => {
@@ -687,21 +752,6 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             )
             .await?;
         }
-        if outcome.clear_run_thread_id {
-            // The fresh-session lever (PDASHOSS01-183): the next
-            // continuation builds a fresh-session Assign instead of
-            // resuming the session that will fail again.
-            let conn = TxConn::new(tx.inner());
-            agent_run::Entity::update_many()
-                .col_expr(
-                    agent_run::Column::ThreadId,
-                    sea_orm::sea_query::Expr::value(""),
-                )
-                .filter(agent_run::Column::Id.eq(run_id))
-                .exec(&conn)
-                .await
-                .map_err(into_sqlx)?;
-        }
     }
     tx.commit().await?;
     if let Some(outcome) = &outcome {
@@ -710,7 +760,12 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             clock::reconcile_log_line(&work_item_id, TickerEventKind::RUN_ENDED, &outcome.decision)
         );
     }
-    Ok(stopped)
+    Ok(DisarmOutcome {
+        stopped,
+        clear_run_thread_id: outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.clear_run_thread_id),
+    })
 }
 
 #[cfg(test)]
@@ -1058,7 +1113,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '')"#,
         )
         .bind(run)
         .bind(now)
@@ -1163,7 +1218,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '')"#,
         )
         .bind(run)
         .bind(now)
@@ -1289,7 +1344,7 @@ mod tests {
         .await
         .expect("seed ticker");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "done_payload") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '{"stop_ticking": true}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "done_payload", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '{"stop_ticking": true}', '')"#,
         )
         .bind(run)
         .bind(now)

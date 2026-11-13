@@ -325,7 +325,8 @@ fn status(codes: &[u16]) -> String {
 }
 
 /// `_AGENT_TEXT_RULES` (`failure.py`), in order — first match wins. Order
-/// is load-bearing (context before quota, capacity before auth, model
+/// is load-bearing (context before quota, quota before capacity — 429s
+/// carrying exhausted-quota wording — capacity before auth, model
 /// access before auth, provider rules before the generic process rules).
 fn agent_text_rules() -> &'static [(RunFailureReason, Regex)] {
     static RULES: OnceLock<Vec<(RunFailureReason, Regex)>> = OnceLock::new();
@@ -341,21 +342,23 @@ fn agent_text_rules() -> &'static [(RunFailureReason, Regex)] {
                 .to_string(),
             ),
             (
+                RunFailureReason::AgentProviderQuota,
+                status(&[402])
+                    + concat!(
+                        r"|insufficient[ _](?:credit|quota|funds|balance)|exceeded your current quota",
+                        r"|credit balance|out of (?:usage )?credits|quota exceeded",
+                        r"|(?:hit|reached|exceeded) (?:your |the )?usage limit|usage limit (?:reached|exceeded|hit)",
+                        r"|billing (?:details|limit|issue|required)|payment required",
+                        r"|\b(?:5-hour|weekly|monthly) limit\b|hard limit reached",
+                    ),
+            ),
+            (
                 RunFailureReason::AgentProviderCapacity,
                 status(&[429, 529])
                     + concat!(
                         r"|rate[ _-]?limit|too many requests|overloaded_error|\boverloaded\b",
                         r"|concurrent connections|capacity constraint|server is busy",
                         r"|number of request tokens has exceeded",
-                    ),
-            ),
-            (
-                RunFailureReason::AgentProviderQuota,
-                status(&[402])
-                    + concat!(
-                        r"|insufficient (?:credit|quota|funds)|credit balance|out of (?:usage )?credits",
-                        r"|quota exceeded|usage limit|billing|payment required",
-                        r"|\b(?:5-hour|weekly|monthly) limit\b|hard limit reached",
                     ),
             ),
             (
@@ -376,7 +379,7 @@ fn agent_text_rules() -> &'static [(RunFailureReason, Regex)] {
                         r"|api key.{0,30}(?:invalid|expired|revoked|disabled)",
                         r"|token (?:has )?expired|refresh(?:ing)? (?:the )?(?:oauth )?token",
                         r"|re-?authenticate|please run /login|not logged in|login required",
-                        r"|invalid credentials|oauth",
+                        r"|invalid credentials|oauth (?:token|session|credentials?)\b.{0,40}?(?:expired|invalid|revoked)",
                     ),
             ),
             (
@@ -384,7 +387,6 @@ fn agent_text_rules() -> &'static [(RunFailureReason, Regex)] {
                 concat!(
                     r"command not found|not recognized as an internal or external command",
                     r"|(?:executable|program|binary) (?:file )?not found",
-                    r"|no such file or directory \(os error 2\)",
                     r"|failed to (?:spawn|launch|exec)",
                 )
                 .to_string(),
@@ -582,7 +584,7 @@ mod tests {
     fn classify_replays_every_fixture_vector() {
         let fx = fixture();
         let rows = fx["classify"].as_array().expect("classify rows");
-        assert_eq!(rows.len(), 944, "golden covers the tables");
+        assert_eq!(rows.len(), 976, "golden covers the tables");
         for row in rows {
             let raw = s(row, "raw");
             let runner_reason = s(row, "runner_reason");

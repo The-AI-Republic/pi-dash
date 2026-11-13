@@ -734,24 +734,22 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         None
     } else {
         let failure_comment = if inputs.status == AgentRunStatus::Failed && !handoff {
-            // The savepoint pair always runs around the hook call;
-            // the reads only when the comment is not suppressed
-            // (suppression returns before any SQL). Everything after
-            // the re-read is additionally runtime-gated: the streak read
-            // needs a stored reason, a free-retry gate / dedupe hit /
-            // missing work item means silence, and the notification
-            // needs a stopped clock plus a surviving receiver.
+            // The savepoint pair always runs around the hook call, and
+            // so does the re-read: infra noise is only silenced once the
+            // clock effect says the clock keeps running. Everything after
+            // the re-read is runtime-gated: the clock-effect reads need a
+            // stored reason and an armed clock, a free-retry / infra gate,
+            // dedupe hit or missing work item means silence, and the
+            // notification needs a stopped clock plus a surviving receiver.
             statements.push(EffectsSql::FailureCommentSavepoint);
             let comment = plan_failure_comment(inputs.error, inputs.run_id);
-            if comment.is_some() {
-                statements.push(EffectsSql::FailureCommentReread);
-                statements.push(EffectsSql::FailureCommentStreak);
-                statements.push(EffectsSql::FailureCommentDedupeCheck);
-                statements.push(EffectsSql::FailureCommentInserts);
-                statements.push(EffectsSql::FailureCommentNotify);
-            }
+            statements.push(EffectsSql::FailureCommentReread);
+            statements.push(EffectsSql::FailureCommentStreak);
+            statements.push(EffectsSql::FailureCommentDedupeCheck);
+            statements.push(EffectsSql::FailureCommentInserts);
+            statements.push(EffectsSql::FailureCommentNotify);
             statements.push(EffectsSql::FailureCommentRelease);
-            comment
+            Some(comment)
         } else {
             None
         };
@@ -1814,16 +1812,24 @@ mod tests {
                 UpdateCapacityMarker,
             ]
         );
-        // Suppressed detail: savepoint pair runs, reads do not.
+        // Infra detail: still re-read — it is only silenced once the clock
+        // effect says the clock keeps running (a backstop stop is reported).
         inputs.error = "daemon shutdown requested: restart";
         let outcome = plan_terminal_effects(&inputs);
         let TerminalEffectsOutcome::Applied(plan) = outcome else {
             panic!("expected Applied");
         };
-        assert_eq!(plan.hooks.as_ref().expect("hooks").failure_comment, None);
+        let comment = plan
+            .hooks
+            .as_ref()
+            .expect("hooks")
+            .failure_comment
+            .as_ref()
+            .expect("planned");
+        assert!(comment.infra);
         assert!(plan.statements.contains(&FailureCommentSavepoint));
         assert!(plan.statements.contains(&FailureCommentRelease));
-        assert!(!plan.statements.contains(&FailureCommentReread));
+        assert!(plan.statements.contains(&FailureCommentReread));
     }
 
     #[test]

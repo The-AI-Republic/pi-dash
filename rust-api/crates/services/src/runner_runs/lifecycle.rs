@@ -35,9 +35,8 @@ use pidash_db::app_pages::strip::{django_strip_tags, ml_strip_tags};
 use pidash_db::entity as orm;
 use pidash_db::runner_runs::agent_run;
 use pidash_types::runner_runs::{
-    classify_failure, classify_run_error_for_reason, enrich_run_error, merge_usage, policy_for,
-    repeated_failure_limit_for, AgentRunStatus, FailurePolicy, RefusalCategory, RunFailureReason,
-    RunnerInfo,
+    classify_failure, classify_run_error_for_reason, enrich_run_error, merge_usage, AgentRunStatus,
+    RefusalCategory, RunFailureReason, RunnerInfo,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -47,6 +46,7 @@ use super::{
     py_str, py_strip, py_truthy, qualified_columns, truncate_chars, LifecycleEffect, SetValue,
     ISSUE_COLUMNS, PROJECT_COLUMNS, STATE_COLUMNS,
 };
+use crate::orchestration::clock::FailureClockEffect;
 
 /// `PROJECT_MOVE_HANDOFF_CONFIG_KEY`
 /// (`orchestration/service.py:57`): the `run_config` key whose
@@ -830,70 +830,62 @@ pub fn is_infra_failure_detail(stripped_detail: &str) -> bool {
         .any(|prefix| stripped_detail.starts_with(prefix))
 }
 
-/// The failure comment past the prefix gate (`_post_failure_comment`,
-/// `:363-365`): the stripped detail it will render, for the run it
-/// belongs to. Everything else the comment needs — the stored
-/// `failure_reason`, the failure streak, the dedupe verdict — is read by
-/// the executing layer after the run re-read (PDASHOSS01-183), then fed
-/// to [`failure_comment_gate`] and [`FailureCommentPlan::render`].
+/// The failure comment's input (`_post_failure_comment`): the stripped
+/// detail it will render, for the run it belongs to, and whether that
+/// detail is infra noise. Everything else the comment needs — the stored
+/// `failure_reason`, the clock effect, the dedupe verdict — is read by the
+/// executing layer after the run re-read (PDASHOSS01-183), then fed to
+/// [`failure_comment_gate`] and [`FailureCommentPlan::render`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureCommentPlan {
     pub run_id: Uuid,
     pub detail: String,
+    /// The detail starts with an [`INFRA_FAILURE_DETAIL_PREFIXES`] entry:
+    /// kept off the thread unless the failure stops the clock.
+    pub infra: bool,
 }
 
-/// Plan the failure comment (`_post_failure_comment:341-399`): strip and
-/// suppress infra noise. `None` means suppressed before any SQL; the
-/// executing layer still runs the row re-read, the streak gate and the
-/// dedupe check (each can also mean silence).
-pub fn plan_failure_comment(error: &str, run_id: Uuid) -> Option<FailureCommentPlan> {
+/// Plan the failure comment (`_post_failure_comment`): strip and flag
+/// infra noise. The executing layer then runs the row re-read, the clock
+/// effect, the gate and the dedupe check (each can mean silence).
+pub fn plan_failure_comment(error: &str, run_id: Uuid) -> FailureCommentPlan {
     let detail = py_strip(error);
-    if is_infra_failure_detail(detail) {
-        return None;
-    }
-    Some(FailureCommentPlan {
+    FailureCommentPlan {
         run_id,
         detail: detail.to_owned(),
-    })
-}
-
-/// The reason the streak query counts, when the gate needs it: only a
-/// non-empty stored reason routes on policy (`reason = (run.failure_reason
-/// or "").strip()` / `if reason:`).
-pub fn failure_comment_streak_reason(failure_reason: &str) -> Option<&str> {
-    let reason = py_strip(failure_reason);
-    (!reason.is_empty()).then_some(reason)
+        infra: is_infra_failure_detail(detail),
+    }
 }
 
 /// The per-reason gate (`_post_failure_comment`, PDASHOSS01-183) run
 /// after the re-read and before the dedupe check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureCommentGate {
-    /// A free-retry failure below the backstop: retried silently.
+    /// Silence: a failure the policy is about to free-retry, or infra
+    /// noise that does not stop the clock.
     Suppress,
     /// Post the comment; `clock_stopped` adds the paused paragraph and
     /// raises the clock-stopped notification after the insert.
     Post { clock_stopped: bool },
 }
 
-/// Decide the gate from the stored reason and the streak
-/// (`consecutive_failure_streak`; ignored for an empty reason). Mirrors
+/// Decide the gate from the predicted clock effect
+/// ([`failure_clock_effect`][crate::orchestration::clock::failure_clock_effect],
 /// the decision `_apply_failure_policy` makes when the run's `RUN_ENDED`
-/// reconciles right after this hook.
-pub fn failure_comment_gate(failure_reason: &str, streak: u32) -> FailureCommentGate {
-    let reason = py_strip(failure_reason);
-    if reason.is_empty() {
-        return FailureCommentGate::Post {
-            clock_stopped: false,
-        };
+/// reconciles right after this hook): a free retry is silent; infra noise
+/// is silent unless the clock stops — the user must hear about that.
+pub fn failure_comment_gate(
+    plan: &FailureCommentPlan,
+    effect: FailureClockEffect,
+) -> FailureCommentGate {
+    if effect.free_retry {
+        return FailureCommentGate::Suppress;
     }
-    let policy = policy_for(reason);
-    let hit_backstop = streak >= repeated_failure_limit_for(reason);
-    if policy == FailurePolicy::RetryFree && !hit_backstop {
+    if plan.infra && !effect.clock_stopped {
         return FailureCommentGate::Suppress;
     }
     FailureCommentGate::Post {
-        clock_stopped: hit_backstop || policy == FailurePolicy::NeedsHuman,
+        clock_stopped: effect.clock_stopped,
     }
 }
 
@@ -1184,6 +1176,11 @@ pub struct FailureRereadRow {
     pub issue_workspace_id: Option<Uuid>,
     /// The stored canonical reason (PDASHOSS01-183); blank pre-backfill.
     pub failure_reason: String,
+    /// The run's `phase_kind` (`""` when never set) — the failure policy's
+    /// stage guard.
+    pub phase_kind: String,
+    /// The joined issue's `state_id` — the failure policy's bucket guard.
+    pub issue_state_id: Option<Uuid>,
 }
 
 /// `agent_run.work_item_id -> issues.id` (trimmed from the entity).
@@ -1209,6 +1206,8 @@ pub fn failure_reread_select(
         .column_as(orm::issues::Column::ProjectId, "issue_project_id")
         .column_as(orm::issues::Column::WorkspaceId, "issue_workspace_id")
         .column(Column::FailureReason)
+        .column(Column::PhaseKind)
+        .column_as(orm::issues::Column::StateId, "issue_state_id")
         .join(JoinType::LeftJoin, work_item_rel())
         .filter(Column::Id.eq(run_id))
         .order_by_desc(Column::CreatedAt)
@@ -2197,7 +2196,13 @@ mod tests {
     /// The pre-taxonomy comment: a re-read row with no stored
     /// `failure_reason` (legacy rows) renders exactly the FX-RUN-05 body.
     fn legacy_comment(detail: &str, run_id: Uuid) -> Option<CommentPlan> {
-        plan_failure_comment(detail, run_id).map(|plan| plan.render("", false).comment)
+        let plan = plan_failure_comment(detail, run_id);
+        match failure_comment_gate(&plan, FailureClockEffect::default()) {
+            FailureCommentGate::Suppress => None,
+            FailureCommentGate::Post { clock_stopped } => {
+                Some(plan.render("", clock_stopped).comment)
+            }
+        }
     }
 
     fn fx10() -> Value {
@@ -2208,27 +2213,50 @@ mod tests {
     }
 
     /// FX-RUN-10 `failure_comment`: the real `_post_failure_comment` body
-    /// for every reason × detail × streak (I/O mocked, streak injected) —
-    /// prefix gate, policy gate, render and the notify decision.
+    /// for every reason × detail × streak × armed clock (I/O mocked; the
+    /// real `failure_clock_effect` over an injected streak and ticker on an
+    /// in-bucket, same-stage, allowed clock) — clock effect, gate, render
+    /// and the notify decision.
     #[test]
     fn failure_comment_replays_fx_run_10() {
         let fx = fx10();
         let rows = fx["failure_comment"].as_array().expect("rows");
-        assert_eq!(rows.len(), 480);
+        assert_eq!(rows.len(), 960);
+        let issue = crate::orchestration::clock::ClockIssue {
+            issue_id: Uuid::nil(),
+            state: Some(pidash_types::orchestration::StateRef {
+                group: "started",
+                name: "In Progress",
+            }),
+            policy: Default::default(),
+        };
         for row in rows {
             let detail = row["detail"].as_str().expect("detail");
             let reason = row["failure_reason"].as_str().expect("reason");
             let streak = row["streak"].as_u64().expect("streak") as u32;
-            let rendered =
-                plan_failure_comment(detail, Uuid::nil()).and_then(
-                    |plan| match failure_comment_gate(reason, streak) {
-                        FailureCommentGate::Suppress => None,
-                        FailureCommentGate::Post { clock_stopped } => {
-                            Some(plan.render(reason, clock_stopped))
-                        }
-                    },
-                );
-            let case = format!("({detail:?}, {reason:?}, streak={streak})");
+            let armed = row["armed"].as_bool().expect("armed");
+            let mut ticker = crate::orchestration::clock::new_ticker_row(
+                Uuid::nil(),
+                Uuid::nil(),
+                chrono::Utc::now(),
+                None,
+            );
+            ticker.enabled = armed;
+            let effect = crate::orchestration::clock::failure_clock_effect(
+                Some(&ticker),
+                &issue,
+                "",
+                py_strip(reason),
+                streak,
+            );
+            let plan = plan_failure_comment(detail, Uuid::nil());
+            let rendered = match failure_comment_gate(&plan, effect) {
+                FailureCommentGate::Suppress => None,
+                FailureCommentGate::Post { clock_stopped } => {
+                    Some(plan.render(reason, clock_stopped))
+                }
+            };
+            let case = format!("({detail:?}, {reason:?}, streak={streak}, armed={armed})");
             assert_eq!(
                 rendered.as_ref().map(|r| r.comment.comment_html.as_str()),
                 row["html"].as_str(),
@@ -2893,6 +2921,8 @@ mod tests {
                 issue_project_id: Some(project),
                 issue_workspace_id: Some(workspace),
                 failure_reason: String::new(),
+                phase_kind: String::new(),
+                issue_state_id: reread.issue_state_id,
             }
         );
         assert_eq!(

@@ -114,9 +114,9 @@ pub use finalization::{
 };
 pub use lifecycle::{
     clock_stopped_data, clock_stopped_message_html, clock_stopped_notification_insert_sql,
-    clock_stopped_receivers, failure_comment_gate, failure_comment_streak_reason,
-    ClockStoppedIssue, FailureCommentGate, FailureCommentPlan, ReceiverCandidate,
-    RenderedFailureComment, CLOCK_STOPPED_ENTITY_NAME, CLOCK_STOPPED_SENDER,
+    clock_stopped_receivers, failure_comment_gate, ClockStoppedIssue, FailureCommentGate,
+    FailureCommentPlan, ReceiverCandidate, RenderedFailureComment, CLOCK_STOPPED_ENTITY_NAME,
+    CLOCK_STOPPED_SENDER,
 };
 pub use lifecycle::{
     comment_dedupe_exists_sql, failure_reread_sql, has_project_move_handoff,

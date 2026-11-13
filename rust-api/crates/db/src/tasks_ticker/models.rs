@@ -141,7 +141,7 @@ impl TickerDisarmReason {
     }
 
     /// All nine values in declaration order (`enums.json` plus the two
-    /// PDASHOSS01-183 failure-policy reasons, db migration 0169).
+    /// PDASHOSS01-183 failure-policy reasons, db migration 0177).
     pub const ALL: &[TickerDisarmReason] = &[
         TickerDisarmReason::None,
         TickerDisarmReason::LeftTickingState,

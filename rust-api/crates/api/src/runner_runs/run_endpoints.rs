@@ -1058,35 +1058,32 @@ async fn post_failure_comment(
 ) -> Result<(), TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     let orm_err = |error: sea_orm::DbErr| TerminalEffectsError::Database(error.to_string());
-    // Suppression returns before any SQL (`finalization.py:136-147`).
-    let Some(plan) = lifecycle_kernel::plan_failure_comment(error, run_id) else {
-        return Ok(());
-    };
+    let plan = lifecycle_kernel::plan_failure_comment(error, run_id);
     let (work_item_id, project_id, workspace_id, failure_reason, clock_stopped) = {
         let conn = TxConn::new(hooks);
         // `failure_reread`: run + work item (+ project), first row.
         let reread = lifecycle_kernel::failure_reread(&conn, run_id)
             .await
             .map_err(orm_err)?;
-        let (work_item, project, workspace, reason) = match reread {
-            Some(lifecycle_kernel::FailureRereadRow {
+        let Some(reread) = reread else {
+            return Ok(());
+        };
+        let (work_item, project, workspace) = match &reread {
+            lifecycle_kernel::FailureRereadRow {
                 work_item_id: Some(work_item),
                 issue_project_id: Some(project),
                 issue_workspace_id: Some(workspace),
-                failure_reason,
                 ..
-            }) => (work_item, project, workspace, failure_reason),
+            } => (*work_item, *project, *workspace),
             _ => return Ok(()),
         };
-        // Route on the stored canonical reason (PDASHOSS01-183): a free-retry
-        // failure below the backstop is retried silently.
-        let streak = match lifecycle_kernel::failure_comment_streak_reason(&reason) {
-            Some(streak_reason) => failure_effects::failure_streak(&conn, work_item, streak_reason)
-                .await
-                .map_err(orm_err)?,
-            None => 0,
-        };
-        let clock_stopped = match lifecycle_kernel::failure_comment_gate(&reason, streak) {
+        let reason = reread.failure_reason.clone();
+        // Route on the stored canonical reason (PDASHOSS01-183), predicting
+        // the `RUN_ENDED` failure policy that follows on this transaction.
+        let effect = failure_effects::failure_clock_effect(&conn, &reread)
+            .await
+            .map_err(orm_err)?;
+        let clock_stopped = match lifecycle_kernel::failure_comment_gate(&plan, effect) {
             lifecycle_kernel::FailureCommentGate::Suppress => return Ok(()),
             lifecycle_kernel::FailureCommentGate::Post { clock_stopped } => clock_stopped,
         };
