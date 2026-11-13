@@ -54130,6 +54130,54 @@ export class WebNewDriver implements ParityDriver {
     return row.first().isVisible();
   }
 
+  private viewsDetailMenuTrigger(): Locator {
+    return this.page.getByTestId("project-view-detail-menu-trigger");
+  }
+
+  async viewsDetailMenuOpen(): Promise<void> {
+    const trigger = this.viewsDetailMenuTrigger();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailMenuItems(): Promise<string[]> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
+  }
+
+  async viewsDetailMenuPick(item: string): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await menu.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsDetailMenuOpen();
+    await this.viewsDetailMenuPick("Copy link");
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsDetailMenuOpenNewTabHref(): Promise<string> {
+    await this.viewsDetailMenuOpen();
+    const menu = this.page.getByRole("menu");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
+  }
+
   // --- Workspace views list, CRUD and detail (VIEW-029-040) ---------------
 
   private wsViewsCustomRow(name: string): Locator {

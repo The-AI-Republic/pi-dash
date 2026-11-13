@@ -24014,6 +24014,58 @@ export class WebDriver implements ParityDriver {
     return text.includes(name);
   }
 
+  private viewsDetailMenuTrigger(): Locator {
+    // The detail header's overflow buttons: the ViewQuickActions
+    // MoreHorizontal trigger (last header control) and the headless
+    // Display dropdown's trigger. Lucide 0.469 aliases MoreHorizontal
+    // to the ellipsis icon, so match both class names; the caller
+    // resolves to the last match (see viewsDetailMenuOpen).
+    return this.viewsDetailHeader().locator("button:has(svg.lucide-ellipsis), button:has(svg.lucide-more-horizontal)");
+  }
+
+  async viewsDetailMenuOpen(): Promise<void> {
+    // Two header buttons carry an ellipsis glyph (the headless Display
+    // dropdown's trigger and the quick-actions trigger); the quick-actions
+    // trigger is the last header control, so resolve to the last match.
+    const trigger = this.viewsDetailMenuTrigger().last();
+    await trigger.waitFor({ state: "visible", timeout: 30_000 });
+    await trigger.click({ timeout: 30_000 });
+    await this.viewsOpenMenu().getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsDetailMenuItems(): Promise<string[]> {
+    const menu = this.viewsOpenMenu();
+    await menu.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsDetailMenuPick(item: string): Promise<void> {
+    const menu = this.viewsOpenMenu();
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: 30_000 });
+    await menu.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined);
+  }
+
+  async viewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsDetailMenuOpen();
+    await this.viewsDetailMenuPick("Copy link");
+    await expect.poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsDetailMenuOpenNewTabHref(): Promise<string> {
+    await this.viewsDetailMenuOpen();
+    const menu = this.viewsOpenMenu();
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 30_000 }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: 30_000 }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
+  }
+
   private viewsDetailLayoutButtons(): Locator {
     // Five icon-only buttons (list, board, calendar, table, timeline);
     // the active one carries the primary marker class. Visible-only: the

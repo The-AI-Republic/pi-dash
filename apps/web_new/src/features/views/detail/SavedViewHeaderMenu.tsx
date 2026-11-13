@@ -31,7 +31,6 @@ import { UpdateViewDialog, type CreateViewDialogProps } from "../dialog/CreateVi
 import { PublishViewDialog } from "../dialog/PublishViewDialog.js";
 import {
   canEditProjectView,
-  canDeleteProjectView,
   removeProjectViewRow,
   selectProjectViewMenuItems,
   setProjectViewAnchor,
@@ -243,13 +242,4 @@ export function SavedViewHeaderMenu({
       />
     </span>
   );
-}
-
-// Re-export helper for tests that want to assert the permission rule directly.
-export function canDeleteFromDetail(
-  viewerId: string | null,
-  view: Pick<SavedView, "owned_by">,
-  role: number | null
-): boolean {
-  return canDeleteProjectView(viewerId, view, role);
 }

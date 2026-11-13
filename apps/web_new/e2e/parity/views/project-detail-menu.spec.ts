@@ -16,33 +16,6 @@ import { viewsHarness, viewsOpenDetailAs, viewsSeat } from "./support";
 
 const POLL = { timeout: 60_000 };
 
-async function openDetailMenu(driver: unknown): Promise<void> {
-  const d = driver as {
-    page: import("playwright").Page;
-  };
-  const trigger = d.page.getByTestId("project-view-detail-menu-trigger");
-  await trigger.waitFor({ state: "visible", timeout: 30_000 });
-  await trigger.click({ timeout: 30_000 });
-  await d.page.getByRole("menuitem").first().waitFor({ timeout: 30_000 });
-}
-
-async function detailMenuItems(driver: unknown): Promise<string[]> {
-  const d = driver as { page: import("playwright").Page };
-  const menu = d.page.getByRole("menu");
-  await menu.getByRole("menuitem").first().waitFor({ timeout: 30_000 });
-  const texts = await menu.getByRole("menuitem").allInnerTexts();
-  return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
-}
-
-async function pickDetailMenuItem(driver: unknown, name: string): Promise<void> {
-  const d = driver as { page: import("playwright").Page };
-  await d.page.getByRole("menuitem", { name }).first().click({ timeout: 30_000 });
-  await d.page
-    .getByRole("menu")
-    .waitFor({ state: "hidden", timeout: 30_000 })
-    .catch(() => undefined);
-}
-
 test(
   specTitle(
     ["VIEW-017", "VIEW-018", "VIEW-020"],
@@ -68,20 +41,20 @@ test(
     await test.step("owners see edit and delete, members see subsets, admins see delete", async () => {
       await viewsOpenDetailAs(driver, harness, created, owner);
       await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
-      await openDetailMenu(driver);
-      expect(await detailMenuItems(driver)).toEqual(ownerItems);
+      await driver.viewsDetailMenuOpen();
+      expect(await driver.viewsDetailMenuItems()).toEqual(ownerItems);
       await driver.page.keyboard.press("Escape");
 
       await viewsOpenDetailAs(driver, harness, created, member);
       await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
-      await openDetailMenu(driver);
-      expect(await detailMenuItems(driver)).toEqual(["Open in new tab", "Copy link"]);
+      await driver.viewsDetailMenuOpen();
+      expect(await driver.viewsDetailMenuItems()).toEqual(["Open in new tab", "Copy link"]);
       await driver.page.keyboard.press("Escape");
 
       await viewsOpenDetailAs(driver, harness, created, admin);
       await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
-      await openDetailMenu(driver);
-      expect(await detailMenuItems(driver)).toEqual(adminItems);
+      await driver.viewsDetailMenuOpen();
+      expect(await driver.viewsDetailMenuItems()).toEqual(adminItems);
       await driver.page.keyboard.press("Escape");
     });
 
@@ -92,11 +65,8 @@ test(
         browserSessionCookies(owner)
       );
       await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
-      await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-      await openDetailMenu(driver);
-      await pickDetailMenuItem(driver, "Copy link");
+      const clip = await driver.viewsDetailCopyLink();
       await expect.poll(() => driver.lastToast(), POLL).toContain("Link Copied");
-      const clip = await driver.page.evaluate(() => navigator.clipboard.readText());
       expect(clip).toContain(`/projects/${projectId}/views/${created}`);
       // canonical: no peek/layout query params leaked
       expect(clip).not.toContain("peekIssueId");
@@ -108,14 +78,8 @@ test(
     await test.step("open in new tab loads the same view at the canonical address", async () => {
       await viewsOpenDetailAs(driver, harness, created, owner);
       await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
-      await openDetailMenu(driver);
-      const menu = driver.page.getByRole("menu");
-      const [popup] = await Promise.all([
-        driver.page.waitForEvent("popup", { timeout: 30_000 }),
-        menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: 30_000 }),
-      ]);
-      expect(popup.url()).toContain(`/projects/${projectId}/views/${created}`);
-      await popup.close().catch(() => undefined);
+      const href = await driver.viewsDetailMenuOpenNewTabHref();
+      expect(href).toContain(`/projects/${projectId}/views/${created}`);
     });
 
     await test.step("delete from the detail navigates to the list", async () => {
@@ -123,8 +87,8 @@ test(
       const doomedId = await createProjectViewFull(workspaceSlug, projectId, owner.cookie, { name: doomed });
       await viewsOpenDetailAs(driver, harness, doomedId, owner);
       await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(doomed);
-      await openDetailMenu(driver);
-      await pickDetailMenuItem(driver, "Delete");
+      await driver.viewsDetailMenuOpen();
+      await driver.viewsDetailMenuPick("Delete");
       await driver.viewsDeleteConfirm();
       await expect.poll(() => driver.lastToast(), POLL).toContain("View deleted successfully");
       // detail delete must return to the list, like the row menu does

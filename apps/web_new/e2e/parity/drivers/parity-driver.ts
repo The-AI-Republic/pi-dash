@@ -4659,6 +4659,16 @@ export interface ParityDriver {
   viewsDetailAddClick(): Promise<void>;
   /** Whether the detail body text currently contains `name`. */
   viewsDetailShowsIssue(name: string): Promise<boolean>;
+  /** Open the detail header's view overflow menu; resolves once items show. */
+  viewsDetailMenuOpen(): Promise<void>;
+  /** Visible entries of the open detail header menu in display order. */
+  viewsDetailMenuItems(): Promise<string[]>;
+  /** Pick an entry of the open detail header menu; resolves once it closes. */
+  viewsDetailMenuPick(item: string): Promise<void>;
+  /** Copy the detail view's link; resolves with the clipboard text. */
+  viewsDetailCopyLink(): Promise<string>;
+  /** Follow the detail menu's new-tab entry; resolves with the popup URL. */
+  viewsDetailMenuOpenNewTabHref(): Promise<string>;
   /** Custom workspace view names in list order. */
   wsViewsListNames(): Promise<string[]>;
   /** Static default view names in list order. */
