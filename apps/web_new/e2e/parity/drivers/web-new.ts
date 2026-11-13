@@ -20787,6 +20787,24 @@ export class WebNewDriver implements ParityDriver {
   async archivesCyclesOpenPeek(name: string): Promise<void> {
     await this.openArchivedCyclePeek(name);
   }
+  async archivesCyclesClickRow(name: string): Promise<void> {
+    // Row body click: archived rows render a button that opens the peek,
+    // live rows (not used here) would link to detail. Click the name's
+    // owning button and wait for the peek panel, as a user would.
+    const row = this.cycleRowRoot(name);
+    const nameLocator = row.getByText(name, { exact: true }).first();
+    const button = nameLocator.locator("xpath=ancestor::button[1]");
+    if ((await button.count()) > 0) {
+      await button.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      // Fallback for live rows (not expected on the archived tab): click the link.
+      await row.locator("a").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.waitForFunction(() => new URL(location.href).searchParams.has("peekCycle"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.archivedCyclePeekPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
   async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
     await this.page.waitForLoadState("domcontentloaded");
