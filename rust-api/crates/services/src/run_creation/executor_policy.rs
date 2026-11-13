@@ -6,7 +6,7 @@
 //! and all of `apps/api/pi_dash/cloud_agent/policy.py:11-196`:
 //!
 //! * `cloud_agent_is_configured` (`agent_execution.py:34-43`) → [`cloud_agent_is_configured`].
-//! * `managed_runner_is_enabled` (`agent_execution.py:46-54`) → [`managed_runner_is_enabled`].
+//! * `pidash_agent_is_enabled` (`agent_execution.py:46-54`) → [`pidash_agent_is_enabled`].
 //! * `effective_executor_for_issue` (`agent_execution.py:57-66`) → [`effective_executor_for_issue`].
 //! * `user_has_llm_config` (`agent_execution.py:69-80`) → [`user_has_llm_config`].
 //! * `agent_executor_options` (`agent_execution.py:83-128`) → [`agent_executor_options`]
@@ -20,11 +20,11 @@
 //! with the retired execute plane.
 //!
 //! Out of scope here (owned by siblings): `AgentExecutorKind` / `MACHINE_EXECUTORS` /
-//! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `ManagedRunnerReason` /
-//! `ManagedRunnerUnavailable` (L1, reused, not redefined);
+//! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `PidashAgentReason` /
+//! `PidashAgentUnavailable` (L1, reused, not redefined);
 //! `CloudAgentUnavailableAPI` (`cloud_agent/api.py`, L4 PIDASHCONV-485);
 //! `managed_runner_availability` (`managed_runner/policy.py`, L4 — arrives here as a
-//! precomputed [`ManagedAvailability`]); the `extra_toolsets_enabled_for` CE default
+//! precomputed [`PidashAgentAvailability`]); the `extra_toolsets_enabled_for` CE default
 //! (`ee/cloud_agent/toolsets.py`, L5 PIDASHCONV-486 — arrives as a seam verdict).
 //!
 //! Translation notes:
@@ -60,7 +60,7 @@
 
 use pidash_db::config::ManagedRunnerSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
-use pidash_types::agent_runs::AgentExecutorKind;
+use pidash_types::issuing::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -73,7 +73,7 @@ use uuid::Uuid;
 
 /// Operator kill switch for the desktop-bundled managed runner
 /// (`agent_execution.py:46-54`).
-pub fn managed_runner_is_enabled(managed: &ManagedRunnerSettings) -> bool {
+pub fn pidash_agent_is_enabled(managed: &ManagedRunnerSettings) -> bool {
     managed.enabled
 }
 
@@ -159,7 +159,7 @@ pub fn resolve_executor_kind(
         .filter(|r| !r.is_empty())
         .unwrap_or(project_default);
     let kind = AgentExecutorKind::from_value(value).ok_or(ResolveExecutorError::UnknownExecutor)?;
-    if kind == AgentExecutorKind::ManagedRunner || kind == AgentExecutorKind::CloudAgent {
+    if kind == AgentExecutorKind::PidashAgent || kind == AgentExecutorKind::RetiredCloudRun {
         return Ok(AgentExecutorKind::LocalRunner);
     }
     Ok(kind)
@@ -239,7 +239,7 @@ pub struct ExecutorOption {
 /// (`managed_runner/policy.py:76-96`), passed through verbatim
 /// (`agent_execution.py:111`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedAvailability {
+pub struct PidashAgentAvailability {
     pub available: bool,
     pub reason_code: String,
 }
@@ -264,7 +264,7 @@ pub fn agent_executor_options<F>(
     has_usable_llm_config: F,
     local_runner_available: bool,
     local_runner_exists: bool,
-    managed: ManagedAvailability,
+    managed: PidashAgentAvailability,
 ) -> [ExecutorOption; 3]
 where
     F: FnOnce() -> bool,
@@ -281,7 +281,7 @@ where
     };
     [
         ExecutorOption {
-            kind: AgentExecutorKind::CloudAgent,
+            kind: AgentExecutorKind::RetiredCloudRun,
             available: cloud_available,
             reason_code: cloud_reason,
             deprecated: true,
@@ -293,7 +293,7 @@ where
             deprecated: false,
         },
         ExecutorOption {
-            kind: AgentExecutorKind::ManagedRunner,
+            kind: AgentExecutorKind::PidashAgent,
             available: managed.available,
             reason_code: managed.reason_code,
             deprecated: true,
@@ -411,8 +411,8 @@ mod tests {
         }
     }
 
-    fn managed(available: bool, reason: &str) -> ManagedAvailability {
-        ManagedAvailability {
+    fn managed(available: bool, reason: &str) -> PidashAgentAvailability {
+        PidashAgentAvailability {
             available,
             reason_code: reason.to_string(),
         }

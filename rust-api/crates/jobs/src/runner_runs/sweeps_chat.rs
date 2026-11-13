@@ -1034,7 +1034,7 @@ async fn run_finalize_transaction(
         );
         let now = Utc::now();
         finalization::finalize_update(&conn, values, *run_id, now).await?;
-        if facts.executor_kind == AgentExecutorKind::CloudAgent {
+        if facts.executor_kind == AgentExecutorKind::RetiredCloudRun {
             finalization::append_terminal_event_once(
                 &conn,
                 *run_id,

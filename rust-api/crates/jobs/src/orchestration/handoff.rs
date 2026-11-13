@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
     agent_run, agent_run_event, dev_machine, git_code_review_links,
     git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
@@ -38,7 +38,7 @@ use pidash_db::entity::{
 use pidash_db::orm_tx::TxConn;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::run_creation::{
+use pidash_services::dispatch::{
     ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::AssistantModelSeam;
@@ -53,9 +53,9 @@ use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
-use pidash_types::agent_runs::AgentExecutorKind;
+use pidash_types::issuing::AgentExecutorKind;
 
-use crate::run_dispatch::{
+use crate::issuing::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
     DispatchDecision,
@@ -908,10 +908,10 @@ impl CreationSeam for HandoffStore<'_, '_> {
 
 }
 
-fn twin_map_execution_fields(fields: crate::run_dispatch::ExecutionFields) -> ServiceExecutionFields {
+fn twin_map_execution_fields(fields: crate::issuing::ExecutionFields) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -1968,7 +1968,7 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
                 .await
                 .map_err(twin_db)?;
         }
-        if locked.executor_kind == AgentExecutorKind::CloudAgent {
+        if locked.executor_kind == AgentExecutorKind::RetiredCloudRun {
             let exists_count = {
                 let conn = TxConn::new(self.tx.inner());
                 agent_run_event::Entity::find()
@@ -2348,7 +2348,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: serde_json::json!({}),
             tool_plan: serde_json::json!({}),
             trigger: "direct".to_owned(),

@@ -1004,7 +1004,7 @@ async fn expire_approval_locked(
     };
     finalization::finalize_update(conn, &values, row.run_id, now).await?;
     if AgentExecutorKind::from_value(&finalized.executor_kind)
-        == Some(AgentExecutorKind::CloudAgent)
+        == Some(AgentExecutorKind::RetiredCloudRun)
     {
         finalization::append_terminal_event_once(
             conn,
