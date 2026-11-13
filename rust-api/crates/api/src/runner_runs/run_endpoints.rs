@@ -835,6 +835,35 @@ pub async fn execute_assign_rejected_busy(
     execute_requeue(tx, locked).await
 }
 
+/// `apply_agent_auth_missing` (`run_lifecycle.py` recent): same DB effect as
+/// `execute_assign_rejected_busy` (BUSY flip + requeue) for
+/// `agent_auth_missing` NACKs, distinguished by wire name, plus the failure
+/// comment with agent/runner/machine/fix so a credential-less pod is not
+/// silent. The comment is posted synchronously inside the endpoint
+/// transaction (like Django's `_post_failure_comment` inside
+/// `apply_agent_auth_missing`); effects are only the post-commit pod drain.
+pub async fn execute_agent_auth_missing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    locked: &LockedRun,
+    ports: &LivePorts,
+    detail: &str,
+    created_by: Option<Uuid>,
+) -> Result<Vec<LifecycleEffect>, Response> {
+    lifecycle_kernel::runner_busy_update(&TxConn::new(tx), runner_id)
+        .await
+        .map_err(|_| server_error())?;
+    let effects = execute_requeue(tx, locked).await?;
+    if !detail.is_empty() {
+        // Posting the failure comment is best-effort here: the run is
+        // already requeued, so a comment failure must not fail the
+        // endpoint's reschedule. Log via the existing terminal-error
+        // path would over-report; instead swallow and continue.
+        let _ = post_failure_comment(tx, ports, locked.id, detail, created_by).await;
+    }
+    Ok(effects)
+}
+
 // ---------------------------------------------------------------------------
 // Terminal effects (`apply_terminal_effects`) + post-commit drain
 // ---------------------------------------------------------------------------
@@ -2183,6 +2212,15 @@ async fn run_failed_inner(
     if reason_is(&preamble.data, "assign_rejected_busy") {
         return run_failed_requeue(&pool, &ports, tx, runner, run.id, true).await;
     }
+    if reason_is(&preamble.data, "agent_auth_missing") {
+        let detail = preamble
+            .data
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return run_failed_agent_auth_missing(&pool, &ports, tx, runner, run.id, detail).await;
+    }
     let detail = preamble.data.get("detail").cloned().unwrap_or(Value::Null);
     let tokens = frame_tokens(&preamble.data);
     let model = preamble.data.get("model").cloned().unwrap_or(Value::Null);
@@ -2314,6 +2352,87 @@ async fn run_failed_requeue(
             Ok(effects) => effects,
             Err(response) => return response,
         }
+    };
+    if commit_tx(tx).await.is_err() {
+        return server_error();
+    }
+    if !effects.is_empty()
+        && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+            .await
+            .is_err()
+    {
+        return server_error();
+    }
+    json_response(
+        StatusCode::OK,
+        r#"{"ok":true,"rescheduled":true}"#.to_owned(),
+    )
+}
+
+/// `agent_auth_missing` NACK path: lock, a pending cancel finalizes
+/// `CANCELLED`, otherwise BUSY-flip + requeue + failure comment with
+/// the detail (agent/runner/machine/fix). The run is re-queued without
+/// tick charge and the comment is posted synchronously, so a pod of
+/// credential-less runners does not loop silently.
+async fn run_failed_agent_auth_missing(
+    pool: &PgPool,
+    ports: &LivePorts,
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    runner: &DaemonRunner,
+    run_id: Uuid,
+    detail: String,
+) -> Response {
+    let terminal_created_by = Some(runner.owner_id);
+    let locked = match lock_non_terminal(&mut tx, run_id).await {
+        Ok(locked) => locked,
+        Err(closed) => {
+            if commit_tx(tx).await.is_err() {
+                return server_error();
+            }
+            return closed;
+        }
+    };
+    if locked.status == AgentRunStatus::CancelRequested.value() {
+        let effects = match execute_finalize_terminal(
+            &mut tx,
+            runner,
+            run_id,
+            AgentRunStatus::Cancelled,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        )
+        .await
+        {
+            Ok(effects) => effects,
+            Err(response) => return response,
+        };
+        if commit_tx(tx).await.is_err() {
+            return server_error();
+        }
+        if !effects.is_empty()
+            && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+                .await
+                .is_err()
+        {
+            return server_error();
+        }
+        return json_response(StatusCode::OK, r#"{"ok":true,"cancelled":true}"#.to_owned());
+    }
+    let effects = match execute_agent_auth_missing(
+        &mut tx,
+        runner.id,
+        &locked,
+        ports,
+        &detail,
+        terminal_created_by,
+    )
+    .await
+    {
+        Ok(effects) => effects,
+        Err(response) => return response,
     };
     if commit_tx(tx).await.is_err() {
         return server_error();

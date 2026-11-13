@@ -633,6 +633,25 @@ pub fn plan_assign_rejected_busy(runner_id: Uuid, run: &RequeueRunFacts) -> Assi
     }
 }
 
+/// The Muse auth-missing rejection: same DB effect as
+/// [`plan_assign_rejected_busy`] (BUSY flip + requeue) so the pod drain
+/// cannot instantly re-dispatch `agent_auth_missing` to the same
+/// credential-less runner. Wire name `agent_auth_missing` distinguishes
+/// telemetry from `assign_rejected_busy`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentAuthMissingPlan {
+    pub busy_flip_runner_id: Uuid,
+    pub requeue: RequeuePlan,
+}
+
+/// Plan the auth-missing rejection: the flip plus [`plan_requeue_from_locked`].
+pub fn plan_agent_auth_missing(runner_id: Uuid, run: &RequeueRunFacts) -> AgentAuthMissingPlan {
+    AgentAuthMissingPlan {
+        busy_flip_runner_id: runner_id,
+        requeue: plan_requeue_from_locked(run),
+    }
+}
+
 /// Runner `BUSY` flip (`apply_assign_rejected_busy:321`): single-column
 /// update, no timestamp touch. Params: `$1` `busy`, `$2` runner id.
 pub fn runner_busy_update_sql() -> &'static str {
@@ -1641,6 +1660,15 @@ mod tests {
             Some("busy")
         );
         let plan = plan_assign_rejected_busy(Uuid::nil(), &requeue_facts());
+        assert_eq!(plan.busy_flip_runner_id, Uuid::nil());
+        assert_eq!(plan.requeue, plan_requeue_from_locked(&requeue_facts()));
+    }
+
+    #[test]
+    fn agent_auth_missing_plan_matches_busy_effect() {
+        // `agent_auth_missing` reuses the busy rejection's DB effect: BUSY flip
+        // + shared requeue, with a distinct plan type for telemetry.
+        let plan = plan_agent_auth_missing(Uuid::nil(), &requeue_facts());
         assert_eq!(plan.busy_flip_runner_id, Uuid::nil());
         assert_eq!(plan.requeue, plan_requeue_from_locked(&requeue_facts()));
     }
