@@ -1152,7 +1152,12 @@ async fn post_project_asset(
         issue_display.as_deref(),
         &asset_id,
     );
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
@@ -1416,7 +1421,12 @@ async fn get_project_asset(
         Some(Value::String(s)) => Filename::Name(s.clone()),
         Some(_) => return server_error(),
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
@@ -1871,7 +1881,12 @@ async fn post_duplicate_asset(
     // client never reads the request Host (`storage.py:50-57`: the
     // `request.get_host()` branch needs `not is_server`), so a missing
     // Host falls through instead of 500ing.
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let host = host_of(&headers).unwrap_or_default();
     if endpoint_parts(storage, &scheme_of(&headers), &host, false, true).is_err() {
         return server_error();
@@ -2170,7 +2185,12 @@ async fn download_lookup(
         Some(Value::String(s)) => Filename::Name(s.clone()),
         Some(_) => return server_error(),
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(headers) else {
         return server_error();
     };

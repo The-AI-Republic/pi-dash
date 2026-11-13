@@ -144,12 +144,21 @@ impl CredentialSource {
         let secret_key = var("AWS_SECRET_ACCESS_KEY");
         match (access_key.is_empty(), secret_key.is_empty()) {
             (false, false) => {
-                return Self::Static(AwsCredentials {
-                    access_key,
-                    secret_key,
-                    session_token: var("AWS_SESSION_TOKEN"),
-                    expires_at: None,
-                })
+                // Placeholder keys are local-MinIO only (NEWPIDASH-204):
+                // outside `USE_MINIO=1` they are treated as not configured
+                // and fall through to the instance role / a clear error,
+                // never signed.
+                let use_minio = var("USE_MINIO").trim() == "1";
+                if is_placeholder_credentials(&access_key, &secret_key) && !use_minio {
+                    // Fall through to the IMDS / Unavailable handling below.
+                } else {
+                    return Self::Static(AwsCredentials {
+                        access_key,
+                        secret_key,
+                        session_token: var("AWS_SESSION_TOKEN"),
+                        expires_at: None,
+                    });
+                }
             }
             (false, true) => return Self::Partial(partial_message("AWS_SECRET_ACCESS_KEY")),
             (true, false) => return Self::Partial(partial_message("AWS_ACCESS_KEY_ID")),
@@ -666,6 +675,51 @@ pub mod tests {
             CredentialSource::Unavailable
         ));
         assert!(matches!(source_for(&[]), CredentialSource::InstanceRole(_)));
+    }
+
+    #[test]
+    fn placeholder_keys_are_minio_only() {
+        // Outside MinIO, placeholder keys fall through to the instance role
+        // (never returned as Static).
+        assert!(matches!(
+            source_for(&[
+                ("AWS_ACCESS_KEY_ID", "access-key"),
+                ("AWS_SECRET_ACCESS_KEY", "secret-key")
+            ]),
+            CredentialSource::InstanceRole(_)
+        ));
+        // With IMDS disabled, placeholders outside MinIO are Unavailable,
+        // not Static.
+        assert!(matches!(
+            source_for(&[
+                ("AWS_ACCESS_KEY_ID", "access-key"),
+                ("AWS_SECRET_ACCESS_KEY", "secret-key"),
+                ("AWS_EC2_METADATA_DISABLED", "true")
+            ]),
+            CredentialSource::Unavailable
+        ));
+        // Under USE_MINIO=1 placeholders are accepted as Static.
+        assert!(matches!(
+            source_for(&[
+                ("AWS_ACCESS_KEY_ID", "access-key"),
+                ("AWS_SECRET_ACCESS_KEY", "secret-key"),
+                ("USE_MINIO", "1")
+            ]),
+            CredentialSource::Static(_)
+        ));
+        assert!(matches!(
+            source_for(&[
+                ("AWS_ACCESS_KEY_ID", "access-key"),
+                ("AWS_SECRET_ACCESS_KEY", "secret-key"),
+                ("USE_MINIO", " 1 "),
+            ]),
+            CredentialSource::Static(_)
+        ));
+        // Non-placeholder keys still return Static outside MinIO.
+        assert!(matches!(
+            source_for(&[("AWS_ACCESS_KEY_ID", "A"), ("AWS_SECRET_ACCESS_KEY", "S")]),
+            CredentialSource::Static(_)
+        ));
     }
 
     #[test]

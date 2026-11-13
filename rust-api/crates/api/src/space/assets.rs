@@ -524,16 +524,11 @@ async fn get_asset(
     if !asset.is_uploaded {
         return guard_err(guards::requested_asset_not_found());
     }
-    let storage_owned = pidash_storage::resolve_storage_credentials(&state.settings().storage)
-        .await
-        .map(|creds| {
-            let mut s = state.settings().storage.clone();
-            s.access_key_id = creds.access_key;
-            s.secret_access_key = creds.secret_key;
-            s.session_token = creds.session_token;
-            s
-        })
-        .unwrap_or_else(|_| state.settings().storage.clone());
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
     let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
@@ -669,16 +664,11 @@ async fn post_asset(
     };
     let slug = slug_model.slug;
     let asset_url = asset_url_for(entity_type, &slug, &board.project_id, &asset_id);
-    let storage_owned = pidash_storage::resolve_storage_credentials(&state.settings().storage)
-        .await
-        .map(|creds| {
-            let mut s = state.settings().storage.clone();
-            s.access_key_id = creds.access_key;
-            s.secret_access_key = creds.secret_key;
-            s.session_token = creds.session_token;
-            s
-        })
-        .unwrap_or_else(|_| state.settings().storage.clone());
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
     let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();

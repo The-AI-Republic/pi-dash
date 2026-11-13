@@ -4102,6 +4102,7 @@ fn base64_encode(input: &[u8]) -> String {
 /// Whether the storage settings can sign: boto3 without credentials
 /// raises `NoCredentialsError` (not a `ClientError`) into the 500, so an
 /// empty key or secret answers [`Denial::ServerError`] before signing.
+#[allow(dead_code)]
 fn storage_can_sign(storage: &pidash_db::config::StorageSettings) -> bool {
     !storage.access_key_id.is_empty() && !storage.secret_access_key.is_empty()
 }
@@ -4867,7 +4868,6 @@ async fn attachment_post_inner(
         return Err(Denial::ServerError);
     }
     let size_f64 = size_limit_f64(&size_limit)?;
-    let storage = &state.settings().storage;
     // `FileAsset.objects.create(...)` (`:2386-2401`): the attachment row
     // with the Django defaults (`is_uploaded`/`is_deleted`/`is_archived`
     // false, `storage_metadata` `{}`), un-set FKs `NULL`.
@@ -4914,10 +4914,13 @@ async fn attachment_post_inner(
     // The signability check runs AFTER the INSERT: Django creates the
     // row first (`:2386-2401`), then builds the client (`S3Storage(...)`
     // raises on empty credentials) — a broken config 500s with the row
-    // already stored.
-    if !storage_can_sign(storage) {
-        return Err(Denial::ServerError);
-    }
+    // already stored. Resolved per-request for role credentials.
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return Err(Denial::ServerError),
+        };
+    let storage = &storage_owned;
     let scheme = scheme_of(headers);
     let host = host_of(headers);
     let Some(upload_data) = presigned_post(
@@ -5065,10 +5068,12 @@ async fn attachment_get_inner(
         ));
     }
     let filename = download_filename(&row.attributes)?;
-    let storage = &state.settings().storage;
-    if !storage_can_sign(storage) {
-        return Err(Denial::ServerError);
-    }
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return Err(Denial::ServerError),
+        };
+    let storage = &storage_owned;
     let scheme = scheme_of(headers);
     let host = host_of(headers);
     let key = row.asset.clone();

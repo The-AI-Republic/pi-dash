@@ -52,8 +52,10 @@ pub use aws_credentials::{
 };
 pub use s3::{
     capped_expires_secs, presign_get_url, presign_get_url_with_creds, presign_get_url_with_token,
-    resolve_default_credentials, resolve_server_endpoint, resolve_storage_credentials, sha256_hex,
-    sign_delete, sign_delete_with_creds, sign_head, sign_head_with_creds, sign_put, sign_put_extra,
-    sign_put_extra_with_creds, sign_put_with_creds, validate_storage, PresignEndpoint,
-    ResolvedEndpoint, SignedRequest, StorageError,
+    resolve_default_credentials, resolve_server_endpoint, resolve_storage_credentials,
+    resolve_storage_credentials_with_source, resolve_storage_settings,
+    resolve_storage_settings_with_source, sha256_hex, sign_delete, sign_delete_with_creds,
+    sign_head, sign_head_with_creds, sign_put, sign_put_extra, sign_put_extra_with_creds,
+    sign_put_with_creds, validate_storage, PresignEndpoint, ResolvedEndpoint, SignedRequest,
+    StorageError,
 };

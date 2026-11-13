@@ -1235,7 +1235,12 @@ async fn user_post(
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Ok(upload_data) = presigned_post(
         storage,
         &scheme_of(&headers),
@@ -1543,7 +1548,12 @@ async fn workspace_post(
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Ok(upload_data) = presigned_post(
         storage,
         &scheme_of(&headers),
@@ -1728,7 +1738,12 @@ async fn workspace_get(
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Ok(url) = presigned_get_url(
         storage,
         &scheme_of(&headers),
@@ -1807,7 +1822,12 @@ async fn static_get(
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     // `generate_presigned_url(object_name)` with the defaults:
     // `disposition="inline"`, `filename=None` → fresh hex.
     let Ok(url) = presigned_get_url(

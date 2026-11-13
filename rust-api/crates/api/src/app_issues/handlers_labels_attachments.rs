@@ -3214,8 +3214,11 @@ pub async fn v2_create(
     let timezone = actor_timezone(&db, &user_id).await?;
     let attachment = render_asset(&row, &workspace_slug, &timezone)?;
     let host = host_of(&parts.headers).ok_or(Denial::ServerError)?;
+    let storage_owned = pidash_storage::resolve_storage_settings(&state.settings().storage)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let upload_data = presigned_post(
-        &state.settings().storage,
+        &storage_owned,
         &scheme_of(&parts.headers),
         &host,
         &asset_key,
@@ -3285,8 +3288,11 @@ pub async fn v2_detail(
     };
     let (parts, _) = split_parts(req).await?;
     let host = host_of(&parts.headers).ok_or(Denial::ServerError)?;
+    let storage_owned = pidash_storage::resolve_storage_settings(&state.settings().storage)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let url = presigned_get_url(
-        &state.settings().storage,
+        &storage_owned,
         &scheme_of(&parts.headers),
         &host,
         &row.asset,

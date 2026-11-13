@@ -95,6 +95,19 @@ pub fn validate_storage(storage: &StorageSettings) -> Result<(), StorageError> {
 pub async fn resolve_storage_credentials(
     storage: &StorageSettings,
 ) -> Result<AwsCredentials, StorageError> {
+    resolve_storage_credentials_with_source(storage, CredentialSource::from_env()).await
+}
+
+/// [`resolve_storage_credentials`] over an explicit [`CredentialSource`].
+///
+/// Useful for tests that must not mutate the process environment or share the
+/// process-wide IMDS cache: construct a per-test
+/// `CredentialSource::InstanceRole(Arc::new(InstanceRoleProvider::new(base)))`
+/// against a fake IMDS and pass it here.
+pub async fn resolve_storage_credentials_with_source(
+    storage: &StorageSettings,
+    source: CredentialSource,
+) -> Result<AwsCredentials, StorageError> {
     let is_placeholder =
         is_placeholder_credentials(&storage.access_key_id, &storage.secret_access_key);
     let has_static = !storage.access_key_id.is_empty()
@@ -117,9 +130,36 @@ pub async fn resolve_storage_credentials(
         });
     }
     // No usable static keys: fall through to the credential chain.
-    let source = CredentialSource::from_env();
     source.check_static().map_err(StorageError::Config)?;
     source.resolve().await.map_err(StorageError::Config)
+}
+
+/// Resolve `storage` into a signable copy: fills `access_key_id`,
+/// `secret_access_key` and `session_token` from the per-request resolution
+/// and caps `signed_url_expiration_secs` so a presigned URL does not outlive
+/// temporary (role) credentials. Static keys leave the expiry unchanged.
+pub async fn resolve_storage_settings(
+    storage: &StorageSettings,
+) -> Result<StorageSettings, StorageError> {
+    resolve_storage_settings_with_source(storage, CredentialSource::from_env()).await
+}
+
+/// [`resolve_storage_settings`] over an explicit [`CredentialSource`].
+pub async fn resolve_storage_settings_with_source(
+    storage: &StorageSettings,
+    source: CredentialSource,
+) -> Result<StorageSettings, StorageError> {
+    let creds = resolve_storage_credentials_with_source(storage, source).await?;
+    let mut resolved = storage.clone();
+    resolved.access_key_id = creds.access_key.clone();
+    resolved.secret_access_key = creds.secret_key.clone();
+    resolved.session_token = creds.session_token.clone();
+    if let Some(expires_at) = creds.expires_at {
+        let now = chrono::Utc::now();
+        let remaining = (expires_at - now).num_seconds().max(0);
+        resolved.signed_url_expiration_secs = resolved.signed_url_expiration_secs.min(remaining);
+    }
+    Ok(resolved)
 }
 
 /// Resolve credentials without a `StorageSettings` (export uploader and
@@ -1378,11 +1418,15 @@ mod tests {
     #[tokio::test]
     async fn resolve_storage_credentials_falls_back_to_instance_role() {
         use crate::aws_credentials::tests::{imds_router, serve, FakeImds};
+        use crate::aws_credentials::{CredentialSource, InstanceRoleProvider};
         use std::sync::atomic::AtomicUsize;
         use std::sync::atomic::Ordering;
         use std::sync::Arc;
 
-        // Fake IMDS with a role; no AWS_* env keys.
+        // Fake IMDS with a role; no process-env mutation. A per-test
+        // provider keeps this test parallel-safe (the previous version
+        // raced on `AWS_EC2_METADATA_SERVICE_ENDPOINT` + the shared
+        // `OnceLock` IMDS cache).
         let state = FakeImds {
             fetches: Arc::new(AtomicUsize::new(0)),
             tokens: Arc::new(AtomicUsize::new(0)),
@@ -1390,19 +1434,8 @@ mod tests {
             with_role: true,
         };
         let base = serve(imds_router(state.clone())).await;
-        // Point the credential provider at the fake by building a source
-        // that uses it directly via InstanceRoleProvider::new.
-        // We test the full chain: storage with empty keys + IMDS override.
-        let prev = std::env::var("AWS_EC2_METADATA_SERVICE_ENDPOINT").ok();
-        std::env::set_var("AWS_EC2_METADATA_SERVICE_ENDPOINT", &base);
-        // Ensure no static keys leak from the test environment.
-        let prev_ak = std::env::var("AWS_ACCESS_KEY_ID").ok();
-        let prev_sk = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-        // Also disable shared config interference by clearing AWS_SESSION_TOKEN.
-        let prev_tok = std::env::var("AWS_SESSION_TOKEN").ok();
-        std::env::remove_var("AWS_SESSION_TOKEN");
+        let provider = Arc::new(InstanceRoleProvider::new(&base));
+        let source = CredentialSource::InstanceRole(provider.clone());
 
         let storage = StorageSettings {
             use_minio: false,
@@ -1412,7 +1445,7 @@ mod tests {
             ..test_storage()
         };
         // The creds are fetched at most once and carry the token.
-        let creds = resolve_storage_credentials(&storage)
+        let creds = resolve_storage_credentials_with_source(&storage, source.clone())
             .await
             .expect("role creds");
         assert!(creds.access_key.starts_with("ASIAFAKE"));
@@ -1457,23 +1490,57 @@ mod tests {
         );
 
         // Cache: second resolve does not refetch.
-        let _ = resolve_storage_credentials(&storage).await.expect("cached");
+        let _ = resolve_storage_credentials_with_source(
+            &storage,
+            CredentialSource::InstanceRole(provider),
+        )
+        .await
+        .expect("cached");
         assert_eq!(state.fetches.load(Ordering::SeqCst), 1);
+    }
 
-        // Restore env.
-        if let Some(v) = prev {
-            std::env::set_var("AWS_EC2_METADATA_SERVICE_ENDPOINT", v);
-        } else {
-            std::env::remove_var("AWS_EC2_METADATA_SERVICE_ENDPOINT");
-        }
-        if let Some(v) = prev_ak {
-            std::env::set_var("AWS_ACCESS_KEY_ID", v);
-        }
-        if let Some(v) = prev_sk {
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", v);
-        }
-        if let Some(v) = prev_tok {
-            std::env::set_var("AWS_SESSION_TOKEN", v);
-        }
+    #[tokio::test]
+    async fn resolve_storage_settings_caps_expiry_for_role_creds() {
+        use crate::aws_credentials::tests::{imds_router, serve, FakeImds};
+        use crate::aws_credentials::{CredentialSource, InstanceRoleProvider};
+        use std::sync::Arc;
+
+        let state = FakeImds {
+            fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            tokens: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lifetime_secs: 1800,
+            with_role: true,
+        };
+        let base = serve(imds_router(state)).await;
+        let provider = Arc::new(InstanceRoleProvider::new(&base));
+        let source = CredentialSource::InstanceRole(provider);
+        let storage = StorageSettings {
+            use_minio: false,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            session_token: String::new(),
+            bucket_name: "b".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            signed_url_expiration_secs: 604800,
+            ..test_storage()
+        };
+        let resolved = resolve_storage_settings_with_source(&storage, source)
+            .await
+            .expect("resolves");
+        assert!(resolved.access_key_id.starts_with("ASIAFAKE"));
+        assert!(!resolved.session_token.is_empty());
+        assert!(
+            resolved.signed_url_expiration_secs < 604800 && resolved.signed_url_expiration_secs > 0,
+            "{}",
+            resolved.signed_url_expiration_secs
+        );
+        assert!(
+            resolved.signed_url_expiration_secs == 1800
+                || (resolved.signed_url_expiration_secs >= 1798
+                    && resolved.signed_url_expiration_secs <= 1800),
+            "{}",
+            resolved.signed_url_expiration_secs
+        );
     }
 }

@@ -1156,7 +1156,12 @@ pub(crate) async fn handle_post(
     let Some(host) = host_of(&headers) else {
         return server_error("missing Host");
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error("s3 storage misconfigured"),
+        };
+    let storage = &storage_owned;
     let upload_data = match presigned_post(
         storage,
         &scheme_of(&headers),
