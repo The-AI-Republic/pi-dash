@@ -1953,13 +1953,13 @@ pub fn pinned_runner_for(
     now: DateTime<Utc>,
 ) -> Option<Uuid> {
     let runner = runner?;
-    let is_engine = runner.provisioning
+    let is_pidash_agent = runner.provisioning
         == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let pod_member = runner.pod_dispatch
         == pidash_db::runner_enroll::columns::enums::RUNNER_POD_DISPATCH_POD_MEMBER;
     if !pidash_auth::permissions::runner::locality_pin_allowed(
         true,
-        is_engine,
+        is_pidash_agent,
         pod_member,
         runner.engine_paused,
     ) {

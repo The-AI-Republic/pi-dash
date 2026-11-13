@@ -2461,8 +2461,8 @@ impl ToolStore for PgToolStore {
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-                pidash_services::run_creation::LlmProfile {
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+                pidash_services::issuing::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
                 }
@@ -2626,7 +2626,7 @@ impl ToolStore for PgToolStore {
             let matcher =
                 crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
             let triggered_by =
-                pidash_db::agent_runs::status::AgentRunTrigger::StateTransition.value();
+                pidash_db::issuing::status::AgentRunTrigger::StateTransition.value();
             self.probe_savepoint(&mut tx).await?;
             let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
             // `resolve_pod_for_issue` reads issue + pods only (no
@@ -2792,7 +2792,7 @@ impl ToolStore for PgToolStore {
                 drain_finalized_run(&self.pool, *run_id).await;
             }
             for run_id in dispatches {
-                pidash_jobs::run_dispatch::dispatch_agent_run(&self.pool, run_id, *now)
+                pidash_jobs::dispatch::dispatch_agent_run(&self.pool, run_id, *now)
                     .await
                     .map_err(StoreError::from)?;
             }
@@ -2835,8 +2835,8 @@ impl ToolStore for PgToolStore {
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-                pidash_services::run_creation::LlmProfile {
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+                pidash_services::issuing::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
                 }
@@ -2900,7 +2900,7 @@ impl ToolStore for PgToolStore {
         // `on_commit`, outside the signal `try`, so its tool fails
         // there too (the save stands either way).
         for run_id in dispatches {
-            pidash_jobs::run_dispatch::dispatch_agent_run(pool, run_id, *now)
+            pidash_jobs::dispatch::dispatch_agent_run(pool, run_id, *now)
                 .await
                 .map_err(StoreError::from)?;
         }
@@ -2941,8 +2941,8 @@ impl ToolStore for PgToolStore {
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-                pidash_services::run_creation::LlmProfile {
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+                pidash_services::issuing::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
                 }
@@ -2983,7 +2983,7 @@ impl ToolStore for PgToolStore {
         // re-run the services preflight after the drive, so the real
         // bounce lands post-reconcile, exactly as in Python.
         let matcher = crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
-        let triggered_by = pidash_db::agent_runs::status::AgentRunTrigger::StateTransition.value();
+        let triggered_by = pidash_db::issuing::status::AgentRunTrigger::StateTransition.value();
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         self.probe_savepoint(&mut tx).await?;
         let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
@@ -3129,7 +3129,7 @@ impl ToolStore for PgToolStore {
                 // from `on_commit`, outside the signal `try`, so its
                 // tool fails there too (the save stands either way).
                 for run_id in dispatches {
-                    pidash_jobs::run_dispatch::dispatch_agent_run(pool, run_id, *now)
+                    pidash_jobs::dispatch::dispatch_agent_run(pool, run_id, *now)
                         .await
                         .map_err(StoreError::from)?;
                 }
@@ -3552,8 +3552,9 @@ struct TurnPreflight<H, P> {
 
 impl<H, P> pidash_services::orchestration::entries::PreflightSeam for TurnPreflight<H, P>
 where
+
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    P: Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> pidash_services::issuing::LlmProfile + Clone + Send + Sync,
 {
     async fn preflight_eligibility_or_bounce(
         &mut self,
@@ -3818,8 +3819,8 @@ mod tests {
     }
 
 
-    fn live_managed_settings() -> pidash_db::config::ManagedRunnerSettings {
-        pidash_db::config::ManagedRunnerSettings {
+    fn live_managed_settings() -> pidash_db::config::PidashAgentSettings {
+        pidash_db::config::PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

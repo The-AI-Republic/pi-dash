@@ -255,11 +255,11 @@ pub(crate) async fn drain_pod_by_id(
             .map_err(map)?;
         let last_dedicated = matches!(last, Some(run) if run.pinned_runner_id.is_some() && run.pin_kind == "dedicated");
         let facts = {
-            let is_engine = provisioning == "desktop_bundled";
+            let is_pidash_agent = provisioning == "desktop_bundled";
             let pod_member = pod_dispatch == "pod_member";
-            if !is_engine {
+            if !is_pidash_agent {
                 DispatchFacts {
-                    is_engine: false,
+                    is_pidash_agent: false,
                     pod_member,
                     paused: false,
                     team_runs: true,
@@ -284,7 +284,7 @@ pub(crate) async fn drain_pod_by_id(
                     None => (false, false),
                 };
                 DispatchFacts {
-                    is_engine: true,
+                    is_pidash_agent: true,
                     pod_member,
                     paused,
                     team_runs,

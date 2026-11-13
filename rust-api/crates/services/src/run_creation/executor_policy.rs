@@ -23,14 +23,14 @@
 //! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `PidashAgentReason` /
 //! `PidashAgentUnavailable` (L1, reused, not redefined);
 //! `CloudAgentUnavailableAPI` (`cloud_agent/api.py`, L4 PIDASHCONV-485);
-//! `managed_runner_availability` (`managed_runner/policy.py`, L4 — arrives here as a
+//! `pidash_agent_availability` (`managed_runner/policy.py`, L4 — arrives here as a
 //! precomputed [`PidashAgentAvailability`]); the `extra_toolsets_enabled_for` CE default
 //! (`ee/cloud_agent/toolsets.py`, L5 PIDASHCONV-486 — arrives as a seam verdict).
 //!
 //! Translation notes:
 //!
 //! * Django settings arrive as the already-ported central structs
-//!   (`pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings}`); no
+//!   (`pidash_db::config::{CloudAgentSettings, PidashAgentSettings}`); no
 //!   parallel settings struct is defined. The kill-switch getters stay as named
 //!   functions so call sites keep one switch point instead of reaching into fields.
 //! * Limits are `i64`, the central-`Settings` precedent for env-parsed ints.
@@ -73,7 +73,7 @@ use uuid::Uuid;
 
 /// Operator kill switch for the desktop-bundled managed runner
 /// (`agent_execution.py:46-54`).
-pub fn pidash_agent_is_enabled(managed: &ManagedRunnerSettings) -> bool {
+pub fn pidash_agent_is_enabled(managed: &PidashAgentSettings) -> bool {
     managed.enabled
 }
 
@@ -235,7 +235,7 @@ pub struct ExecutorOption {
     pub deprecated: bool,
 }
 
-/// The `(available, reason_code)` verdict of L4's `managed_runner_availability`
+/// The `(available, reason_code)` verdict of L4's `pidash_agent_availability`
 /// (`managed_runner/policy.py:76-96`), passed through verbatim
 /// (`agent_execution.py:111`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,7 +255,7 @@ pub struct PidashAgentAvailability {
 /// [`LOCAL_RUNNER_EXISTS_SQL`] verdict (online pod member, paused or
 /// not) — consulted only when the runner is unavailable, exactly as
 /// Python's `elif` runs the second `exists()` only then. `managed` is L4's
-/// `managed_runner_availability` verdict, passed through verbatim.
+/// `pidash_agent_availability` verdict, passed through verbatim.
 /// `deprecated` marks the two legacy executors: only `local_runner` is
 /// selectable (design §6); availability is still computed for older
 /// clients (NEWPIDASH-58).
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(rows[2].reason_code, "desktop_not_connected");
         assert_eq!(
             shape["managed_reason_passthrough"],
-            "managed_runner_availability(project, user) reason verbatim"
+            "pidash_agent_availability(project, user) reason verbatim"
         );
     }
 

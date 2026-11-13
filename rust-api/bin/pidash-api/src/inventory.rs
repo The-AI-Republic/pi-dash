@@ -1931,7 +1931,7 @@ mod tests {
             pool.clone(),
             runner_seams,
         );
-        pidash_jobs::runner_runs::register_engine_pause_tasks(&mut registry, pool.clone());
+        pidash_jobs::runner_runs::register_pidash_agent_pause_tasks(&mut registry, pool.clone());
         // Managed wait expiry (P3 step A): the only execute-plane
         // handler that survives; same call the worker builder makes —
         // real register over the lazy pool, no forward override
@@ -1941,7 +1941,7 @@ mod tests {
         pidash_jobs::runner_runs::waiting_expiry::register_waiting_expiry_tasks(
             &mut registry,
             pool.clone(),
-            execute_settings.managed_runner.clone(),
+            execute_settings.pidash_agent.clone(),
             std::sync::Arc::new(
                 pidash_jobs::runner_runs::waiting_expiry::LiveExecuteSeams::new(pool.clone()),
             ),

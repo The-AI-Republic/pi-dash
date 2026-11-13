@@ -32,10 +32,10 @@ use uuid::Uuid;
 
 use pidash_db::entity::dev_machine;
 use pidash_db::redis::client_from_settings;
-use pidash_services::domain::engine_credential::{
-    authenticate_engine_credential, engine_profile_for_user, is_legacy_desktop, AuthError,
+use pidash_services::domain::pidash_agent_credential::{
+    authenticate_pidash_agent_credential, pidash_agent_profile_for_user, is_legacy_desktop, AuthError,
 };
-use pidash_services::domain::engine_state::{apply_model_token_outcome, apply_profile_outcome};
+use pidash_services::domain::pidash_agent_state::{apply_model_token_outcome, apply_profile_outcome};
 use pidash_services::extensions::CredentialError;
 use pidash_services::runner_enroll::dispatch_rules::PauseEffects;
 
@@ -165,7 +165,7 @@ fn payload_map(
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Map<String, serde_json::Value> {
-    let payload = pidash_services::domain::engine_credential::engine_credential_payload(
+    let payload = pidash_services::domain::pidash_agent_credential::engine_credential_payload(
         stored, expires_at, now,
     );
     payload.as_object().cloned().unwrap_or_default()
@@ -188,7 +188,7 @@ async fn authed_machine_id(
 
 /// Whether the user holds a BYOK LLM key (the seam's `has_key` input):
 /// the same one-row read the profile endpoint makes for its own
-/// `agent_model_profile` call.
+/// `pidash_agent_profile` call.
 #[allow(clippy::result_large_err)]
 async fn llm_has_key(sea: &impl sea_orm::ConnectionTrait, user_id: Uuid) -> Result<bool, Response> {
     use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _, QuerySelect as _};
@@ -321,7 +321,7 @@ pub async fn engine_model_token(
     let secret = state.settings().secret_key.clone();
     let sea = pidash_db::pool::sea_orm_connection(pool);
     let raw = bearer.unwrap_or_default();
-    let credential = match authenticate_engine_credential(&sea, secret.as_bytes(), raw, now).await {
+    let credential = match authenticate_pidash_agent_credential(&sea, secret.as_bytes(), raw, now).await {
         Ok(credential) => credential,
         Err(AuthError::Database(_)) => return server_error(),
         Err(AuthError::Credential(error)) => {
@@ -368,16 +368,16 @@ pub async fn engine_model_token(
         }
     };
 
-    let managed_enabled = state.settings().managed_runner.enabled;
+    let managed_enabled = state.settings().pidash_agent.enabled;
     let has_key = match llm_has_key(&sea, credential.user_id).await {
         Ok(has_key) => has_key,
         Err(response) => return response,
     };
     let profile = state
         .assistant_seam()
-        .agent_model_profile(credential.user_id, has_key)
+        .pidash_agent_profile(credential.user_id, has_key)
         .await;
-    let (available, pause_reason) = engine_profile_for_user(managed_enabled, &profile);
+    let (available, pause_reason) = pidash_agent_profile_for_user(managed_enabled, &profile);
     if !available {
         // The profile endpoint's to report: the seam's reason code for
         // a profile failure, else the instance switch's own words.
@@ -400,7 +400,7 @@ pub async fn engine_model_token(
 
     match state
         .assistant_seam()
-        .agent_model_credential(credential.user_id)
+        .pidash_agent_credential(credential.user_id)
         .await
     {
         Ok((token, expires_at)) => {
@@ -500,10 +500,10 @@ pub async fn engine_profile(State(state): State<AppState>, headers: HeaderMap) -
     };
     let profile = state
         .assistant_seam()
-        .agent_model_profile(machine.owner_id, has_key)
+        .pidash_agent_profile(machine.owner_id, has_key)
         .await;
     let (available, pause_reason) =
-        engine_profile_for_user(state.settings().managed_runner.enabled, &profile);
+        pidash_agent_profile_for_user(state.settings().pidash_agent.enabled, &profile);
     if !is_legacy_desktop(&machine.provisioning) {
         match apply_profile_outcome(&sea, machine_id, pause_reason, now).await {
             Ok((_changed, effects)) => {
@@ -589,7 +589,7 @@ pub async fn engine_credential_revoke(
     // Idempotent: revoking a signed-out machine is a no-op that still
     // answers the payload.
     let (revoked, revoke_effects) =
-        match pidash_services::domain::engine_credential::revoke_engine_credential(
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
             &sea,
             machine_id,
             "signed_out",

@@ -409,7 +409,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         runner_seams,
     );
-    crate::runner_runs::register_engine_pause_tasks(registry, ctx.pools.primary().clone());
+    crate::runner_runs::register_pidash_agent_pause_tasks(registry, ctx.pools.primary().clone());
     // Managed wait expiry (P3 step A; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`):
     // beat-published every `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`;
@@ -417,7 +417,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::runner_runs::waiting_expiry::register_waiting_expiry_tasks(
         registry,
         ctx.pools.primary().clone(),
-        ctx.settings.managed_runner.clone(),
+        ctx.settings.pidash_agent.clone(),
         std::sync::Arc::new(crate::runner_runs::waiting_expiry::LiveExecuteSeams::new(
             ctx.pools.primary().clone(),
         )),

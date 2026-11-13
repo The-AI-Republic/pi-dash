@@ -6732,7 +6732,7 @@ fn opt_limited_string(
 /// * `cloud_agent` needs the instance kill switch
 ///   (`CLOUD_AGENT_ENABLED`); the per-run BYOK question is answered at
 ///   run creation, not here.
-/// * `managed_runner` evaluates `managed_runner_availability` in gate
+/// * `managed_runner` evaluates `pidash_agent_availability` in gate
 ///   order; the desktop-unenrolled case (`NO_RUNNER_FOR_PROJECT`) is
 ///   ACCEPTED (the client self-resolves on open). The deeper gates
 ///   (LLM profile, enrollment, online presence) need the managed-runner

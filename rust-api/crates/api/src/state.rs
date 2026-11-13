@@ -8,22 +8,22 @@ use pidash_db::DatabaseConnection;
 use pidash_db::Pools;
 use pidash_services::user_settings::{base_settings_schema, SettingsSchema};
 
-use crate::desktop_gate::CeDesktopRequestGate;
-use crate::desktop_gate::DesktopCredential;
-use crate::desktop_gate::DesktopRequestGate;
+use crate::desktop_gate::CePidashAgentPidashAgentDesktopRequestGate;
+use crate::desktop_gate::PidashAgentDesktopCredential;
+use crate::desktop_gate::PidashAgentDesktopRequestGate;
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
 use crate::edge_shadow::{ShadowConfig, ShadowGate};
 
 /// The CE desktop-session gate: the `pidash_client == "desktop"`
 /// session-key check. Served when the overlay installed no gate.
-static CE_DESKTOP_GATE: CeDesktopRequestGate = CeDesktopRequestGate;
+static CE_DESKTOP_GATE: CePidashAgentPidashAgentDesktopRequestGate = CePidashAgentPidashAgentDesktopRequestGate;
 
 /// An installed desktop-session gate (PIDASHCONV-917). The overlay binary
 /// installs its OIDC-`client`-claim gate; OSS serves with the CE default
 /// (`None` on the state). Opaque under `Debug` — a trait object has no
 /// useful rendering; `Clone` shares the gate.
 #[derive(Clone)]
-pub struct DesktopGateHandle(Arc<dyn DesktopRequestGate>);
+pub struct DesktopGateHandle(Arc<dyn PidashAgentDesktopRequestGate>);
 
 impl std::fmt::Debug for DesktopGateHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -169,7 +169,7 @@ impl AppState {
     /// Install the overlay's desktop-session gate (PIDASHCONV-917).
     /// Installed once by the overlay binary, whose gate answers from the
     /// verified client claim; OSS serves with the CE default (`None`).
-    pub fn with_desktop_gate(mut self, gate: impl DesktopRequestGate + 'static) -> Self {
+    pub fn with_desktop_gate(mut self, gate: impl PidashAgentDesktopRequestGate + 'static) -> Self {
         self.desktop_gate = Some(DesktopGateHandle(Arc::new(gate)));
         self
     }
@@ -179,7 +179,7 @@ impl AppState {
     /// families consult this (never the CE check directly), so the
     /// private overlay substitutes its OIDC-claim gate without touching
     /// the callers.
-    pub fn desktop_gate(&self) -> &dyn DesktopRequestGate {
+    pub fn desktop_gate(&self) -> &dyn PidashAgentDesktopRequestGate {
         match &self.desktop_gate {
             Some(handle) => &*handle.0,
             None => &CE_DESKTOP_GATE,
@@ -192,7 +192,7 @@ impl AppState {
     /// authentication is decided by the actor resolution that follows in
     /// each caller (DRF checks authentication before permissions, so anon
     /// still 401s), keeping this predicate purely the desktop check.
-    pub fn is_desktop_request(&self, credential: &DesktopCredential) -> bool {
+    pub fn is_desktop_request(&self, credential: &PidashAgentDesktopCredential) -> bool {
         let gate = self.desktop_gate();
         pidash_services::run_creation::is_desktop_session(true, || gate.is_desktop(credential))
     }
@@ -305,8 +305,8 @@ mod tests {
     /// dict.
     struct TokenDesktopGate;
 
-    impl DesktopRequestGate for TokenDesktopGate {
-        fn is_desktop(&self, credential: &DesktopCredential) -> bool {
+    impl PidashAgentDesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &PidashAgentDesktopCredential) -> bool {
             matches!(
                 credential.authorization,
                 Some(header) if header == "Bearer desktop-token"
@@ -317,8 +317,8 @@ mod tests {
     fn credential<'a>(
         session: Option<&'a serde_json::Value>,
         authorization: Option<&'a str>,
-    ) -> DesktopCredential<'a> {
-        DesktopCredential {
+    ) -> PidashAgentDesktopCredential<'a> {
+        PidashAgentDesktopCredential {
             session,
             authorization,
             cookie: None,

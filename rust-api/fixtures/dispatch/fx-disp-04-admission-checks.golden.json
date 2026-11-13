@@ -64,7 +64,7 @@
     "E008": [["cloud_agent.E008", "Cloud Agent limits must be positive: CLOUD_AGENT_TOOL_CALL_LIMIT"]],
     "retired": "E002/E003/E004/E006 covered platform model settings and are retired (checks.py:15-17); active ids are E001/E002/E005/E007/E008"
   },
-  "managed_runner_configuration_check": {
+  "pidash_agent_configuration_check": {
     "W001": "DEFAULT_AGENT_EXECUTOR='managed_runner' is ignored: new projects always use local_runner",
     "E002": "one per orchestration phase whose template_name is missing from prompting.recipes.MANAGED_RECIPES",
     "E003": "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1 (< 1)",

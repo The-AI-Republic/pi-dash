@@ -34,7 +34,7 @@ use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::user_settings::SettingsSchema;
 
 use super::{connect_serve_pools, queue_schema_pool, settings_from_env, shutdown_signal};
-use crate::desktop_gate::DesktopRequestGate;
+use crate::desktop_gate::PidashAgentDesktopRequestGate;
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
 use crate::state::AppState;
 use crate::RouteWrap;
@@ -138,7 +138,7 @@ impl ServeBuilder {
 
     /// Install the overlay's desktop-session gate (PIDASHCONV-917). OSS
     /// serves with the CE session-key gate when none is installed.
-    pub fn with_desktop_gate(mut self, gate: impl DesktopRequestGate + 'static) -> Self {
+    pub fn with_desktop_gate(mut self, gate: impl PidashAgentDesktopRequestGate + 'static) -> Self {
         self.state_mods
             .push(Box::new(move |state| state.with_desktop_gate(gate)));
         self
@@ -390,15 +390,15 @@ mod tests {
     /// Desktop-gate double with a fixed verdict.
     struct FixedGate(bool);
 
-    impl DesktopRequestGate for FixedGate {
-        fn is_desktop(&self, credential: &crate::desktop_gate::DesktopCredential) -> bool {
+    impl PidashAgentDesktopRequestGate for FixedGate {
+        fn is_desktop(&self, credential: &crate::desktop_gate::PidashAgentDesktopCredential) -> bool {
             let _ = credential;
             self.0
         }
     }
 
-    fn empty_credential() -> crate::desktop_gate::DesktopCredential<'static> {
-        crate::desktop_gate::DesktopCredential {
+    fn empty_credential() -> crate::desktop_gate::PidashAgentDesktopCredential<'static> {
+        crate::desktop_gate::PidashAgentDesktopCredential {
             session: None,
             authorization: None,
             cookie: None,

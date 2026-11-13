@@ -855,7 +855,7 @@ pub async fn machine_session_poll(
     // poll that delivers the machine's control messages.
     if let Some(Value::Object(report)) = body.get("engine_state") {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        match pidash_services::domain::engine_state::record_engine_state_report(
+        match pidash_services::domain::pidash_agent_state::record_pidash_agent_state_report(
             &sea,
             dev_machine_id,
             report,

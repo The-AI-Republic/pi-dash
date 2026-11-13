@@ -16,13 +16,13 @@
 //! ownership after the proxy pass, so until then every name here still
 //! routes to `PythonOwned` (see [`crate::worker::route_for`]).
 
-pub mod engine_pause;
+pub mod pidash_agent_pause;
 pub mod offline_recovery;
 pub mod sweeps_chat;
 pub mod sweeps_runs;
 pub mod waiting_expiry;
 
-pub use engine_pause::{register_engine_pause_tasks, PAUSE_ENGINES_TASK};
+pub use pidash_agent_pause::{register_pidash_agent_pause_tasks, PIDASH_AGENT_PAUSE_TASK};
 pub use offline_recovery::{
     register_offline_recovery_tasks, FAIL_DEDICATED_TASK, FAIL_RUNS_TASK, RELEASE_PINS_TASK,
     SWEEP_STRANDED_TASK,
@@ -43,7 +43,7 @@ pub use sweeps_runs::{
 pub const TASK_NAMES: [&str; 16] = [
     EXPIRE_TASK,
     MARK_OFFLINE_TASK,
-    PAUSE_ENGINES_TASK,
+    PIDASH_AGENT_PAUSE_TASK,
     RELEASE_PINS_TASK,
     FAIL_RUNS_TASK,
     SWEEP_IDLE_TASK,

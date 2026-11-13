@@ -125,11 +125,11 @@ pub fn runner_may_take(
     !human || team_runs
 }
 
-/// `engine_takes_pod_work` (`dispatch_rules.py`): an engine takes pins and
+/// `pidash_agent_takes_pod_work` (`dispatch_rules.py`): an engine takes pins and
 /// unpinned pod work only while it is a `pod_member` and its machine's
 /// engine is not paused. `pod_member` is `pod_dispatch == 'pod_member'`;
 /// `paused` is `Runner.engine_paused`. Callers map their data to these.
-pub fn engine_takes_pod_work(pod_member: bool, paused: bool) -> bool {
+pub fn pidash_agent_takes_pod_work(pod_member: bool, paused: bool) -> bool {
     pod_member && !paused
 }
 
@@ -149,7 +149,7 @@ pub fn locality_pin_allowed(
     if !is_engine {
         return true;
     }
-    engine_takes_pod_work(pod_member, paused)
+    pidash_agent_takes_pod_work(pod_member, paused)
 }
 
 /// Facts for `can_manage_runner`: the view check plus ownership and the
@@ -316,11 +316,11 @@ mod tests {
 
     #[test]
     fn locality_tables() {
-        // engine_takes_pod_work: pod_member AND not paused.
-        assert!(engine_takes_pod_work(true, false));
-        assert!(!engine_takes_pod_work(true, true));
-        assert!(!engine_takes_pod_work(false, false));
-        assert!(!engine_takes_pod_work(false, true));
+        // pidash_agent_takes_pod_work: pod_member AND not paused.
+        assert!(pidash_agent_takes_pod_work(true, false));
+        assert!(!pidash_agent_takes_pod_work(true, true));
+        assert!(!pidash_agent_takes_pod_work(false, false));
+        assert!(!pidash_agent_takes_pod_work(false, true));
         // locality_pin_allowed: none -> false; own-agent -> true;
         // engine -> pod-member + unpaused.
         assert!(!locality_pin_allowed(false, false, true, false));

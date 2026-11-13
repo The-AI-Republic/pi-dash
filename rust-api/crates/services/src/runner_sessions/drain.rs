@@ -175,7 +175,7 @@ pub const POD_COLUMNS: [&str; 10] = [
 /// `DevMachine.engine_team_runs` (any value for own-agent runners).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchFacts {
-    pub is_engine: bool,
+    pub is_pidash_agent: bool,
     pub pod_member: bool,
     pub paused: bool,
     pub team_runs: bool,
@@ -322,7 +322,7 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
     let local = AgentExecutorKind::LocalRunner.value();
     let managed = AgentExecutorKind::ManagedRunner.value();
     let pinned = col("agent_run", "pinned_runner_id");
-    if facts.is_engine {
+    if facts.is_pidash_agent {
         let managed_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(managed))
             .add(pinned.clone().eq(runner_id));
@@ -411,7 +411,7 @@ pub fn next_for_runner_stmt(
         visibility,
         owner_id,
         "agent_run",
-        facts.is_engine,
+        facts.is_pidash_agent,
         facts.team_runs,
     )?;
     let mut query = Query::select().to_owned();
@@ -880,7 +880,7 @@ mod tests {
 
     fn manual_facts() -> DispatchFacts {
         DispatchFacts {
-            is_engine: false,
+            is_pidash_agent: false,
             pod_member: true,
             paused: false,
             team_runs: true,
@@ -890,7 +890,7 @@ mod tests {
 
     fn engine_facts(pod_member: bool, paused: bool) -> DispatchFacts {
         DispatchFacts {
-            is_engine: true,
+            is_pidash_agent: true,
             pod_member,
             paused,
             team_runs: false,
@@ -1035,7 +1035,7 @@ mod tests {
     #[test]
     fn next_for_runner_team_runs_restores_ordinary_rule() {
         let team = DispatchFacts {
-            is_engine: true,
+            is_pidash_agent: true,
             pod_member: true,
             paused: false,
             team_runs: true,

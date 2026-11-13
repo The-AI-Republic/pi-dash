@@ -12,7 +12,7 @@
 //!
 //! The gate reads request data, not the request: the caller extracts the
 //! session dict plus the raw `Authorization` and `Cookie` headers into a
-//! [`DesktopCredential`]. CE reads only the session dict (the
+//! [`PidashAgentDesktopCredential`]. CE reads only the session dict (the
 //! `pidash_client == "desktop"` marker from
 //! `ee/authentication/desktop.py`); the cloud overlay reads only the
 //! headers (the signed access token whose `client` claim the desktop
@@ -31,11 +31,11 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 
 /// Request data the desktop verdict may consult, extracted by the
-/// caller. Every field is optional input: CE needs only [`DesktopCredential::session`],
-/// the cloud overlay only [`DesktopCredential::authorization`] and
-/// [`DesktopCredential::cookie`].
+/// caller. Every field is optional input: CE needs only [`PidashAgentDesktopCredential::session`],
+/// the cloud overlay only [`PidashAgentDesktopCredential::authorization`] and
+/// [`PidashAgentDesktopCredential::cookie`].
 #[derive(Debug, Clone, Copy)]
-pub struct DesktopCredential<'a> {
+pub struct PidashAgentDesktopCredential<'a> {
     /// The full session-dict snapshot (`None` when the request carries
     /// no session extension or the snapshot is missing).
     pub session: Option<&'a Value>,
@@ -56,11 +56,11 @@ pub fn header_value(headers: &HeaderMap, name: axum::http::HeaderName) -> Option
 /// Overlay seam for `ee/authentication/desktop.py::request_is_desktop`,
 /// over the full request credential: the CE session dict plus the raw
 /// auth headers. Every build provides its own verdict —
-/// [`CeDesktopRequestGate`] is the CE one; the overlay's gate answers
+/// [`CePidashAgentPidashAgentDesktopRequestGate`] is the CE one; the overlay's gate answers
 /// from the signed client claim instead. `Send + Sync` so the overlay
 /// installs its gate on [`crate::state::AppState`] once at boot.
-pub trait DesktopRequestGate: Send + Sync {
-    fn is_desktop(&self, credential: &DesktopCredential) -> bool;
+pub trait PidashAgentDesktopRequestGate: Send + Sync {
+    fn is_desktop(&self, credential: &PidashAgentDesktopCredential) -> bool;
 }
 
 /// CE verdict: the `pidash_client == "desktop"` session-key check
@@ -69,10 +69,10 @@ pub trait DesktopRequestGate: Send + Sync {
 /// keeps its single definition. Headers are ignored — CE
 /// authenticates with Django sessions. A missing/unreadable session is
 /// not a desktop (the `except` in Python returns `False`).
-pub struct CeDesktopRequestGate;
+pub struct CePidashAgentPidashAgentDesktopRequestGate;
 
-impl DesktopRequestGate for CeDesktopRequestGate {
-    fn is_desktop(&self, credential: &DesktopCredential) -> bool {
+impl PidashAgentDesktopRequestGate for CePidashAgentPidashAgentDesktopRequestGate {
+    fn is_desktop(&self, credential: &PidashAgentDesktopCredential) -> bool {
         use pidash_auth::permissions::desktop::DesktopGate;
         use pidash_auth::permissions::desktop::SessionDesktopGate;
         use pidash_auth::permissions::desktop::DESKTOP_SESSION_KEY;
@@ -92,8 +92,8 @@ mod tests {
     /// cloud `client`-claim check) and ignores the session dict.
     struct TokenDesktopGate;
 
-    impl DesktopRequestGate for TokenDesktopGate {
-        fn is_desktop(&self, credential: &DesktopCredential) -> bool {
+    impl PidashAgentDesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &PidashAgentDesktopCredential) -> bool {
             matches!(
                 credential.authorization,
                 Some(header) if header == "Bearer desktop-token"
@@ -105,8 +105,8 @@ mod tests {
         session: Option<&'a Value>,
         authorization: Option<&'a str>,
         cookie: Option<&'a str>,
-    ) -> DesktopCredential<'a> {
-        DesktopCredential {
+    ) -> PidashAgentDesktopCredential<'a> {
+        PidashAgentDesktopCredential {
             session,
             authorization,
             cookie,
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn ce_gate_matches_the_session_dict_check() {
-        let gate = CeDesktopRequestGate;
+        let gate = CePidashAgentPidashAgentDesktopRequestGate;
         assert!(gate.is_desktop(&credential(
             Some(&serde_json::json!({"pidash_client": "desktop"})),
             None,
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn ce_gate_ignores_the_auth_headers() {
-        let gate = CeDesktopRequestGate;
+        let gate = CePidashAgentPidashAgentDesktopRequestGate;
         // A bearer token never makes a CE session a desktop, and never
         // unmakes one either.
         assert!(!gate.is_desktop(&credential(

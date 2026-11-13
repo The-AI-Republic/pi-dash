@@ -4,7 +4,7 @@
 //!
 //! Pure naming kernels: `slug`, machine slug, base name with the 128-char
 //! sha256 truncation, and the unique-name suffix loop. The DB-backed
-//! `unique_runner_name` / `live_engine_runner_for` live in `queries`
+//! `unique_runner_name` / `live_pidash_agent_runner_for` live in `queries`
 //! (they need the `taken names` seam); this module owns the string
 //! rules byte-for-byte.
 
@@ -56,10 +56,10 @@ fn hex_of(hash: &[u8]) -> String {
     out
 }
 
-/// `engine_runner_base_name` (`:73-83`): join non-empty `builtin`, machine
+/// `pidash_agent_runner_base_name` (`:73-83`): join non-empty `builtin`, machine
 /// slug, workspace slug, project identifier; over 128 chars, cut to 119,
 /// rstrip `-`, plus `-` and the first 8 hex of sha256(project.id).
-pub fn engine_runner_base_name(
+pub fn pidash_agent_runner_base_name(
     machine_id: uuid::Uuid,
     host_label: &str,
     label: &str,
@@ -128,7 +128,7 @@ mod tests {
         let mid = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
         let pid = uuid::Uuid::parse_str("87654321-1234-1234-1234-123456789abc").unwrap();
         assert_eq!(
-            engine_runner_base_name(mid, "rich-mbp", "", "test-workspace", pid, "DEF"),
+            pidash_agent_runner_base_name(mid, "rich-mbp", "", "test-workspace", pid, "DEF"),
             "builtin-rich-mbp-test-workspace-def"
         );
     }
@@ -138,7 +138,7 @@ mod tests {
         let mid = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
         let pid = uuid::Uuid::parse_str("87654321-1234-1234-1234-123456789abc").unwrap();
         let host = "h".repeat(200);
-        let name = engine_runner_base_name(mid, &host, "", "ws", pid, "DEF");
+        let name = pidash_agent_runner_base_name(mid, &host, "", "ws", pid, "DEF");
         assert_eq!(name.len(), RUNNER_NAME_MAX);
         assert!(name.starts_with("builtin-hhh"));
         let mut hasher = Sha256::new();

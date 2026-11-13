@@ -855,7 +855,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
         let (_revoked, _effects) =
-            pidash_services::domain::engine_credential::revoke_engine_credential(
+            pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
                 &pidash_db::orm_tx::TxConn::new(self.tx),
                 machine_id,
                 "machine_removed",
@@ -1014,11 +1014,11 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
             .map_err(store_err)
     }
 
-    async fn delete_machine_engine_credentials(
+    async fn delete_machine_pidash_agent_credentials(
         &mut self,
         machine_id: Uuid,
     ) -> Result<(), RevokeError> {
-        delete_svc::delete_machine_engine_credentials(&TxConn::new(self.tx), machine_id)
+        delete_svc::delete_machine_pidash_agent_credentials(&TxConn::new(self.tx), machine_id)
             .await
             .map_err(store_err)
     }

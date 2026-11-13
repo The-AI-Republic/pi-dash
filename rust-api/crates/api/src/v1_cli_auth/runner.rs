@@ -76,7 +76,7 @@ use pidash_db::entity::{
 use pidash_db::redis::client_from_settings;
 use pidash_db::v1_cli_auth::queries::runner_lookup;
 use pidash_jobs::runner_enroll::{fire_revoke_bundle, revoke, RevokeCtx, RevokeScope};
-use pidash_services::domain::engine_credential;
+use pidash_services::domain::pidash_agent_credential;
 use pidash_services::runner_enroll::purge;
 use pidash_services::runner_enroll::queries::manage_reads;
 use pidash_services::runner_enroll::serializers::shapes;
@@ -731,9 +731,9 @@ pub async fn list_runners(
                     .map(crate::serializer::render_datetime);
                 // `DevMachineMiniSerializer.to_representation`
                 // (`serializers.py:186-189`): the stored state is derived
-                // through `current_engine_sign_in_state`, never emitted raw
+                // through `current_pidash_agent_sign_in_state`, never emitted raw
                 // (the `runner_enroll::manage` precedent).
-                let engine_sign_in_state = engine_credential::current_engine_sign_in_state(
+                let engine_sign_in_state = pidash_agent_credential::current_pidash_agent_sign_in_state(
                     row.dm_engine_sign_in_state.as_deref().unwrap_or(""),
                     row.dm_engine_credential_expires_at,
                     Utc::now(),
