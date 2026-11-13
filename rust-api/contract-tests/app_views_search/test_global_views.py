@@ -420,6 +420,34 @@ def test_view_issues_or_assignee_label_matches_either_branch(
     assert len(body["results"]) == 4
 
 
+def test_view_issues_rich_plus_legacy_same_relation(
+    api, seed, tenant_a, project_a, auth_a
+):
+    # NEWPIDASH-195: a rich assignee leaf AND a legacy assignees= key on
+    # the same relation must join the link table twice (Django applies
+    # two .filter() calls), so an issue assigned to both users matches.
+    # Pre-fix Rust ANDed both predicates on one join alias and returned
+    # nothing whenever the two users differ.
+    ws = tenant_a["workspace"]["id"]
+    user_x = seed.user()["id"]
+    user_y = seed.user()["id"]
+    both = seed.issue(ws, project_a, name="195 assigned to X and Y")
+    seed.issue_assignee(ws, project_a, both, user_x)
+    seed.issue_assignee(ws, project_a, both, user_y)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a,
+        params={
+            "filters": json.dumps({"assignee_id__in": user_x}),
+            "assignees": user_y,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["id"] for e in body["results"]] == [both]
+    assert body["total_count"] == 1
+
+
 def test_favorite_create_and_delete(api, seed, tenant_a, project_a, auth_a):
     view_id = seed.issue_view(
         tenant_a["workspace"]["id"], tenant_a["user"]["id"],

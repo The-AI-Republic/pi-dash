@@ -1151,10 +1151,14 @@ fn p_legacy_condition(query: &QueryMap) -> Result<Option<Condition>, Denial> {
     let mut cond = Condition::all();
     let mut any = false;
     for (name, value) in legacy.predicates() {
+        // Empty shared set: this path keeps its single-alias joins
+        // (NEWPIDASH-195 covers only the workspace + project lists;
+        // the profile-list copy of the pattern is reported separately).
         cond = cond.add(crate::app_issues::list_engine::legacy_expr(
             name,
             value,
             &chrono_tz::UTC,
+            &std::collections::BTreeSet::new(),
         )?);
         any = true;
     }
