@@ -97,6 +97,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use http_body_util::BodyExt as _;
 use pidash_db::orm_tx::TxConn;
 use pidash_services::runner_enroll::queries::manage_reads::RunnerJoinRow;
@@ -746,6 +747,7 @@ struct LiveStateOwned {
 async fn fetch_live_state(
     pool: &PgPool,
     runner_id: Uuid,
+    tz: &Tz,
 ) -> Result<Option<LiveStateOwned>, Response> {
     let row =
         manage_reads::runner_live_state(&pidash_db::pool::sea_orm_connection(pool), runner_id)
@@ -755,7 +757,7 @@ async fn fetch_live_state(
         return Ok(None);
     };
     let render = |at: &sea_orm::prelude::DateTimeWithTimeZone| {
-        crate::serializer::render_datetime(&at.with_timezone(&Utc))
+        crate::serializer::render_datetime_in(&at.with_timezone(&Utc), tz)
     };
     Ok(Some(LiveStateOwned {
         observed_run_id: row.observed_run_id.map(|id| id.to_string()),
@@ -1181,6 +1183,7 @@ fn runner_render(
     dev_machine_detail: Option<DevMachineMiniOwned>,
     live_state: Option<LiveStateOwned>,
     eligibility: RunnerEligibility,
+    tz: &Tz,
 ) -> RunnerRender {
     // `Runner.is_engine` / `engine_paused` / `machine_display_name`
     // (`models.py:740-755`): engine-ness from provisioning, pause from
@@ -1222,7 +1225,7 @@ fn runner_render(
         last_heartbeat_at: runner
             .last_heartbeat_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         owner: runner.owner_id.to_string(),
         dev_machine: runner.dev_machine_id.map(|id| id.to_string()),
         dev_machine_detail,
@@ -1239,23 +1242,23 @@ fn runner_render(
         enrolled_at: runner
             .enrolled_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         revoked_at: runner
             .revoked_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         revoked_reason: runner.revoked_reason.clone(),
         paused_at: runner
             .paused_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         paused_by: runner.paused_by_id.map(|id| id.to_string()),
         assignable: eligibility.assignable,
         not_assignable_code: eligibility.not_assignable_code,
         is_busy: eligibility.is_busy,
         queue_depth: eligibility.queue_depth,
-        created_at: crate::serializer::render_datetime(&runner.created_at),
-        updated_at: crate::serializer::render_datetime(&runner.updated_at),
+        created_at: crate::serializer::render_datetime_in(&runner.created_at, tz),
+        updated_at: crate::serializer::render_datetime_in(&runner.updated_at, tz),
     }
 }
 
@@ -1267,6 +1270,7 @@ async fn render_runner_parts(
     pod: &PodOwned,
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
+    tz: &Tz,
 ) -> Result<String, Response> {
     render_runner_parts_ctx(
         pool,
@@ -1276,11 +1280,13 @@ async fn render_runner_parts(
         dev_machine_detail,
         None,
         None,
+        tz,
     )
     .await
 }
 
 /// `#assignable_for` context, when the list was asked for it (§7.4).
+#[allow(clippy::too_many_arguments)]
 async fn render_runner_parts_ctx(
     pool: &PgPool,
     runner: &RunnerOwned,
@@ -1289,8 +1295,9 @@ async fn render_runner_parts_ctx(
     dev_machine_detail: Option<DevMachineMiniOwned>,
     viewer_id: Option<Uuid>,
     assignable_for: Option<Option<Uuid>>,
+    tz: &Tz,
 ) -> Result<String, Response> {
-    let live_state = fetch_live_state(pool, runner.id).await?;
+    let live_state = fetch_live_state(pool, runner.id, tz).await?;
     let eligibility = match assignable_for {
         None => RunnerEligibility::default(),
         Some(issue_id) => {
@@ -1345,6 +1352,7 @@ async fn render_runner_parts_ctx(
         dev_machine_detail,
         live_state,
         eligibility,
+        tz,
     )
     .to_json()
 }
@@ -1352,8 +1360,12 @@ async fn render_runner_parts_ctx(
 /// Serialize one R1/R2 join row: the runner + dev-machine + pod blocks
 /// decode positionally; `projects.identifier` reads by name (the only
 /// `identifier` column across the four tables).
-async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow) -> Result<String, Response> {
-    render_runner_row_ctx(pool, row, None, None).await
+async fn render_runner_row(
+    pool: &PgPool,
+    row: &RunnerJoinRow,
+    tz: &Tz,
+) -> Result<String, Response> {
+    render_runner_row_ctx(pool, row, None, None, tz).await
 }
 
 /// `#assignable_for` context, when the list was asked for it (design
@@ -1364,6 +1376,7 @@ pub(crate) async fn render_runner_row_ctx(
     row: &RunnerJoinRow,
     viewer_id: Option<Uuid>,
     assignable_for: Option<Option<Uuid>>,
+    tz: &Tz,
 ) -> Result<String, Response> {
     let runner = runner_of(row);
     let pod = pod_of(row);
@@ -1375,6 +1388,7 @@ pub(crate) async fn render_runner_row_ctx(
         machine_mini_of(row),
         viewer_id,
         assignable_for,
+        tz,
     )
     .await
 }
@@ -1719,6 +1733,103 @@ pub async fn dev_machine_patch(
 }
 
 // ---------------------------------------------------------------------------
+// Shared runner directory (`runner/services/runner_directory.py`)
+// ---------------------------------------------------------------------------
+
+/// Raw `?project=` / `?pod=` / `include_bundled` inputs of one
+/// [`project_runners_body`] read (`project_runners_queryset` kwargs). The
+/// filters stay unparsed: Django validates them at queryset evaluation,
+/// after the membership gate.
+pub(crate) struct DirectoryFilters {
+    /// `project_id=` — `None` or empty disables the filter.
+    pub project: Option<String>,
+    /// `pod_id=` — `None` or empty disables the filter.
+    pub pod: Option<String>,
+    /// [`manage_reads::include_bundled`] of the raw query value.
+    pub include_bundled: bool,
+}
+
+/// Why a [`project_runners_body`] read failed. Each surface maps these
+/// onto its own bodies, like each Django view catches (or does not
+/// catch) the helper's exceptions.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryError {
+    /// Caller is not a workspace member (`PermissionDenied`).
+    Forbidden,
+    /// A filter value is not a UUID (Django's `ValidationError`).
+    InvalidFilter,
+    /// Database or decode failure.
+    Server,
+}
+
+/// `project_runners_queryset` + `RunnerSerializer(many=True)`
+/// (`runner/services/runner_directory.py`): the "which runners can
+/// this user see" read behind the token-auth CLI list
+/// ([`crate::v1_cli_auth::project_runners`]). The session-auth web
+/// panel ([`runners_list`]) reads through the same
+/// `manage_reads::runner_list` query with the same visibility rules
+/// but keeps its own scope (`runner_list_scope`) and
+/// `assignable_for` handling, so it renders rows directly.
+///
+/// Membership gate first (`is_workspace_member`), then the filters
+/// parse, then R1 (owner+private visibility, `?pod=`, bundled
+/// exclusion, `?project=`, `-updated_at`). Returns the rendered JSON
+/// array with datetimes in `tz`.
+pub(crate) async fn project_runners_body(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    filters: &DirectoryFilters,
+    tz: &Tz,
+) -> Result<String, DirectoryError> {
+    let role = workspace_role(pool, workspace_id, user_id)
+        .await
+        .map_err(|_| DirectoryError::Server)?;
+    if !membership::is_workspace_member(role) {
+        return Err(DirectoryError::Forbidden);
+    }
+    // Filter UUIDs parse at queryset evaluation — after the member
+    // gate, so a non-member with a garbage filter still answers 403.
+    let parse = |raw: &Option<String>| -> Result<Option<Uuid>, DirectoryError> {
+        match raw.as_deref().filter(|raw| !raw.is_empty()) {
+            None => Ok(None),
+            Some(raw) => raw
+                .parse::<Uuid>()
+                .map(Some)
+                .map_err(|_| DirectoryError::InvalidFilter),
+        }
+    };
+    let pod_id = parse(&filters.pod)?;
+    let project_id = parse(&filters.project)?;
+    let exclude_bundled = !filters.include_bundled;
+    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
+    let rows = manage_reads::runner_list(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
+        visibility,
+        pod_id,
+        if exclude_bundled {
+            Some("desktop_bundled")
+        } else {
+            None
+        },
+        project_id,
+    )
+    .await
+    .map_err(|_| DirectoryError::Server)?;
+    let mut bodies = Vec::with_capacity(rows.len());
+    for row in &rows {
+        bodies.push(
+            render_runner_row(pool, row, tz)
+                .await
+                .map_err(|_| DirectoryError::Server)?,
+        );
+    }
+    Ok(format!("[{}]", bodies.join(",")))
+}
+
+// ---------------------------------------------------------------------------
 // Runner list (`runners.py:340-413`)
 // ---------------------------------------------------------------------------
 
@@ -1801,7 +1912,7 @@ pub async fn runners_list(
         }
     }
     // Engine runners are listed like any other runner (#2910);
-    // `?include_bundled` is ignored.
+    // `?include_bundled` is ignored (preserved for CLI compat).
     // `?assignable_for=<issue-id | "new">` (design §7.4): the per-row
     // eligibility read. A garbage id behaves as "new" (Django's
     // `except (ValueError, TypeError)` arm).
@@ -1837,7 +1948,9 @@ pub async fn runners_list(
     };
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
-        match render_runner_row_ctx(&pool, row, Some(user_id), assignable_for).await {
+        match render_runner_row_ctx(&pool, row, Some(user_id), assignable_for, &chrono_tz::UTC)
+            .await
+        {
             Ok(body) => bodies.push(body),
             Err(response) => return response,
         }
@@ -1922,7 +2035,7 @@ pub async fn runner_detail(
         Ok(hit) => hit,
         Err(response) => return response,
     };
-    match render_runner_row(&pool, &hit.row).await {
+    match render_runner_row(&pool, &hit.row, &chrono_tz::UTC).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
     }
@@ -2244,7 +2357,16 @@ pub async fn runner_patch(
             machine_mini_of(&hit.row),
         ),
     };
-    match render_runner_parts(&pool, &runner, &pod, pod_identifier, dev_machine_detail).await {
+    match render_runner_parts(
+        &pool,
+        &runner,
+        &pod,
+        pod_identifier,
+        dev_machine_detail,
+        &chrono_tz::UTC,
+    )
+    .await
+    {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
     }
@@ -3525,6 +3647,7 @@ mod tests {
             None,
             Some(live),
             RunnerEligibility::default(),
+            &chrono_tz::UTC,
         )
         .to_json()
         .unwrap();
@@ -3532,5 +3655,66 @@ mod tests {
             body,
             r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","is_engine":false,"engine_paused":false,"dispatch_paused":false,"machine_display_name":"h","provisioning":"manual","pod_dispatch":"pod_member","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
+    }
+
+    /// The v1 CLI list renders the request zone (`TimezoneMixin`): the
+    /// same buffer, every runner datetime shifted with its offset kept;
+    /// `+00:00` still rewrites to `Z`.
+    #[test]
+    fn runner_render_uses_request_timezone() {
+        let mut runner = RunnerOwned {
+            id: Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap(),
+            owner_id: Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap(),
+            workspace_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+            dev_machine_id: None,
+            pod_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            name: "r1".to_owned(),
+            host_label: "h".to_owned(),
+            provisioning: "manual".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
+            visibility: 0,
+            enrolled_at: None,
+            capabilities: serde_json::json!([]),
+            status: "online".to_owned(),
+            os: String::new(),
+            arch: String::new(),
+            runner_version: String::new(),
+            dev_metadata: serde_json::json!({}),
+            protocol_version: 4,
+            last_heartbeat_at: Some(moment("2026-10-02T01:02:03+00:00")),
+            created_at: moment("2026-10-01T12:34:56.789012+00:00"),
+            updated_at: moment("2026-10-02T01:02:03+00:00"),
+            revoked_at: None,
+            revoked_reason: String::new(),
+            paused_at: None,
+            paused_by_id: None,
+        };
+        let kolkata: Tz = "Asia/Kolkata".parse().unwrap();
+        let render = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            None,
+            RunnerEligibility::default(),
+            &kolkata,
+        );
+        assert_eq!(
+            render.last_heartbeat_at.as_deref(),
+            Some("2026-10-02T06:32:03+05:30")
+        );
+        assert_eq!(render.created_at, "2026-10-01T18:04:56.789012+05:30");
+        assert_eq!(render.updated_at, "2026-10-02T06:32:03+05:30");
+        runner.last_heartbeat_at = None;
+        let utc = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            None,
+            RunnerEligibility::default(),
+            &chrono_tz::UTC,
+        );
+        assert_eq!(utc.created_at, "2026-10-01T12:34:56.789012Z");
     }
 }

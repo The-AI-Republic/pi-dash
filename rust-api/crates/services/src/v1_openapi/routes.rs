@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! D-23 golden route table: the 135 served `/api/v1/` paths (stage 5).
+//! D-23 golden route table: the 136 served `/api/v1/` paths (stage 5).
 //!
 //! Static data sourced from `FX-OPENAPI-06` (byte copy of
 //! `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81,
@@ -21,7 +21,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 /// The golden route map as static data: `(path, methods)` pairs, paths
-/// sorted, methods sorted lowercase. 135 entries, 209 operations.
+/// sorted, methods sorted lowercase. 136 entries, 210 operations.
 pub const ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/assets/user-assets/", &["post"]),
     ("/api/v1/assets/user-assets/{asset_id}/", &["delete", "patch"]),
@@ -119,6 +119,7 @@ pub const ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/", &["delete", "post"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/project-members/", &["get", "post"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/", &["delete", "get", "patch"]),
+    ("/api/v1/workspaces/{slug}/projects/{project_id}/runners/", &["get"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/", &["get", "post"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/", &["get"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/", &["delete", "patch"]),
@@ -161,7 +162,7 @@ pub const ROUTES: &[(&str, &[&str])] = &[
 ];
 
 /// Number of paths in [`ROUTES`]. Pinned to the golden file by the tests.
-pub const ROUTE_COUNT: usize = 135;
+pub const ROUTE_COUNT: usize = 136;
 
 /// `{path: sorted methods}` in the `test_routes_golden.route_map` shape,
 /// for golden comparison.
@@ -184,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn route_count_is_128() {
+    fn route_count_is_136() {
         assert_eq!(ROUTES.len(), ROUTE_COUNT);
         assert_eq!(golden().as_object().unwrap().len(), ROUTE_COUNT);
     }
@@ -223,6 +224,6 @@ mod tests {
             }
         }
         let ops: usize = ROUTES.iter().map(|(_, methods)| methods.len()).sum();
-        assert_eq!(ops, 209);
+        assert_eq!(ops, 210);
     }
 }

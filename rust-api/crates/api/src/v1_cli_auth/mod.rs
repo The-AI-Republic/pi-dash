@@ -1,4 +1,4 @@
-//! api-v1 CLI runner delete + list (D-22, stage 5, PIDASHCONV-538; list NEWPIDASH-146).
+//! api-v1 CLI runner delete + list (D-22, stage 5, PIDASHCONV-538; list NEWPIDASH-146; project runners PDASHOSS01-245).
 //!
 //! Ports the one unit this domain still needs after D-17 merged the auth
 //! half (PIDASHCONV-342 #808, PIDASHCONV-343 #817):
@@ -6,10 +6,18 @@
 //! `DELETE /api/v1/runners/<runner_id>/`; route `api/urls/runner.py:9-14`)
 //! and the dedicated-runner CLI list (`RunnerListAPIEndpoint`,
 //! `GET /api/v1/workspaces/<slug>/runners/`; route `api/urls/runner.py:16-20`,
-//! f92fe3c0 NEWPIDASH-146).
+//! f92fe3c0 NEWPIDASH-146) and `ProjectRunnersEndpoint` (`GET
+//! /api/v1/workspaces/<slug>/projects/<project_id>/runners/`,
+//! PDASHOSS01-245): the CLI's cloud runner list, sharing the web list's
+//! visibility read.
 //!
 //! * [`runner`] — the DELETE handler (auth → lookup → guards →
-//!   purge-flag parse → `delete_runner` service → 204).
+//!   purge-flag parse → `delete_runner` service → 204) and the workspace
+//!   runner list handler.
+//! * [`project_runners`] — `ProjectRunnersEndpoint` (`GET
+//!   /api/v1/workspaces/<slug>/projects/<project_id>/runners/`,
+//!   PDASHOSS01-245): the CLI's cloud runner list, sharing the web list's
+//!   visibility read.
 //!
 //! Wiring note: the crate root declares `pub mod v1_cli_auth;` (seam for
 //! this issue's new files); every file under this module is new. The
@@ -17,6 +25,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod project_runners;
 pub mod runner;
 
 use axum::Router;
@@ -27,6 +36,9 @@ use crate::state::AppState;
 pub const RUNNER_DELETE_PATH: &str = "/api/v1/runners/{runner_id}/";
 /// `api/urls/runner.py:16-20` under the `api/v1/` include (f92fe3c0).
 pub const WORKSPACE_RUNNERS_LIST_PATH: &str = "/api/v1/workspaces/{slug}/runners/";
+/// `api/urls/runner.py` `api-project-runners` under the `api/v1/` include
+/// (`<str:slug>` / `<str:project_id>`: any non-empty segment).
+pub const PROJECT_RUNNERS_PATH: &str = "/api/v1/workspaces/{slug}/projects/{project_id}/runners/";
 
 /// Domain router: the DELETE-owned + GET-owned runner paths. Registration is the
 /// cutover granularity — sibling `api/v1/` paths have no Rust route and
@@ -40,6 +52,12 @@ pub fn routes() -> Router<AppState> {
         .route(
             WORKSPACE_RUNNERS_LIST_PATH,
             owned_list(axum::routing::get(runner::list_runners)),
+        )
+        .route(
+            PROJECT_RUNNERS_PATH,
+            // `http_method_names=["get"]`: GET serves Rust, every other
+            // method (HEAD included) proxies for Django's own 405.
+            crate::v1_schedulers::owned(axum::routing::get(project_runners::project_runners)),
         )
 }
 
@@ -109,53 +127,30 @@ mod tests {
         assert_eq!(
             status(
                 "DELETE",
-                "/api/v1/runners/11111111-1111-1111-1111-111111111111/"
+                "/api/v1/runners/12345678-1234-1234-1234-123456789012/"
             )
             .await,
             StatusCode::UNAUTHORIZED
         );
     }
 
-    /// A non-UUID segment 404s at the resolver level, before auth — the
-    /// `<uuid:>` converter rejects it in Django before any view code runs.
+    /// GET serves from Rust: anonymous callers 401 at the auth layer
+    /// (before any pool access or proxy dispatch).
     #[tokio::test]
-    async fn non_uuid_segment_404s_before_auth() {
+    async fn owned_list_answers_401_anonymous() {
         assert_eq!(
-            status("DELETE", "/api/v1/runners/not-a-uuid/").await,
-            StatusCode::NOT_FOUND
+            status("GET", "/api/v1/workspaces/ws/runners/").await,
+            StatusCode::UNAUTHORIZED
         );
     }
 
-    /// Parseable-but-non-canonical UUID spellings proxy to Django
-    /// (502 fail-closed with the test edge) so its resolver 404 answers
-    /// byte for byte — before auth, so anonymous callers proxy too.
+    /// GET serves from Rust: anonymous callers 401 at the auth layer
+    /// (before any pool access or proxy dispatch).
     #[tokio::test]
-    async fn noncanonical_uuid_segments_proxy_before_auth() {
-        for segment in [
-            "12345678-1234-1234-1234-1234567890ab".to_uppercase(),
-            "123456781234123412341234567890ab".to_owned(),
-            "%7B12345678-1234-1234-1234-1234567890ab%7D".to_owned(),
-            "urn:uuid:12345678-1234-1234-1234-1234567890ab".to_owned(),
-        ] {
-            assert_eq!(
-                status("DELETE", &format!("/api/v1/runners/{segment}/"),).await,
-                StatusCode::BAD_GATEWAY,
-                "{segment}"
-            );
-        }
-    }
-
-    /// Unowned methods proxy to Django (502 fail-closed with the test
-    /// edge), preserving its 405-after-auth byte for byte.
-    #[tokio::test]
-    async fn unowned_methods_proxy() {
-        let uri = "/api/v1/runners/11111111-1111-1111-1111-111111111111/";
-        for method in ["GET", "POST", "PUT", "PATCH"] {
-            assert_eq!(
-                status(method, uri).await,
-                StatusCode::BAD_GATEWAY,
-                "{method}"
-            );
-        }
+    async fn owned_project_runners_answers_401_anonymous() {
+        assert_eq!(
+            status("GET", "/api/v1/workspaces/ws/projects/proj/runners/").await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

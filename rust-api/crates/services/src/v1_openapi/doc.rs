@@ -11098,6 +11098,49 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/runners/": {
+    "get": {
+      "operationId": "workspaces_projects_runners_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": {
     "get": {
       "operationId": "workspaces_projects_schedulers_retrieve",
@@ -17286,7 +17329,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 209);
+        assert_eq!(ops, 210);
     }
 
     #[test]
@@ -17518,7 +17561,7 @@ mod tests {
             }
         }
         assert_eq!(omitted_parameters, 19);
-        assert_eq!(omitted_summaries, 115);
+        assert_eq!(omitted_summaries, 116);
     }
 
     #[test]
