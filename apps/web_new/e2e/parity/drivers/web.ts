@@ -288,6 +288,18 @@ import type {
 // its own); the open chord settles on it to ride out the 200ms close-reset.
 const PALETTE_ROOT_PLACEHOLDER = "Type a command or search";
 
+/**
+ * The drafts row-menu catalog ids as the labels both apps render
+ * (drafts spec §3.1, DRAFT-009; the old app translates them since
+ * main#532). Scenarios name entries by the stable ids.
+ */
+const WEB_DRAFT_MENU_LABELS: Readonly<Record<string, string>> = {
+  edit: "Edit",
+  make_a_copy: "Make a copy",
+  move_to_project: "Move to project",
+  delete: "Delete",
+};
+
 /** Escape a literal for embedding in a `new RegExp` (NEWFRONT-450 pill match). */
 function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -25642,7 +25654,14 @@ export class WebDriver implements ParityDriver {
   async draftRowMenuClick(name: string, entry: string): Promise<void> {
     await this.draftOpenQuickMenu(name);
     const menu = this.draftOpenQuickMenuScope(name);
-    await menu.getByRole("button", { name: entry, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+    // Scenarios name entries by their catalog ids (edit, make_a_copy, ...);
+    // the old app renders the translated labels since main#532 (an English
+    // catalog, so its keys and labels agree). Translate here, and let an
+    // already-labelled call pass through.
+    await menu
+      .getByRole("button", { name: WEB_DRAFT_MENU_LABELS[entry] ?? entry, exact: true })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
   }
 
   async draftRowQuickActionVisible(name: string): Promise<boolean> {

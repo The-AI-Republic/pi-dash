@@ -17,6 +17,7 @@ import {
   serverCreateDraftStatus,
   serverDeleteDraftStatus,
   serverDraftNames,
+  serverDraftRecord,
   serverDraftsPage,
   serverFetchDraftStatus,
   serverIssueNames,
@@ -137,15 +138,15 @@ test(
   }
 );
 
-// The update and retrieve actions declare a creator bypass but point it
-// at work-item rows, so it never matches a draft id; DRAFT-025 requires
-// admin-or-creator. The fix is backend work owned by NEWFRONT-299 and
-// filed as PDASHOSS01-320, which is still open — so this reproduces the
-// refusal on whichever app is under test rather than asserting a target
-// the server cannot yet meet. DRAFT-025 stays oracle green, never new
-// green, until PDASHOSS01-320 lands; the gate flips it then.
+// Update and single fetch must admit a draft's creator at any workspace
+// role (DRAFT-025, spec §9). They used to run their creator bypass against
+// work-item rows, so an owned PATCH or GET was refused with 403
+// (NEWFRONT-299); PDASHOSS01-320 fixed the endpoints (#2840) and both
+// frontends read the same corrected API, so this is a plain regression
+// scenario now: the refusal is what the row used to pin, and the contract
+// below is what spec §9 requires of both apps.
 test(
-  specTitle(["DRAFT-025"], "bug: creator bypass refuses owned-draft edits and fetches (NEWFRONT-299)"),
+  specTitle(["DRAFT-025"], "an owner patches and fetches their own draft at any role"),
   { tag: specTags(["DRAFT-025"]) },
   async ({ driver }) => {
     const harness = await draftsHarness("parity-d25bug");
@@ -161,14 +162,23 @@ test(
       project_id: projectId,
     });
 
-    await test.step("owned edits and fetches are refused and nothing changes", async () => {
+    await test.step("owned edits and fetches succeed for a guest and a member", async () => {
       expect(
         (await serverPatchDraftStatus(workspaceSlug, guestDraft.id, guest.cookie, { priority: "high" })).status
-      ).toBe(403);
-      expect((await serverFetchDraftStatus(workspaceSlug, memberDraft.id, member.cookie)).status).toBe(403);
-      expect((await serverFetchDraftStatus(workspaceSlug, guestDraft.id, guest.cookie)).status).toBe(403);
+      ).toBe(204);
+      expect((await serverFetchDraftStatus(workspaceSlug, memberDraft.id, member.cookie)).status).toBe(200);
+      expect((await serverFetchDraftStatus(workspaceSlug, guestDraft.id, guest.cookie)).status).toBe(200);
+      expect(
+        (await serverPatchDraftStatus(workspaceSlug, memberDraft.id, member.cookie, { name: "renamed" })).status
+      ).toBe(204);
+    });
+
+    await test.step("the write lands on the owner's row and leaves the other owner's alone", async () => {
+      expect((await serverDraftRecord(workspaceSlug, guestDraft.id, guest.cookie)).priority).toBe("high");
+      const memberRow = await serverDraftRecord(workspaceSlug, memberDraft.id, member.cookie);
+      expect(memberRow.name).toBe("renamed");
+      expect(memberRow.priority).toBe("none");
       expect(await serverDraftNames(workspaceSlug, guest.cookie)).toContain(guestDraft.name);
-      expect(await serverDraftNames(workspaceSlug, member.cookie)).toContain(memberDraft.name);
     });
 
     await test.step("the owners still see their rows", async () => {
