@@ -723,6 +723,7 @@ fn annotated_machines(
             dev_machine::Column::Label,
             dev_machine::Column::Visibility,
             dev_machine::Column::Provisioning,
+            dev_machine::Column::SupportedAgents,
             dev_machine::Column::EnginePausedByOwner,
             dev_machine::Column::EngineAutoPauseReason,
             dev_machine::Column::EngineTeamRuns,
@@ -1053,6 +1054,7 @@ pub async fn lock_machine(
             dev_machine::Column::Label,
             dev_machine::Column::Visibility,
             dev_machine::Column::Provisioning,
+            dev_machine::Column::SupportedAgents,
             dev_machine::Column::EnginePausedByOwner,
             dev_machine::Column::EngineAutoPauseReason,
             dev_machine::Column::EngineTeamRuns,
@@ -1352,6 +1354,29 @@ mod tests {
     // -- M1 --
 
     // -- M3 --
+
+    fn built(query: impl sea_orm::QueryTrait) -> String {
+        query.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    #[test]
+    fn machine_list_selects_supported_agents() {
+        // PDASHOSS01-142: `MachineListRow` decodes `supported_agents`,
+        // so the M3/M5 shared builder must select it — a missing column
+        // 500s the dev-machines list on every populated row.
+        let sql = built(machine_list_query(
+            Uuid::nil(),
+            Uuid::nil(),
+            0,
+            chrono::Utc::now(),
+        ));
+        assert!(
+            sql.contains(
+                r#""dev_machine"."provisioning", "dev_machine"."supported_agents", "dev_machine"."engine_paused_by_owner""#
+            ),
+            "{sql}"
+        );
+    }
 
     // -- M4 --
 
