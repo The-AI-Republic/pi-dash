@@ -4,19 +4,22 @@
 
 """Shared "which runners can this user see?" queryset builder.
 
-Three read surfaces list a workspace's runners and must apply identical
-rules: the web AI Workers panel (``RunnerListEndpoint``, session auth),
-the token-auth CLI endpoint (``GET /api/v1/workspaces/<slug>/projects/
-<project>/runners/``), and the hosted MCP ``pidash_list_project_runners``
-tool. This module is the single source of truth for those rules so the
-surfaces cannot drift apart:
+Two read surfaces list a workspace's runners and must apply identical
+rules: the web AI Workers panel (``RunnerListEndpoint``, session auth)
+and the token-auth CLI endpoint (``GET /api/v1/workspaces/<slug>/projects/
+<project>/runners/``). This module is the single source of truth for
+those rules so the surfaces cannot drift apart (the hosted MCP
+``pidash_list_project_runners`` tool — PDASHOSS01-246 — still reads via
+its own queryset and migrates here when it lands):
 
 - the caller must be a member of the workspace (``PermissionDenied``
   otherwise);
 - private runners are visible only to their owner, even inside a shared
   workspace (``runner_visible_to_user_q``);
 - desktop-bundled runners are excluded unless explicitly asked for —
-  the user never registered them and cannot manage them;
+  the user never registered them and cannot manage them (the web panel
+  always passes ``include_bundled=True`` and lists built-in engine
+  runners);
 - optional narrowing to one project (every pod the project owns) or one
   pod.
 """
@@ -66,6 +69,8 @@ def project_runners_queryset(
 
 
 def parse_include_bundled(query_params) -> bool:
-    """Truthiness rule for the ``include_bundled`` query flag, shared by the
-    session and token endpoints so "true" means the same thing on both."""
+    """Truthiness rule for the ``include_bundled`` query flag on the
+    token-auth v1 list, where desktop-bundled runners are excluded by
+    default. The web panel does not parse this flag: it always lists
+    built-in engine runners."""
     return query_params.get("include_bundled") in ("1", "true", "yes")

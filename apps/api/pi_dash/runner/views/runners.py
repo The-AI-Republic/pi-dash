@@ -45,10 +45,7 @@ from pi_dash.runner.services.runner_delete import (
     delete_runner as delete_runner_svc,
     parse_purge_local,
 )
-from pi_dash.runner.services.runner_directory import (
-    parse_include_bundled,
-    project_runners_queryset,
-)
+from pi_dash.runner.services.runner_directory import project_runners_queryset
 
 # A machine counts as "control online" (able to execute cloud-pushed
 # commands) when its control session polled within this window. Polls
@@ -384,17 +381,19 @@ class RunnerListEndpoint(APIView):
                 {"error": "project or workspace is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # The visibility/filter rules (membership, private-runner ownership,
-        # bundled exclusion, project/pod narrowing) are shared with the
-        # token-auth /api/v1/ list and the MCP tool via runner_directory —
-        # change them there, not here.
+        # The visibility/filter rules are shared with the token-auth
+        # /api/v1/ list via runner_directory — change them there, not here.
+        # The web panel always lists built-in engine runners (they are
+        # desktop-bundled and labelled by machine), so it passes
+        # ``include_bundled=True``; the ``?include_bundled`` flag only
+        # governs the v1 CLI list, which excludes them by default.
         try:
             qs = project_runners_queryset(
                 request.user,
                 workspace_id,
                 project_id=request.query_params.get("project"),
                 pod_id=request.query_params.get("pod"),
-                include_bundled=parse_include_bundled(request.query_params),
+                include_bundled=True,
             )
         except PermissionDenied:
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
