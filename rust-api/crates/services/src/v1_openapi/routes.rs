@@ -119,6 +119,7 @@ pub const ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/", &["delete", "post"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/project-members/", &["get", "post"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/", &["delete", "get", "patch"]),
+    ("/api/v1/workspaces/{slug}/projects/{project_id}/runners/", &["get"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/", &["get", "post"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/", &["get"]),
     ("/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/", &["delete", "patch"]),

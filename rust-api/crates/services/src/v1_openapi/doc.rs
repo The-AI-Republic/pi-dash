@@ -17329,7 +17329,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 209);
+        assert_eq!(ops, 210);
     }
 
     #[test]
@@ -17561,7 +17561,7 @@ mod tests {
             }
         }
         assert_eq!(omitted_parameters, 19);
-        assert_eq!(omitted_summaries, 115);
+        assert_eq!(omitted_summaries, 116);
     }
 
     #[test]
