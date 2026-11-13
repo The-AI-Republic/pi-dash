@@ -401,7 +401,6 @@ surface_snapshot! {
     db::ADMIN_PERMISSION_ROLE_GTE,
     db::AgentRunStatus,
     db::AssistantSettings,
-    db::CloudAgentSettings,
     db::ConfigRegistry,
     db::ConfigSource,
     db::DEFAULT_TIMEOUT_SECONDS,

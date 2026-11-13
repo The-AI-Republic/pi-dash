@@ -343,7 +343,6 @@ pidash_sdk::db::ADMIN_INSERT_SQL
 pidash_sdk::db::ADMIN_PERMISSION_ROLE_GTE
 pidash_sdk::db::AgentRunStatus
 pidash_sdk::db::AssistantSettings
-pidash_sdk::db::CloudAgentSettings
 pidash_sdk::db::ConfigRegistry
 pidash_sdk::db::ConfigSource
 pidash_sdk::db::DEFAULT_TIMEOUT_SECONDS

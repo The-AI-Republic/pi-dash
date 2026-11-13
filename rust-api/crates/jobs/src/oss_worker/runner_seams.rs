@@ -34,7 +34,7 @@ use crate::runner_runs::sweeps_chat::{
 use crate::runner_runs::sweeps_runs::{
     InlineTerminalEffects, SendOfflineError, SweepsError, SweepsRunsOutbox,
 };
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings, Settings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings, Settings};
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_services::domain::identity::get_agent_system_user;
 use pidash_services::extensions::AssistantModelSeam;
@@ -52,7 +52,6 @@ pub struct RunnerSeams {
     pool: PgPool,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
@@ -73,7 +72,6 @@ impl RunnerSeams {
             pool,
             redis,
             runner: settings.runner.clone(),
-            cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
             assistant_seam,
         }
@@ -142,7 +140,6 @@ impl RunnerRunsSeams for RunnerSeams {
         Box::pin(async move {
             complete_project_move_handoff_live(
                 &self.pool,
-                &self.cloud,
                 &self.managed,
                 self.redis.as_ref(),
                 &self.runner,
@@ -174,7 +171,6 @@ impl RunnerRunsSeams for RunnerSeams {
         Box::pin(async move {
             maybe_apply_deferred_pause_live(
                 &self.pool,
-                &self.cloud,
                 &self.managed,
                 run_id,
             )

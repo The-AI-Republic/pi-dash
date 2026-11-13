@@ -880,7 +880,6 @@ impl LiveTurnSeam {
             PgToolStore::new(
                 pool.clone(),
                 redis.clone(),
-                settings.cloud_agent.clone(),
                 settings.managed_runner.clone(),
             )
             .map_err(|error| SeamError(error.message()))?,

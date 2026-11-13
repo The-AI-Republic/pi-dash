@@ -82,7 +82,7 @@ use std::borrow::Cow;
 use base64::Engine as _;
 use serde::Serialize;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::ManagedRunnerSettings;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::v1_assets::sticky as sticky_kernel;
 
@@ -629,8 +629,6 @@ pub struct ValidateInstance<'a> {
 /// kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExecutorPolicy<'a> {
-    /// `CLOUD_AGENT_ENABLED` for [`cloud_agent_is_configured`].
-    pub cloud: &'a CloudAgentSettings,
     /// `MANAGED_RUNNER_ENABLED` for [`managed_runner_availability`].
     pub managed: &'a ManagedRunnerSettings,
     /// `request.user` flags (`None` = anonymous / absent request).
@@ -1547,44 +1545,6 @@ mod tests {
         }
     }
 
-    fn cloud_settings(enabled: bool) -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
 
     fn managed_settings(enabled: bool) -> ManagedRunnerSettings {
         ManagedRunnerSettings {
@@ -1696,10 +1656,8 @@ mod tests {
         }
         let probes = bank.probes();
 
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -1895,10 +1853,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2004,10 +1960,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2139,10 +2093,8 @@ mod tests {
         // Unknown executor (fires only for values past the ChoiceField).
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2220,10 +2172,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2272,10 +2222,8 @@ mod tests {
     fn assignee_label_filters_silently_drop() {
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2359,10 +2307,8 @@ mod tests {
                 .expect("estimate message")
         );
 
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2518,10 +2464,8 @@ mod tests {
             runner_error: Box::new(|| None),
         };
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };

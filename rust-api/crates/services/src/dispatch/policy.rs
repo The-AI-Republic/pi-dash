@@ -58,7 +58,7 @@
 //! over the edge semantics: duplicate required capabilities, `""` overrides, catalog
 //! contents, plan key order).
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::ManagedRunnerSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
 use pidash_types::dispatch::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
@@ -70,12 +70,6 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 // Kill switches (`agent_execution.py:34-54`)
 // ---------------------------------------------------------------------------
-
-/// Whether the managed executor can accept new work: the operator kill switch
-/// (`agent_execution.py:34-43`).
-pub fn cloud_agent_is_configured(cloud: &CloudAgentSettings) -> bool {
-    cloud.enabled
-}
 
 /// Operator kill switch for the desktop-bundled managed runner
 /// (`agent_execution.py:46-54`).
@@ -252,9 +246,10 @@ pub struct ManagedAvailability {
 
 /// Availability as explicit API data (`agent_execution.py:83-134`).
 ///
-/// Rows are always `[cloud_agent, local_runner, managed_runner]`. The cloud row also
-/// reflects the viewer's LLM config when `user` is given; without a user only the
-/// instance switch is reported. `local_runner_available` is the
+/// Rows are always `[cloud_agent, local_runner, managed_runner]`. The cloud row is
+/// static (decision 4): always unavailable with `cloud_agent_unavailable`,
+/// so the legacy frontend and the Django-parity tests keep passing with no
+/// settings behind it. `local_runner_available` is the
 /// [`LOCAL_RUNNER_AVAILABLE_EXISTS_SQL`] verdict (online pod member,
 /// unpaused, engine unpaused); `local_runner_exists` is the
 /// [`LOCAL_RUNNER_EXISTS_SQL`] verdict (online pod member, paused or
@@ -265,7 +260,6 @@ pub struct ManagedAvailability {
 /// selectable (design §6); availability is still computed for older
 /// clients (NEWPIDASH-58).
 pub fn agent_executor_options<F>(
-    cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
     has_usable_llm_config: F,
     local_runner_available: bool,
@@ -275,19 +269,9 @@ pub fn agent_executor_options<F>(
 where
     F: FnOnce() -> bool,
 {
-    let mut cloud_available = cloud_agent_is_configured(cloud);
-    let mut cloud_reason = if cloud_available {
-        String::new()
-    } else {
-        CloudAgentUnavailable::CODE.to_string()
-    };
-    if cloud_available
-        && user.is_some()
-        && !user_has_llm_config(user.as_ref(), has_usable_llm_config)
-    {
-        cloud_available = false;
-        cloud_reason = LLM_CONFIG_MISSING_REASON.to_string();
-    }
+    let _ = (user, has_usable_llm_config);
+    let cloud_available = false;
+    let cloud_reason = CloudAgentUnavailable::CODE.to_string();
     let local_reason = if local_runner_available {
         String::new()
     } else if local_runner_exists {
@@ -417,48 +401,6 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-    /// Django-default settings (`settings/common.py:531-584` + `config/registry.py`).
-    /// The limits half is pinned against the fixture below, so a drift in either
-    /// source fails loudly instead of silently re-baselining the goldens.
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
@@ -489,19 +431,14 @@ mod tests {
 
     #[test]
     fn kill_switches_read_the_settings() {
-        let cloud = django_cloud_settings();
+        // `cloud_agent_is_configured` died in P4: the retired row is
+        // static (decision 4); only the managed switch reads settings.
         let managed = django_managed_settings();
-        assert!(!cloud_agent_is_configured(&cloud));
         assert!(!managed_runner_is_enabled(&managed));
-        let cloud = CloudAgentSettings {
-            enabled: true,
-            ..django_cloud_settings()
-        };
         let managed = ManagedRunnerSettings {
             enabled: true,
             ..django_managed_settings()
         };
-        assert!(cloud_agent_is_configured(&cloud));
         assert!(managed_runner_is_enabled(&managed));
     }
 
@@ -648,14 +585,11 @@ mod tests {
             json!(["kind", "available", "reason_code", "deprecated"])
         );
 
-        let cloud_on = CloudAgentSettings {
-            enabled: true,
-            ..django_cloud_settings()
-        };
+        // The cloud row is static (decision 4): unavailable with the
+        // retired code, whatever the user/LLM verdicts are.
         let rows = agent_executor_options(
-            &cloud_on,
             None,
-            || panic!("no user, no seam"),
+            || panic!("no seam behind the static row"),
             true,
             true,
             managed(true, ""),
@@ -671,7 +605,7 @@ mod tests {
         let text = serde_json::to_string(&rows[0]).expect("serializes");
         assert_eq!(
             text,
-            r#"{"kind":"cloud_agent","available":true,"reason_code":"","deprecated":true}"#
+            r#"{"kind":"cloud_agent","available":false,"reason_code":"cloud_agent_unavailable","deprecated":true}"#
         );
         assert!(!rows[1].deprecated);
         assert!(rows[2].deprecated);
@@ -680,17 +614,11 @@ mod tests {
     #[test]
     fn executor_options_cloud_and_local_legs() {
         let shape = &fixture()["agent_executor_options_shape"];
-        let cloud_on = CloudAgentSettings {
-            enabled: true,
-            ..django_cloud_settings()
-        };
-        let cloud_off = django_cloud_settings();
-
-        // Cloud off: unavailable + code, seam never consulted.
+        // The cloud leg is static (decision 4): unavailable with the
+        // retired code regardless of user or LLM verdict.
         let rows = agent_executor_options(
-            &cloud_off,
             Some(active_user()),
-            || panic!("cloud off, no seam"),
+            || panic!("no seam behind the static row"),
             false,
             false,
             managed(false, "managed_runner_disabled"),
@@ -704,39 +632,8 @@ mod tests {
                 .expect("golden")
         );
 
-        // Cloud on + user without LLM config: llm_config_missing.
-        let rows = agent_executor_options(
-            &cloud_on,
-            Some(active_user()),
-            || false,
-            false,
-            false,
-            managed(false, "x"),
-        );
-        assert!(!rows[0].available);
-        assert_eq!(rows[0].reason_code, LLM_CONFIG_MISSING_REASON);
-        assert_eq!(
-            rows[0].reason_code,
-            shape["cloud_reasons"]["no_llm_config"]
-                .as_str()
-                .expect("golden")
-        );
-
-        // Cloud on + user with LLM config: available.
-        let rows = agent_executor_options(
-            &cloud_on,
-            Some(active_user()),
-            || true,
-            false,
-            false,
-            managed(false, "x"),
-        );
-        assert!(rows[0].available);
-        assert_eq!(rows[0].reason_code, "");
-
         // Local leg: reason iff unavailable (the query itself is SQL, below).
         let rows = agent_executor_options(
-            &cloud_on,
             None,
             || panic!("no user"),
             false,
@@ -750,7 +647,6 @@ mod tests {
             shape["local_reason"].as_str().expect("golden")
         );
         let rows = agent_executor_options(
-            &cloud_on,
             None,
             || panic!("no user"),
             true,
@@ -763,7 +659,6 @@ mod tests {
         // Local leg, paused: online runners exist but all are paused —
         // unavailable with the resume-the-runner reason (`09738d222`).
         let rows = agent_executor_options(
-            &cloud_on,
             None,
             || panic!("no user"),
             false,
@@ -775,7 +670,6 @@ mod tests {
 
         // Managed leg passes L4's verdict through verbatim.
         let rows = agent_executor_options(
-            &cloud_on,
             None,
             || panic!("no user"),
             true,

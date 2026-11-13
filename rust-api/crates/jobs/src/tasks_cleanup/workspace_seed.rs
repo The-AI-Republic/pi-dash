@@ -1225,13 +1225,12 @@ fn page_view_props() -> Value {
 /// Postgres [`SeedStore`]: the exact Django query shapes. Timestamps are
 /// one clock (`RunInput::now`) the way `auto_now_add`/`auto_now` stamp
 /// statement time; uuids are v4 like the model default. The dispatch
-/// inputs (`cloud`, `managed`, `toolsets`, `assistant_seam`) feed the
+/// inputs (`managed`, `assistant_seam`) feed the
 /// per-issue post-save fire ([`SeedStore::drive_seed_transition`]) —
 /// the `LiveFireTickSeam` field shape, worker-installed.
 pub struct PgSeedStore {
     pool: sqlx::PgPool,
     now: DateTime<Utc>,
-    cloud: pidash_db::config::CloudAgentSettings,
     managed: pidash_db::config::ManagedRunnerSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
@@ -1240,14 +1239,12 @@ impl PgSeedStore {
     pub fn new(
         pool: sqlx::PgPool,
         now: DateTime<Utc>,
-        cloud: pidash_db::config::CloudAgentSettings,
         managed: pidash_db::config::ManagedRunnerSettings,
         assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
             now,
-            cloud,
             managed,
             assistant_seam,
         }
@@ -1899,11 +1896,9 @@ impl SeedStore for PgSeedStore {
                 .map_err(Self::db_err)?,
         );
         let verdicts = std::sync::Arc::new(gate_verdicts(&self.assistant_seam, &presence).await);
-        let cloud = self.cloud.clone();
         // Built fresh per store (probe, drive and bounce take owned
         // deps; the driver consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: self.cloud.clone(),
             managed: self.managed.clone(),
             has_usable_llm_config: gate_fn(verdicts.clone()),
             llm_profile: profile_fn(presence.clone()),
@@ -2167,7 +2162,7 @@ impl SeedStore for PgSeedStore {
                 // dispatch never fails the save.
                 for run_id in dispatches {
                     if let Err(error) =
-                        crate::dispatch::dispatch_agent_run(pool, &cloud, run_id, now).await
+                        crate::dispatch::dispatch_agent_run(pool, run_id, now).await
                     {
                         tracing::error!(
                             %error,
@@ -2514,14 +2509,12 @@ pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
     seed_data_dir: PathBuf,
-    cloud: pidash_db::config::CloudAgentSettings,
     managed: pidash_db::config::ManagedRunnerSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
     let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {
         let pool = pool.clone();
         let seed_data_dir = seed_data_dir.clone();
-        let cloud = cloud.clone();
         let managed = managed.clone();
         let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
@@ -2533,7 +2526,7 @@ pub fn register_workspace_seed(
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
                 .ok_or_else(|| "workspace_seed: args[0] must be a workspace uuid".to_owned())?;
             let now = Utc::now();
-            let store = PgSeedStore::new(pool, now, cloud, managed, assistant_seam);
+            let store = PgSeedStore::new(pool, now, managed, assistant_seam);
             let input = RunInput::now_for(&seed_data_dir, workspace_id, now);
             match run(&store, &input).await {
                 Ok(report) => {

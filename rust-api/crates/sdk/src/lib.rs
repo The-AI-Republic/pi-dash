@@ -907,7 +907,6 @@ pub mod db {
     pub use pidash_db::app_project::models::project_member;
     pub use pidash_db::config::registry::ConfigRegistry;
     pub use pidash_db::config::registry::ConfigSource;
-    pub use pidash_db::config::settings::CloudAgentSettings;
     pub use pidash_db::config::settings::ManagedRunnerSettings;
     pub use pidash_db::config::settings::RunnerSettings;
     pub use pidash_db::config::AssistantSettings;

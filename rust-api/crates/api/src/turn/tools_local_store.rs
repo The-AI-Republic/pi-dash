@@ -719,7 +719,6 @@ pub struct PgToolStore {
     redis: Option<RedisClient>,
     http: reqwest::Client,
     keyring: pidash_db::config::encryption::Keyring,
-    cloud: pidash_db::config::CloudAgentSettings,
     managed: pidash_db::config::ManagedRunnerSettings,
 }
 
@@ -825,7 +824,6 @@ impl PgToolStore {
     pub fn new(
         pool: PgPool,
         redis: Option<RedisClient>,
-        cloud: pidash_db::config::CloudAgentSettings,
         managed: pidash_db::config::ManagedRunnerSettings,
     ) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
@@ -840,7 +838,6 @@ impl PgToolStore {
             redis,
             http,
             keyring: pidash_db::config::encryption::Keyring::from_env(),
-            cloud,
             managed,
         })
     }
@@ -2456,12 +2453,10 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         // Built up to three times (the probe, drive, and bounce stores
         // each take owned deps).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
             managed: managed.clone(),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
@@ -2797,7 +2792,7 @@ impl ToolStore for PgToolStore {
                 drain_finalized_run(&self.pool, *run_id).await;
             }
             for run_id in dispatches {
-                pidash_jobs::dispatch::dispatch_agent_run(&self.pool, &self.cloud, run_id, *now)
+                pidash_jobs::dispatch::dispatch_agent_run(&self.pool, run_id, *now)
                     .await
                     .map_err(StoreError::from)?;
             }
@@ -2832,12 +2827,10 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         // Built twice (store + preflight take owned deps; the driver
         // consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
             managed: managed.clone(),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
@@ -2907,7 +2900,7 @@ impl ToolStore for PgToolStore {
         // `on_commit`, outside the signal `try`, so its tool fails
         // there too (the save stands either way).
         for run_id in dispatches {
-            pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
+            pidash_jobs::dispatch::dispatch_agent_run(pool, run_id, *now)
                 .await
                 .map_err(StoreError::from)?;
         }
@@ -2940,12 +2933,10 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         // Built twice (store + preflight take owned deps; the driver
         // consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
             managed: managed.clone(),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
@@ -3138,7 +3129,7 @@ impl ToolStore for PgToolStore {
                 // from `on_commit`, outside the signal `try`, so its
                 // tool fails there too (the save stands either way).
                 for run_id in dispatches {
-                    pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
+                    pidash_jobs::dispatch::dispatch_agent_run(pool, run_id, *now)
                         .await
                         .map_err(StoreError::from)?;
                 }
@@ -3826,44 +3817,6 @@ mod tests {
         pool
     }
 
-    fn live_cloud_settings() -> pidash_db::config::CloudAgentSettings {
-        pidash_db::config::CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
 
     fn live_managed_settings() -> pidash_db::config::ManagedRunnerSettings {
         pidash_db::config::ManagedRunnerSettings {
@@ -4080,7 +4033,6 @@ mod tests {
         let store = PgToolStore::new(
             pool.clone(),
             None,
-            live_cloud_settings(),
             live_managed_settings(),
         )
         .expect("build store");
@@ -4142,7 +4094,6 @@ mod tests {
         let store = PgToolStore::new(
             pool.clone(),
             None,
-            live_cloud_settings(),
             live_managed_settings(),
         )
         .expect("build store");
@@ -4213,7 +4164,6 @@ mod tests {
         let store = PgToolStore::new(
             pool.clone(),
             None,
-            live_cloud_settings(),
             live_managed_settings(),
         )
         .expect("build store");

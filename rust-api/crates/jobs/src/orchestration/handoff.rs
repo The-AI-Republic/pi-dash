@@ -27,7 +27,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
     agent_run, dev_machine, git_code_review_links,
@@ -74,8 +74,6 @@ fn now_micros() -> DateTime<Utc> {
 /// builds it from its own.
 #[derive(Clone)]
 pub struct HandoffInlineDeps {
-    /// Cloud-agent executor settings.
-    pub cloud: CloudAgentSettings,
     /// Managed-runner executor settings.
     pub managed: ManagedRunnerSettings,
     /// Shared Redis client for admission buckets and pod drains.
@@ -2026,7 +2024,7 @@ where
         // with the same recipe the revoke path uses so the replacement run
         // is matched to the target pod's idle runner.
         if let DispatchDecision::PodDrain { pod_id } =
-            dispatch_agent_run(pool, &deps.cloud, id, now)
+            dispatch_agent_run(pool, id, now)
                 .await
                 .map_err(|_| ())?
         {

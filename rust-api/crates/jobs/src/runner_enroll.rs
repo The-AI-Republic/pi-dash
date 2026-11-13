@@ -71,7 +71,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
 use pidash_db::runner_sessions::outbox as runner_outbox;
@@ -345,7 +345,6 @@ where
 /// `on_commit` sweep.
 #[allow(clippy::type_complexity)]
 pub fn overlay_store_deps(
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
 ) -> crate::orchestration::StoreDeps<
     fn(Uuid) -> bool,
@@ -361,7 +360,6 @@ pub fn overlay_store_deps(
         }
     }
     crate::orchestration::StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
         has_usable_llm_config: no_llm,
         llm_profile: no_profile,
@@ -376,7 +374,6 @@ pub fn overlay_store_deps(
 #[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_for_revoke(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     now: DateTime<Utc>,
     jitter_secs: f64,
@@ -388,7 +385,7 @@ pub async fn bounce_issue_for_revoke(
     crate::orchestration::DispatchOutcome<pidash_services::orchestration::dispatch::BounceOutcome>,
     crate::orchestration::DispatchJobsError,
 > {
-    let deps = overlay_store_deps(cloud, managed);
+    let deps = overlay_store_deps(managed);
     crate::orchestration::bounce_issue_no_eligible_runner(
         pool,
         deps,
@@ -411,7 +408,6 @@ pub async fn bounce_issue_for_revoke(
 #[allow(clippy::too_many_arguments)]
 pub async fn recreate_issue_for_revoke(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     now: DateTime<Utc>,
     issue_id: Uuid,
@@ -424,7 +420,7 @@ pub async fn recreate_issue_for_revoke(
     >,
     crate::orchestration::creation_jobs::CreationJobsError,
 > {
-    let deps = overlay_store_deps(cloud, managed);
+    let deps = overlay_store_deps(managed);
     let req = pidash_services::orchestration::creation::CreateDispatchRequest {
         issue_id,
         parent: None,

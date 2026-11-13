@@ -20,7 +20,6 @@ use sea_orm::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::CloudAgentSettings;
 use pidash_db::entity::agent_run;
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
@@ -96,7 +95,6 @@ pub enum DispatchDecision {
 /// died in P3 step A.
 pub async fn dispatch_agent_run(
     pool: &PgPool,
-    _cloud: &CloudAgentSettings,
     run_id: Uuid,
     _now: DateTime<Utc>,
 ) -> Result<DispatchDecision, sqlx::Error> {

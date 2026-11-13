@@ -415,42 +415,6 @@
       ],
       "on_commit": []
     },
-    "C4_admission_error_failed": {
-      "before_runs": 0,
-      "issue": "FX6-4",
-      "call": {
-        "seam": "lock_cloud_creation_capacity -> {'code': 'run_quota_exceeded', 'detail': 'Cloud Agent queue is full for this workspace'}"
-      },
-      "reason": "run_quota_exceeded",
-      "after": {
-        "label": "run-C4",
-        "status": "failed",
-        "trigger": "state_transition",
-        "phase_kind": "coding-task",
-        "parent_run": null,
-        "runner": null,
-        "pinned_runner": null,
-        "owner": null,
-        "created_by": "fx6-creator@example.com",
-        "pod": "FX6_pod_1",
-        "prompt": "",
-        "prompt_manifest": null,
-        "run_config": {
-          "repo_ref": "main",
-          "repo_url": "https://example.com/fx6.git",
-          "git_work_branch": null
-        },
-        "executor_kind": "local_runner",
-        "tool_plan": {},
-        "error_code": "run_quota_exceeded",
-        "error": "Cloud Agent queue is full for this workspace",
-        "ended_at": "2026-06-01T12:00:00+00:00"
-      },
-      "dispatched": [],
-      "on_commit": [
-        "finalize_agent_run.<locals>.<lambda>"
-      ]
-    },
     "C5_render_failed": {
       "before_runs": 0,
       "issue": "FX6-5",
