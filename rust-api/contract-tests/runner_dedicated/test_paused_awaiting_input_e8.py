@@ -49,7 +49,7 @@ def _insert_run(seeder, world, issue_id, status):
            VALUES (%s,%s,'e8 prompt','{}','{}','',
                    '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
                    '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
-                   NULL,NULL,now())""",
+                   NULL,'locality',now())""",
         (
             run_id,
             status,
@@ -76,7 +76,10 @@ def test_paused_awaiting_input_does_not_block_assign_clear_or_picker(
     # Step 3a: assign
     resp = admin_client.patch(
         _issue_url(world, issue_id),
-        json={"assigned_runner_id": runner_a["id"]},
+        json={
+            "assigned_runner_id": runner_a["id"],
+            "assigned_pod_id": world["pod"]["id"],
+        },
     )
     assert resp.status_code in (200, 204), resp.text[:1000]
 
@@ -109,7 +112,10 @@ def test_running_run_still_blocks_assign_clear_and_picker(
 
     resp = admin_client.patch(
         _issue_url(world, issue_id),
-        json={"assigned_runner_id": runner_a["id"]},
+        json={
+            "assigned_runner_id": runner_a["id"],
+            "assigned_pod_id": world["pod"]["id"],
+        },
     )
     assert resp.status_code == 400, resp.text[:1000]
     assert "the issue has an active run" in resp.text
@@ -117,8 +123,8 @@ def test_running_run_still_blocks_assign_clear_and_picker(
     # Clear is also blocked when a runner is already assigned and a
     # running run exists (separate fixture: assign via DB, then clear).
     seeder.db.execute(
-        "UPDATE issues SET assigned_runner_id=%s WHERE id=%s",
-        (runner_a["id"], issue_id),
+        "UPDATE issues SET assigned_runner_id=%s, assigned_pod_id=%s WHERE id=%s",
+        (runner_a["id"], world["pod"]["id"], issue_id),
     )
     resp = admin_client.patch(
         _issue_url(world, issue_id),
