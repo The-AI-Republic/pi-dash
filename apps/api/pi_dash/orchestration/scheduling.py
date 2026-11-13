@@ -466,6 +466,76 @@ def _on_left_bucket(issue: Issue, event: TickerEvent) -> TickerDecision:
     return TickerDecision(ticker=ticker, reason="dormant")
 
 
+def _run_ended_guard(issue: Issue, run: AgentRun) -> Optional[str]:
+    """Why ``_on_run_ended`` ignores this run's verdict, or ``None``.
+
+    The issue left the bucket, or the run belongs to a stage the issue has
+    already moved past — either way the finished run must not touch the
+    clock that is set for where the issue is now.
+    """
+    if not is_ticking_state(issue.state):
+        return "not-in-bucket"
+
+    from pi_dash.orchestration.agent_phases import template_name_for
+    from pi_dash.prompting.recipes import kind_for
+
+    run_kind = getattr(run, "phase_kind", "") or ""
+    if run_kind and run_kind != kind_for(template_name_for(issue.state)):
+        return "stage-moved-on"
+    return None
+
+
+def _free_retry_allowed(issue: Issue, ticker: IssueAgentTicker, streak: int) -> bool:
+    from pi_dash.runner.failure import FREE_RETRY_MAX_ATTEMPTS
+
+    return (
+        streak <= FREE_RETRY_MAX_ATTEMPTS
+        and ticker.enabled
+        and not ticker.pending_entry
+        and _clock_allowed(issue, ticker)
+    )
+
+
+@dataclass(frozen=True)
+class FailureClockEffect:
+    """What the failure policy will do to the issue's clock for a failed run.
+
+    Read by the failure comment, which is posted *before* the run's
+    RUN_ENDED event reconciles (same transaction, ticker unchanged in
+    between), so the comment and notification never claim a pause or a
+    silent retry the ticker does not actually make.
+    """
+
+    clock_stopped: bool = False
+    free_retry: bool = False
+
+
+def failure_clock_effect(issue: Issue, run: AgentRun, reason: str) -> FailureClockEffect:
+    """Predict ``_apply_failure_policy``'s effect for ``run`` failing with
+    ``reason`` — the same guards, without mutating anything."""
+    from pi_dash.runner.failure import (
+        FailurePolicy,
+        consecutive_failure_streak,
+        policy_for,
+        repeated_failure_limit_for,
+    )
+
+    if not reason:
+        return FailureClockEffect()
+    ticker = IssueAgentTicker.objects.filter(issue=issue).first()
+    # Only an armed clock is stopped (an already-stopped one, e.g. CAP_HIT,
+    # stays as it is) and only an armed clock gets a free retry.
+    if ticker is None or not ticker.enabled or _run_ended_guard(issue, run) is not None:
+        return FailureClockEffect()
+    streak = consecutive_failure_streak(issue.pk, reason)
+    policy = policy_for(reason)
+    if streak >= repeated_failure_limit_for(reason) or policy == FailurePolicy.NEEDS_HUMAN:
+        return FailureClockEffect(clock_stopped=True)
+    if policy == FailurePolicy.RETRY_FREE and _free_retry_allowed(issue, ticker, streak):
+        return FailureClockEffect(free_retry=True)
+    return FailureClockEffect()
+
+
 def _apply_failure_policy(issue: Issue, ticker: IssueAgentTicker, run: AgentRun) -> Optional[TickerDecision]:
     """Per-reason ticker policy for a run that FAILED without yielding
     (PDASHOSS01-183). Returns ``None`` to fall through to the normal
@@ -488,7 +558,6 @@ def _apply_failure_policy(issue: Issue, ticker: IssueAgentTicker, run: AgentRun)
     """
     from pi_dash.runner.failure import (
         FREE_RETRY_BACKOFF_SECONDS,
-        FREE_RETRY_MAX_ATTEMPTS,
         FailurePolicy,
         classify,
         consecutive_failure_streak,
@@ -519,7 +588,7 @@ def _apply_failure_policy(issue: Issue, ticker: IssueAgentTicker, run: AgentRun)
         return TickerDecision(ticker=ticker, reason=f"failed:{reason_value}:needs-human-already-stopped")
 
     if policy == FailurePolicy.RETRY_FREE:
-        if streak <= FREE_RETRY_MAX_ATTEMPTS and ticker.enabled and _clock_allowed(issue, ticker):
+        if _free_retry_allowed(issue, ticker, streak):
             # A free entry does not spend the pool (``fire_tick`` skips the
             # claim's ``used`` increment for free claims) and the scanner
             # admits pending rows regardless of cap. ``TICK`` trigger so the
@@ -559,17 +628,15 @@ def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
     ticker = _lock_ticker(issue, create=False)
     if ticker is None:
         return TickerDecision(reason="no-ticker")
-    state = issue.state
-    if not is_ticking_state(state):
-        return TickerDecision(ticker=ticker, reason="not-in-bucket")
+    guard = _run_ended_guard(issue, run)
+    if guard is not None:
+        return TickerDecision(ticker=ticker, reason=guard)
 
     from pi_dash.orchestration.agent_phases import template_name_for
     from pi_dash.prompting.recipes import kind_for
 
-    current_kind = kind_for(template_name_for(state))
+    current_kind = kind_for(template_name_for(issue.state))
     run_kind = getattr(run, "phase_kind", "") or ""
-    if run_kind and run_kind != current_kind:
-        return TickerDecision(ticker=ticker, reason="stage-moved-on")
 
     outcome = event.outcome if event.outcome is not None else outcome_for_run(run)
     failed_without_yield = outcome is None and run.status == AgentRunStatus.FAILED
@@ -585,16 +652,20 @@ def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
         else:
             outcome = default_outcome_for_kind(run_kind or current_kind)
 
-    if ticker.pending_entry:
-        # Something (a human, a queued hand-off) already owes the next run
-        # on this clock; the finished run's opinion does not override it.
-        return TickerDecision(ticker=ticker, reason=f"{outcome}:pending-entry-kept")
-
     if failed_without_yield:
+        # Before the pending-entry check: an owed entry would only repeat a
+        # failure a retry cannot fix, so a needs-human / backstop stop wins
+        # over it (``_stop_clock`` drops the entry). A free retry defers to
+        # an owed entry instead of stacking a second one.
         decision = _apply_failure_policy(issue, ticker, run)
         if decision is not None:
             return decision
         # No policy override: fall through to the normal keep-ticking path.
+
+    if ticker.pending_entry:
+        # Something (a human, a queued hand-off) already owes the next run
+        # on this clock; the finished run's opinion does not override it.
+        return TickerDecision(ticker=ticker, reason=f"{outcome}:pending-entry-kept")
 
     payload = run.done_payload if isinstance(run.done_payload, dict) else {}
     if payload.get("stop_ticking") is True:

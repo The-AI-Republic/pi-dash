@@ -360,45 +360,42 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     Suppressed for known infrastructure-flavored failures (daemon
     restart, cloud-side stall reconciler) — see
     ``_INFRA_FAILURE_DETAIL_PREFIXES``. The DB row still gets the
-    ``error`` field; we just don't pollute the issue thread.
+    ``error`` field; we just don't pollute the issue thread. Also
+    suppressed when the failure policy is about to free-retry the run.
+    Neither suppression applies when the failure stops the clock.
     """
     from django.utils.html import format_html
 
     from pi_dash.db.models.issue import IssueComment
     from pi_dash.orchestration.workpad import get_agent_system_user
     from pi_dash.runner.diagnostics import classify_run_error
-    from pi_dash.runner.failure import (
-        FailurePolicy,
-        RunFailureReason,
-        consecutive_failure_streak,
-        policy_for,
-        repeated_failure_limit_for,
-    )
+    from pi_dash.orchestration.scheduling import failure_clock_effect
+    from pi_dash.runner.failure import RunFailureReason
 
     detail = (error_detail or "").strip()
-    if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES):
-        return
 
-    run = AgentRun.objects.select_related("work_item", "work_item__project").filter(pk=run_id).first()
+    run = (
+        AgentRun.objects.select_related("work_item", "work_item__project", "work_item__state")
+        .filter(pk=run_id)
+        .first()
+    )
     if run is None or run.work_item_id is None:
         return
 
-    # Route on the stored canonical reason (PDASHOSS01-183). A free-retry
-    # failure is transient infrastructure being retried silently on a short
-    # backoff — posting it each attempt would be noise — unless the streak
-    # just hit the repeated-failure backstop, at which point the clock stops
-    # and the user must be told. This mirrors the decision
-    # ``scheduling._apply_failure_policy`` makes when the run's RUN_ENDED
-    # event reconciles (which runs after this hook).
+    # Route on the stored canonical reason (PDASHOSS01-183), predicting the
+    # decision ``scheduling._apply_failure_policy`` makes when the run's
+    # RUN_ENDED event reconciles (after this hook, same transaction). A
+    # failure the free-retry path is about to re-run silently would be
+    # noise each attempt; but when the clock stops (needs-human, or the
+    # repeated-failure backstop) the user must be told — even for the
+    # infrastructure details that are otherwise kept off the thread.
     reason = (run.failure_reason or "").strip()
-    policy = policy_for(reason) if reason else None
-    clock_stopped = False
-    if reason:
-        streak = consecutive_failure_streak(run.work_item_id, reason)
-        hit_backstop = streak >= repeated_failure_limit_for(reason)
-        clock_stopped = hit_backstop or policy == FailurePolicy.NEEDS_HUMAN
-        if policy == FailurePolicy.RETRY_FREE and not hit_backstop:
-            return
+    effect = failure_clock_effect(run.work_item, run, reason)
+    clock_stopped = effect.clock_stopped
+    if effect.free_retry:
+        return
+    if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES) and not clock_stopped:
+        return
 
     if IssueComment.objects.filter(
         issue_id=run.work_item_id,

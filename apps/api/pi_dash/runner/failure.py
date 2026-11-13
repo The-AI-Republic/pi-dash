@@ -254,7 +254,9 @@ def _status(*codes: int) -> str:
 
 #: Ordered agent-side text rules — first match wins. Order is load-bearing:
 #: context overflow before quota (its messages quote token *counts*),
-#: capacity before auth (Anthropic-compatible providers use 403 for
+#: quota before capacity (OpenAI's ``insufficient_quota`` and Codex's
+#: "hit your usage limit" both arrive as HTTP 429, and an exhausted account
+#: needs a human, not a retry), capacity before auth (Anthropic-compatible providers use 403 for
 #: concurrency rejections), model access before auth ("may not have
 #: access"), and everything provider-ish before the generic process rules
 #: (a provider error usually also mentions an exit status).
@@ -268,18 +270,20 @@ _AGENT_TEXT_RULES: tuple[tuple[RunFailureReason, re.Pattern[str]], ...] = tuple(
             r"|conversation (?:is )?too long|input length and `?max_tokens`? exceed",
         ),
         (
+            RunFailureReason.AGENT_PROVIDER_QUOTA,
+            _status(402)
+            + r"|insufficient[ _](?:credit|quota|funds|balance)|exceeded your current quota"
+            r"|credit balance|out of (?:usage )?credits|quota exceeded"
+            r"|(?:hit|reached|exceeded) (?:your |the )?usage limit|usage limit (?:reached|exceeded|hit)"
+            r"|billing (?:details|limit|issue|required)|payment required"
+            r"|\b(?:5-hour|weekly|monthly) limit\b|hard limit reached",
+        ),
+        (
             RunFailureReason.AGENT_PROVIDER_CAPACITY,
             _status(429, 529)
             + r"|rate[ _-]?limit|too many requests|overloaded_error|\boverloaded\b"
             r"|concurrent connections|capacity constraint|server is busy"
             r"|number of request tokens has exceeded",
-        ),
-        (
-            RunFailureReason.AGENT_PROVIDER_QUOTA,
-            _status(402)
-            + r"|insufficient (?:credit|quota|funds)|credit balance|out of (?:usage )?credits"
-            r"|quota exceeded|usage limit|billing|payment required"
-            r"|\b(?:5-hour|weekly|monthly) limit\b|hard limit reached",
         ),
         (
             RunFailureReason.AGENT_MODEL_NOT_FOUND,
@@ -295,13 +299,12 @@ _AGENT_TEXT_RULES: tuple[tuple[RunFailureReason, re.Pattern[str]], ...] = tuple(
             r"|api key.{0,30}(?:invalid|expired|revoked|disabled)"
             r"|token (?:has )?expired|refresh(?:ing)? (?:the )?(?:oauth )?token"
             r"|re-?authenticate|please run /login|not logged in|login required"
-            r"|invalid credentials|oauth",
+            r"|invalid credentials|oauth (?:token|session|credentials?)\b.{0,40}?(?:expired|invalid|revoked)",
         ),
         (
             RunFailureReason.AGENT_MISSING_EXECUTABLE,
             r"command not found|not recognized as an internal or external command"
             r"|(?:executable|program|binary) (?:file )?not found"
-            r"|no such file or directory \(os error 2\)"
             r"|failed to (?:spawn|launch|exec)",
         ),
         (
