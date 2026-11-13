@@ -3386,6 +3386,39 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     })
 }
 
+/// Rewrite every `alias.` reference in the filter SQL (both spellings,
+/// see [`alias_ref_starts`]) to `replacement.`. Used to give the legacy
+/// stack its own copy of a relation join (NEWPIDASH-195).
+fn rename_alias_refs(sql: &str, alias: &str, replacement: &str) -> String {
+    let mut starts = alias_ref_starts(sql, alias);
+    if starts.is_empty() {
+        return sql.to_owned();
+    }
+    starts.sort_unstable();
+    let mut out = String::with_capacity(sql.len() + starts.len() * replacement.len());
+    let mut cursor = 0;
+    for start in starts {
+        let quoted = sql[start..].starts_with('"');
+        let marker_len = if quoted {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        out.push_str(&sql[cursor..start]);
+        if quoted {
+            out.push('"');
+        }
+        out.push_str(replacement);
+        if quoted {
+            out.push('"');
+        }
+        out.push('.');
+        cursor = start + marker_len;
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
+
 /// Shape one view-issues row in `ViewIssueListSerializer` source order
 /// (`app/serializers/view.py:28-55`): the four datetimes render as raw UTC
 /// `...Z` (DRF `JSONEncoder`, not a `DateTimeField`), `sort_order` through
@@ -3562,6 +3595,33 @@ async fn view_issues_list(
     } else {
         Some(legacy_parts.join(" AND "))
     };
+    // NEWPIDASH-195: Django applies the rich `filter=` tree and the
+    // legacy predicates as two separate `.filter()` calls, so a
+    // relation filtered by BOTH stacks joins the link table twice and
+    // an issue linked to both rows matches. Give the legacy stack's
+    // copy of each shared relation its own alias (`<alias>_legacy`) —
+    // otherwise one link row must satisfy both predicates and the
+    // result is empty whenever the two sides name different rows.
+    // A request can only produce one legacy predicate per relation
+    // (`issue_filters` emits `__in` xor `__isnull`, plus the
+    // `\*_deleted_at__isnull` guard on the same alias), so one extra
+    // alias per shared relation is enough. The primary join still
+    // covers the rich side; the legacy alias join is INNER when the
+    // legacy predicates are positive, LEFT when only `__isnull`.
+    let mut legacy_where = legacy_where;
+    let mut legacy_joins: Vec<(&str, String, bool)> = Vec::new();
+    if let (Some(complex), Some(legacy)) = (complex_where.as_deref(), legacy_where.clone()) {
+        let mut renamed = legacy;
+        for (table, alias) in FILTER_JOINS {
+            if alias_referenced(complex, alias) && alias_referenced(&renamed, alias) {
+                let nullable_only = alias_nullable_only(&renamed, alias);
+                let legacy_alias = format!("{alias}_legacy");
+                renamed = rename_alias_refs(&renamed, alias, &legacy_alias);
+                legacy_joins.push((*table, legacy_alias, nullable_only));
+            }
+        }
+        legacy_where = Some(renamed);
+    }
 
     // Ordering (`:242-244`): the rewritten paginator key over the
     // annotation expressions, `NULLS LAST`, `issue.created_at` tiebreak —
@@ -3582,8 +3642,16 @@ async fn view_issues_list(
     // Both alias spellings count: legacy predicates spell the bridge
     // unquoted (`issue_cycle.`), and the traversal must reuse the
     // filter's scoped join for those too — a cycle filter's `issue_cycle`
-    // join wins over joining fresh (see [`alias_referenced`]).
-    let cycle_bridge = alias_referenced(&filter_sql, "issue_cycle").then_some("issue_cycle");
+    // join wins over joining fresh (see [`alias_referenced`]). A shared
+    // cycle relation (NEWPIDASH-195) resolves over the primary join
+    // first, like Django's first `.filter()` call.
+    let cycle_bridge = if alias_referenced(&filter_sql, "issue_cycle") {
+        Some("issue_cycle")
+    } else if alias_referenced(&filter_sql, "issue_cycle_legacy") {
+        Some("issue_cycle_legacy")
+    } else {
+        None
+    };
     let key = crate::app_issues::order_key(&spec.out_param, &order_param, cycle_bridge, false)
         .map_err(|_| Denial::ServerError)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
@@ -3627,6 +3695,19 @@ async fn view_issues_list(
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+        ));
+    }
+    // The legacy stacks' own copy of each shared relation join
+    // (NEWPIDASH-195); the probe above only sees the primary aliases
+    // because the renamed fragment spells these `<alias>_legacy`.
+    for (table, legacy_alias, nullable_only) in &legacy_joins {
+        let kind = if *nullable_only {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} {table} AS {legacy_alias} ON {legacy_alias}.issue_id = issue.id"
         ));
     }
     if alias_referenced(&filter_probe, "issue_intake") {

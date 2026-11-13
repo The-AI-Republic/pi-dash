@@ -82,6 +82,44 @@ def test_assignee_id_in(clients, seed):
     assert _ids(resp.json()) == {seed["issue1"]}
 
 
+def test_assignee_id_in_plus_legacy_assignees(clients, seed, db_conn):
+    """NEWPIDASH-195 (project-list twin): a rich assignee leaf AND a
+    legacy assignees= key on the same relation must join the link
+    table twice (Django applies two .filter() calls), so an issue
+    assigned to both users matches. Pre-fix Rust ANDed both
+    predicates on one join alias and returned nothing whenever the
+    two users differ. I1 is seeded assigned to member; this test
+    adds a second (admin) link and queries the pair."""
+    member = clients["member"]
+    base = _base(seed["ws_slug"], seed["project"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO issue_assignees (created_at, updated_at, id,"
+            " assignee_id, created_by_id, issue_id, project_id,"
+            " updated_by_id, workspace_id)"
+            " VALUES (NOW(), NOW(), %s, %s, %s, %s, %s, %s, %s)",
+            (str(uuid.uuid4()), seed["admin"], seed["admin"], seed["issue1"],
+             seed["project"], seed["admin"], seed["ws"]),
+        )
+    try:
+        resp = member.get(
+            f"{base}/issues/",
+            params={
+                "filters": json.dumps({"assignee_id__in": seed["member"]}),
+                "assignees": seed["admin"],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert _ids(resp.json()) == {seed["issue1"]}
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM issue_assignees WHERE issue_id = %s"
+                " AND assignee_id = %s",
+                (seed["issue1"], seed["admin"]),
+            )
+
+
 def test_target_date_exact(clients, seed, dated_issues):
     member = clients["member"]
     base = _base(seed["ws_slug"], seed["project"])
