@@ -211,7 +211,7 @@ describe("tiles", () => {
     );
     expect(screen.getByText("Runs")).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
-    expect(screen.getByText("Cloud agent")).toBeInTheDocument();
+    expect(screen.getByText("Cloud agent run (retired)")).toBeInTheDocument();
     expect(screen.getByText("2h 30m")).toBeInTheDocument();
     expect(screen.getByText("3/13 runs used")).toBeInTheDocument();
     expect(screen.getByText("12.8k")).toBeInTheDocument();

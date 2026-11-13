@@ -93,7 +93,7 @@ describe("RunnersRail", () => {
     expect(screen.getAllByTestId("runners-rail-contact")).toHaveLength(1);
     expect(screen.queryByTestId("runners-rail-local-reason")).toBeNull();
     // The Pi Dash Agent section reads before the runner section.
-    const sections = screen.getAllByText(/^(Pi Dash Agent|Runners)$/).map((node) => node.textContent);
+    const sections = screen.getAllByText(/^(Built-in|Runners)$/).map((node) => node.textContent);
     expect(sections[0]).toBe(PIDASH_AGENT_SECTION_HEADER);
     expect(sections).toContain("Runners");
     expect(sections.indexOf("Runners") > 0).toBe(true);

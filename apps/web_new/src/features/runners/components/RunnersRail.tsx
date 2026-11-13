@@ -19,7 +19,7 @@ import { RunnerStatusDot } from "./RunnerStatusBadge.js";
 
 /** Rail header: the canonical area name (D27, RUN-004/RUN-005). */
 export const RAIL_HEADER = "AI Workers";
-export const PIDASH_AGENT_SECTION_HEADER = "Pi Dash Agent";
+export const PIDASH_AGENT_SECTION_HEADER = "Built-in";
 
 /** Chat address for one runner; plain string per the router's Link typing. */
 export function chatHref(base: string, runnerId: string): string {

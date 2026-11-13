@@ -30,7 +30,7 @@ export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   gateway_scopes_missing:
     "Your sign-in is missing permission to reach the model gateway. Sign out, then sign in again to grant it.",
   byok_not_supported_on_desktop:
-    "The desktop agent runs on the hosted model lane. Choose that lane in AI Assistant settings; the provider key you supplied still serves cloud runs.",
+    "The Pi Dash Agent runs on the hosted model lane. Choose that lane in AI Assistant settings; the provider key you supplied still serves cloud runs.",
   no_managed_runner_for_project: "This computer has not enrolled a Pi Dash Agent for this project yet.",
 
   // Credential and permission literals from the profile and token endpoints.

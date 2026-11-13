@@ -118,15 +118,15 @@ describe("pidashAgentState", () => {
 
   it("ranks the owner's pause, then the automatic pause, then the sign-in state", () => {
     const paused = { ...online, engine_paused_by_owner: true, engine_auto_pause_reason: "wallet_empty" };
-    expect(pidashAgentState(machine(paused), engine)?.label).toBe("Engine paused by you");
+    expect(pidashAgentState(machine(paused), engine)?.label).toBe("Pi Dash Agent paused by you");
     expect(pidashAgentState(machine({ ...paused, engine_paused_by_owner: false }), engine)?.label).toBe(
-      "Engine paused: wallet is empty"
+      "Pi Dash Agent paused: wallet is empty"
     );
     expect(pidashAgentState(machine({ ...online, engine_auto_pause_reason: "brand_new" }), engine)?.label).toBe(
-      "Engine paused: brand_new"
+      "Pi Dash Agent paused: brand_new"
     );
     expect(pidashAgentState(machine({ ...online, engine_paused_by_owner: false }), engine)).toEqual({
-      label: "Engine available",
+      label: "Pi Dash Agent available",
       tone: "success",
     });
   });
@@ -135,37 +135,39 @@ describe("pidashAgentState", () => {
     expect(
       pidashAgentState(machine({ engine_paused_by_owner: false, engine_sign_in_state: "active" }), engine)
     ).toEqual({
-      label: "Engine unavailable",
+      label: "Pi Dash Agent unavailable",
       tone: "neutral",
     });
-    expect(pidashAgentState(machine({ online_runner_count: 1 }), engine)?.label).toBe("Engine available");
-    expect(pidashAgentState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe("Engine signed out");
+    expect(pidashAgentState(machine({ online_runner_count: 1 }), engine)?.label).toBe("Pi Dash Agent available");
+    expect(pidashAgentState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe(
+      "Pi Dash Agent signed out"
+    );
   });
 
   it("uses connection and pause state for legacy desktops without engine credentials", () => {
     const legacy = { provisioning: "desktop_bundled", engine_sign_in_state: "never" };
-    expect(pidashAgentState(machine({ ...legacy, ...online }), engine)?.label).toBe("Engine available");
-    expect(pidashAgentState(machine(legacy), engine)?.label).toBe("Engine unavailable");
+    expect(pidashAgentState(machine({ ...legacy, ...online }), engine)?.label).toBe("Pi Dash Agent available");
+    expect(pidashAgentState(machine(legacy), engine)?.label).toBe("Pi Dash Agent unavailable");
     expect(pidashAgentState(machine({ ...legacy, ...online, engine_paused_by_owner: true }), engine)?.label).toBe(
-      "Engine paused by you"
+      "Pi Dash Agent paused by you"
     );
     expect(
       pidashAgentState(machine({ ...legacy, ...online, engine_auto_pause_reason: "wallet_empty" }), engine)?.label
-    ).toBe("Engine paused: wallet is empty");
+    ).toBe("Pi Dash Agent paused: wallet is empty");
   });
 
   it("reads the sign-in state with its expiry", () => {
     const at = { ...online, engine_credential_expires_at: "2026-11-07T00:00:00Z" };
     expect(pidashAgentState(machine({ ...at, engine_sign_in_state: "expiring" }), engine, fmt)?.label).toBe(
-      "Engine expiring on Nov 7"
+      "Pi Dash Agent expiring on Nov 7"
     );
     const read = (state: string) =>
       pidashAgentState(machine({ ...online, engine_sign_in_state: state }), engine)?.label;
-    expect(read("expiring")).toBe("Engine sign-in expiring");
-    expect(read("signed_out")).toBe("Engine signed out");
-    expect(read("expired")).toBe("Engine sign-in expired");
-    expect(read("never")).toBe("Engine not signed in");
-    expect(read("active")).toBe("Engine available");
+    expect(read("expiring")).toBe("Pi Dash Agent sign-in expiring");
+    expect(read("signed_out")).toBe("Pi Dash Agent signed out");
+    expect(read("expired")).toBe("Pi Dash Agent sign-in expired");
+    expect(read("never")).toBe("Pi Dash Agent not signed in");
+    expect(read("active")).toBe("Pi Dash Agent available");
   });
 });
 

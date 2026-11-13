@@ -163,7 +163,7 @@ describe("RunnerDetailScreen", () => {
   it("names a Pi Dash Agent by its machine, badges it and explains renaming", () => {
     setup({ runner: runner({ provisioning: "desktop_bundled", pod_dispatch: "pinned_only", name: "builtin-x" }) });
     expect(screen.getByRole("heading", { name: "Pi Dash Agent · build box" })).toBeInTheDocument();
-    expect(screen.getByTestId("runner-built-in-badge")).toHaveTextContent("Pi Dash Agent");
+    expect(screen.getByTestId("runner-built-in-badge")).toHaveTextContent("Built-in");
     expect(screen.getByText(ENGINE_RENAME_HINT)).toBeInTheDocument();
     expect(meta()["Pod work"]).toBe("Off");
     expect(meta()["Working directory"]).toBe("/tmp/wd");

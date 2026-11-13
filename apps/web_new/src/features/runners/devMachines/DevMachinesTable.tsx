@@ -59,7 +59,7 @@ export const MACHINE_RESUME_LABEL = "Resume the Pi Dash Agent";
 export const MACHINE_TEAM_RUNS_LABEL = "Teammates can start runs on my issues";
 export const MACHINE_TEAM_RUNS_HINT =
   "Off: only your own runs, and automatic runs on your issues, use this computer's engine and your wallet.";
-export const MACHINE_SIGN_OUT_ENGINE_LABEL = "Sign out the engine";
+export const MACHINE_SIGN_OUT_ENGINE_LABEL = "Sign out Pi Dash Agent";
 
 /** "Replaced by <machine>": the merge offer for a wiped computer. */
 export function replacedByLabel(targetName: string): string {
