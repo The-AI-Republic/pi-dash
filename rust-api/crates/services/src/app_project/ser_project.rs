@@ -729,7 +729,7 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 /// pod-work verdicts (`local_runner_available_exists` /
 /// `local_runner_exists`, online incl. paused for the exists leg —
 /// evaluated only when unavailable, as Python's `elif`), and
-/// `managed` the L4 `managed_runner_availability` verdict, all passed
+/// `managed` the L4 `pidash_agent_availability` verdict, all passed
 /// through verbatim. Rows are always
 /// `[cloud_agent, local_runner, managed_runner]`, each carrying
 /// `deprecated` (#2903: true for cloud/managed).

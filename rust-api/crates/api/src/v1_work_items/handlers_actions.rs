@@ -245,11 +245,11 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
 async fn drain_dispatch_decisions(
     pool: &PgPool,
     state: &AppState,
-    decisions: &[(Uuid, pidash_jobs::run_dispatch::DispatchDecision)],
+    decisions: &[(Uuid, pidash_jobs::issuing::DispatchDecision)],
     site: &str,
 ) -> Result<(), Denial> {
     for (_, decision) in decisions {
-        if let pidash_jobs::run_dispatch::DispatchDecision::PodDrain { pod_id } = decision {
+        if let pidash_jobs::issuing::DispatchDecision::PodDrain { pod_id } = decision {
             if crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, *pod_id)
                 .await
                 .is_err()
@@ -986,13 +986,13 @@ pub fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Cl
 /// The `managed_llm_profile` closure over pre-fetched presence.
 pub fn profile_fn(
     presence: Arc<HashMap<Uuid, bool>>,
-) -> impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync {
-    move |uid: Option<Uuid>| -> pidash_services::run_creation::LlmProfile {
+) -> impl Fn(Option<Uuid>) -> pidash_services::issuing::LlmProfile + Clone + Send + Sync {
+    move |uid: Option<Uuid>| -> pidash_services::issuing::LlmProfile {
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-        pidash_services::run_creation::LlmProfile {
+        let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+        pidash_services::issuing::LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
         }
@@ -1016,7 +1016,7 @@ pub async fn dispatch_deps(
     (
         pidash_jobs::orchestration::StoreDeps<
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::issuing::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
     ),
@@ -1048,7 +1048,7 @@ pub async fn dispatch_deps_for_ids(
     (
         pidash_jobs::orchestration::StoreDeps<
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::issuing::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
     ),

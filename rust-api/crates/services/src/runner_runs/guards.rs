@@ -401,7 +401,7 @@ pub fn runs_usable_by_runner_predicate(
     visibility: i32,
     owner_id: Uuid,
     run_alias: &str,
-    is_engine: bool,
+    is_pidash_agent: bool,
     team_runs: bool,
 ) -> Option<Condition> {
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
@@ -409,7 +409,7 @@ pub fn runs_usable_by_runner_predicate(
     }
     let issue = runner_visible_issue_exists(owner_id, run_alias);
     let sched = runner_visible_scheduler_exists(owner_id, run_alias);
-    if is_engine && !team_runs {
+    if is_pidash_agent && !team_runs {
         let triggers: Vec<SimpleExpr> = pidash_types::runner_runs::enums::HUMAN_TRIGGERS
             .iter()
             .map(|trigger| trigger.value().into())

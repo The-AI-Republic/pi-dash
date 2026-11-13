@@ -51,14 +51,14 @@ pub mod reason {
 }
 
 /// How the desktop agent engine should reach a model for one user
-/// (`ee/assistant/model_provider.py::AgentModelProfile`).
+/// (`ee/assistant/model_provider.py::PidashAgentProfile`).
 ///
 /// The credential itself is never part of this object — the desktop is
 /// handed it separately through the agent-token endpoint. `reason_code` is
 /// empty exactly when `available` is true. `top_up_url` is where a user
 /// adds credit for this lane; the overlay fills it, CE leaves it empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentModelProfile {
+pub struct PidashAgentProfile {
     pub available: bool,
     pub lane: String,
     pub base_url: String,
@@ -179,15 +179,15 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
     /// Describe the model endpoint the desktop engine may call. CE has
     /// exactly one lane, BYOK, which the desktop does not serve — so this
     /// is always unavailable; only the reason differs.
-    fn agent_model_profile(
+    fn pidash_agent_profile(
         &self,
         user_id: Uuid,
         has_api_key: bool,
-    ) -> SeamFuture<'_, AgentModelProfile> {
+    ) -> SeamFuture<'_, PidashAgentProfile> {
         let _ = user_id;
         Box::pin(async move {
-            let profile = crate::assistant::seams::agent_model_profile_for_user(has_api_key);
-            AgentModelProfile {
+            let profile = crate::assistant::seams::pidash_agent_profile_for_user(has_api_key);
+            PidashAgentProfile {
                 available: profile.available,
                 lane: profile.lane,
                 base_url: profile.base_url,
@@ -204,13 +204,13 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
     /// user's own short-lived gateway credential here, answering
     /// [`CredentialError::Classified`] (its `_classify_credential_error`
     /// outcome) when the gateway fetch fails.
-    fn agent_model_credential(
+    fn pidash_agent_credential(
         &self,
         user_id: Uuid,
     ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
         let _ = user_id;
         Box::pin(async move {
-            crate::assistant::seams::agent_model_credential_for_user().map_err(|unavailable| {
+            crate::assistant::seams::pidash_agent_credential_for_user().map_err(|unavailable| {
                 CredentialError::Unavailable(CredentialUnavailable {
                     reason: unavailable.code,
                     message: unavailable.detail,
@@ -352,14 +352,14 @@ mod tests {
     #[tokio::test]
     async fn ce_desktop_profile_is_never_available() {
         let seam = TestSeam;
-        let with_key = seam.agent_model_profile(user(), true).await;
+        let with_key = seam.pidash_agent_profile(user(), true).await;
         assert!(!with_key.available);
         assert_eq!(with_key.lane, "byok");
         assert_eq!(with_key.base_url, "");
         assert_eq!(with_key.model, "");
         assert_eq!(with_key.reason_code, reason::BYOK_UNSUPPORTED);
         assert_eq!(reason::BYOK_UNSUPPORTED, "byok_not_supported_on_desktop");
-        let without_key = seam.agent_model_profile(user(), false).await;
+        let without_key = seam.pidash_agent_profile(user(), false).await;
         assert!(!without_key.available);
         assert!(without_key.lane.is_empty());
         assert_eq!(without_key.reason_code, reason::LLM_CONFIG_MISSING);
@@ -371,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn ce_hands_out_no_desktop_credential() {
         let error = TestSeam
-            .agent_model_credential(user())
+            .pidash_agent_credential(user())
             .await
             .expect_err("CE has no desktop lane");
         let CredentialError::Unavailable(unavailable) = &error else {
@@ -458,14 +458,14 @@ mod tests {
             Box::pin(async move { true })
         }
 
-        fn agent_model_profile(
+        fn pidash_agent_profile(
             &self,
             user_id: Uuid,
             has_api_key: bool,
-        ) -> SeamFuture<'_, AgentModelProfile> {
+        ) -> SeamFuture<'_, PidashAgentProfile> {
             let _ = (user_id, has_api_key);
             Box::pin(async move {
-                AgentModelProfile {
+                PidashAgentProfile {
                     available: true,
                     lane: "openhub".to_string(),
                     base_url: "https://gateway.example.com".to_string(),
@@ -476,7 +476,7 @@ mod tests {
             })
         }
 
-        fn agent_model_credential(
+        fn pidash_agent_credential(
             &self,
             user_id: Uuid,
         ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
@@ -503,7 +503,7 @@ mod tests {
         let seam = OpenHubLikeSeam;
         // Keyless yet usable: the gateway lane, not BYOK.
         assert!(seam.has_usable_llm_config(user(), false).await);
-        let profile = seam.agent_model_profile(user(), false).await;
+        let profile = seam.pidash_agent_profile(user(), false).await;
         assert!(profile.available);
         assert_eq!(profile.lane, "openhub");
         assert_eq!(profile.base_url, "https://gateway.example.com");
@@ -514,7 +514,7 @@ mod tests {
             "https://gateway.example.com/account/credits"
         );
         let (token, expires_at) = seam
-            .agent_model_credential(user())
+            .pidash_agent_credential(user())
             .await
             .expect("gateway credential");
         assert_eq!(token, "gateway-token");

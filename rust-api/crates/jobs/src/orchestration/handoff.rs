@@ -75,7 +75,7 @@ fn now_micros() -> DateTime<Utc> {
 #[derive(Clone)]
 pub struct HandoffInlineDeps {
     /// Managed-runner executor settings.
-    pub managed: ManagedRunnerSettings,
+    pub managed: PidashAgentSettings,
     /// Shared Redis client for admission buckets and pod drains.
     pub redis: Option<redis::Client>,
     /// Runner-plane settings for pod drains.

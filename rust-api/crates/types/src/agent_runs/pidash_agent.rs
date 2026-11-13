@@ -23,7 +23,7 @@
 //!
 //! Ported bugs: none found in this unit on read-through.
 
-/// Reason codes, in the precedence order `managed_runner_availability`
+/// Reason codes, in the precedence order `pidash_agent_availability`
 /// evaluates them (`errors.py:16-18`): the first failing gate wins, which is
 /// what makes the copy deterministic for a given user/project pair.
 pub struct ManagedRunnerReason;

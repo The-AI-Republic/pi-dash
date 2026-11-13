@@ -20,7 +20,7 @@
 //!
 //! The derived sign-in state (`expiring`/`expired`) is a read-time
 //! computation over the stored fields, never written, exactly as Django
-//! computes it in `DevMachine.current_engine_sign_in_state`.
+//! computes it in `DevMachine.current_pidash_agent_sign_in_state`.
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -34,8 +34,8 @@ use uuid::Uuid;
 
 use crate::runner_enroll::dispatch_rules::PauseEffects;
 
-/// The engine credential's `ec_` prefix (`ENGINE_CREDENTIAL_PREFIX`).
-pub const ENGINE_CREDENTIAL_PREFIX: &str = "ec_";
+/// The engine credential's `ec_` prefix (`PIDASH_AGENT_CREDENTIAL_PREFIX`).
+pub const PIDASH_AGENT_CREDENTIAL_PREFIX: &str = "ec_";
 
 /// Fixed engine-credential lifetime from issue (`ENGINE_CREDENTIAL_TTL`,
 /// 14 days). A renewal is a new issue, never an extension.
@@ -100,12 +100,12 @@ pub(crate) fn utc(value: sea_orm::prelude::DateTimeWithTimeZone) -> DateTime<Utc
     value.with_timezone(&Utc)
 }
 
-/// `DevMachine.current_engine_sign_in_state`: the stored state, with
+/// `DevMachine.current_pidash_agent_sign_in_state`: the stored state, with
 /// `expiring`/`expired` derived from `engine_credential_expires_at` when
 /// the stored state is `active`. A missing expiry means `active`; an empty
 /// stored state reads as `never` (Django `self.engine_sign_in_state or
 /// NEVER`; the column has a DB default, so this is belt-and-braces).
-pub fn current_engine_sign_in_state(
+pub fn current_pidash_agent_sign_in_state(
     stored: &str,
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
@@ -130,15 +130,15 @@ pub fn current_engine_sign_in_state(
     SIGN_IN_STATE_ACTIVE.to_owned()
 }
 
-/// `DevMachine.has_live_engine_credential`: the derived state is `active`
+/// `DevMachine.has_live_pidash_agent_credential`: the derived state is `active`
 /// or `expiring`.
-pub fn has_live_engine_credential(
+pub fn has_live_pidash_agent_credential(
     stored: &str,
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> bool {
     matches!(
-        current_engine_sign_in_state(stored, expires_at, now).as_str(),
+        current_pidash_agent_sign_in_state(stored, expires_at, now).as_str(),
         SIGN_IN_STATE_ACTIVE | SIGN_IN_STATE_EXPIRING
     )
 }
@@ -159,7 +159,7 @@ pub fn engine_credential_payload(
     now: DateTime<Utc>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "engine_sign_in_state": current_engine_sign_in_state(stored, expires_at, now),
+        "engine_sign_in_state": current_pidash_agent_sign_in_state(stored, expires_at, now),
         "engine_credential_expires_at": expires_at.map(|exp| exp.to_rfc3339()),
     })
 }
@@ -223,11 +223,11 @@ pub struct IssuedEngineCredential {
 
 /// A credential failure. `code` is the wire code; `credential` carries the
 /// row when the failure is about a known credential (Django
-/// `EngineCredentialError.code` / `.credential`). The model-token
+/// `PidashAgentCredentialError.code` / `.credential`). The model-token
 /// endpoint pauses the machine on a known, dead credential, so callers
 /// need both halves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineCredentialError {
+pub struct PidashAgentCredentialError {
     pub code: String,
     pub credential: Option<AuthenticatedCredential>,
 }
@@ -244,7 +244,7 @@ pub struct AuthenticatedCredential {
     pub expires_at: DateTime<Utc>,
 }
 
-impl EngineCredentialError {
+impl PidashAgentCredentialError {
     fn sign_in_required() -> Self {
         Self {
             code: "engine_sign_in_required".to_owned(),
@@ -261,7 +261,7 @@ impl EngineCredentialError {
 }
 
 /// The issuance half's refusals: Django raises `ValueError` for a
-/// non-owner and `EngineCredentialError` for a refused silent renewal.
+/// non-owner and `PidashAgentCredentialError` for a refused silent renewal.
 #[derive(Debug)]
 pub enum IssueError {
     NotMachineOwner,
@@ -306,11 +306,11 @@ impl std::fmt::Display for RevokeError {
 
 impl std::error::Error for RevokeError {}
 
-/// `EngineCredentialError` as a `Result`: the authenticate half raises
+/// `PidashAgentCredentialError` as a `Result`: the authenticate half raises
 /// rather than returning an enum.
 #[derive(Debug)]
 pub enum AuthError {
-    Credential(EngineCredentialError),
+    Credential(PidashAgentCredentialError),
     Database(sqlx::Error),
 }
 
@@ -332,7 +332,7 @@ impl std::error::Error for AuthError {}
 fn mint_raw() -> String {
     let bytes: [u8; 32] = rand::random();
     format!(
-        "{ENGINE_CREDENTIAL_PREFIX}{}",
+        "{PIDASH_AGENT_CREDENTIAL_PREFIX}{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     )
 }
@@ -369,7 +369,7 @@ async fn silent_issue_allowed_for_row(
     machine: &dev_machine::Model,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    let state = current_engine_sign_in_state(
+    let state = current_pidash_agent_sign_in_state(
         &machine.engine_sign_in_state,
         machine.engine_credential_expires_at.map(utc),
         now,
@@ -395,13 +395,13 @@ async fn silent_issue_allowed_for_row(
     ))
 }
 
-/// `issue_engine_credential(user, dev_machine, silent)`: revoke the live
+/// `issue_pidash_agent_credential(user, dev_machine, silent)`: revoke the live
 /// credential (`superseded`), mint `ec_` + urlsafe, store hash and
 /// fingerprint and `now + 14d`, set the machine `active` with the new
 /// expiry, and clear an `engine_sign_in_required` pause (the engine has a
 /// valid credential again). The caller owns the transaction; run on a
 /// `TxConn` when it is part of a larger exchange.
-pub async fn issue_engine_credential(
+pub async fn issue_pidash_agent_credential(
     db: &impl ConnectionTrait,
     secret_key: &[u8],
     user_id: Uuid,
@@ -476,7 +476,7 @@ pub async fn issue_engine_credential(
     // (`set_engine_auto_pause_reason(machine, NONE)` in Django, no keep /
     // only_from: it clears whatever the row holds).
     let pause_effects = if machine.engine_auto_pause_reason == PAUSE_ENGINE_SIGN_IN_REQUIRED {
-        let (_changed, effects) = crate::domain::engine_state::set_engine_auto_pause_reason(
+        let (_changed, effects) = crate::domain::pidash_agent_state::set_engine_auto_pause_reason(
             db,
             machine_id,
             PAUSE_NONE,
@@ -505,7 +505,7 @@ pub async fn issue_engine_credential(
     })
 }
 
-/// `revoke_engine_credential(machine, reason)`: revoke the live
+/// `revoke_pidash_agent_credential(machine, reason)`: revoke the live
 /// credential, record `signed_out`/`revoked` (and clear the expiry) even
 /// when nothing is live — except on a never-enabled machine with a
 /// sign-out reason, which stays `never` (#2912). On a new-path,
@@ -513,7 +513,7 @@ pub async fn issue_engine_credential(
 /// pause with `engine_sign_in_required`. Returns whether a live
 /// credential was revoked and the post-commit drains for the pause flip;
 /// an absent machine returns `(false, default)`.
-pub async fn revoke_engine_credential(
+pub async fn revoke_pidash_agent_credential(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     reason: &str,
@@ -563,7 +563,7 @@ pub async fn revoke_engine_credential(
         && machine.revoked_at.is_none()
         && machine.engine_auto_pause_reason.is_empty()
     {
-        let (_changed, effects) = crate::domain::engine_state::set_engine_auto_pause_reason(
+        let (_changed, effects) = crate::domain::pidash_agent_state::set_engine_auto_pause_reason(
             db,
             machine_id,
             PAUSE_ENGINE_SIGN_IN_REQUIRED,
@@ -589,7 +589,7 @@ pub async fn revoke_engine_credential(
 /// revoke every machine holding one of the user's live credentials
 /// (sign-out everywhere). Returns how many machines had a live credential
 /// revoked and the aggregated post-commit drains for the pause flips.
-pub async fn revoke_engine_credentials_for_user(
+pub async fn revoke_pidash_agent_credentials_for_user(
     db: &impl ConnectionTrait,
     user_id: Uuid,
     now: DateTime<Utc>,
@@ -610,7 +610,7 @@ pub async fn revoke_engine_credentials_for_user(
     let mut merged = PauseEffects::default();
     for machine_id in machine_ids {
         let (revoked, inner) =
-            revoke_engine_credential(db, machine_id, "user_signed_out", now).await?;
+            revoke_pidash_agent_credential(db, machine_id, "user_signed_out", now).await?;
         if revoked {
             count += 1;
             merged.drain_pod_ids.extend(inner.drain_pod_ids);
@@ -625,22 +625,22 @@ pub async fn revoke_engine_credentials_for_user(
     Ok((count, merged))
 }
 
-/// `authenticate_engine_credential(raw)`: resolve a presented `ec_`
+/// `authenticate_pidash_agent_credential(raw)`: resolve a presented `ec_`
 /// value to its live credential. Unknown, expired or revoked values raise
 /// `engine_sign_in_required` (the daemon's fix is the same: sign the
 /// engine in again); a revoked machine or an owner mismatch raises
 /// `dev_machine_revoked`; an inactive user raises
 /// `engine_sign_in_required`. Bumps `last_used_at` only; never extends
 /// `expires_at`.
-pub async fn authenticate_engine_credential(
+pub async fn authenticate_pidash_agent_credential(
     db: &impl ConnectionTrait,
     secret_key: &[u8],
     raw: &str,
     now: DateTime<Utc>,
 ) -> Result<AuthenticatedCredential, AuthError> {
-    if raw.is_empty() || !raw.starts_with(ENGINE_CREDENTIAL_PREFIX) {
+    if raw.is_empty() || !raw.starts_with(PIDASH_AGENT_CREDENTIAL_PREFIX) {
         return Err(AuthError::Credential(
-            EngineCredentialError::sign_in_required(),
+            PidashAgentCredentialError::sign_in_required(),
         ));
     }
     let row = engine_credential::Entity::find()
@@ -651,7 +651,7 @@ pub async fn authenticate_engine_credential(
         .one(db)
         .await
         .map_err(|error| AuthError::Database(into_sqlx(error)))?
-        .ok_or_else(|| AuthError::Credential(EngineCredentialError::sign_in_required()))?;
+        .ok_or_else(|| AuthError::Credential(PidashAgentCredentialError::sign_in_required()))?;
     let credential = AuthenticatedCredential {
         id: row.id,
         user_id: row.user_id,
@@ -661,7 +661,7 @@ pub async fn authenticate_engine_credential(
     };
     if row.revoked_at.is_some() || utc(row.expires_at) <= now {
         return Err(AuthError::Credential(
-            EngineCredentialError::with_credential("engine_sign_in_required", credential),
+            PidashAgentCredentialError::with_credential("engine_sign_in_required", credential),
         ));
     }
     let Some(machine) = read_machine(db, row.dev_machine_id)
@@ -669,12 +669,12 @@ pub async fn authenticate_engine_credential(
         .map_err(AuthError::Database)?
     else {
         return Err(AuthError::Credential(
-            EngineCredentialError::with_credential("dev_machine_revoked", credential),
+            PidashAgentCredentialError::with_credential("dev_machine_revoked", credential),
         ));
     };
     if machine.revoked_at.is_some() || machine.owner_id != row.user_id {
         return Err(AuthError::Credential(
-            EngineCredentialError::with_credential("dev_machine_revoked", credential),
+            PidashAgentCredentialError::with_credential("dev_machine_revoked", credential),
         ));
     }
     let user = users::Entity::find_by_id(row.user_id)
@@ -682,14 +682,14 @@ pub async fn authenticate_engine_credential(
         .await
         .map_err(|error| AuthError::Database(into_sqlx(error)))?
         .ok_or_else(|| {
-            AuthError::Credential(EngineCredentialError::with_credential(
+            AuthError::Credential(PidashAgentCredentialError::with_credential(
                 "engine_sign_in_required",
                 credential.clone(),
             ))
         })?;
     if !user.is_active {
         return Err(AuthError::Credential(
-            EngineCredentialError::with_credential("engine_sign_in_required", credential),
+            PidashAgentCredentialError::with_credential("engine_sign_in_required", credential),
         ));
     }
     engine_credential::Entity::update_many()
@@ -701,14 +701,14 @@ pub async fn authenticate_engine_credential(
     Ok(credential)
 }
 
-/// `engine_profile_for_user(user)`: `(available, pause_reason)` for
+/// `pidash_agent_profile_for_user(user)`: `(available, pause_reason)` for
 /// serving the engine to one user. `managed_enabled` is the instance kill
-/// switch (`managed_runner_is_enabled`); the profile is the seam's
-/// `agent_model_profile` answer. Old `engine_disabled`/`profile_unavailable`
+/// switch (`pidash_agent_is_enabled`); the profile is the seam's
+/// `pidash_agent_profile` answer. Old `engine_disabled`/`profile_unavailable`
 /// names are the pause reasons the state maps to, not the wire codes.
-pub fn engine_profile_for_user(
+pub fn pidash_agent_profile_for_user(
     managed_enabled: bool,
-    profile: &crate::extensions::AgentModelProfile,
+    profile: &crate::extensions::PidashAgentProfile,
 ) -> (bool, &'static str) {
     if !managed_enabled {
         return (false, PAUSE_ENGINE_DISABLED);
@@ -720,15 +720,15 @@ pub fn engine_profile_for_user(
 }
 
 /// The device-flow availability gate (NEWPIDASH-51): the same rule as
-/// [`engine_profile_for_user`] with the CE profile, which is always
+/// [`pidash_agent_profile_for_user`] with the CE profile, which is always
 /// unavailable (CE has no lane the desktop serves; see the
-/// `agent_model_profile` seam docs). The `reason_code` in the
+/// `pidash_agent_profile` seam docs). The `reason_code` in the
 /// device-flow 409 is the pause reason, which is identical on both
 /// paths, so this needs no has-key lookup.
-pub fn engine_profile_for_user_available(
+pub fn pidash_agent_profile_for_user_available(
     settings: &pidash_db::config::Settings,
 ) -> (bool, &'static str) {
-    if !settings.managed_runner.enabled {
+    if !settings.pidash_agent.enabled {
         return (false, PAUSE_ENGINE_DISABLED);
     }
     (false, PAUSE_PROFILE_UNAVAILABLE)
@@ -738,9 +738,9 @@ pub fn engine_profile_for_user_available(
 /// issue an engine credential.
 pub fn instance_can_serve_engine(
     managed_enabled: bool,
-    profile: &crate::extensions::AgentModelProfile,
+    profile: &crate::extensions::PidashAgentProfile,
 ) -> bool {
-    engine_profile_for_user(managed_enabled, profile).0
+    pidash_agent_profile_for_user(managed_enabled, profile).0
 }
 
 /// Default `profile.reason_code` for the `_engine_refusal` body
@@ -749,7 +749,7 @@ pub fn engine_profile_reason_code() -> &'static str {
     "llm_config_missing"
 }
 
-/// Whether `user_id` holds a BYOK key (`agent_model_profile_for_user`
+/// Whether `user_id` holds a BYOK key (`pidash_agent_profile_for_user`
 /// CE leg, `model_provider.py:110-113`): the `assistant_user_llm_config`
 /// row exists and its encrypted bytes are non-empty (`has_api_key`).
 pub async fn user_has_byok_key(db: &impl ConnectionTrait, user_id: Uuid) -> Result<bool, DbErr> {
@@ -765,10 +765,10 @@ pub async fn user_has_byok_key(db: &impl ConnectionTrait, user_id: Uuid) -> Resu
 }
 
 /// `profile.reason_code` for the `_engine_refusal` body
-/// (`engine_credentials.py` via `agent_model_profile_for_user`):
+/// (`engine_credentials.py` via `pidash_agent_profile_for_user`):
 /// `byok_not_supported_on_desktop` when the user holds a BYOK key,
 /// else `llm_config_missing`.
-pub async fn engine_profile_reason_code_for_user(
+pub async fn pidash_agent_profile_reason_code_for_user(
     db: &impl ConnectionTrait,
     user_id: Uuid,
 ) -> Result<&'static str, DbErr> {
@@ -793,61 +793,61 @@ mod tests {
         let now = at_utc(2026, 11, 6);
         // Stored state passes through when it is not active.
         assert_eq!(
-            current_engine_sign_in_state("never", Some(now), now),
+            current_pidash_agent_sign_in_state("never", Some(now), now),
             "never"
         );
         assert_eq!(
-            current_engine_sign_in_state("signed_out", Some(now), now),
+            current_pidash_agent_sign_in_state("signed_out", Some(now), now),
             "signed_out"
         );
         assert_eq!(
-            current_engine_sign_in_state("revoked", None, now),
+            current_pidash_agent_sign_in_state("revoked", None, now),
             "revoked"
         );
         // Active with no expiry is active.
-        assert_eq!(current_engine_sign_in_state("active", None, now), "active");
+        assert_eq!(current_pidash_agent_sign_in_state("active", None, now), "active");
         // Active far from expiry is active.
         assert_eq!(
-            current_engine_sign_in_state("active", Some(now + chrono::Duration::days(10)), now),
+            current_pidash_agent_sign_in_state("active", Some(now + chrono::Duration::days(10)), now),
             "active"
         );
         // Inside the 3-day window is expiring (boundary: exactly 3d).
         assert_eq!(
-            current_engine_sign_in_state("active", Some(now + chrono::Duration::days(3)), now),
+            current_pidash_agent_sign_in_state("active", Some(now + chrono::Duration::days(3)), now),
             "expiring"
         );
         assert_eq!(
-            current_engine_sign_in_state("active", Some(now + chrono::Duration::days(2)), now),
+            current_pidash_agent_sign_in_state("active", Some(now + chrono::Duration::days(2)), now),
             "expiring"
         );
         // At or past expiry is expired.
         assert_eq!(
-            current_engine_sign_in_state("active", Some(now), now),
+            current_pidash_agent_sign_in_state("active", Some(now), now),
             "expired"
         );
         assert_eq!(
-            current_engine_sign_in_state("active", Some(now - chrono::Duration::seconds(1)), now),
+            current_pidash_agent_sign_in_state("active", Some(now - chrono::Duration::seconds(1)), now),
             "expired"
         );
         // Empty stored state reads as never.
-        assert_eq!(current_engine_sign_in_state("", None, now), "never");
+        assert_eq!(current_pidash_agent_sign_in_state("", None, now), "never");
     }
 
     #[test]
     fn live_and_legacy_predicates() {
         let now = at_utc(2026, 11, 6);
-        assert!(has_live_engine_credential(
+        assert!(has_live_pidash_agent_credential(
             "active",
             Some(now + chrono::Duration::days(10)),
             now
         ));
-        assert!(has_live_engine_credential(
+        assert!(has_live_pidash_agent_credential(
             "active",
             Some(now + chrono::Duration::days(2)),
             now
         ));
-        assert!(!has_live_engine_credential("active", Some(now), now));
-        assert!(!has_live_engine_credential("signed_out", None, now));
+        assert!(!has_live_pidash_agent_credential("active", Some(now), now));
+        assert!(!has_live_pidash_agent_credential("signed_out", None, now));
         assert!(is_legacy_desktop("desktop_bundled"));
         assert!(!is_legacy_desktop("manual"));
         assert!(!is_legacy_desktop(""));
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn profile_for_user_covers_every_arm() {
-        let profile = |available| crate::extensions::AgentModelProfile {
+        let profile = |available| crate::extensions::PidashAgentProfile {
             available,
             lane: "byok".to_owned(),
             base_url: String::new(),
@@ -973,13 +973,13 @@ mod tests {
             reason_code: String::new(),
             top_up_url: String::new(),
         };
-        let (available, reason) = engine_profile_for_user(false, &profile(true));
+        let (available, reason) = pidash_agent_profile_for_user(false, &profile(true));
         assert!(!available);
         assert_eq!(reason, "engine_disabled");
-        let (available, reason) = engine_profile_for_user(true, &profile(false));
+        let (available, reason) = pidash_agent_profile_for_user(true, &profile(false));
         assert!(!available);
         assert_eq!(reason, "profile_unavailable");
-        let (available, reason) = engine_profile_for_user(true, &profile(true));
+        let (available, reason) = pidash_agent_profile_for_user(true, &profile(true));
         assert!(available);
         assert_eq!(reason, "");
         assert!(!instance_can_serve_engine(false, &profile(true)));
