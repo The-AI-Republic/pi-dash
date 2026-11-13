@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace dialog display settings (parity/specs/views.md §10, VIEW-034).
-// The dialog offers the spreadsheet set only: no layout picker, and the
-// layout key is pinned on the way out even when the stored record carries
-// another layout (API-created customs take the model default). New views
-// order newest first.
+// The dialog offers the spreadsheet set only: no layout picker. Create
+// defaults to spreadsheet; edit round-trips the stored layout so a
+// non-spreadsheet choice made on the detail page (VIEW-040, for example
+// list on cloud) survives a later edit. New views order newest first.
 
-import { parseDisplayPrefs, type DisplayPrefs } from "../../issues/index.js";
+import { isLayoutKind, parseDisplayPrefs, type DisplayPrefs } from "../../issues/index.js";
 
-/** The only layout the workspace dialog writes. */
+/** The default layout the workspace dialog creates with; edit round-trips the stored layout. */
 export const WORKSPACE_VIEW_LAYOUT = "spreadsheet";
 
 /** Newest-first ordering every workspace create starts from. */
@@ -20,12 +20,14 @@ export function defaultWorkspaceDisplay(): DisplayPrefs {
   return { ...parseDisplayPrefs({}, {}), layout: WORKSPACE_VIEW_LAYOUT, orderBy: WORKSPACE_VIEW_ORDER_BY };
 }
 
-/** An edit dialog's opening settings: the stored record, layout pinned. */
+/** An edit dialog's opening settings: the stored record, keeping its layout. */
 export function prefillWorkspaceDisplay(
   displayFilters: Record<string, unknown>,
   displayProperties: Record<string, unknown>
 ): DisplayPrefs {
-  return { ...parseDisplayPrefs(displayFilters, displayProperties), layout: WORKSPACE_VIEW_LAYOUT };
+  const stored = displayFilters["layout"];
+  const layout = isLayoutKind(stored) ? stored : WORKSPACE_VIEW_LAYOUT;
+  return { ...parseDisplayPrefs(displayFilters, displayProperties), layout };
 }
 
 /** Explicit display pair for the create/patch body. */
@@ -38,7 +40,7 @@ export interface WorkspaceDisplayPayload {
 export function serializeWorkspaceDisplay(prefs: DisplayPrefs): WorkspaceDisplayPayload {
   return {
     displayFilters: {
-      layout: WORKSPACE_VIEW_LAYOUT,
+      layout: prefs.layout,
       group_by: prefs.groupBy,
       sub_group_by: prefs.subGroupBy,
       order_by: prefs.orderBy,
