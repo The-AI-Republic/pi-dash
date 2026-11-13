@@ -1878,11 +1878,12 @@ fn predicates_to_query(predicates: &[(String, pidash_db::issue_filters::FilterVa
 
 /// `issue_filters(filters_dict, method)` over a JSON-object filters value:
 /// JSON arrays of scalars become id-list params, strings become text
-/// params; `null` values are dropped (Python's falsy check skips them).
-/// Unrecognized keys are ignored by the kernel, like the Python
-/// `ISSUE_FILTER` loop. Kernel failures (relative-date overflow) escape
-/// as 500s in Python (`TypeError`/`OverflowError` uncaught), mapped here
-/// to the generic 500.
+/// params; `null` values stay as present keys (Python's
+/// `if key in query_params` runs the arm; the falsy check skips the `__in`
+/// but companion predicates emit). Unrecognized keys are ignored by the
+/// kernel, like the Python `ISSUE_FILTER` loop. Kernel failures
+/// (relative-date overflow) escape as 500s in Python
+/// (`TypeError`/`OverflowError` uncaught), mapped here to the generic 500.
 /// POST and PATCH share the `else` branches in every filter func, so one
 /// kernel serves both write paths. Takes the `Option` directly: `None`
 /// is the validated `{}` default for a missing key.
@@ -1897,7 +1898,9 @@ fn stored_lookup_query(filters: Option<&Value>) -> Result<Value, Denial> {
     let mut params: HashMap<String, PostVal> = HashMap::new();
     for (key, value) in object {
         match value {
-            Value::Null => {}
+            Value::Null => {
+                params.insert(key.clone(), PostVal::Null);
+            }
             Value::Array(items) => {
                 let mut list = Vec::with_capacity(items.len());
                 for item in items {
