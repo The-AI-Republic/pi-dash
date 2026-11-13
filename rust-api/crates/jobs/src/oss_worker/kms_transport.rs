@@ -433,6 +433,7 @@ mod tests {
         );
         let imds = FakeImds {
             fetches: Arc::new(AtomicUsize::new(0)),
+            tokens: Arc::new(AtomicUsize::new(0)),
             lifetime_secs: 3600,
             with_role: true,
         };

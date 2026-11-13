@@ -20,6 +20,10 @@
 //!    process-wide and refreshed [`REFRESH_MARGIN_SECS`] before it
 //!    expires.
 //!
+//! Exactly one of the two static keys set is an error, as boto3's
+//! `PartialCredentialsError`: falling through to the role would sign as
+//! a principal the operator never configured.
+//!
 //! `AWS_EC2_METADATA_DISABLED=true` skips step 2 (boto3's switch), and
 //! `AWS_EC2_METADATA_SERVICE_ENDPOINT` overrides the IMDS base URL (also
 //! boto3's), which the tests use to point at a local fake.
@@ -40,6 +44,11 @@ const DEFAULT_IMDS_ENDPOINT: &str = "http://169.254.169.254";
 const IMDS_TOKEN_TTL_SECS: &str = "21600";
 /// Refresh role credentials this long before their `Expiration`.
 pub const REFRESH_MARGIN_SECS: i64 = 300;
+/// After a failed fetch, or one that returned credentials already inside
+/// the refresh margin, wait this long before asking IMDS again. Bounds
+/// IMDS traffic (and the lock hold) during an outage, and makes a host
+/// without IMDS fail fast between probes.
+pub const RETRY_AFTER_SECS: i64 = 30;
 
 /// One set of AWS credentials. `Debug` never prints the secret parts.
 #[derive(Clone, PartialEq, Eq)]
@@ -76,6 +85,9 @@ pub enum CredentialSource {
     InstanceRole(Arc<InstanceRoleProvider>),
     /// No environment keys and IMDS disabled.
     Unavailable,
+    /// Only one of the two static keys is set (boto3
+    /// `PartialCredentialsError`); carries the message.
+    Partial(String),
 }
 
 /// Message for [`CredentialSource::Unavailable`] (kept from the
@@ -88,15 +100,24 @@ impl CredentialSource {
     /// both static keys set wins; otherwise the instance role unless
     /// `AWS_EC2_METADATA_DISABLED=true`.
     pub fn from_env() -> Self {
-        let var = |name: &str| std::env::var(name).unwrap_or_default();
+        Self::from_vars(|name| std::env::var(name).unwrap_or_default())
+    }
+
+    /// [`Self::from_env`] over an explicit variable lookup.
+    fn from_vars(var: impl Fn(&str) -> String) -> Self {
         let access_key = var("AWS_ACCESS_KEY_ID");
         let secret_key = var("AWS_SECRET_ACCESS_KEY");
-        if !access_key.is_empty() && !secret_key.is_empty() {
-            return Self::Static(AwsCredentials {
-                access_key,
-                secret_key,
-                session_token: var("AWS_SESSION_TOKEN"),
-            });
+        match (access_key.is_empty(), secret_key.is_empty()) {
+            (false, false) => {
+                return Self::Static(AwsCredentials {
+                    access_key,
+                    secret_key,
+                    session_token: var("AWS_SESSION_TOKEN"),
+                })
+            }
+            (false, true) => return Self::Partial(partial_message("AWS_SECRET_ACCESS_KEY")),
+            (true, false) => return Self::Partial(partial_message("AWS_ACCESS_KEY_ID")),
+            (true, true) => {}
         }
         if var("AWS_EC2_METADATA_DISABLED")
             .trim()
@@ -111,17 +132,14 @@ impl CredentialSource {
     /// credentials.
     pub fn check_static(&self) -> Result<(), String> {
         match self {
+            Self::Static(_) | Self::InstanceRole(_) => Ok(()),
             Self::Unavailable => Err(NOT_CONFIGURED.to_owned()),
-            Self::Static(creds) if creds.access_key.is_empty() || creds.secret_key.is_empty() => {
-                Err(NOT_CONFIGURED.to_owned())
-            }
-            _ => Ok(()),
+            Self::Partial(message) => Err(message.clone()),
         }
     }
 
     /// Current credentials; role credentials may hit IMDS.
     pub async fn resolve(&self) -> Result<AwsCredentials, String> {
-        self.check_static()?;
         match self {
             Self::Static(creds) => Ok(creds.clone()),
             Self::InstanceRole(provider) => provider.credentials().await.map_err(|err| {
@@ -132,8 +150,13 @@ impl CredentialSource {
                 )
             }),
             Self::Unavailable => Err(NOT_CONFIGURED.to_owned()),
+            Self::Partial(message) => Err(message.clone()),
         }
     }
+}
+
+fn partial_message(missing: &str) -> String {
+    format!("Partial AWS credentials found in env, missing: {missing}.")
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +171,18 @@ struct CachedCredentials {
 pub struct InstanceRoleProvider {
     endpoint: String,
     client: reqwest::Client,
-    cache: Mutex<Option<CachedCredentials>>,
+    retry_after: chrono::Duration,
+    state: Mutex<ProviderState>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ProviderState {
+    cached: Option<CachedCredentials>,
+    /// No IMDS fetch before this instant (set after a failed fetch or a
+    /// fetch that returned near-expiry credentials).
+    next_fetch_at: Option<DateTime<Utc>>,
+    /// The last fetch error, replayed while `next_fetch_at` holds.
+    last_error: Option<String>,
 }
 
 impl std::fmt::Debug for InstanceRoleProvider {
@@ -161,8 +195,16 @@ impl std::fmt::Debug for InstanceRoleProvider {
 
 impl InstanceRoleProvider {
     /// A provider against `endpoint` (IMDS base URL, no trailing path).
+    ///
+    /// The client never uses a proxy (IMDS is link-local and the session
+    /// token must not leave the host; `HTTP_PROXY` would otherwise apply)
+    /// and keeps no idle connections: fetches are rare, and a pooled
+    /// connection is bound to the runtime that opened it, while this
+    /// provider is process-wide and may be used from several runtimes.
     pub fn new(endpoint: &str) -> Self {
         let client = reqwest::Client::builder()
+            .no_proxy()
+            .pool_max_idle_per_host(0)
             .connect_timeout(Duration::from_secs(1))
             .timeout(Duration::from_secs(3))
             .build()
@@ -170,7 +212,8 @@ impl InstanceRoleProvider {
         Self {
             endpoint: endpoint.trim().trim_end_matches('/').to_owned(),
             client,
-            cache: Mutex::new(None),
+            retry_after: chrono::Duration::seconds(RETRY_AFTER_SECS),
+            state: Mutex::new(ProviderState::default()),
         }
     }
 
@@ -192,30 +235,63 @@ impl InstanceRoleProvider {
             .clone()
     }
 
-    /// Cached credentials, refetched once inside the refresh margin. A
-    /// failed refetch keeps serving the cached set while it is still
-    /// unexpired, so a brief IMDS hiccup does not fail live requests.
+    /// Cached credentials, refetched inside the refresh margin.
+    ///
+    /// Fetches are rate-limited to one per [`RETRY_AFTER_SECS`] after a
+    /// failure or a near-expiry result. In between, unexpired cached
+    /// credentials are served, and with none the last error is replayed
+    /// without touching IMDS — so an outage costs one slow fetch per
+    /// interval rather than one per request, and a host without IMDS fails
+    /// fast between probes.
     pub async fn credentials(&self) -> Result<AwsCredentials, String> {
-        let mut cache = self.cache.lock().await;
+        let mut state = self.state.lock().await;
         let now = Utc::now();
-        if let Some(cached) = cache.as_ref() {
-            if cached.expires_at - chrono::Duration::seconds(REFRESH_MARGIN_SECS) > now {
+        let margin = chrono::Duration::seconds(REFRESH_MARGIN_SECS);
+        let usable = |state: &ProviderState| {
+            state
+                .cached
+                .as_ref()
+                .filter(|cached| cached.expires_at > now)
+                .map(|cached| cached.credentials.clone())
+        };
+
+        if let Some(cached) = state.cached.as_ref() {
+            if cached.expires_at - margin > now {
                 return Ok(cached.credentials.clone());
             }
         }
+        if state.next_fetch_at.is_some_and(|at| now < at) {
+            if let Some(credentials) = usable(&state) {
+                return Ok(credentials);
+            }
+            return Err(state
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "IMDS credentials are near expiry".to_owned()));
+        }
+
         match self.fetch().await {
             Ok(fresh) => {
                 let credentials = fresh.credentials.clone();
-                *cache = Some(fresh);
+                // IMDS may still hand out the old set inside the margin;
+                // don't ask again on every request until it rotates.
+                state.next_fetch_at =
+                    (fresh.expires_at - margin <= now).then(|| now + self.retry_after);
+                state.last_error = None;
+                state.cached = Some(fresh);
                 Ok(credentials)
             }
-            Err(err) => match cache.as_ref() {
-                Some(cached) if cached.expires_at > now => {
-                    tracing::warn!(error = %err, "aws_credentials.imds_refresh_failed_using_cached");
-                    Ok(cached.credentials.clone())
+            Err(err) => {
+                state.next_fetch_at = Some(now + self.retry_after);
+                state.last_error = Some(err.clone());
+                match usable(&state) {
+                    Some(credentials) => {
+                        tracing::warn!(error = %err, "aws_credentials.imds_refresh_failed_using_cached");
+                        Ok(credentials)
+                    }
+                    None => Err(err),
                 }
-                _ => Err(err),
-            },
+            }
         }
     }
 
@@ -321,6 +397,8 @@ pub(crate) mod tests {
     #[derive(Clone)]
     pub(crate) struct FakeImds {
         pub fetches: Arc<AtomicUsize>,
+        /// IMDSv2 session-token requests (one per fetch attempt).
+        pub tokens: Arc<AtomicUsize>,
         pub lifetime_secs: i64,
         pub with_role: bool,
     }
@@ -337,7 +415,8 @@ pub(crate) mod tests {
         Router::new()
             .route(
                 "/latest/api/token",
-                put(|headers: HeaderMap| async move {
+                put(|State(s): State<FakeImds>, headers: HeaderMap| async move {
+                    s.tokens.fetch_add(1, Ordering::SeqCst);
                     if headers.contains_key("X-aws-ec2-metadata-token-ttl-seconds") {
                         (StatusCode::OK, FAKE_TOKEN.to_owned())
                     } else {
@@ -398,6 +477,7 @@ pub(crate) mod tests {
     fn fake(lifetime_secs: i64, with_role: bool) -> FakeImds {
         FakeImds {
             fetches: Arc::new(AtomicUsize::new(0)),
+            tokens: Arc::new(AtomicUsize::new(0)),
             lifetime_secs,
             with_role,
         }
@@ -420,8 +500,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn credentials_inside_refresh_margin_are_refetched() {
-        // Expires in 60 s, inside the 300 s margin: every call refetches.
+    async fn near_expiry_credentials_are_refetched_at_most_once_per_interval() {
+        // Expires in 60 s, inside the 300 s margin.
         let state = fake(60, true);
         let base = serve(imds_router(state.clone())).await;
         let provider = InstanceRoleProvider::new(&base);
@@ -430,6 +510,15 @@ pub(crate) mod tests {
             provider.credentials().await.unwrap().access_key,
             "ASIAFAKE1"
         );
+        // Inside the retry interval: served from cache, IMDS untouched.
+        assert_eq!(
+            provider.credentials().await.unwrap().access_key,
+            "ASIAFAKE1"
+        );
+        assert_eq!(state.fetches.load(Ordering::SeqCst), 1);
+
+        // Interval elapsed: refetch.
+        provider.state.lock().await.next_fetch_at = None;
         assert_eq!(
             provider.credentials().await.unwrap().access_key,
             "ASIAFAKE2"
@@ -444,13 +533,35 @@ pub(crate) mod tests {
         let provider = InstanceRoleProvider::new(&base);
         let cached = provider.credentials().await.unwrap();
 
-        // Point the same cache at an endpoint that refuses connections.
+        // Point the same state at an endpoint that refuses connections,
+        // with the retry interval already elapsed.
+        let mut seeded = provider.state.lock().await.clone();
+        seeded.next_fetch_at = None;
         let broken = InstanceRoleProvider {
             endpoint: "http://127.0.0.1:1".to_owned(),
             client: provider.client.clone(),
-            cache: Mutex::new(provider.cache.lock().await.clone()),
+            retry_after: provider.retry_after,
+            state: Mutex::new(seeded),
         };
         assert_eq!(broken.credentials().await.unwrap(), cached);
+        assert!(broken.state.lock().await.next_fetch_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn failures_are_replayed_without_hitting_imds_until_the_interval() {
+        let state = fake(3600, false);
+        let base = serve(imds_router(state.clone())).await;
+        let provider = InstanceRoleProvider::new(&base);
+
+        let first = provider.credentials().await.expect_err("no role");
+        let second = provider.credentials().await.expect_err("replayed");
+        assert_eq!(first, second);
+        assert_eq!(state.tokens.load(Ordering::SeqCst), 1);
+
+        provider.state.lock().await.next_fetch_at = None;
+        let _ = provider.credentials().await.expect_err("probe again");
+        let _ = provider.credentials().await.expect_err("replayed again");
+        assert_eq!(state.tokens.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -473,17 +584,49 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unavailable_and_empty_static_fail_without_a_runtime() {
+    fn unconfigured_sources_fail_without_a_runtime() {
         assert_eq!(
             CredentialSource::Unavailable.check_static(),
             Err(NOT_CONFIGURED.to_owned())
         );
-        let empty = CredentialSource::Static(AwsCredentials {
-            access_key: String::new(),
-            secret_key: String::new(),
-            session_token: String::new(),
-        });
-        assert_eq!(empty.check_static(), Err(NOT_CONFIGURED.to_owned()));
+        let partial = CredentialSource::Partial(partial_message("AWS_SECRET_ACCESS_KEY"));
+        assert!(partial.check_static().is_err());
+    }
+
+    fn source_for(vars: &[(&str, &str)]) -> CredentialSource {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        CredentialSource::from_vars(|name| vars.get(name).cloned().unwrap_or_default())
+    }
+
+    #[test]
+    fn env_source_selection_follows_boto3() {
+        assert!(matches!(
+            source_for(&[("AWS_ACCESS_KEY_ID", "A"), ("AWS_SECRET_ACCESS_KEY", "S")]),
+            CredentialSource::Static(_)
+        ));
+        match source_for(&[("AWS_ACCESS_KEY_ID", "A")]) {
+            CredentialSource::Partial(message) => {
+                assert!(
+                    message.contains("missing: AWS_SECRET_ACCESS_KEY"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        match source_for(&[("AWS_SECRET_ACCESS_KEY", "S")]) {
+            CredentialSource::Partial(message) => {
+                assert!(message.contains("missing: AWS_ACCESS_KEY_ID"), "{message}")
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        assert!(matches!(
+            source_for(&[("AWS_EC2_METADATA_DISABLED", "TRUE")]),
+            CredentialSource::Unavailable
+        ));
+        assert!(matches!(source_for(&[]), CredentialSource::InstanceRole(_)));
     }
 
     #[test]
