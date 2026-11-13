@@ -4673,4 +4673,1153 @@ mod live_tests {
         assert_eq!(desc.description_stripped.as_deref(), Some("a &amp; b"));
         cleanup(&pool, &seed.scope, comment_id).await;
     }
+
+    // ------------------------------------------------------------------
+    // Phase 0 characterization (NEWPIDASH-190): the six agent write
+    // tools through `dispatch_fn` — rows, result JSON, enqueued jobs
+    // and ledger atomicity, pinned before the `operations::core`
+    // refactor. Must pass on main unchanged.
+    // ------------------------------------------------------------------
+    use sqlx::Row;
+
+    const ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+    const SWEEP_TASK: &str = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects";
+    const RELATE_CREATED_ACTIVITY: &str = "issue_relation.activity.created";
+    const RELATE_DELETED_ACTIVITY: &str = "issue_relation.activity.deleted";
+
+    struct Phase0Seed {
+        user_id: Uuid,
+        workspace_id: Uuid,
+        project_id: Uuid,
+        project_identifier: String,
+        state_backlog: Uuid,
+        state_second: Uuid,
+        issue_id: Uuid,
+        target_id: Uuid,
+        pod_id: Uuid,
+        scheduler_id: Uuid,
+        binding_id: Uuid,
+    }
+
+    /// Test transition hook: the seeded tools never invoke it (the
+    /// create fire is skipped in-transaction; the post-commit fire
+    /// parks without LLM config), but domain writes resolve it eagerly.
+    #[derive(Debug)]
+    struct NoopTransitionHook;
+
+    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
+        fn enqueue_completion_comment(
+            &self,
+            _issue_id: Uuid,
+            _prev_state_id: Option<Uuid>,
+            _current_state_id: Option<Uuid>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: Uuid,
+            _request: pidash_services::orchestration::entries::FireRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
+            })
+        }
+    }
+
+    fn phase0_ctx(pool: &sqlx::PgPool) -> ToolCtx {
+        let settings = pidash_db::config::Settings::test_defaults();
+        let mut cloud = settings.cloud_agent.clone();
+        cloud.enabled = true;
+        cloud.writes_enabled = true;
+        ToolCtx {
+            pool: pool.clone(),
+            orm: pidash_db::pool::sea_orm_connection(pool),
+            cloud,
+            managed: settings.managed_runner.clone(),
+            http: reqwest::Client::new(),
+            github: crate::oss_worker::model_runtime::github::GithubAppContext::new(
+                pool.clone(),
+                pidash_db::redis::RedisHandle::from_settings(&settings),
+                settings.secret_key.clone(),
+            ),
+            toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            redis: None,
+            runner: settings.runner.clone(),
+            transition_hook: std::sync::Arc::new(NoopTransitionHook),
+        }
+    }
+
+    async fn phase0_ensure_queue(pool: &sqlx::PgPool) {
+        crate::queue::ensure_schema(pool)
+            .await
+            .expect("queue schema");
+    }
+
+    /// Insert one `agent_run` for the seeded world (work item bound,
+    /// or missing-issue when `None`). Returns the run id.
+    async fn phase0_run(pool: &sqlx::PgPool, seed: &Phase0Seed, work_item: Option<Uuid>) -> Uuid {
+        let run_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, \
+             thread_id, created_at, workspace_id, pod_id, created_by_id, \
+             scheduler_binding_id, work_item_id, llm_model, trigger, executor_kind, \
+             dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, \
+             usage, error_details, pin_kind) VALUES ($1, 'running', '', '{}', '{}', '', $2, \
+             $3, $4, $5, $6, $7, '', 'manual', 'cloud_agent', 0, '', '{}', 'main', '{}', \
+             '{}', '{}', 'locality')",
+        )
+        .bind(run_id)
+        .bind(now)
+        .bind(seed_workspace_id(seed))
+        .bind(seed.pod_id)
+        .bind(seed.user_id)
+        .bind(seed.binding_id)
+        .bind(work_item)
+        .execute(pool)
+        .await
+        .expect("seed agent run");
+        run_id
+    }
+
+    fn seed_workspace_id(seed: &Phase0Seed) -> Uuid {
+        seed.workspace_id
+    }
+
+    /// Seed the full dispatch world: user → workspace → project →
+    /// two states → two issues → pod → scheduler + binding →
+    /// workspace/project memberships. The run itself comes from
+    /// [`phase0_run`] so missing-issue cases can choose its shape.
+    async fn seed_phase0(pool: &sqlx::PgPool) -> Phase0Seed {
+        use pidash_db::entity::{
+            issues as i_entity, projects as proj_entity, states as st_entity, users as u_entity,
+            workspaces as ws_entity,
+        };
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
+        let user_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        u_entity::ActiveModel {
+            id: Set(user_id),
+            password: Set("pbkdf2_sha256$600000$salt$hash".to_owned()),
+            email: Set(Some(format!("p0-{tag}@example.com"))),
+            username: Set(format!("p0_{tag}")),
+            display_name: Set(String::new()),
+            first_name: Set(String::new()),
+            last_name: Set(String::new()),
+            avatar: Set(String::new()),
+            date_joined: Set(now_tz),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            last_location: Set(String::new()),
+            created_location: Set(String::new()),
+            is_superuser: Set(false),
+            is_managed: Set(false),
+            is_password_expired: Set(false),
+            is_active: Set(true),
+            is_staff: Set(false),
+            is_email_verified: Set(false),
+            is_password_autoset: Set(false),
+            is_password_reset_required: Set(false),
+            token: Set(String::new()),
+            last_active: Set(None),
+            last_login_ip: Set(String::new()),
+            last_logout_ip: Set(String::new()),
+            last_login_medium: Set("email".to_owned()),
+            last_login_uagent: Set(String::new()),
+            is_bot: Set(false),
+            user_timezone: Set("UTC".to_owned()),
+            is_email_valid: Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed user");
+        let workspace_id = Uuid::new_v4();
+        let slug = format!("p0-{tag}");
+        ws_entity::ActiveModel {
+            id: Set(workspace_id),
+            name: Set(format!("P0 {tag}")),
+            owner_id: Set(user_id),
+            slug: Set(slug.clone()),
+            timezone: Set("UTC".to_owned()),
+            background_color: Set("#ffffff".to_owned()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed workspace");
+        let project_id = Uuid::new_v4();
+        let project_identifier = format!("P0{}", tag.to_uppercase());
+        proj_entity::ActiveModel {
+            id: Set(project_id),
+            name: Set(format!("P0 {tag}")),
+            description: Set(String::new()),
+            network: Set(2),
+            workspace_id: Set(workspace_id),
+            identifier: Set(project_identifier.clone()),
+            module_view: Set(false),
+            cycle_view: Set(false),
+            issue_views_view: Set(false),
+            page_view: Set(true),
+            intake_view: Set(false),
+            is_time_tracking_enabled: Set(false),
+            is_issue_type_enabled: Set(false),
+            is_default: Set(false),
+            guest_view_all_features: Set(false),
+            members_can_edit_states: Set(true),
+            dedicated_runner_lost_action: Set("fail_to_backlog".to_owned()),
+            archive_in: Set(0),
+            close_in: Set(0),
+            logo_props: Set(serde_json::json!({})),
+            timezone: Set("UTC".to_owned()),
+            repo_url: Set(String::new()),
+            base_branch: Set("main".to_owned()),
+            agent_default_interval_seconds: Set(10800),
+            agent_default_max_ticks: Set(10),
+            agent_review_default_interval_seconds: Set(10800),
+            agent_test_default_interval_seconds: Set(10800),
+            agent_ticking_enabled: Set(true),
+            default_agent_executor: Set("local_runner".to_owned()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed project");
+        let state_backlog = Uuid::new_v4();
+        st_entity::ActiveModel {
+            id: Set(state_backlog),
+            workspace_id: Set(workspace_id),
+            project_id: Set(project_id),
+            name: Set("Backlog".to_owned()),
+            description: Set(String::new()),
+            color: Set("#ff0000".to_owned()),
+            slug: Set(String::new()),
+            sequence: Set(65535.0),
+            group: Set("backlog".to_owned()),
+            is_triage: Set(false),
+            default: Set(true),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed backlog state");
+        let state_second = Uuid::new_v4();
+        st_entity::ActiveModel {
+            id: Set(state_second),
+            workspace_id: Set(workspace_id),
+            project_id: Set(project_id),
+            name: Set("Todo".to_owned()),
+            description: Set(String::new()),
+            color: Set("#00ff00".to_owned()),
+            slug: Set(String::new()),
+            sequence: Set(65535.0),
+            group: Set("unstarted".to_owned()),
+            is_triage: Set(false),
+            default: Set(false),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed second state");
+        let issue_id = Uuid::new_v4();
+        i_entity::ActiveModel {
+            id: Set(issue_id),
+            workspace_id: Set(workspace_id),
+            project_id: Set(project_id),
+            state_id: Set(Some(state_backlog)),
+            name: Set("Phase0 issue".to_owned()),
+            description_json: Set(serde_json::json!({})),
+            description_html: Set("<p></p>".to_owned()),
+            priority: Set("none".to_owned()),
+            complexity_score: Set(0),
+            sequence_id: Set(1),
+            sort_order: Set(65535.0),
+            is_draft: Set(false),
+            git_work_branch: Set(String::new()),
+            workpad: Set(String::new()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed issue");
+        let target_id = Uuid::new_v4();
+        i_entity::ActiveModel {
+            id: Set(target_id),
+            workspace_id: Set(workspace_id),
+            project_id: Set(project_id),
+            state_id: Set(Some(state_backlog)),
+            name: Set("Phase0 target".to_owned()),
+            description_json: Set(serde_json::json!({})),
+            description_html: Set("<p></p>".to_owned()),
+            priority: Set("none".to_owned()),
+            complexity_score: Set(0),
+            sequence_id: Set(2),
+            sort_order: Set(65535.0),
+            is_draft: Set(false),
+            git_work_branch: Set(String::new()),
+            workpad: Set(String::new()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed target issue");
+        let pod_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO pod (id, name, description, is_default, created_at, updated_at, \
+             workspace_id, project_id) VALUES ($1, $2, '', false, $3, $3, $4, $5)",
+        )
+        .bind(pod_id)
+        .bind(format!("pod-{tag}"))
+        .bind(now)
+        .bind(workspace_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .expect("seed pod");
+        let scheduler_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO schedulers (id, slug, name, description, prompt, source, \
+             is_enabled, workspace_id, color, created_at, updated_at) VALUES ($1, $2, \
+             'Phase0 sched', '', '', 'manual', true, $3, '#000000', $4, $4)",
+        )
+        .bind(scheduler_id)
+        .bind(format!("sched-{tag}"))
+        .bind(workspace_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed scheduler");
+        let binding_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO scheduler_bindings (id, created_at, updated_at, extra_context, \
+             enabled, last_error, scheduler_id, dtstart, tzid, rrule, rdates, exdates, \
+             outcome_mode, workspace_id, project_id, pod_id) VALUES ($1, $2, $2, '', true, \
+             '', $3, $2, 'UTC', 'FREQ=DAILY', '[]', '[]', 'create_issue', $4, $5, $6)",
+        )
+        .bind(binding_id)
+        .bind(now)
+        .bind(scheduler_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(pod_id)
+        .execute(pool)
+        .await
+        .expect("seed binding");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, created_at, updated_at, role, member_id, \
+             workspace_id, view_props, default_props, issue_props, is_active, \
+             explored_features, getting_started_checklist, tips) VALUES ($1, $2, $2, 20, $3, \
+             $4, '{}', '{}', '{}', true, '{}', '{}', '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace member");
+        sqlx::query(
+            "INSERT INTO project_members (id, created_at, updated_at, role, member_id, \
+             project_id, workspace_id, view_props, default_props, sort_order, preferences, \
+             is_active) VALUES ($1, $2, $2, 15, $3, $4, $5, '{}', '{}', 0, '{}', true)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed project member");
+        Phase0Seed {
+            user_id,
+            workspace_id,
+            project_id,
+            project_identifier,
+            state_backlog,
+            state_second,
+            issue_id,
+            target_id,
+            pod_id,
+            scheduler_id,
+            binding_id,
+        }
+    }
+
+    /// Validate `args` against the tool's golden schema (the loop
+    /// path: `invoke` validation → `dispatch_fn`) and dispatch.
+    async fn dispatch_tool(
+        ctx: &ToolCtx,
+        run_id: Uuid,
+        tool: &'static str,
+        args: Value,
+    ) -> Result<Value, ToolExecError> {
+        let golden =
+            crate::oss_worker::model_runtime::schemas::Golden::load().expect("golden loads");
+        let schema = golden.function_schema(tool).expect("function schema");
+        let validated =
+            crate::oss_worker::model_runtime::validation::validate_args_value(schema, &args)
+                .map_err(|details| {
+                    ToolExecError::Failure(plan::ToolCallFailure::Failed(format!(
+                        "validation failed: {details:?}"
+                    )))
+                })?;
+        dispatch_fn(ctx, run_id, tool, &validated).await
+    }
+
+    /// Ledger rows for one run as `(tool_name, risk, status)`.
+    async fn ledger_for_run(pool: &sqlx::PgPool, run_id: Uuid) -> Vec<(String, String, String)> {
+        let rows = sqlx::query(
+            "SELECT tool_name, risk, status FROM agent_run_tool_call WHERE agent_run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_all(pool)
+        .await
+        .expect("read ledger");
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("tool_name").expect("tool"),
+                    row.try_get::<String, _>("risk").expect("risk"),
+                    row.try_get::<String, _>("status").expect("status"),
+                )
+            })
+            .collect()
+    }
+
+    /// Queue rows mentioning `needle` (an issue or relation uuid) in
+    /// args or kwargs, as `(task, kwargs_type)` where the activity
+    /// `type` kwarg (if any) rides along for assertion.
+    async fn jobs_for_needle(pool: &sqlx::PgPool, needle: Uuid) -> Vec<(String, Option<String>)> {
+        let like = format!("%{}%", needle);
+        let rows = sqlx::query(
+            "SELECT task, kwargs ->> 'type' AS activity_type FROM rust_job_queue \
+             WHERE args::text LIKE $1 OR kwargs::text LIKE $1",
+        )
+        .bind(&like)
+        .fetch_all(pool)
+        .await
+        .expect("read queue");
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("task").expect("task"),
+                    row.try_get::<Option<String>, _>("activity_type")
+                        .unwrap_or(None),
+                )
+            })
+            .collect()
+    }
+
+    /// Order-safe teardown for one phase-0 world, including rows the
+    /// orchestration drive may leave behind (ticker, queued runs).
+    async fn cleanup_phase0(pool: &sqlx::PgPool, seed: &Phase0Seed, extra_needles: &[Uuid]) {
+        let mut needles: Vec<Uuid> = vec![seed.issue_id, seed.target_id];
+        needles.extend_from_slice(extra_needles);
+        for needle in &needles {
+            let like = format!("%{}%", needle);
+            sqlx::query(
+                "DELETE FROM rust_job_queue WHERE args::text LIKE $1 OR kwargs::text LIKE $1",
+            )
+            .bind(&like)
+            .bind(&like)
+            .execute(pool)
+            .await
+            .expect("teardown queue");
+        }
+        sqlx::query("DELETE FROM agent_run_tool_call WHERE agent_run_id IN (SELECT id FROM agent_run WHERE workspace_id = $1)")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown ledger");
+        sqlx::query("DELETE FROM agent_run_event WHERE agent_run_id IN (SELECT id FROM agent_run WHERE workspace_id = $1)")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown events");
+        sqlx::query("DELETE FROM issue_agent_ticker WHERE issue_id IN (SELECT id FROM issues WHERE workspace_id = $1)")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown ticker");
+        sqlx::query("DELETE FROM agent_run WHERE workspace_id = $1")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown runs");
+        let desc_ids: Vec<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT description_id FROM issue_comments WHERE issue_id IN (SELECT id FROM issues WHERE workspace_id = $1) AND description_id IS NOT NULL",
+        )
+        .bind(seed.workspace_id)
+        .fetch_all(pool)
+        .await
+        .expect("list descriptions");
+        sqlx::query("DELETE FROM issue_comments WHERE issue_id IN (SELECT id FROM issues WHERE workspace_id = $1)")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown comments");
+        for desc_id in desc_ids.into_iter().flatten() {
+            sqlx::query("DELETE FROM descriptions WHERE id = $1")
+                .bind(desc_id)
+                .execute(pool)
+                .await
+                .expect("teardown descriptions");
+        }
+        sqlx::query("DELETE FROM issue_relations WHERE workspace_id = $1")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown relations");
+        sqlx::query("DELETE FROM issue_sequences WHERE issue_id IN (SELECT id FROM issues WHERE workspace_id = $1)")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown sequences");
+        sqlx::query("DELETE FROM issues WHERE workspace_id = $1")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown issues");
+        sqlx::query("DELETE FROM states WHERE project_id = $1")
+            .bind(seed.project_id)
+            .execute(pool)
+            .await
+            .expect("teardown states");
+        sqlx::query("DELETE FROM scheduler_bindings WHERE id = $1")
+            .bind(seed.binding_id)
+            .execute(pool)
+            .await
+            .expect("teardown binding");
+        sqlx::query("DELETE FROM schedulers WHERE id = $1")
+            .bind(seed.scheduler_id)
+            .execute(pool)
+            .await
+            .expect("teardown scheduler");
+        sqlx::query("DELETE FROM pod WHERE id = $1")
+            .bind(seed.pod_id)
+            .execute(pool)
+            .await
+            .expect("teardown pod");
+        sqlx::query("DELETE FROM project_members WHERE project_id = $1")
+            .bind(seed.project_id)
+            .execute(pool)
+            .await
+            .expect("teardown project members");
+        sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown workspace members");
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(seed.project_id)
+            .execute(pool)
+            .await
+            .expect("teardown project");
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(seed.workspace_id)
+            .execute(pool)
+            .await
+            .expect("teardown workspace");
+        sqlx::query("DELETE FROM user_notification_preferences WHERE user_id = $1")
+            .bind(seed.user_id)
+            .execute(pool)
+            .await
+            .expect("teardown notif prefs");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(seed.user_id)
+            .execute(pool)
+            .await
+            .expect("teardown user");
+    }
+
+    /// Phase 0: the comment write pins attribution, html, ledger
+    /// success and zero queued jobs.
+    #[tokio::test]
+    async fn phase0_comment_write_pins_rows_result_ledger_and_no_jobs() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let ctx = phase0_ctx(&pool);
+        let result = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_ADD_CURRENT_ISSUE_COMMENT,
+            serde_json::json!({"body": "phase0 hello"}),
+        )
+        .await
+        .expect("add comment");
+        assert_eq!(result["created"], true);
+        let comment_id: Uuid = result["comment_id"]
+            .as_str()
+            .expect("comment id")
+            .parse()
+            .expect("comment id parses");
+        assert_eq!(
+            result.as_object().expect("object").len(),
+            2,
+            "result keys: {result}"
+        );
+        let row = sqlx::query(
+            "SELECT comment_html, comment_stripped, access, speaker_type, speaker_label, \
+             speaker_agent_run_id, actor_id, created_by_id, project_id, issue_id, \
+             description_id FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read comment");
+        assert_eq!(
+            row.try_get::<String, _>("comment_html").expect("html"),
+            "<p>phase0 hello</p>"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("comment_stripped")
+                .expect("stripped"),
+            "phase0 hello"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("access").expect("access"),
+            "INTERNAL"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("speaker_type").expect("speaker"),
+            "agent"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("speaker_label").expect("label"),
+            "Pi Dash Cloud Agent"
+        );
+        assert_eq!(
+            row.try_get::<Uuid, _>("speaker_agent_run_id").expect("run"),
+            run_id
+        );
+        assert_eq!(
+            row.try_get::<Uuid, _>("actor_id").expect("actor"),
+            seed.user_id
+        );
+        assert_eq!(
+            row.try_get::<Uuid, _>("created_by_id").expect("created_by"),
+            seed.user_id
+        );
+        let desc_id = row
+            .try_get::<Option<Uuid>, _>("description_id")
+            .expect("desc id")
+            .expect("desc linked");
+        let desc = sqlx::query("SELECT description_stripped FROM descriptions WHERE id = $1")
+            .bind(desc_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read description");
+        assert_eq!(
+            desc.try_get::<Option<String>, _>("description_stripped")
+                .expect("desc stripped"),
+            Some("phase0 hello".to_owned())
+        );
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            vec![(
+                TOOL_ADD_CURRENT_ISSUE_COMMENT.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        assert!(
+            jobs_for_needle(&pool, seed.issue_id).await.is_empty(),
+            "comment enqueues no jobs"
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: the workpad write is a bare two-column update
+    /// (`updated_by` stays NULL) with no orchestrated effects.
+    #[tokio::test]
+    async fn phase0_workpad_write_pins_bare_columns_and_no_jobs() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let ctx = phase0_ctx(&pool);
+        let result = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_UPDATE_CURRENT_ISSUE_WORKPAD,
+            serde_json::json!({"body": "phase0 workpad"}),
+        )
+        .await
+        .expect("update workpad");
+        assert_eq!(
+            result,
+            serde_json::json!({"updated": true, "issue_id": seed.issue_id.to_string()})
+        );
+        let row = sqlx::query("SELECT workpad, updated_by_id FROM issues WHERE id = $1")
+            .bind(seed.issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read issue");
+        assert_eq!(
+            row.try_get::<String, _>("workpad").expect("workpad"),
+            "phase0 workpad"
+        );
+        assert_eq!(
+            row.try_get::<Option<Uuid>, _>("updated_by_id")
+                .expect("updated_by"),
+            None,
+            "bare update stamps no updated_by"
+        );
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            vec![(
+                TOOL_UPDATE_CURRENT_ISSUE_WORKPAD.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        assert!(
+            jobs_for_needle(&pool, seed.issue_id).await.is_empty(),
+            "workpad enqueues no jobs"
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: a run with no bound issue still answers workpad
+    /// success with Python's `str(None)`.
+    #[tokio::test]
+    async fn phase0_workpad_without_bound_issue_still_succeeds() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let run_id = phase0_run(&pool, &seed, None).await;
+        let ctx = phase0_ctx(&pool);
+        let result = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_UPDATE_CURRENT_ISSUE_WORKPAD,
+            serde_json::json!({"body": "phase0 workpad"}),
+        )
+        .await
+        .expect("update workpad without bound issue");
+        assert_eq!(
+            result,
+            serde_json::json!({"updated": true, "issue_id": "None"})
+        );
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            vec![(
+                TOOL_UPDATE_CURRENT_ISSUE_WORKPAD.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: the transition write moves the bare three columns.
+    #[tokio::test]
+    async fn phase0_transition_write_pins_move_and_same_state_noop() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let ctx = phase0_ctx(&pool);
+        let run_move = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let result = dispatch_tool(
+            &ctx,
+            run_move,
+            TOOL_TRANSITION_CURRENT_ISSUE,
+            serde_json::json!({"state_id": seed.state_second.to_string()}),
+        )
+        .await
+        .expect("transition");
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "updated": true,
+                "state": "Todo",
+                "state_id": seed.state_second.to_string(),
+            })
+        );
+        let state_id = sqlx::query("SELECT state_id FROM issues WHERE id = $1")
+            .bind(seed.issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read issue state")
+            .try_get::<Option<Uuid>, _>("state_id")
+            .expect("state id");
+        assert_eq!(state_id, Some(seed.state_second));
+        assert_eq!(
+            ledger_for_run(&pool, run_move).await,
+            vec![(
+                TOOL_TRANSITION_CURRENT_ISSUE.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        assert!(
+            jobs_for_needle(&pool, seed.issue_id).await.is_empty(),
+            "transition enqueues no jobs"
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: a same-state transition is a successful no-op
+    /// (`updated: false`), the state row untouched, no jobs.
+    #[tokio::test]
+    async fn phase0_transition_write_pins_same_state_noop() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        // Park the bound issue in the second state up front so the
+        // tool call is a same-state no-op on its own run.
+        sqlx::query("UPDATE issues SET state_id = $1 WHERE id = $2")
+            .bind(seed.state_second)
+            .bind(seed.issue_id)
+            .execute(&pool)
+            .await
+            .expect("park issue state");
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let ctx = phase0_ctx(&pool);
+        let result = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_TRANSITION_CURRENT_ISSUE,
+            serde_json::json!({"state_id": seed.state_second.to_string()}),
+        )
+        .await
+        .expect("same-state transition");
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "updated": false,
+                "state": "Todo",
+                "state_id": seed.state_second.to_string(),
+            })
+        );
+        let state_id = sqlx::query("SELECT state_id FROM issues WHERE id = $1")
+            .bind(seed.issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read issue state")
+            .try_get::<Option<Uuid>, _>("state_id")
+            .expect("state id");
+        assert_eq!(state_id, Some(seed.state_second), "no-op leaves state");
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            vec![(
+                TOOL_TRANSITION_CURRENT_ISSUE.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        assert!(
+            jobs_for_needle(&pool, seed.issue_id).await.is_empty(),
+            "same-state transition enqueues no jobs"
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: the create write today fails on a Django-migrated
+    /// schema — the discarded sequence probe decodes INT4 as i64
+    /// (`tools_exec.rs` `_max_seq`, `into_tuple::<i64>()` over
+    /// `issues.sequence_id`, Django `IntegerField`) — leaving no
+    /// issue, no ledger row and no jobs. Pinned as-is: the refactor
+    /// must preserve this until the probe defect is fixed under its
+    /// own issue (found: NEWPIDASH-1).
+    #[tokio::test]
+    async fn phase0_create_write_pins_current_failure_and_atomicity() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let ctx = phase0_ctx(&pool);
+        let outcome = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_CREATE_PROJECT_ISSUE,
+            serde_json::json!({"title": "Phase0 new issue", "description": "body text"}),
+        )
+        .await;
+        match outcome {
+            Err(ToolExecError::Db(error)) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("mismatched types") && message.contains("INT4"),
+                    "sequence probe decode failure: {message}"
+                );
+            }
+            other => panic!("expected Db decode failure, got {other:?}"),
+        }
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            Vec::<(String, String, String)>::new(),
+            "failed create leaves no ledger row"
+        );
+        let issue_count =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM issues WHERE project_id = $1")
+                .bind(seed.project_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count issues");
+        assert_eq!(issue_count, 2, "only the two seeded issues stand");
+        assert!(
+            jobs_for_needle(&pool, seed.issue_id).await.is_empty(),
+            "failed create enqueues no jobs"
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: the relate write pins the relation row, verdict
+    /// arrays, grouped relations and exactly one activity job.
+    #[tokio::test]
+    async fn phase0_relate_write_pins_row_activity_job_and_grouped() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let ctx = phase0_ctx(&pool);
+        let result = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_RELATE_ISSUES,
+            serde_json::json!({
+                "issue": seed.issue_id.to_string(),
+                "relation_type": "relates_to",
+                "related_issues": [seed.target_id.to_string()],
+            }),
+        )
+        .await
+        .expect("relate");
+        let source_ident = format!("{}-1", seed.project_identifier);
+        let target_ident = format!("{}-2", seed.project_identifier);
+        assert_eq!(result["issue"], source_ident);
+        assert_eq!(result["relation_type"], "relates_to");
+        assert_eq!(result["created"], serde_json::json!([target_ident]));
+        assert_eq!(result["unchanged"], serde_json::json!([]));
+        assert_eq!(result["conflicts"], serde_json::json!([]));
+        assert_eq!(
+            result["relations"]["relates_to"],
+            serde_json::json!([{
+                "id": seed.target_id.to_string(),
+                "identifier": target_ident,
+                "name": "Phase0 target",
+                "state": "Backlog",
+                "state_group": "backlog",
+            }]),
+            "grouped relations: {result}"
+        );
+        let row = sqlx::query(
+            "SELECT related_issue_id, relation_type FROM issue_relations \
+             WHERE issue_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(seed.issue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read relation");
+        assert_eq!(
+            row.try_get::<Uuid, _>("related_issue_id").expect("related"),
+            seed.target_id
+        );
+        assert_eq!(
+            row.try_get::<String, _>("relation_type").expect("type"),
+            "relates_to"
+        );
+        assert_eq!(
+            jobs_for_needle(&pool, seed.issue_id).await,
+            vec![(
+                ACTIVITY_TASK.to_owned(),
+                Some(RELATE_CREATED_ACTIVITY.to_owned())
+            )]
+        );
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            vec![(
+                TOOL_RELATE_ISSUES.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
+
+    /// Phase 0: the unrelate write soft-deletes the row and enqueues
+    /// one activity job plus one soft-delete sweep job per row.
+    #[tokio::test]
+    async fn phase0_unrelate_write_pins_soft_delete_activity_and_sweep_jobs() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let now = chrono::Utc::now();
+        let relation_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issue_relations (id, created_at, updated_at, relation_type, \
+             created_by_id, issue_id, project_id, related_issue_id, workspace_id) \
+             VALUES ($1, $2, $2, 'relates_to', $3, $4, $5, $6, $7)",
+        )
+        .bind(relation_id)
+        .bind(now)
+        .bind(seed.user_id)
+        .bind(seed.issue_id)
+        .bind(seed.project_id)
+        .bind(seed.target_id)
+        .bind(seed.workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed relation");
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let ctx = phase0_ctx(&pool);
+        let result = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_UNRELATE_ISSUES,
+            serde_json::json!({
+                "issue": seed.issue_id.to_string(),
+                "relation_type": "relates_to",
+                "related_issues": [seed.target_id.to_string()],
+            }),
+        )
+        .await
+        .expect("unrelate");
+        let target_ident = format!("{}-2", seed.project_identifier);
+        assert_eq!(result["removed"], serde_json::json!([target_ident]));
+        assert_eq!(result["not_related"], serde_json::json!([]));
+        assert_eq!(
+            result["relations"]["relates_to"],
+            serde_json::json!([]),
+            "grouped relations empty after unrelate: {result}"
+        );
+        let row = sqlx::query("SELECT deleted_at FROM issue_relations WHERE id = $1")
+            .bind(relation_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read relation");
+        assert!(
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+                .expect("deleted_at")
+                .is_some(),
+            "row is soft-deleted"
+        );
+        assert_eq!(
+            jobs_for_needle(&pool, seed.issue_id).await,
+            vec![(
+                ACTIVITY_TASK.to_owned(),
+                Some(RELATE_DELETED_ACTIVITY.to_owned())
+            )]
+        );
+        assert_eq!(
+            jobs_for_needle(&pool, relation_id).await,
+            vec![(SWEEP_TASK.to_owned(), None)]
+        );
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            vec![(
+                TOOL_UNRELATE_ISSUES.to_owned(),
+                "write".to_owned(),
+                "succeeded".to_owned(),
+            )]
+        );
+        cleanup_phase0(&pool, &seed, &[relation_id]).await;
+    }
+
+    /// Phase 0: an op failure after the audit opens rolls the
+    /// transaction back — no ledger row, no data — and a pre-audit
+    /// validation failure leaves no ledger row either.
+    #[tokio::test]
+    async fn phase0_op_failure_rolls_back_write_and_ledger() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        phase0_ensure_queue(&pool).await;
+        let seed = seed_phase0(&pool).await;
+        let ctx = phase0_ctx(&pool);
+        // Unknown-state transition: valid UUID outside the project →
+        // op error after the ledger insert.
+        let run_id = phase0_run(&pool, &seed, Some(seed.issue_id)).await;
+        let outcome = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_TRANSITION_CURRENT_ISSUE,
+            serde_json::json!({"state_id": Uuid::new_v4().to_string()}),
+        )
+        .await;
+        assert!(outcome.is_err(), "unknown state fails: {outcome:?}");
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            Vec::<(String, String, String)>::new(),
+            "op failure leaves no ledger row"
+        );
+        let state_id = sqlx::query("SELECT state_id FROM issues WHERE id = $1")
+            .bind(seed.issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read issue state")
+            .try_get::<Option<Uuid>, _>("state_id")
+            .expect("state id");
+        assert_eq!(state_id, Some(seed.state_backlog), "no write survives");
+        // Over-cap comment body: the pre-audit validator fails before
+        // the transaction (and the ledger) ever opens. Failures leave
+        // no ledger row, so reusing the run for a second failing
+        // call stays under the write budget with no single-use cost.
+        let body = "x".repeat(10_001);
+        let outcome = dispatch_tool(
+            &ctx,
+            run_id,
+            TOOL_ADD_CURRENT_ISSUE_COMMENT,
+            serde_json::json!({"body": body}),
+        )
+        .await;
+        assert!(outcome.is_err(), "over-cap body fails: {outcome:?}");
+        assert_eq!(
+            ledger_for_run(&pool, run_id).await,
+            Vec::<(String, String, String)>::new(),
+            "validation failure leaves no ledger row"
+        );
+        let comment_count =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM issue_comments WHERE issue_id = $1")
+                .bind(seed.issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count comments");
+        assert_eq!(comment_count, 0, "no comment written");
+        cleanup_phase0(&pool, &seed, &[]).await;
+    }
 }
