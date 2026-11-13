@@ -580,15 +580,12 @@ pub struct HooksPlan {
     pub scheduler: Option<SchedulerHookPlan>,
 }
 
-/// The capacity branch: cloud runs dispatch waiting work for the
-/// workspace; local runs drain runner and/or pod when set. Drains and
-/// dispatch run *before* the marker write, unisolated — a failure
-/// leaves the marker unset for the reconciler.
+/// The capacity branch: local runs drain runner and/or pod when set.
+/// Drains run *before* the marker write, unisolated — a failure
+/// leaves the marker unset for the reconciler. (P3 step C deleted
+/// the cloud dispatch arm.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapacityPlan {
-    Cloud {
-        workspace_id: Uuid,
-    },
     Local {
         runner_id: Option<Uuid>,
         pod_id: Option<Uuid>,
@@ -596,13 +593,10 @@ pub enum CapacityPlan {
 }
 
 impl CapacityPlan {
-    /// The capacity effects in order: dispatch, or runner drain then
-    /// pod drain (each when its id is set).
+    /// The capacity effects in order: runner drain then pod drain
+    /// (each when its id is set).
     pub fn effects(&self) -> Vec<LifecycleEffect> {
         match self {
-            CapacityPlan::Cloud { workspace_id } => vec![LifecycleEffect::DispatchWaiting {
-                workspace_id: *workspace_id,
-            }],
             CapacityPlan::Local { runner_id, pod_id } => {
                 let mut effects = Vec::new();
                 if let Some(runner_id) = runner_id {
@@ -734,15 +728,9 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         None
     } else {
         statements.push(EffectsSql::UpdateCapacityMarker);
-        Some(if inputs.executor_kind == AgentExecutorKind::CloudAgent {
-            CapacityPlan::Cloud {
-                workspace_id: inputs.workspace_id,
-            }
-        } else {
-            CapacityPlan::Local {
-                runner_id: inputs.runner_id,
-                pod_id: inputs.pod_id,
-            }
+        Some(CapacityPlan::Local {
+            runner_id: inputs.runner_id,
+            pod_id: inputs.pod_id,
         })
     };
 
@@ -1647,7 +1635,6 @@ mod tests {
         }
         if let Some(capacity) = &plan.capacity {
             match capacity {
-                CapacityPlan::Cloud { .. } => names.push("dispatch_waiting"),
                 CapacityPlan::Local { runner_id, pod_id } => {
                     if runner_id.is_some() {
                         names.push("drain_runner");
@@ -1869,39 +1856,6 @@ mod tests {
             Some(SchedulerHookPlan::Noop)
         ));
         assert!(!plan.statements.contains(&SchedulerUpdate));
-    }
-
-    #[test]
-    fn effects_cloud_dispatches_instead_of_draining() {
-        let fx = fixture();
-        let gold = effects_case(&fx, "cloud");
-        let mut inputs = effects_inputs(AgentRunStatus::Completed, &Value::Null);
-        inputs.executor_kind = AgentExecutorKind::CloudAgent;
-        inputs.runner_id = None;
-        inputs.pod_id = None;
-        let outcome = plan_terminal_effects(&inputs);
-        let TerminalEffectsOutcome::Applied(plan) = outcome else {
-            panic!("expected Applied");
-        };
-        assert!(matches!(plan.capacity, Some(CapacityPlan::Cloud { .. })));
-        assert_eq!(effect_names(&plan), ["orchestration", "dispatch_waiting"]);
-        assert_eq!(
-            gold.get("calls"),
-            Some(&json!(["orchestration", "dispatch_waiting"]))
-        );
-        let capacity = plan.capacity.expect("capacity");
-        assert_eq!(
-            capacity.effects(),
-            [LifecycleEffect::DispatchWaiting {
-                workspace_id: Uuid::nil()
-            }]
-        );
-        // Local drains degrade gracefully without ids.
-        let local = CapacityPlan::Local {
-            runner_id: None,
-            pod_id: None,
-        };
-        assert!(local.effects().is_empty());
     }
 
     #[test]
