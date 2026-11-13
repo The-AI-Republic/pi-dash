@@ -29384,6 +29384,15 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebNewDriver.WAIT_MS });
   }
+  async cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void> {
+    // No navigation wait: the no-assignee row carries no click action,
+    // so the scenario asserts the address stays on the list.
+    await this.cyclesHeroBreakdownCard()
+      .locator('[data-testid="hero-breakdown-entry"]')
+      .filter({ hasText: entryText })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
   async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/active-cycles`, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");

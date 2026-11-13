@@ -6325,6 +6325,8 @@ export interface ParityDriver {
   cyclesHeroTapProgressGroup(group: string): Promise<void>;
   /** Click the indexed breakdown entry; waits for the detail navigation. */
   cyclesHeroClickBreakdownEntry(index: number): Promise<void>;
+  /** Click the breakdown entry carrying the text without waiting for navigation. */
+  cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void>;
   /** Open the workspace-level active-cycles page; waits until it settles. */
   cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void>;
   /** Upsell banner heading, benefit-card count, and upgrade-link facts. */

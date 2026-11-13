@@ -187,7 +187,7 @@ describe("heroAssigneeEntries", () => {
     ]);
   });
 
-  it("blanks sparse server rows", () => {
+  it("names the unassigned bucket and keeps its counts", () => {
     const sparse = {
       assignees: [
         { assignee_id: null, display_name: null, avatar_url: null, total_issues: null, total_estimates: null },
@@ -195,9 +195,32 @@ describe("heroAssigneeEntries", () => {
       labels: [],
       completion_chart: {},
     };
-    const blank = [{ id: "", name: "", avatar: null, count: 0 }];
-    expect(heroAssigneeEntries(sparse, "issues")).toEqual(blank);
-    expect(heroAssigneeEntries(sparse, "points")).toEqual(blank);
+    const named = [{ id: null, name: "No assignee", avatar: null, count: 0 }];
+    expect(heroAssigneeEntries(sparse, "issues")).toEqual(named);
+    expect(heroAssigneeEntries(sparse, "points")).toEqual(named);
+  });
+
+  it("keeps id null and the count for a real unassigned row", () => {
+    const distribution = {
+      assignees: [{ assignee_id: null, display_name: null, avatar_url: null, total_issues: 3, total_estimates: 8 }],
+      labels: [],
+      completion_chart: {},
+    };
+    expect(heroAssigneeEntries(distribution, "issues")).toEqual([
+      { id: null, name: "No assignee", avatar: null, count: 3 },
+    ]);
+    expect(heroAssigneeEntries(distribution, "points")).toEqual([
+      { id: null, name: "No assignee", avatar: null, count: 8 },
+    ]);
+  });
+
+  it("keeps a blank name for an assigned row with a missing display name", () => {
+    const distribution = {
+      assignees: [{ assignee_id: "ada", display_name: null, avatar_url: null, total_issues: 1, total_estimates: 2 }],
+      labels: [],
+      completion_chart: {},
+    };
+    expect(heroAssigneeEntries(distribution, "issues")).toEqual([{ id: "ada", name: "", avatar: null, count: 1 }]);
   });
 });
 
@@ -213,15 +236,34 @@ describe("heroLabelEntries", () => {
     expect(heroLabelEntries(distribution, "points")).toEqual([{ id: "bug", name: "Bug", color: "#ff0000", count: 5 }]);
   });
 
-  it("blanks sparse server rows", () => {
+  it("names the unlabeled bucket and keeps its counts", () => {
     const sparse = {
       assignees: [],
       labels: [{ label_id: null, label_name: null, color: null, total_issues: null, total_estimates: null }],
       completion_chart: {},
     };
-    const blank = [{ id: "", name: "", color: null, count: 0 }];
-    expect(heroLabelEntries(sparse, "issues")).toEqual(blank);
-    expect(heroLabelEntries(sparse, "points")).toEqual(blank);
+    const named = [{ id: null, name: "No labels", color: null, count: 0 }];
+    expect(heroLabelEntries(sparse, "issues")).toEqual(named);
+    expect(heroLabelEntries(sparse, "points")).toEqual(named);
+  });
+
+  it("keeps id null and the count for a real unlabeled row", () => {
+    const distribution = {
+      assignees: [],
+      labels: [{ label_id: null, label_name: null, color: null, total_issues: 2, total_estimates: 5 }],
+      completion_chart: {},
+    };
+    expect(heroLabelEntries(distribution, "issues")).toEqual([{ id: null, name: "No labels", color: null, count: 2 }]);
+    expect(heroLabelEntries(distribution, "points")).toEqual([{ id: null, name: "No labels", color: null, count: 5 }]);
+  });
+
+  it("names a labeled row with a missing label name", () => {
+    const distribution = {
+      assignees: [],
+      labels: [{ label_id: "bug", label_name: null, color: null, total_issues: 1, total_estimates: 1 }],
+      completion_chart: {},
+    };
+    expect(heroLabelEntries(distribution, "issues")).toEqual([{ id: "bug", name: "No labels", color: null, count: 1 }]);
   });
 });
 
