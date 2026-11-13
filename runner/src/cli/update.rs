@@ -9,7 +9,7 @@
 //!
 //! `--check` reports whether an update is available without performing one.
 //!
-//! Before the swap, the new release's built-in engine is installed as a new
+//! Before the swap, the new release's Pi Dash Agent is installed as a new
 //! `engine/<version>/` directory beside the current one
 //! (`crate::pidash_agent::install`); the running daemon keeps the engine path it
 //! resolved at start, and older engine versions are left for the daemon to

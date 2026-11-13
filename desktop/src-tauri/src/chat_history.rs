@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
-//! Local, on-device storage for direct chats with the built-in agent engine.
+//! Local, on-device storage for direct chats with the Pi Dash Agent engine.
 //!
 //! A direct local chat never travels through the Pi Dash chat relay, and its
 //! transcript is never uploaded or synced. This module owns the on-disk record

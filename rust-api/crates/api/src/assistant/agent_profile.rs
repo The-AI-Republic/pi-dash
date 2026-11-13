@@ -328,7 +328,7 @@ async fn post_token(
             error_response(status, serde_json::json!({ "error": code }))
         }
         Err(CredentialError::WalletEmpty { detail }) => {
-            // The built-in engine's wallet classification maps onto this
+            // The Pi Dash Agent's wallet classification maps onto this
             // endpoint's transient arm, exactly as Django's
             // `_classify_credential_error` mapped a wallet failure onto
             // `gateway_unavailable` (503): the app keeps the current

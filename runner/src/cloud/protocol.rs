@@ -453,7 +453,7 @@ pub struct CreateRunnerCmd {
 pub struct MachinePollBody {
     /// Stream ids of the messages handled since the last poll.
     pub ack: Vec<String>,
-    /// The machine's built-in engine state (PIDESKAPP-121, design §8): the
+    /// The machine's Pi Dash Agent state (PIDESKAPP-121, design §8): the
     /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
     /// from daemons before the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]

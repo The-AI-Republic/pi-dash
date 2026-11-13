@@ -63,7 +63,7 @@ pub async fn install_missing(config: PidashAgentSection) {
             return;
         }
     };
-    tracing::info!(root = %root.display(), "installing the missing built-in engine");
+    tracing::info!(root = %root.display(), "installing the missing Pi Dash Agent");
     install_until_resolved(
         || {
             let root = root.clone();

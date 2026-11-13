@@ -1925,7 +1925,7 @@ async fn create_runner_inner(
         Err(response) => return response,
     };
     // `agent_kind` (CLI field; `agent` alias): `engine` asks for the
-    // built-in engine runner. Never read from the body as provisioning.
+    // Pi Dash Agent runner. Never read from the body as provisioning.
     // Python `or` chain: the first *truthy* leg wins, then `str()`
     // coercion (`enrollment.py:575`): `agent_kind=""` falls through to
     // `agent`, while a truthy non-string renders via `py_str`.

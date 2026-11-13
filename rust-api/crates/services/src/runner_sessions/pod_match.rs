@@ -9,7 +9,7 @@
 //! BUSY / paused runners still count; REVOKED runners (permanent)
 //! and `pinned_only` runners (never take unpinned work) never count.
 //!
-//! Built-in engines count only for their owner's work: runs the
+//! Pi Dash Agents count only for their owner's work: runs the
 //! owner starts, automatic runs (`human == false`) on the owner's
 //! issues, or any such run when the machine opted into teammates'
 //! runs (`engine_team_runs`). An offline or paused pod-member

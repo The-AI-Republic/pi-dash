@@ -8,7 +8,7 @@
 //! talks to the bundled engine through the Tauri host and the daemon's IPC
 //! socket, and never through the Pi Dash cloud chat relay. It builds directly on
 //! the slice-1a wire protocol (`pidash_ipc::protocol::Chat*`) and the slice-1b
-//! daemon handler (`runner/src/ipc/chat.rs`), which drives the built-in engine
+//! daemon handler (`runner/src/ipc/chat.rs`), which drives the Pi Dash Agent
 //! and streams `Response::Chat*` frames back on the same connection.
 //!
 //! Two directions, matching the transport contract the `desktop-overlay/` seam

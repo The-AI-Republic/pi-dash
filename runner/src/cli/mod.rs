@@ -127,7 +127,7 @@ pub enum Command {
     /// also restart so the new code takes effect immediately.
     Update(update::Args),
 
-    /// The built-in agent engine shipped with this release (`engine install`
+    /// The Pi Dash Agent engine shipped with this release (`engine install`
     /// / `path` / `status` / `pause` / `resume`). Installed next to pidash,
     /// never on PATH.
     Engine(pidash_agent_cmd::PidashAgentArgs),

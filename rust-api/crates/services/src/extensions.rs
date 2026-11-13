@@ -46,7 +46,7 @@ pub type SeamFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub mod reason {
     /// The viewer has no usable LLM configuration at all.
     pub const LLM_CONFIG_MISSING: &str = "llm_config_missing";
-    /// The viewer's provider is BYOK, which the desktop engine does not serve.
+    /// The viewer's provider is BYOK, which the Pi Dash Agent does not serve.
     pub const BYOK_UNSUPPORTED: &str = "byok_not_supported_on_desktop";
 }
 
@@ -81,7 +81,7 @@ pub struct CredentialUnavailable {
 /// `ManagedRunnerUnavailable` arm (the client should have consulted the
 /// profile first); `Classified` is the `_classify_credential_error` arm —
 /// the cloud seam's pre-classified gateway outcome. CE only ever produces
-/// `Unavailable`. `WalletEmpty` is the built-in engine's model-token
+/// `Unavailable`. `WalletEmpty` is the Pi Dash Agent's model-token
 /// classification (§8, `runner/views/engine.py:_classify_gateway_error`):
 /// the gateway's wallet ran out, so the engine pauses with
 /// `wallet_empty` (402). The legacy agent-token endpoint renders it as
@@ -176,7 +176,7 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
     }
 
 
-    /// Describe the model endpoint the desktop engine may call. CE has
+    /// Describe the model endpoint the Pi Dash Agent may call. CE has
     /// exactly one lane, BYOK, which the desktop does not serve — so this
     /// is always unavailable; only the reason differs.
     fn pidash_agent_profile(
@@ -198,7 +198,7 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
         })
     }
 
-    /// Hand out the desktop engine's model credential for one user. CE has
+    /// Hand out the Pi Dash Agent's model credential for one user. CE has
     /// no lane the desktop can use, so there is nothing to hand out —
     /// always [`CredentialError::Unavailable`]. The overlay mints the
     /// user's own short-lived gateway credential here, answering

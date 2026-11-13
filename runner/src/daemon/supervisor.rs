@@ -157,7 +157,7 @@ impl Supervisor {
         // Shared context for bringing a runner's tasks up — used by the
         // startup loop below and by the machine control session's
         // cloud-driven `create_runner` hot-add path.
-        // The machine's built-in engine (design §4.3): credential, profile,
+        // The machine's Pi Dash Agent (design §4.3): credential, profile,
         // in-memory model token and machine-level state.
         let engine = crate::pidash_agent::manager::PidashAgentManager::new(
             transport.as_ref().map(|t| t.cloud_url()),
@@ -396,7 +396,7 @@ async fn build_runner_instance(
 /// All fields are cheap clones of the supervisor's shared state.
 #[derive(Clone)]
 pub(crate) struct RunnerSpawnCtx {
-    /// The machine's built-in engine (PIDESKAPP-121).
+    /// The machine's Pi Dash Agent (PIDESKAPP-121).
     pub(crate) engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
     /// The machine-level engine profile local chat runs on (design §12.1).
     pub(crate) local_chat: Arc<crate::ipc::pidash_agent_chat::PidashAgentChatProfile>,
@@ -1786,7 +1786,7 @@ struct RunnerLoop {
     /// assign lane consults it so a managed run and a local chat never modify
     /// the same working copy at the same time (issue AC6).
     local_chat_active: Arc<std::sync::atomic::AtomicBool>,
-    /// The machine's built-in engine, for the current profile lane the
+    /// The machine's Pi Dash Agent, for the current profile lane the
     /// free-quota classifier is tied to. Threaded into each `AssignWorker`.
     engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
 }
@@ -3735,7 +3735,7 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
-    /// The machine's built-in engine, for the current profile lane the
+    /// The machine's Pi Dash Agent, for the current profile lane the
     /// free-quota classifier is tied to. Read live per event, so a profile
     /// refresh mid-run still gates correctly.
     engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,

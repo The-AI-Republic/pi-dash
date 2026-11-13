@@ -1,4 +1,4 @@
-//! The machine's built-in engine, as the daemon holds it (design §4.3).
+//! The machine's Pi Dash Agent, as the daemon holds it (design §4.3).
 //!
 //! - **Engine credential** (`ec_`, 14 days): read from `config.toml` /
 //!   the keychain through the daemon's [`WorkspaceTokens`] store, so a

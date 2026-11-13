@@ -37,7 +37,7 @@ pub enum SetCommand {
         /// Project identifier or UUID.
         project: String,
     },
-    /// Set the folder new built-in engine runners work under
+    /// Set the folder new Pi Dash Agent runners work under
     /// (`[engine] task_root`). Each project gets
     /// `<root>/<workspace>/<project>/`. Projects already set up keep their
     /// folder; nothing is moved. `default` returns to the default root.

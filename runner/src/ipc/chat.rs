@@ -1,7 +1,7 @@
 //! Daemon-side handler for the local-chat IPC surface (PDASHOSS01-159,
 //! slice 1b).
 //!
-//! The desktop host drives the built-in agent engine *directly* over the
+//! The desktop host drives the Pi Dash Agent engine *directly* over the
 //! daemon's local IPC socket rather than relaying chat through the Pi Dash
 //! cloud. This module is the runner-side of that surface: it services the
 //! `Chat{Warm,Send,Cancel,Close,Decide}` requests added to `pidash-ipc` in

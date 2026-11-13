@@ -94,7 +94,7 @@ pub struct LlmProfile {
     pub reason_code: String,
 }
 
-/// `(available, reason_code)` for the managed runner on one project
+/// `(available, reason_code)` for the Pi Dash Agent on one project
 /// (`pidash_agent_availability`, `managed_runner/policy.py:76-96`).
 ///
 /// Gates in fixed order, first failure wins (`:79-81`): instance switch →

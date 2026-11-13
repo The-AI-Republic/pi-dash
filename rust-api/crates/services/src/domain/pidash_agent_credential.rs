@@ -1,4 +1,4 @@
-//! Engine credentials: the built-in engine's per-machine `ec_` credential
+//! Engine credentials: the Pi Dash Agent's per-machine `ec_` credential
 //! (Django `runner/services/engine_credentials.py`, built_engine_as_runner
 //! §4.3; port of #2910/#2912).
 //!

@@ -327,7 +327,7 @@ impl IpcServer {
                 self.remove_local(&runner).await?;
                 Ok(Response::Ack)
             }
-            // ---- Built-in engine (IPC v6, PIDESKAPP-121) ----------------
+            // ---- Pi Dash Agent (IPC v6, PIDESKAPP-121) ----------------
             Request::EngineModelToken => match self.spawn_ctx.engine.model_token().await {
                 Ok(t) => Ok(Response::EngineModelToken {
                     token: t.token,
@@ -358,7 +358,7 @@ impl IpcServer {
             Request::EngineRunnerRemove { runner } => {
                 // Revoke in the cloud first, preserving the runner's row
                 // and history, then remove its local block. The task
-                // folder is kept (built-in engine design §11).
+                // folder is kept (Pi Dash Agent design §11).
                 let (runner_id, token) = self.spawn_ctx.engine_runner_for_removal(&runner)?;
                 crate::cloud::runners::revoke_runner(
                     &self.spawn_ctx.cloud_url(),

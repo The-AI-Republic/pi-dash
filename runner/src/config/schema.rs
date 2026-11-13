@@ -20,7 +20,7 @@ pub struct Config {
     /// missing means "fall back to environment variables".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliSection>,
-    /// `[engine]`: the built-in agent engine. Empty (and not written) unless
+    /// `[engine]`: the Pi Dash Agent engine. Empty (and not written) unless
     /// a developer overrides the engine binary.
     #[serde(default, skip_serializing_if = "PidashAgentSection::is_default")]
     pub engine: PidashAgentSection,

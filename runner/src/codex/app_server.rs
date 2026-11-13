@@ -48,7 +48,7 @@ impl AppServer {
 
     /// Spawn `codex app-server` with a Pi Dash-controlled environment.
     ///
-    /// The managed runner uses this to point the engine at its own
+    /// The Pi Dash Agent uses this to point the engine at its own
     /// `CODEX_HOME`, put the bundled `pidash` CLI on the agent's `PATH`, and
     /// supply the model credential from a file read fresh on every spawn. An
     /// empty [`AgentEnv`] is exactly the historical behaviour.
