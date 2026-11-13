@@ -497,14 +497,18 @@ pub fn releasable_overbudget_pin_ids_stmt(
     owner_id: Uuid,
     cutoff: DateTime<Utc>,
     threshold: DateTime<Utc>,
-    is_engine: bool,
-    team_runs: bool,
+    facts: &DispatchFacts,
 ) -> Option<SelectStatement> {
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
         return None;
     }
-    let usability =
-        runs_usable_by_runner_predicate(visibility, owner_id, "agent_run", is_engine, team_runs)?;
+    let usability = runs_usable_by_runner_predicate(
+        visibility,
+        owner_id,
+        "agent_run",
+        facts.is_engine,
+        facts.team_runs,
+    )?;
     let mut query = Query::select().to_owned();
     query.column((Alias::new("agent_run"), "id"));
     query.from(Alias::new("agent_run"));
@@ -597,7 +601,7 @@ pub fn next_for_runner_stmt_with_releasable(
         let local = AgentExecutorKind::LocalRunner.value();
         let releasable_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(local))
-            .add(col("agent_run", "id").is_in(releasable.iter().map(|id| *id)));
+            .add(col("agent_run", "id").is_in(releasable.iter().copied()));
         eligible = Condition::any().add(eligible).add(releasable_arm);
     }
     query

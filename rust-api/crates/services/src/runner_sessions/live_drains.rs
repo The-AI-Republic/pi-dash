@@ -211,6 +211,9 @@ pub enum DrainError {
 /// should take, breaking an over-budget pin when that is the run that
 /// wins. Every drain executor claims through this one function, so the
 /// pin wait budget cannot drift between them.
+/// All eight arguments are genuinely distinct inputs; there is no
+/// natural bundle, so the arg-count lint is allowed here.
+#[allow(clippy::too_many_arguments)]
 pub async fn claim_next_assignable<C: ConnectionTrait>(
     db: &C,
     pod_id: Uuid,
@@ -253,14 +256,7 @@ pub async fn claim_next_assignable<C: ConnectionTrait>(
                 let cutoff = now - chrono::Duration::seconds(budget_secs);
                 let threshold = alive_threshold(now);
                 if let Some(stmt) = drain_kernel::releasable_overbudget_pin_ids_stmt(
-                    visibility,
-                    pod_id,
-                    runner_id,
-                    owner_id,
-                    cutoff,
-                    threshold,
-                    facts.is_engine,
-                    facts.team_runs,
+                    visibility, pod_id, runner_id, owner_id, cutoff, threshold, facts,
                 ) {
                     let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
                     for row in rows {
