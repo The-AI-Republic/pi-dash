@@ -1934,6 +1934,7 @@ type ProjectCols = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
     Option<i32>,
     Option<i32>,
     Option<i32>,
@@ -2072,6 +2073,7 @@ async fn load_issue_context(
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        project_context: project.context.clone(),
         repo,
         code_reviews: context::code_reviews_context(&reviews),
         parent,
@@ -2126,6 +2128,7 @@ struct ProjectRow {
     identifier: String,
     name: String,
     description: Option<String>,
+    context: Option<String>,
     repo_url: Option<String>,
     base_branch: Option<String>,
     pool: i64,
@@ -2151,6 +2154,7 @@ async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Pr
         } else {
             Some(m.description)
         },
+        context: m.context.clone(),
         repo_url: if m.repo_url.is_empty() {
             None
         } else {
@@ -3047,18 +3051,20 @@ async fn load_scheduler_context(
     else {
         return Err(Denial::ServerError);
     };
-    let (project_id_str, project_identifier, project_name, project_description) = match project_id {
-        Some(pid) => {
-            let project = load_project(pool, &pid).await?;
-            (
-                project.id,
-                project.identifier,
-                project.name,
-                project.description,
-            )
-        }
-        None => (String::new(), String::new(), String::new(), None),
-    };
+    let (project_id_str, project_identifier, project_name, project_description, project_context) =
+        match project_id {
+            Some(pid) => {
+                let project = load_project(pool, &pid).await?;
+                (
+                    project.id,
+                    project.identifier,
+                    project.name,
+                    project.description,
+                    project.context,
+                )
+            }
+            None => (String::new(), String::new(), String::new(), None, None),
+        };
     let outcome_directive =
         context::outcome_mode_directive(outcome_mode.as_deref().unwrap_or("")).to_owned();
     let input = context::SchedulerContextInput {
@@ -3072,6 +3078,7 @@ async fn load_scheduler_context(
         project_identifier,
         project_name,
         project_description,
+        project_context,
         scheduler_slug,
         scheduler_name,
         scheduler_description,

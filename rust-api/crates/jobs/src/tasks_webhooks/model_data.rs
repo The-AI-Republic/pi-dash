@@ -365,6 +365,7 @@ pub struct ProjectRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub name: String,
     pub description: String,
+    pub context: Option<String>,
     pub description_text: Option<Value>,
     pub description_html: Option<Value>,
     pub network: i32,
@@ -421,6 +422,7 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
         deleted_at: m.deleted_at.map(|t| t.with_timezone(&Utc)),
         name: m.name,
         description: m.description,
+        context: m.context.clone(),
         description_text: m.description_text,
         description_html: m.description_html,
         // `network` is `PositiveSmallIntegerField` (INT2); the entity types
@@ -468,7 +470,7 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
 /// (`cover_image_url`; the annotation siblings skip per QUIRK-ND-2), then
 /// every model field in model order.
 pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<String, Value> {
-    let mut out = Map::with_capacity(47);
+    let mut out = Map::with_capacity(48);
     out.insert("id".to_owned(), uuid_value(&row.id));
     out.insert(
         "cover_image_url".to_owned(),
@@ -487,6 +489,13 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
     out.insert(
         "description".to_owned(),
         Value::String(row.description.clone()),
+    );
+    out.insert(
+        "context".to_owned(),
+        row.context
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
     );
     out.insert(
         "description_text".to_owned(),
@@ -1872,6 +1881,7 @@ mod tests {
             deleted_at: dt_opt(&g["deleted_at"]),
             name: g["name"].as_str().unwrap().to_owned(),
             description: g["description"].as_str().unwrap().to_owned(),
+            context: str_opt(&g["context"]),
             description_text: json_opt(&g["description_text"]),
             description_html: json_opt(&g["description_html"]),
             network: g["network"].as_i64().unwrap() as i32,

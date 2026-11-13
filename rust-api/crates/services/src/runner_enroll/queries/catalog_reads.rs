@@ -337,10 +337,10 @@ pub async fn workspace_pods(
 /// J1 — workspace project query (`projects.py:74-76`).
 ///
 /// `Project.objects.filter(workspace_id).order_by("identifier")`:
-/// `SoftDeletionManager` scope, identifier order, no limit; only the five
+/// `SoftDeletionManager` scope, identifier order, no limit; only the six
 /// columns the serializer reads are selected. Each row becomes `{id: str,
-/// identifier, name, description, is_default, default_pod_id, pod_count,
-/// pods}` (handlers-owned).
+/// identifier, name, description, context, is_default, default_pod_id,
+/// pod_count, pods}` (handlers-owned).
 pub fn workspace_projects_query(workspace_id: Uuid) -> Select<projects::Entity> {
     projects::Entity::find()
         .select_only()
@@ -348,6 +348,7 @@ pub fn workspace_projects_query(workspace_id: Uuid) -> Select<projects::Entity> 
             projects::Column::Id,
             projects::Column::Name,
             projects::Column::Description,
+            projects::Column::Context,
             projects::Column::Identifier,
             projects::Column::IsDefault,
         ])
@@ -362,6 +363,7 @@ pub struct ProjectSummary {
     pub id: Uuid,
     pub name: String,
     pub description: String,
+    pub context: Option<String>,
     pub identifier: String,
     pub is_default: bool,
 }
@@ -1016,9 +1018,9 @@ mod tests {
                 "id"
             ]
         );
-        assert_eq!(project_cols::COLUMNS.len(), 46);
-        assert_eq!(project_cols::COLUMNS[12], "identifier");
-        assert_eq!(project_cols::COLUMNS[45], "default_agent_executor");
+        assert_eq!(project_cols::COLUMNS.len(), 47);
+        assert_eq!(project_cols::COLUMNS[13], "identifier");
+        assert_eq!(project_cols::COLUMNS[46], "default_agent_executor");
         assert_eq!(project_cols::TABLE, "projects");
         // Own cross-domain table pins.
         assert_eq!(AGENT_RUN_TABLE, "agent_run");

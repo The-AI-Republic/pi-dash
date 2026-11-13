@@ -801,6 +801,7 @@ fn twin_map_project(row: &QueryResult) -> Result<ProjectView, CreationError> {
         identifier: get(row, "identifier")?,
         name: get(row, "name")?,
         description: get(row, "description")?,
+        context: get(row, "context")?,
         repo_url: get(row, "repo_url")?,
         base_branch: get(row, "base_branch")?,
         default_agent_executor: get(row, "default_agent_executor")?,

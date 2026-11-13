@@ -30,6 +30,13 @@ def test_daemon_projects_shape_via_api_key(settings, daemon_world):
     assert project["id"] == daemon_world["project"]["id"]
     assert project["identifier"] == daemon_world["project"]["identifier"]
     assert project["name"]
+    # PDASHOSS01-294: agent context ships next to the description; key order
+    # is the wire contract older runner builds rely on.
+    assert list(project) == [
+        "id", "identifier", "name", "description", "context", "is_default",
+        "default_pod_id", "pod_count", "pods",
+    ]
+    assert project["context"] == ""
     assert project["default_pod_id"] == daemon_world["pod"]["id"]
     assert project["pod_count"] == 1
     assert project["pods"] == [

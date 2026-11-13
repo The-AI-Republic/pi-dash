@@ -323,6 +323,7 @@
         "id": "UUIDField",
         "name": "CharField",
         "description": "TextField",
+        "context": "TextField",
         "description_text": "JSONField",
         "description_html": "JSONField",
         "network": "PositiveSmallIntegerField",

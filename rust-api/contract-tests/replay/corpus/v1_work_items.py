@@ -60,7 +60,7 @@ def _seed_move_target(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO projects (id, name, description, network, identifier,
+            INSERT INTO projects (id, name, description, context, network, identifier,
                 workspace_id, created_by_id, cycle_view, module_view,
                 issue_views_view, page_view, intake_view, archive_in, close_in,
                 logo_props, is_time_tracking_enabled, is_issue_type_enabled,
@@ -70,7 +70,7 @@ def _seed_move_target(conn) -> None:
                 agent_review_default_interval_seconds, default_agent_executor,
                 dedicated_runner_lost_action,
                 agent_test_default_interval_seconds, created_at, updated_at)
-            VALUES (%s, 'Replay Move Target', '', 0, 'RPJMOVE',
+            VALUES (%s, 'Replay Move Target', '', '', 0, 'RPJMOVE',
                 %s, %s, true, true,
                 true, true, false, 0, 0,
                 '{}', true, true,

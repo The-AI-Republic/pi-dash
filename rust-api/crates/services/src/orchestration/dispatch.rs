@@ -2180,6 +2180,7 @@ mod tests {
             identifier: "FX8".to_owned(),
             name: "FX8".to_owned(),
             description: None,
+            context: None,
             repo_url: None,
             base_branch: None,
             default_agent_executor: "local_runner".to_owned(),

@@ -401,7 +401,7 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """insert into projects
-                       (created_at, updated_at, id, name, description, network,
+                       (created_at, updated_at, id, name, description, context, network,
                         identifier, workspace_id, cycle_view, module_view,
                         issue_views_view, page_view, intake_view, archive_in,
                         close_in, logo_props, is_time_tracking_enabled,
@@ -413,7 +413,7 @@ class Database:
                         default_agent_executor,
                         dedicated_runner_lost_action,
                         agent_test_default_interval_seconds)
-                       values (%s,%s,%s,%s,'',0,%s,%s,true,true,true,true,true,
+                       values (%s,%s,%s,%s,'','',0,%s,%s,true,true,true,true,true,
                                365,365,'{}',true,false,false,'UTC',true,'','',
                                10800,10,true,false,10800,'local_runner','fail_to_backlog',10800)""",
                     (now, now, pid, name or f"proj-{identifier}",
@@ -722,7 +722,7 @@ def _insert(conn):
             cur.execute(
                 """
                 INSERT INTO projects (
-                    id, created_at, updated_at, name, description, network,
+                    id, created_at, updated_at, name, description, context, network,
                     identifier, workspace_id, cycle_view, module_view,
                     issue_views_view, page_view, intake_view,
                     archive_in, close_in, logo_props,
@@ -736,7 +736,7 @@ def _insert(conn):
                     dedicated_runner_lost_action,
                     agent_test_default_interval_seconds
                 ) VALUES (
-                    %s, now(), now(), %s, '', 0,
+                    %s, now(), now(), %s, '', '', 0,
                     %s, %s, true, true,
                     true, true, true,
                     0, 0, '{}',
@@ -1087,7 +1087,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO projects (id, name, description, network, identifier,
+            INSERT INTO projects (id, name, description, context, network, identifier,
                 workspace_id, created_by_id, cycle_view, module_view,
                 issue_views_view, page_view, intake_view, archive_in, close_in,
                 logo_props, is_time_tracking_enabled, is_issue_type_enabled,
@@ -1096,7 +1096,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
                 agent_default_max_ticks, agent_ticking_enabled, is_default, dedicated_runner_lost_action,
                 agent_review_default_interval_seconds, default_agent_executor,
                 agent_test_default_interval_seconds, created_at, updated_at)
-            VALUES (%s, %s, '', %s, %s,
+            VALUES (%s, %s, '', '', %s, %s,
                 %s, %s, true, true,
                 true, true, false, 0, 0,
                 '{}', true, true,

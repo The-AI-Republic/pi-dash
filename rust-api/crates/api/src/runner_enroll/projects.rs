@@ -162,6 +162,7 @@ struct ProjectRow {
     identifier: String,
     name: String,
     description: Option<String>,
+    context: Option<String>,
     is_default: bool,
     default_pod_id: Option<String>,
     pod_count: usize,
@@ -215,16 +216,19 @@ async fn serialize_projects(
             id,
             name,
             description,
+            context,
             identifier,
             is_default,
         } = project;
         let description = Some(description);
+        let context = Some(context.unwrap_or_default());
         let (pods, default_pod_id) = groups.get(&id).cloned().unwrap_or_default();
         out.push(ProjectRow {
             id: id.to_string(),
             identifier,
             name,
             description,
+            context,
             is_default,
             default_pod_id: default_pod_id.map(|pod| pod.to_string()),
             pod_count: pods.len(),
@@ -407,7 +411,8 @@ mod tests {
     }
 
     /// The project row keeps the source key order, with `null` for a
-    /// missing default pod.
+    /// missing default pod, and `context` right after `description`
+    /// (PDASHOSS01-294).
     #[test]
     fn project_row_key_order() {
         let row = ProjectRow {
@@ -415,6 +420,7 @@ mod tests {
             identifier: "WEB".to_owned(),
             name: "Web".to_owned(),
             description: Some("desc".to_owned()),
+            context: Some("Never push to main.".to_owned()),
             is_default: true,
             default_pod_id: None,
             pod_count: 0,
@@ -422,7 +428,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&row).expect("json"),
-            "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"identifier\":\"WEB\",\"name\":\"Web\",\"description\":\"desc\",\"is_default\":true,\"default_pod_id\":null,\"pod_count\":0,\"pods\":[]}"
+            "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"identifier\":\"WEB\",\"name\":\"Web\",\"description\":\"desc\",\"context\":\"Never push to main.\",\"is_default\":true,\"default_pod_id\":null,\"pod_count\":0,\"pods\":[]}"
         );
         let pod = PodEntry {
             id: "00000000-0000-0000-0000-000000000002".to_owned(),
@@ -444,6 +450,7 @@ mod tests {
             identifier: "W".to_owned(),
             name: "n".to_owned(),
             description: None,
+            context: Some(String::new()),
             is_default: false,
             default_pod_id: Some("p".to_owned()),
             pod_count: 1,

@@ -489,8 +489,8 @@ fn direct_workspace_select(
 }
 
 /// One free-form cloud-context project row: `(id, identifier, name,
-/// description)`.
-type ContextProjectRow = (Uuid, String, String, Option<String>);
+/// description, context)`.
+type ContextProjectRow = (Uuid, String, String, Option<String>, Option<String>);
 
 /// The free-form cloud-context project row (`composer.py:476`).
 fn direct_context_project_select(
@@ -504,6 +504,7 @@ fn direct_context_project_select(
             Column::Identifier,
             Column::Name,
             Column::Description,
+            Column::Context,
         ])
         .filter(Column::Id.eq(project_id))
         .limit(1)
@@ -1214,6 +1215,7 @@ async fn render_cloud_issue_prompt<'a>(
         target_date_iso: issue
             .target_date
             .map(|date| date.format("%Y-%m-%d").to_string()),
+        project_context: project.context.clone(),
         project_states: bundle.project_states.clone(),
         workspace_slug: bundle.workspace_slug.clone(),
         workspace_name: bundle.workspace_name.clone(),
@@ -1308,7 +1310,9 @@ async fn render_cloud_free_prompt(
         .one(&db)
         .await
         .map_err(|_| server_error())?;
-    let Some((project_id, project_identifier, project_name, project_description)) = project else {
+    let Some((project_id, project_identifier, project_name, project_description, project_context)) =
+        project
+    else {
         return Err(server_error());
     };
     let extra_toolsets_enabled = tool_plan
@@ -1330,6 +1334,7 @@ async fn render_cloud_free_prompt(
         project_identifier,
         project_name,
         project_description,
+        project_context: project_context.clone(),
         trigger: Some(TRIGGER_DIRECT.to_owned()),
         available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
         unavailable_capabilities: tool_plan

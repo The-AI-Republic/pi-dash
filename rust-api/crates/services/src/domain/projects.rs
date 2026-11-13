@@ -99,6 +99,7 @@ fn workspace_id_by_slug(slug: &str) -> SelectStatement {
 pub struct NewProject<'a> {
     pub name: &'a str,
     pub description: &'a str,
+    pub context: &'a str,
     pub description_text: Option<&'a serde_json::Value>,
     pub description_html: Option<&'a serde_json::Value>,
     /// `PositiveSmallIntegerField` with choices `0`/`2`; the callers'
@@ -180,6 +181,7 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         deleted_at: Set(None),
         name: Set(p.name.to_owned()),
         description: Set(p.description.to_owned()),
+        context: Set(Some(p.context.to_owned())),
         description_text: Set(p.description_text.cloned()),
         description_html: Set(p.description_html.cloned()),
         network: Set(p.network),
@@ -518,6 +520,7 @@ pub async fn clear_other_defaults(
 pub struct ProjectUpdate<'a> {
     pub name: &'a str,
     pub description: &'a str,
+    pub context: &'a str,
     pub description_text: Option<&'a Value>,
     pub description_html: Option<&'a Value>,
     /// Choices `0`/`2` (see [`NewProject::network`]).
@@ -570,6 +573,7 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
     projects::Entity::update_many()
         .col_expr(C::Name, Expr::value(upd.name))
         .col_expr(C::Description, Expr::value(upd.description))
+        .col_expr(C::Context, Expr::value(upd.context))
         .col_expr(
             C::DescriptionText,
             Expr::value(upd.description_text.cloned()),
@@ -846,6 +850,7 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         deleted_at: Set(None),
         name: Set(p.name.to_owned()),
         description: Set(p.description.to_owned()),
+        context: Set(Some(String::new())),
         description_text: Set(None),
         description_html: Set(None),
         network: Set(p.network),
@@ -947,6 +952,7 @@ fn demo_project_row(id: Uuid, p: &DemoProject<'_>) -> projects::ActiveModel {
         created_at: Set(p.now.into()),
         updated_at: Set(p.now.into()),
         description: Set(String::new()),
+        context: Set(Some(String::new())),
         network: Set(2),
         cycle_view: Set(false),
         module_view: Set(false),
@@ -2702,6 +2708,7 @@ mod tests {
             "\"updated_by_id\"",
             "\"deleted_at\"",
             "\"network\"",
+            "\"context\"",
             "\"default_agent_executor\"",
             "\"members_can_edit_states\"",
             "\"agent_test_default_interval_seconds\"",
@@ -2711,8 +2718,8 @@ mod tests {
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 46,
-            "47 columns, 47 values"
+            2 * 47,
+            "48 columns, 48 values"
         );
     }
 
@@ -2780,6 +2787,7 @@ mod tests {
         let upd = ProjectUpdate {
             name: "Renamed",
             description: "d",
+            context: "ctx",
             description_text: None,
             description_html: None,
             network: 2,
@@ -2827,9 +2835,10 @@ mod tests {
         let update = sql(&project_update_stmt(id, &upd));
         assert_eq!(
             update.matches(" = ").count(),
-            45 + 1,
-            "45 setters plus the id filter"
+            46 + 1,
+            "46 setters plus the id filter"
         );
+        assert!(update.contains("\"context\" = 'ctx'"));
         assert!(update.contains(&format!("\"created_by_id\" = '{actor}'")));
         assert!(update.contains("\"deleted_at\" = NULL"));
         assert!(update.ends_with(&format!("WHERE \"projects\".\"id\" = '{id}'")));
@@ -3299,6 +3308,7 @@ mod tests {
         NewProject {
             name: "Website",
             description: "",
+            context: "",
             description_text: None,
             description_html: None,
             network: 2,
@@ -3431,6 +3441,7 @@ mod tests {
         let upd = ProjectUpdate {
             name: "Renamed",
             description: "d",
+            context: "ctx",
             description_text: None,
             description_html: None,
             network: 2,

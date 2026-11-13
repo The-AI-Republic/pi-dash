@@ -277,6 +277,7 @@ pub const PROJECT_COLUMNS: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -532,7 +533,7 @@ mod tests {
     #[test]
     fn project_get_selects_full_project_row() {
         let sql = project_get_sql();
-        assert_eq!(PROJECT_COLUMNS.len(), 46);
+        assert_eq!(PROJECT_COLUMNS.len(), 47);
         assert!(sql.contains("\"projects\".\"members_can_edit_states\""));
         assert!(sql.ends_with(
             "FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1)"
