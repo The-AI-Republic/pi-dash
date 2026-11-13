@@ -156,6 +156,7 @@ pub mod git_code_review_links;
 pub mod git_comment_syncs;
 pub mod git_issue_syncs;
 pub mod git_provider_accounts;
+pub mod git_provider_install_sessions;
 pub mod git_repositories;
 pub mod git_repository_bindings;
 pub mod git_webhook_deliveries;

@@ -88,8 +88,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    deploy_boards, file_assets, git_issue_syncs, github_issue_syncs, intake_issues, issues,
-    projects, states, workspaces,
+    deploy_boards, file_assets, git_issue_syncs, intake_issues, issues, projects, states,
+    workspaces,
 };
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
@@ -1719,7 +1719,7 @@ fn render_issue_snapshot(
 
 /// Whether the issue is git-synced (`app/serializers/issue.py:63-76`):
 /// empty `external_source` short-circuits before any query; otherwise a
-/// `GitIssueSync`/`GithubIssueSync` row decides.
+/// `GitIssueSync` row decides (git-only after PDASHOSS01-354).
 async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1735,17 +1735,7 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
         .one(&db)
         .await
         .map_err(pidash_db::orm_tx::into_sqlx)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = github_issue_syncs::Entity::find()
-        .filter(github_issue_syncs::Column::DeletedAt.is_null())
-        .filter(github_issue_syncs::Column::IssueId.eq(issue.id))
-        .limit(1)
-        .one(&db)
-        .await
-        .map_err(pidash_db::orm_tx::into_sqlx)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// `get_is_epic` (`app/serializers/issue.py:1109-1112`): false when the
