@@ -149,9 +149,12 @@ jobs:
         working-directory: rust-api/contract-tests
         # Same plugin dodge as the Django oracle job: the API install puts
         # pytest-django in this interpreter; the replay never touches Django.
+        # P3 step B: the retired dispatch-rust workflow was deleted; its
+        # surviving suites (beat pin, wire pin, turns' credential
+        # isolation) run here against the same Rust worker.
         env:
           PIDASH_CONTRACT_BACKEND: rust
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django dispatch/test_expire_waiting_runs.py -v
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django dispatch/test_expire_waiting_runs.py dispatch/test_beat_schedule.py dispatch/test_celery_wire.py assistant/test_turn_isolation.py -v
 
       - name: Upload worker log on failure
         if: failure()
