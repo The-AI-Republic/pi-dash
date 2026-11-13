@@ -290,8 +290,13 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("LOOP_PR_LOOKUPS_PER_RUN", V::from(15)),
         // Storage / S3 / MinIO.
         ("USE_MINIO", V::from(0)),
-        ("AWS_ACCESS_KEY_ID", V::from("access-key")),
-        ("AWS_SECRET_ACCESS_KEY", V::from("secret-key")),
+        // Placeholders are local-MinIO only (USE_MINIO=1); in prod the
+        // empty default signals "no static keys — resolve from the
+        // EC2 instance role" (NEWPIDASH-204). The StorageSettings
+        // builder re-applies the placeholders when USE_MINIO=1.
+        ("AWS_ACCESS_KEY_ID", V::from("")),
+        ("AWS_SECRET_ACCESS_KEY", V::from("")),
+        ("AWS_SESSION_TOKEN", V::from("")),
         ("AWS_S3_BUCKET_NAME", V::from("uploads")),
         ("AWS_REGION", V::from("")),
         ("AWS_S3_ENDPOINT_URL", V::Null),

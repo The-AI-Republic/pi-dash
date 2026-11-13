@@ -189,6 +189,12 @@ pub struct StorageSettings {
     pub minio_endpoint_ssl: bool,
     pub access_key_id: String,
     pub secret_access_key: String,
+    /// `AWS_SESSION_TOKEN` for static temporary keys (e.g. STS, instance role
+    /// static copy). Empty for long-lived keys. For instance-role credentials
+    /// the per-request value comes from the credential provider, not this
+    /// boot-time copy; this field keeps the env-provided value for the
+    /// static-key path.
+    pub session_token: String,
     pub bucket_name: String,
     pub region: String,
     pub endpoint_url: Option<String>,
@@ -1063,17 +1069,33 @@ impl Settings {
                 pr_lookups_per_run: ctx
                     .req_int("LOOP_PR_LOOKUPS_PER_RUN", ConfigValue::from(15))?,
             },
-            storage: StorageSettings {
-                use_minio: ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1,
-                // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
-                minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
-                access_key_id: ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?,
-                secret_access_key: ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?,
-                bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
-                region: ctx.s3_scope_region()?,
-                endpoint_url: s3_or_minio,
-                signed_url_expiration_secs: ctx
-                    .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
+            storage: {
+                // `USE_MINIO=1` keeps the local-dev placeholder defaults
+                // (`storage.py` parity); outside MinIO the registry empty
+                // default signals "no static keys" so the S3 clients fall
+                // through to the EC2 instance role (NEWPIDASH-204).
+                let use_minio = ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1;
+                StorageSettings {
+                    use_minio,
+                    // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
+                    minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
+                    access_key_id: if use_minio {
+                        ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?
+                    } else {
+                        ctx.req_string("AWS_ACCESS_KEY_ID", "")?
+                    },
+                    secret_access_key: if use_minio {
+                        ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?
+                    } else {
+                        ctx.req_string("AWS_SECRET_ACCESS_KEY", "")?
+                    },
+                    session_token: ctx.req_string("AWS_SESSION_TOKEN", "")?,
+                    bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
+                    region: ctx.s3_scope_region()?,
+                    endpoint_url: s3_or_minio,
+                    signed_url_expiration_secs: ctx
+                        .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
+                }
             },
             runner: RunnerSettings {
                 long_poll_interval_secs: {

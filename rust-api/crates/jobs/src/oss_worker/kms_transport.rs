@@ -39,8 +39,7 @@
 //! `pidash-api`.
 
 use pidash_services::assistant::crypto::{CryptoConfig, KmsTransport, KmsTransportError};
-
-use super::aws_credentials::CredentialSource;
+use pidash_storage::aws_credentials::CredentialSource;
 
 /// KMS JSON protocol version header (`application/x-amz-json-1.1`).
 const KMS_JSON_VERSION: &str = "application/x-amz-json-1.1";
@@ -411,10 +410,10 @@ mod tests {
     /// credentials from IMDS and sends their session token.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn signs_with_instance_role_credentials() {
-        use super::super::aws_credentials::tests::{imds_router, serve, FakeImds};
-        use super::super::aws_credentials::InstanceRoleProvider;
         use axum::http::HeaderMap;
         use base64::Engine as _;
+        use pidash_storage::aws_credentials::tests::{imds_router, serve, FakeImds};
+        use pidash_storage::aws_credentials::InstanceRoleProvider;
         use std::sync::atomic::AtomicUsize;
         use std::sync::{Arc, Mutex};
 
