@@ -521,7 +521,7 @@ pub fn comment_author_label(
         }
         _ => match actor {
             None => "Unknown".to_owned(),
-            Some(view) if view.is_bot => "AI agent: Pi Dash Agent".to_owned(),
+            Some(view) if view.is_bot => "AI agent: Pi Dash Bot".to_owned(),
             _ => format!("Human: {actor_name}"),
         },
     }
