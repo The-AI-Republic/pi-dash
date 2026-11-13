@@ -37,7 +37,7 @@ export interface PageRowConnectedProps {
   canDuplicate: boolean;
   /** The caller owns the page or is a project admin. */
   canManage: boolean;
-  /** The edition serves the cross-project move. */
+  /** The viewer is a project admin: the cross-project move (PAGE-017). */
   canMove: boolean;
   /** Creates a child page from this row (PAGE-084); absent for guests. */
   onAddSubPage?: (() => void) | undefined;
@@ -154,8 +154,9 @@ export function PageRowConnected({
         pageName={page.name}
         pending={move.pending}
         onConfirm={(newProjectId) => {
-          move.move(newProjectId);
-          setMoveOpen(false);
+          // The dialog holds its busy state until the server answers; a
+          // refusal keeps it open beside the notice naming the reason.
+          move.move(newProjectId, { onMoved: () => setMoveOpen(false) });
         }}
       />
     </>

@@ -34,8 +34,12 @@ function PageDetailComponent(): React.ReactElement {
   React.useEffect(() => {
     void loadPageExportRegistration(() => import("../../../../../../features/pages-export/register.js"));
   }, []);
+  // A page moved to another project keeps its id (PAGE-017), so the
+  // project is the key: following the move starts a fresh screen instead
+  // of carrying the old project's live session and dialogs across.
   return (
     <PageDetailScreen
+      key={projectId}
       workspaceSlug={ws}
       projectId={projectId}
       pageId={pageId}

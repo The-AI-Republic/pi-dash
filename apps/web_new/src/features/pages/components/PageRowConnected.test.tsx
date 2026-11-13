@@ -5,8 +5,9 @@
 // The connected row (parity/specs/pages.md §3.8, PAGE-013–017): each state
 // entry drives this slice's write, the delete entry opens the confirmation
 // only on a shelved page and closes it once the write lands, the move
-// dialog is mounted only for an edition that serves the move, and both
-// dialogs stay closed until their entry is chosen.
+// entry is offered only to a project admin on an unlocked page, a refused
+// move names the server's reason, and both dialogs stay closed until their
+// entry is chosen.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -38,6 +39,7 @@ interface Harness {
   deleteStatus: number;
   moveStatus: number;
   moveCalls: number;
+  moveBody: unknown;
   childPages: ReturnType<typeof makePageRow>[];
   childReadCalls: number;
   childReadRelease: (() => void) | null;
@@ -55,6 +57,7 @@ beforeEach(() => {
     deleteStatus: 204,
     moveStatus: 204,
     moveCalls: 0,
+    moveBody: null,
     childPages: [],
     childReadCalls: 0,
     childReadRelease: null,
@@ -80,7 +83,7 @@ beforeEach(() => {
     }
     if (url.endsWith("/move/")) {
       harness.moveCalls += 1;
-      return jsonResponse(url, harness.moveStatus, null);
+      return jsonResponse(url, harness.moveStatus, harness.moveBody);
     }
     if (
       new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/[0-9a-f-]+/$`).test(url) &&
@@ -192,9 +195,16 @@ describe("PageRowConnected", () => {
     expect(screen.getByRole("heading", { name: "Delete page" })).toBeInTheDocument();
   });
 
-  it("mounts the move dialog only where the edition serves the move", () => {
+  it("offers no move entry to a viewer who is not a project admin", () => {
     renderRow();
     openMenu();
+    expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
+  });
+
+  it("offers no move entry on a locked page, even to an admin", () => {
+    renderRow({ canMove: true, page: makePageRow({ name: "Connected row", is_locked: true }) });
+    openMenu();
+    expect(screen.getByRole("menuitem", { name: "Unlock" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
   });
 
@@ -274,4 +284,47 @@ describe("PageRowConnected", () => {
     await waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Page could not be moved."));
     expect(PAGES_PAGE_ID).toMatch(/^[0-9a-f-]{36}$/);
   });
+
+  it("names the server's reason when the move is refused and keeps the dialog open", async () => {
+    harness.moveStatus = 400;
+    harness.moveBody = { error: "Page is locked", error_code: 4701, error_message: "PAGE_LOCKED" };
+    pickerHarness.projects = [targetProjectRow()];
+    renderRow({ canMove: true });
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move to project…" }));
+    await screen.findByRole("heading", { name: "Move page" });
+    fireEvent.click(screen.getByRole("button", { name: "Select a project" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Target project/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move page" }));
+    await waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Page could not be moved.", "Page is locked"));
+    expect(toaster.notifySuccess).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Move page" })).toBeInTheDocument();
+  });
 });
+
+function targetProjectRow(): Record<string, unknown> {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    name: "Target project",
+    identifier: "TARG",
+    sort_order: null,
+    logo_props: {},
+    member_role: 20,
+    intake_count: 0,
+    archived_at: null,
+    workspace: "44444444-4444-4444-8444-444444444444",
+    cycle_view: false,
+    issue_views_view: false,
+    module_view: false,
+    page_view: false,
+    inbox_view: false,
+    is_default: false,
+    guest_view_all_features: false,
+    project_lead: null,
+    network: 0,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    created_by: null,
+    updated_by: null,
+  };
+}

@@ -1,19 +1,23 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Cross-project page move (parity/specs/pages.md §3.8 and §11.1, PAGE-017).
-// Cloud only: the community build never mounts this dialog because the row
-// menu carries no entry there. The page owner or a project admin picks a
-// target project from the shared project picker and confirms; the page then
-// leaves this project's collection and appears in the target's. The move
-// is a different feature from the nested reparent of PAGE-087 and never
-// shares a dialog with it.
+// Cross-project page move (parity/specs/pages.md §3.8 and §11.1, PAGE-017,
+// PDASHOSS01-347). A project admin picks a target from the shared project
+// picker, narrowed to the other live projects the viewer can write to, and
+// confirms; the page and its sub-pages then leave this project's collection
+// and appear in the target's. The move is a different feature from the
+// nested reparent of PAGE-087 and never shares a dialog with it.
 
 import { Button, Dialog } from "@pidash/kit";
 import * as React from "react";
 
 import { ProjectPicker } from "../../../shared/pickers/ProjectPicker.js";
+import { usePickerProjects } from "../../../shared/pickers/reference.js";
 import { pageDisplayTitle } from "../lib/pageList.js";
+import { pageMoveProjectIds } from "../lib/pageProjectMove.js";
+
+/** Shown once the project read settles with nowhere to move the page. */
+export const PAGE_MOVE_NO_TARGETS = "There is no other project you can move this page into.";
 
 export interface PageMoveDialogProps {
   open: boolean;
@@ -69,13 +73,58 @@ export function PageMoveDialog({
         </>
       }
     >
-      <ProjectPicker
+      <PageMoveTargetField
         workspaceSlug={workspaceSlug}
+        currentProjectId={currentProjectId}
         value={target}
-        excludeProjectIds={[currentProjectId]}
+        pending={pending}
         onChange={setTarget}
-        placeholder="Select a project"
       />
     </Dialog>
+  );
+}
+
+interface PageMoveTargetFieldProps {
+  workspaceSlug: string;
+  currentProjectId: string;
+  value: string | null;
+  pending: boolean;
+  onChange: (projectId: string) => void;
+}
+
+/**
+ * The picker body. It mounts only while the dialog is open, so the project
+ * read never runs for the closed dialog every row carries.
+ */
+function PageMoveTargetField({
+  workspaceSlug,
+  currentProjectId,
+  value,
+  pending,
+  onChange,
+}: PageMoveTargetFieldProps): React.ReactElement {
+  const projects = usePickerProjects(workspaceSlug, true);
+  const targetIds = React.useMemo(
+    () => pageMoveProjectIds(projects.data ?? [], currentProjectId),
+    [projects.data, currentProjectId]
+  );
+  const noTargets = projects.isSuccess && targetIds.length === 0;
+  return (
+    <>
+      <ProjectPicker
+        workspaceSlug={workspaceSlug}
+        value={value}
+        includeProjectIds={targetIds}
+        excludeProjectIds={[currentProjectId]}
+        disabled={pending || noTargets}
+        onChange={onChange}
+        placeholder="Select a project"
+      />
+      {noTargets ? (
+        <p data-testid="page-move-no-targets" className="text-body text-(--text-muted)">
+          {PAGE_MOVE_NO_TARGETS}
+        </p>
+      ) : null}
+    </>
   );
 }

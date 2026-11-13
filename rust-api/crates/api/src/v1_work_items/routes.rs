@@ -48,7 +48,8 @@ use super::handlers_core::{
 use super::handlers_labels_pages::{
     delete_label, delete_page_archive, get_label_detail, get_label_list, get_page_detail,
     get_page_list, owned_label_detail, owned_label_list, owned_page_archive, owned_page_detail,
-    owned_page_list, patch_label, patch_page, post_label, post_page, post_page_archive,
+    owned_page_list, owned_page_move, patch_label, patch_page, post_label, post_page,
+    post_page_archive, post_page_move,
 };
 
 use super::handlers_pr_links::{
@@ -288,6 +289,11 @@ pub fn routes() -> Router<AppState> {
                 axum::routing::post(post_page_archive).delete(delete_page_archive),
             ),
         )
+        // `page.py:30-34` — page move (post, PDASHOSS01-347).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/",
+            owned_page_move(axum::routing::post(post_page_move)),
+        )
         // `work_item.py:113-117` — by-identifier (get, PIDASHCONV-673).
         .route(
             "/api/v1/workspaces/{slug}/work-items/{segment}/",
@@ -503,6 +509,10 @@ mod tests {
             (
                 "DELETE",
                 format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/archive/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/p1/pages/{pk}/move/"),
             ),
             // PIDASHCONV-677: the three search paths + the move path.
             (

@@ -8,7 +8,7 @@
 // switches (lock, visibility, shelve) and the destructive entries close the
 // menu for the page's owner or a project admin. Visibility is absent while
 // the page is shelved; delete appears only on a shelved page; the
-// cross-project move is cloud-only. Everything later slices add goes here
+// cross-project move is for project admins and never on a locked page. Everything later slices add goes here
 // instead of forking a second menu, so the order stays pinned in one place.
 
 import type { MenuAction } from "@pidash/kit";
@@ -62,7 +62,7 @@ export interface PageRowCapabilities {
   locked: boolean;
   /** The record's current access chooses Make public or Make private. */
   restricted: boolean;
-  /** Cross-project move is an edition flag; community builds carry none. */
+  /** The viewer is a project admin and may move the page to another project. */
   move: boolean;
   /** Member and above may create a child page (PAGE-084). */
   addSubPage?: boolean;
@@ -110,7 +110,7 @@ export function pageRowActions(capabilities: PageRowCapabilities, handlers: Page
     if (capabilities.archived) {
       entries.push({ label: PAGE_ACTION_DELETE, onSelect: handlers.requestDelete });
     }
-    if (capabilities.move) {
+    if (capabilities.move && !capabilities.locked) {
       entries.push({ label: PAGE_ACTION_MOVE, onSelect: handlers.requestMove });
     }
   }

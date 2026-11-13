@@ -9,7 +9,6 @@ import {
   APP_RAIL_FLAG,
   OPENHUB_FREE_QUOTA_FLAG,
   PAGE_ASSISTANT_FLAG,
-  PAGE_MOVE_FLAG,
   PRICING_FREE_TOKENS_FLAG,
   SIDEBAR_TOGGLE_FLAG,
   type Edition,
@@ -23,15 +22,6 @@ export function isAppRailEnabled(edition: Edition): boolean {
 /** False only when the edition explicitly hides the sidebar toggle. */
 export function isSidebarToggleEnabled(edition: Edition): boolean {
   return edition.flags[SIDEBAR_TOGGLE_FLAG] !== false;
-}
-
-/**
- * True only where the edition's server serves the cross-project page move
- * (PAGE-017). The community default is absent, which is what the oracle
- * pins: no row or detail affordance and no route.
- */
-export function isPageMoveEnabled(edition: Edition): boolean {
-  return edition.flags[PAGE_MOVE_FLAG] === true;
 }
 
 /**
