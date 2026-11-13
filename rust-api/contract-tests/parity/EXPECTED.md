@@ -220,17 +220,18 @@ stays reserved in `WIRE_GAPS`.
 
 ```
 
-### W-cloud-agent (0 rows; wired)
+### W-cloud-agent (3 rows; retired by the agent-naming P3)
 
-Fix: PIDASHCONV-832 (wired `register_execute_tasks` in `worker()`:
-scan/sweep/expire execute in Rust on bin-local live seams. The run
-handler is overridden with an explicit forward — the model runtime
-(pydantic-ai) has no Rust counterpart, so Python keeps executing
-runs; PIDASHCONV-866 tracks true run ownership. The `W-cloud-agent`
-gap id stays reserved in `WIRE_GAPS`).
+P3 (agent-naming spec §5.2) deleted the retired cloud plane: Rust no
+longer registers the three cloud tasks. Django still lists them, so
+they diff as MISSING under the reserved `W-cloud-agent` gap id.
+`managed_runner.expire_waiting_runs` is NOT in this list: it moved to
+`jobs/src/runner_runs/waiting_expiry.rs` and stays OWNED.
 
 ```expected-jobs
-
+W-cloud-agent :: cloud_agent.run_agent_run :: absent-from-rust-table
+W-cloud-agent :: cloud_agent.scan_queued_runs :: absent-from-rust-table
+W-cloud-agent :: cloud_agent.sweep_stale_runs :: absent-from-rust-table
 ```
 
 ### W-mail (0 rows; wired by PIDASHCONV-865)
