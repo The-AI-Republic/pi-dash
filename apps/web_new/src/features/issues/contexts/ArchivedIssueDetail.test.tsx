@@ -383,4 +383,16 @@ describe("ArchivedIssueDetail", () => {
       .filter((title) => title !== "");
     expect(titles).toEqual(["Open in new tab", "Copy link"]);
   });
+
+  it("places Properties above Activity (NEWPIDASH-233)", async () => {
+    renderDetail();
+    await screen.findByTestId("archived-detail-banner");
+    const layout = screen.getByTestId("archived-detail-layout");
+    const properties = screen.getByRole("region", { name: "Properties" });
+    const activity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(properties.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(layout).toHaveStyle({
+      gridTemplateAreas: '"main sidebar" "activity sidebar"',
+    });
+  });
 });
