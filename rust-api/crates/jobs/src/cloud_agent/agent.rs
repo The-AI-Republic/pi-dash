@@ -1481,17 +1481,19 @@ mod tests {
 
     #[tokio::test]
     async fn limits_match_the_agent_construction() {
-        // Inlined (P2): mirrors live::turn_usage_limits without
-        // importing the assistant.
+        // Mirrors live::turn_usage_limits (engine imports nothing from
+        // the assistant in production; this pin swaps via the same
+        // constants so any drift fails the suites on both sides).
+        use crate::assistant::run_turn::{REQUEST_LIMIT, TOOL_CALLS_LIMIT};
         let limits = UsageLimits {
-            request_limit: Some(25),
-            tool_calls_limit: Some(20),
+            request_limit: Some(i64::from(REQUEST_LIMIT)),
+            tool_calls_limit: Some(i64::from(TOOL_CALLS_LIMIT)),
             input_tokens_limit: None,
             output_tokens_limit: None,
             total_tokens_limit: None,
         };
-        assert_eq!(limits.request_limit, Some(25));
-        assert_eq!(limits.tool_calls_limit, Some(20));
+        assert_eq!(limits.request_limit, Some(i64::from(REQUEST_LIMIT)));
+        assert_eq!(limits.tool_calls_limit, Some(i64::from(TOOL_CALLS_LIMIT)));
         assert_eq!(limits.input_tokens_limit, None);
         assert_eq!(MAX_RETRIES, 2);
     }

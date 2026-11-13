@@ -14,6 +14,7 @@ pub mod errors;
 pub mod history;
 pub mod keys;
 pub mod provider;
+#[cfg(test)]
 pub mod replay;
 pub mod streaming;
 pub mod usage;

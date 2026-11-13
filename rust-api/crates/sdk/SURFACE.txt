@@ -261,7 +261,6 @@ pidash_sdk::cloud_agent::UsageLimits
 pidash_sdk::cloud_agent::UsageNumber
 pidash_sdk::cloud_agent::UsageTableError
 pidash_sdk::cloud_agent::WireTool
-pidash_sdk::cloud_agent::anthropic_request_body
 pidash_sdk::cloud_agent::check_before_request
 pidash_sdk::cloud_agent::check_before_tool_call
 pidash_sdk::cloud_agent::check_tokens
@@ -271,7 +270,6 @@ pidash_sdk::cloud_agent::dump_message
 pidash_sdk::cloud_agent::join_valid_blobs
 pidash_sdk::cloud_agent::load
 pidash_sdk::cloud_agent::now_stamp
-pidash_sdk::cloud_agent::openai_request_body
 pidash_sdk::cloud_agent::parse_blob
 pidash_sdk::cloud_agent::parse_retry_details
 pidash_sdk::cloud_agent::provider_detail

@@ -820,8 +820,6 @@ pub mod cloud_agent {
     pub use pidash_jobs::cloud_agent::history::TurnState;
     pub use pidash_jobs::cloud_agent::keys::KeyFailure;
     pub use pidash_jobs::cloud_agent::keys::KeyResolver;
-    pub use pidash_jobs::cloud_agent::provider::anthropic_request_body;
-    pub use pidash_jobs::cloud_agent::provider::openai_request_body;
     pub use pidash_jobs::cloud_agent::provider::transform_anthropic_schema;
     pub use pidash_jobs::cloud_agent::provider::transform_openai_schema;
     pub use pidash_jobs::cloud_agent::provider::wire_tool_for;
