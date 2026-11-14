@@ -113,7 +113,15 @@ SESSIONS = (
         # via random.choice (api/serializers/project.py:177-185),
         # ignoring input (logo_props is not a declared field): minted
         # per backend, so the column compares blanked.
-        generated_columns={"projects": ["logo_props"]},
+        # django_content_type.model also blanks (NEWPIDASH-229): the
+        # create captures logo_name per backend, and when the Rust
+        # roll hits a seeded model name ("cycle") the capture
+        # substitution rewrites that seeded cell on one side only —
+        # a capture collision, not a product divergence. Blanking the
+        # column covers every roll (a cell pin cannot: its dj/rs
+        # values would have to differ).
+        generated_columns={"projects": ["logo_props"],
+                           "django_content_type": ["model"]},
         # NOTE (rebase): PIDASHCONV-870/892/893/894/895/896 all landed;
         # their exact pins tripped stale and were removed; this session
         # now compares the v1 create seeding and DELETE enqueues fully.

@@ -1655,6 +1655,7 @@ def compare_jobs(
     known_absent: dict | None = None,
     known_shapes: list | None = None,
     gap_ctx: dict | None = None,
+    django_extra: list | None = None,
 ) -> str | None:
     """Compare normalised job multisets (order-insensitive, ETA-tolerant).
 
@@ -1667,9 +1668,14 @@ def compare_jobs(
     landed or behavior changed — remove or update the pin).
     Several pins may share a task name (PIDASHCONV-913: one destroy
     emitting two same-task enqueues); unmatched leftovers still go
-    through the multiset compare below.
+    through the multiset compare below. ``django_extra`` ([(task,
+    fix_issue, dj_match)]) is the one-sided counterpart: each pin
+    consumes exactly one exactly-matching Django job (sunset
+    dual-delete legacy surpluses Rust intentionally does not emit,
+    PDASHOSS01-355); a matching Rust job is never consumed and fails
+    as a rust-only leftover, and a missing Django job fails loudly.
     """
-    from .session import render_template
+    from .session import render_pin_node
 
     known_absent = known_absent or {}
     for task, issue in known_absent.items():
@@ -1689,12 +1695,26 @@ def compare_jobs(
     rs_jobs = [j for j in rs_jobs if j["task"] not in known_absent]
     dj_pool = list(dj_jobs)
     rs_pool = list(rs_jobs)
+    for task, issue, dj_match in django_extra or []:
+        dj_want = render_pin_node(dj_match, gap_ctx or {})
+        dj_hit = next(
+            (j for j in dj_pool if j["task"] == task and j == dj_want), None
+        )
+        if dj_hit is None:
+            dj_have = [j for j in dj_pool if j["task"] == task]
+            return (
+                f"known-django-extra pin {task} ({issue}): Django stopped "
+                "emitting the extra legacy job or its bytes changed — "
+                "remove or update the pin. "
+                f"no emitted job matches {dj_want!r:.400}; "
+                f"got {dj_have!r:.400}"
+            )
+        dj_pool.remove(dj_hit)
     for task, issue, dj_match, rs_match in known_shapes or []:
-        try:
-            dj_want = render_template(dj_match, gap_ctx or {})
-            rs_want = render_template(rs_match, gap_ctx or {})
-        except KeyError as exc:
-            return f"known-shape pin {task} ({issue}): unrenderable match: {exc}"
+        # Literal-preserving render: matches carry normalised
+        # {row:<table>} stubs strict formatting would choke on.
+        dj_want = render_pin_node(dj_match, gap_ctx or {})
+        rs_want = render_pin_node(rs_match, gap_ctx or {})
         dj_hit = next(
             (j for j in dj_pool if j["task"] == task and j == dj_want), None
         )
