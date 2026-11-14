@@ -540,6 +540,24 @@ def test_revalidate_clean_row_is_kept_silently(pair, owner):
     assert updated_at_of(oracle, "prompt_section_override", row_id) == before[1]
 
 
+def test_revalidate_non_neutral_core_override_flags(pair, owner):
+    # PDASHOSS01-234: a core stage section override that renders cleanly
+    # but still carries git/PR wording would leak into every work type;
+    # both engines flag it with the same byte-exact detail.
+    wid = make_workspace(pair, owner)
+    add_override(pair, wid, KNOWN_KEY, "Commit and push the branch, then open a PR.")
+    rust_proc, oracle_proc = run_rust(REVALIDATE), run_oracle(REVALIDATE)
+    assert_cli_parity(rust_proc, oracle_proc)
+    assert rust_proc.stdout == (
+        f"flagged {wid}/{KNOWN_KEY} (user=None): override for core section {KNOWN_KEY!r}"
+        " carries work-type-specific wording ('branch', 'Commit', 'push', 'PR'); core sections"
+        " are shared by every work type, so move that guidance into a work-type section"
+        " (e.g. 'software.execute')\n"
+        "checked 1 active override(s): 1 newly flagged, 0 cleared.\n"
+    ).encode()
+    assert_db_parity(pair)
+
+
 def test_revalidate_render_failure_flags_with_engine_detail(pair, owner):
     # The attribution wrapper is byte-exact on both sides; only the
     # trailing engine prose differs (minijinja vs Jinja2 StrictUndefined —
@@ -551,7 +569,8 @@ def test_revalidate_render_failure_flags_with_engine_detail(pair, owner):
     assert rust_proc.stderr == oracle_proc.stderr == b""
     prefix = (
         f"flagged {wid}/{KNOWN_KEY} (user=None): override for section"
-        f" {KNOWN_KEY!r} fails to render as part of the 'coding-task' prompt: "
+        f" {KNOWN_KEY!r} fails to render as part of the 'coding-task' prompt"
+        " (work type 'general'): "
     ).encode()
     for proc in (rust_proc, oracle_proc):
         lines = proc.stdout.split(b"\n")
