@@ -325,14 +325,15 @@ SESSIONS = (
         # Django metadata legacy pointer vs Rust {} on PR-link rows.
         # After db_cell_refs blanking the Django pointer is the stub
         # {row:github_pull_request_links}; Rust is {}. Pin the blanked
-        # stub so the generic row otherwise compares. The match is the
-        # captured PR id (normalised {pr}); other generic rows (code
-        # reviews) have no pointer and compare without this pin.
+        # stub so the generic row otherwise compares. The match is
+        # the work item plus external_iid (normalised {wi}); the
+        # volatile id ({"id": "{pr}"}) never matches after blanking,
+        # which is why the 207 pin was dead (NEWPIDASH-229).
         known_cell_diffs=[
             (
                 "git_code_review_links",
                 "NEWPIDASH-207",
-                {"id": "{pr}"},
+                {"issue_id": "{wi}", "external_iid": "424242"},
                 "metadata",
                 {"legacy_github_pull_request_link_id": "{row:github_pull_request_links}"},
                 {},
@@ -458,6 +459,52 @@ SESSIONS = (
                 "DELETE", _WI + "github/pull-requests/{pr}/",
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/github/pull-requests/{link_id}/",
                 auth="api_key", expect_status=204,
+                # Sunset 2/6 (PDASHOSS01-355, NEWPIDASH-229): Django's
+                # detach deletes the legacy row AND its generic mirror;
+                # Rust deletes generic only. The legacy pk is the
+                # captured {pr} (attach returns the legacy id), so the
+                # extra pin names the capture, not a row stub.
+                known_django_extra_jobs=[
+                    (
+                        "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                        "NEWPIDASH-229",
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "githubpullrequestlink", "{pr}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                    ),
+                ],
+                # The shared generic job's pk is a different
+                # backend-local row per side (Django's {pr} is the
+                # legacy id, Rust's is the generic id): row-blanked on
+                # Django, capture-substituted on Rust.
+                known_job_shapes=[
+                    (
+                        "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                        "NEWPIDASH-229",
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "gitcodereviewlink",
+                                     "{row:git_code_review_links}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "gitcodereviewlink", "{pr}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                    ),
+                ],
             ),
             Request(
                 "DELETE", _WI + "links/{link}/",
@@ -674,6 +721,24 @@ SESSIONS = (
                 "DELETE", _WB + "/code-reviews/{cr}/",
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/{review_id}/",
                 auth="api_key", expect_status=204,
+                # Sunset 2/6 (PDASHOSS01-355, NEWPIDASH-229): Django's
+                # code-review attach dual-wrote the legacy link, so this
+                # detach deletes legacy AND generic; Rust generic only.
+                known_django_extra_jobs=[
+                    (
+                        "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                        "NEWPIDASH-229",
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "githubpullrequestlink",
+                                     "{row:github_pull_request_links}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                    ),
+                ],
             ),
             # Pages: patch without a doc service is a 503 both sides;
             # archive + unarchive round-trip.
