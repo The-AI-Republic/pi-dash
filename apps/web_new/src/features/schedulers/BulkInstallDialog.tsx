@@ -98,6 +98,7 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
   const visible = React.useMemo(() => filterProjects(projects, query), [projects, query]);
   const visibleIds = visible.map((project) => project.id);
   const visibleEligible = visibleIds.filter((id) => !selection.installed.includes(id));
@@ -112,10 +113,22 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
     return () => document.removeEventListener("mousedown", onPointer);
   }, [open]);
 
+  // Escape inside the open popup closes the popup only: stopping the event
+  // here keeps the enclosing dialog from treating it as its own dismissal,
+  // and focus returns to the trigger so a second Escape closes the dialog.
+  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
+    if (!open || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
+
   return (
-    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)">
+    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)" onKeyDown={onKeyDown}>
       <span className="text-body font-medium text-(--text)">Projects</span>
       <button
+        ref={triggerRef}
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
