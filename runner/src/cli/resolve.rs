@@ -16,9 +16,10 @@ use serde_json::Value;
 
 use crate::api_client::{ApiClient, CliError, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_SERVER};
 
-// Note: there is no `resolve_project` helper. Project-scoped REST routes
-// accept either a UUID or the workspace-scoped slug ("ENG") in the URL path,
-// so callers pass the user-supplied `--project` value straight through.
+// Note: most project-scoped REST routes accept either a UUID or the
+// workspace-scoped slug ("ENG") in the URL path, so callers pass the
+// user-supplied `--project` value straight through. The states route does
+// not; `pidash state list` resolves keys via `cli::project::resolve_project`.
 
 /// Issue resolved from a `<PROJ>-<num>` identifier.
 #[derive(Debug, Clone)]
