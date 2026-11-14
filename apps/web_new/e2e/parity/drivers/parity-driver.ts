@@ -4039,6 +4039,8 @@ export interface ParityDriver {
   archivesCyclesGroupHeadings(): Promise<string[]>;
   /** Open the side peek for the named row; waits for the peek to show it. */
   archivesCyclesOpenPeek(name: string): Promise<void>;
+  /** Click the archived row's name/body to open its peek; waits for the peek panel. */
+  archivesCyclesClickRow(name: string): Promise<void>;
   /** Open the tab at a shared peek link without settling (fresh loads never settle). */
   archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
   /** Peek panel heading, or null when no peek is open. */

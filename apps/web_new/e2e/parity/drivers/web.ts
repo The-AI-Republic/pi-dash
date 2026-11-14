@@ -21330,6 +21330,11 @@ export class WebDriver implements ParityDriver {
     await this.page.locator("div.fixed.right-0 h4", { hasText: name }).waitFor({ timeout: WebDriver.OPEN_MS });
   }
 
+  async archivesCyclesClickRow(name: string): Promise<void> {
+    await this.archivesCyclesRowLink(name).click();
+    await this.page.locator("div.fixed.right-0 h4", { hasText: name }).waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
   async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
     await this.page.waitForLoadState("domcontentloaded");
