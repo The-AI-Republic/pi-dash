@@ -13,6 +13,7 @@ on:
     branches: [main]
     paths:
       - "apps/web_new/**"
+      - "apps/proxy/**"
       - "packages/kit/**"
       - "packages/api-client/**"
       - ".ai_design/new_frontend_implementation/parity/**"
@@ -51,7 +52,7 @@ jobs:
         run: |
           frontend=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            pattern='^(apps/web_new/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml$|pnpm-lock\.yaml$|desktop/scripts/dev-prep\.sh$|desktop/tests/)'
+            pattern='^(apps/web_new/|apps/proxy/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml$|pnpm-lock\.yaml$|desktop/scripts/dev-prep\.sh$|desktop/tests/)'
             git diff --name-only HEAD^1 HEAD | grep -Eq "$pattern" || frontend=false
           fi
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"

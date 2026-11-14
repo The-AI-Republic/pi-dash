@@ -460,6 +460,19 @@
         try_files {path} {path}/ /index.html
         file_server
     }
+    # web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.
+    @web_new_static {
+        path /assets/* /apple-touch-icon.svg /empty-state/* /icon-contrast.svg /icon.svg /illustrations/* /logos/* /manifest.desktop.webmanifest /manifest.webmanifest /social-card.svg /world-map.svg
+        file {
+            root /app/web_new
+        }
+    }
+    handle @web_new_static {
+        root * /app/web_new
+        @web_new_webmanifest path *.webmanifest
+        header @web_new_webmanifest Content-Type application/manifest+json
+        file_server
+    }
     # END MIGRATED ROUTES
     # Legacy /auth/* fallback. It stays below the generated block on purpose:
     # a migrated /auth/* subpath (today /auth/device) must win, and Caddy
