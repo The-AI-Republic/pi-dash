@@ -8,58 +8,19 @@
 from __future__ import annotations
 
 import copy
-import re
 from types import SimpleNamespace
 
 import pytest
 
-from pi_dash.prompting import recipes, registry, work_types
+from pi_dash.prompting import neutrality, recipes, registry, work_types
 from pi_dash.prompting.composer import compose
 from pi_dash.prompting.validation import sample_contexts
 
 #: The three issue-stage kinds whose recipes carry work-type slots.
-STAGE_KINDS = (recipes.KIND_CODING_TASK, recipes.KIND_REVIEW, recipes.KIND_TEST)
-
-#: Wording that marks a section as software/git/PR-specific. Core sections of
-#: the stage recipes must never match any of these — that guidance belongs in
-#: work-type sections only. Uppercase entries are case-sensitive (``PR``);
-#: the rest match case-insensitively.
-NEUTRALITY_BANNED = [
-    r"\bgit\b",
-    r"\bgithub\b",
-    r"\bgitlab\b",
-    r"\bbranch(es|ed|ing)?\b",
-    r"\bcommit(s|ted|ting)?\b",
-    r"\bpush(es|ed|ing)?\b",
-    r"pull request",
-    r"merge request",
-    r"code review",
-    r"\brepo\b",
-    r"\brepositor(y|ies)\b",
-    r"\bcodebase\b",
-    r"CLAUDE\.md",
-    r"AGENTS\.md",
-    r"\.ai_design",
-    r"\bgh\b",
-    r"\bglab\b",
-    r"\brebase(s|d)?\b",
-    r"\bcheckout\b",
-    # Bare "merge" only: "merged set" (labels) is not a git reference.
-    r"\bmerge\b",
-    r"\bpipeline(s)?\b",
-    r"\bdiff(s)?\b",
-]
-NEUTRALITY_BANNED_CASE_SENSITIVE = [
-    r"\bPRs?\b",
-    r"\bMRs?\b",
-    r"\bCI\b",
-]
-
+STAGE_KINDS = neutrality.STAGE_KINDS
 
 def _neutrality_violations(text: str) -> list[str]:
-    hits = [p for p in NEUTRALITY_BANNED if re.search(p, text, re.IGNORECASE)]
-    hits += [p for p in NEUTRALITY_BANNED_CASE_SENSITIVE if re.search(p, text)]
-    return hits
+    return neutrality.violations(text)
 
 
 # ----------------------------------------------------------------------
@@ -273,3 +234,67 @@ def test_software_prompts_keep_todays_coding_guidance():
     assert ".github/workflows/" in test
     assert "somewhere the software runs" in test
     assert "AUTOMATED" in test and "OPS / INFRA" in test
+
+
+# ----------------------------------------------------------------------
+# Existing overrides of core sections (revalidate_section_overrides)
+# ----------------------------------------------------------------------
+
+_LEGACY_IMPLEMENTATION_OVERRIDE = (
+    "## Step 2\n1. Commit and push the branch, then open a PR with `gh pr create`.\n"
+)
+
+
+@pytest.mark.unit
+def test_override_neutrality_flags_core_section_with_git_wording():
+    detail = neutrality.override_neutrality_issue("implementation", _LEGACY_IMPLEMENTATION_OVERRIDE)
+    assert detail == (
+        "override for core section 'implementation' carries work-type-specific wording "
+        "('branch', 'Commit', 'push', 'gh', 'PR'); core sections are shared by every work type, "
+        "so move that guidance into a work-type section (e.g. 'software.execute')"
+    )
+
+
+@pytest.mark.unit
+def test_override_neutrality_allows_neutral_core_and_any_work_type_section():
+    assert neutrality.override_neutrality_issue("implementation", "Deliver the part and record it.") is None
+    # Software wording is exactly what work-type sections are for.
+    assert neutrality.override_neutrality_issue("software.execute", _LEGACY_IMPLEMENTATION_OVERRIDE) is None
+    # Scheduler-only sections are not composed with a work type.
+    assert "scheduler-task" not in neutrality.core_stage_section_keys()
+    assert neutrality.override_neutrality_issue("scheduler-task", _LEGACY_IMPLEMENTATION_OVERRIDE) is None
+
+
+@pytest.mark.unit
+def test_revalidate_flags_core_override_with_git_wording(db, workspace, create_user):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    from pi_dash.prompting.models import PromptSectionOverride
+
+    legacy = PromptSectionOverride.objects.create(
+        workspace=workspace, user=None, section_key="implementation", body=_LEGACY_IMPLEMENTATION_OVERRIDE
+    )
+    neutral = PromptSectionOverride.objects.create(
+        workspace=workspace, user=None, section_key="default-posture", body="Work autonomously; ask only when blocked."
+    )
+    software = PromptSectionOverride.objects.create(
+        workspace=workspace, user=None, section_key="software.execute", body=_LEGACY_IMPLEMENTATION_OVERRIDE
+    )
+
+    out = StringIO()
+    call_command("revalidate_section_overrides", stdout=out)
+
+    for row in (legacy, neutral, software):
+        row.refresh_from_db()
+    assert legacy.needs_attention is True
+    assert neutral.needs_attention is False
+    assert software.needs_attention is False
+    assert "carries work-type-specific wording" in out.getvalue()
+    assert "checked 3 active override(s): 1 newly flagged, 0 cleared." in out.getvalue()
+
+    # --clear never clears a row that is still non-neutral.
+    call_command("revalidate_section_overrides", "--clear", stdout=StringIO())
+    legacy.refresh_from_db()
+    assert legacy.needs_attention is True
