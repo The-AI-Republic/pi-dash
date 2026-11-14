@@ -140,6 +140,7 @@ export function ActiveCycleHero({
               cycleId={shown.id}
               startDate={shown.start_date}
               endDate={shown.end_date}
+              projectTimeZone={projectTimeZone}
               measure={activeMeasure}
               estimatesEnabled={estimatesEnabled}
               estimateType={estimateType}

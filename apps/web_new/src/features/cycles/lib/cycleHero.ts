@@ -8,6 +8,8 @@
 
 import type { CycleDistribution, CycleProgress, IssueListItem } from "@pidash/api-client";
 
+import { instantToProjectDate, projectToday } from "./cycleDates.js";
+
 /** Issues count work items; points sum their estimates. */
 export type HeroMeasure = "issues" | "points";
 
@@ -108,16 +110,20 @@ export function heroBurndownPoints(
 /**
  * The chart plots only for a dated cycle that has started: undated
  * and future-start cycles show the chart placeholder instead.
+ * The start gate reads in the project's timezone date, matching the
+ * sidebar's `cycleProgressChartVisible` (§15, §17): the comparison
+ * is date-only in the project zone, not a raw browser-clock timestamp.
  */
 export function heroChartAvailable(
   startDate: string | null | undefined,
   endDate: string | null | undefined,
+  timeZone: string | null | undefined,
   now: Date = new Date()
 ): boolean {
   if (startDate === null || startDate === undefined || endDate === null || endDate === undefined) return false;
-  const start = new Date(startDate).getTime();
-  if (Number.isNaN(start)) return false;
-  return start <= now.getTime();
+  const start = instantToProjectDate(startDate, timeZone);
+  if (start === null) return false;
+  return start <= projectToday(timeZone, now);
 }
 
 export interface HeroAssigneeEntry {

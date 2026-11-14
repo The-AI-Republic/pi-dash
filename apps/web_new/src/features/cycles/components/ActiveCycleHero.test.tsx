@@ -53,6 +53,7 @@ vi.mock("./HeroProgressCard.js", () => ({
 vi.mock("./HeroBurndownCard.js", () => ({
   HeroBurndownCard: (props: {
     measure: string;
+    projectTimeZone: string;
     estimatesEnabled: boolean;
     estimateType: string | null;
     onMeasureChange: (measure: string) => void;
@@ -62,6 +63,7 @@ vi.mock("./HeroBurndownCard.js", () => ({
       data-measure={props.measure}
       data-estimates={String(props.estimatesEnabled)}
       data-estimate-type={props.estimateType}
+      data-project-timezone={props.projectTimeZone}
     >
       <button type="button" onClick={() => props.onMeasureChange("points")}>
         probe measure

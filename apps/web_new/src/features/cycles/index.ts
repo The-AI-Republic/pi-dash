@@ -171,6 +171,7 @@ export {
   instantZoneDay,
   projectOffsetChip,
   projectToday,
+  resolveViewerTimeZone,
   zoneOffsetMinutes,
   type CycleSpanModel,
   type ZoneDay,
