@@ -840,17 +840,22 @@ pub fn sender_for(subscriber: &Uuid, created_by: Option<Uuid>, assignees: &[Uuid
     }
 }
 
-/// `send_email` flag chain (`:331-349`): state-change, completed-state,
-/// comment, then the `property_change` catch-all.
+/// `send_email` flag chain (`:331-349`) with NEWPIDASH-271 (DIFF-28)
+/// independent gating: comment and state fields are gated only by
+/// their own toggles (state also honours `issue_completed` on
+/// completed-state rows). Only non-comment/state fields fall through
+/// to `property_change` (old Django's bare `elif` at `:346` let
+/// `property_change` rescue comment/state fields too).
 pub fn should_send_email(
     field: Option<&str>,
     preference: &Preference,
     completed_state_exists: bool,
 ) -> bool {
     match field {
-        Some("state") if preference.state_change => true,
-        Some("state") if preference.issue_completed && completed_state_exists => true,
-        Some("comment") if preference.comment => true,
+        Some("state") => {
+            preference.state_change || (preference.issue_completed && completed_state_exists)
+        }
+        Some("comment") => preference.comment,
         _ => preference.property_change,
     }
 }
@@ -2238,6 +2243,27 @@ mod tests {
         assert!(should_send_email(None, &catch_all, false));
         assert!(!should_send_email(Some("priority"), &all_off, false));
         assert!(!should_send_email(None, &all_off, false));
+        // NEWPIDASH-271 (DIFF-28): each topic gates independently —
+        // `property_change` never rescues a comment or state field
+        // (old Django :346 bare `elif` catch-all).
+        assert!(!should_send_email(Some("comment"), &catch_all, false));
+        assert!(!should_send_email(Some("state"), &catch_all, false));
+        assert!(!should_send_email(Some("state"), &catch_all, true));
+        let completed_on_property = Preference {
+            issue_completed: true,
+            property_change: true,
+            ..all_off
+        };
+        assert!(should_send_email(
+            Some("state"),
+            &completed_on_property,
+            true
+        ));
+        assert!(!should_send_email(
+            Some("state"),
+            &completed_on_property,
+            false
+        ));
     }
 
     #[test]
