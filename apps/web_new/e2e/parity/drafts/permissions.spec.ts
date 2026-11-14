@@ -6,9 +6,9 @@
 // the server refuses cross-user and guest-convert calls. Row: DRAFT-025.
 // Green on apps/web first.
 //
-// The creator-bypass halves are bug: scenarios (guest edits and
-// member/guest single-fetches of owned drafts 403 on the oracle); those
-// scenarios live below once their linked issue exists.
+// The creator-bypass halves (guest edits and member/guest single-fetches
+// of owned drafts) were a bug on both apps until PDASHOSS01-320 fixed the
+// endpoints; they now assert the fixed contract on either target.
 import { test, expect } from "../fixtures";
 import {
   ROLE,
@@ -17,7 +17,7 @@ import {
   serverCreateDraftStatus,
   serverDeleteDraftStatus,
   serverDraftNames,
-  serverDraftsPage,
+  serverDraftRecord,
   serverFetchDraftStatus,
   serverIssueNames,
   serverPatchDraftStatus,
@@ -73,15 +73,12 @@ test(
       await driver.draftOpenPriorityPicker(name);
       await driver.pickerPick("Medium");
       await expect.poll(() => driver.draftPriorityText(name), { timeout: 30_000 }).toBe("Medium");
-      // Members cannot single-fetch even owned drafts (NEWFRONT-299), so
-      // verify through the owner-scoped list both roles can read.
+      // The single fetch admits the creator at any role (DRAFT-025,
+      // PDASHOSS01-320), so read the stored row back through it.
       await expect
-        .poll(
-          async () =>
-            (await serverDraftsPage(workspaceSlug, member.cookie, "")).drafts.find((row) => row.id === draft.id)
-              ?.priority,
-          { timeout: 30_000 }
-        )
+        .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, member.cookie)).priority, {
+          timeout: 30_000,
+        })
         .toBe("medium");
     });
 
@@ -125,6 +122,21 @@ test(
       expect(await serverIssueNames(workspaceSlug, projectId, owner.cookie)).not.toContain(guestOwn.name);
     });
 
+    await test.step("cross-user patches are refused and leave the owner's row alone", async () => {
+      const hijack = `${name} Hijacked`;
+      // Only the role half refuses a foreign PATCH now: the creator bypass
+      // admits the owner at any role, so the role check is all that stands
+      // between another user and this row (spec §9, DRAFT-025). A member
+      // clears the member half and then meets the owner-scoped queryset,
+      // which hides the row (404); a guest fails the role half (403).
+      // Either way the write must not land.
+      expect((await serverPatchDraftStatus(workspaceSlug, draft.id, member.cookie, { name: hijack })).status).toBe(404);
+      expect((await serverPatchDraftStatus(workspaceSlug, draft.id, guest.cookie, { name: hijack })).status).toBe(403);
+      const ownerRow = await serverDraftRecord(workspaceSlug, draft.id, owner.cookie);
+      expect(ownerRow.name).toBe(name);
+      expect(ownerRow.name).not.toBe(hijack);
+    });
+
     await test.step("single-fetch of another user's draft is refused", async () => {
       expect((await serverFetchDraftStatus(workspaceSlug, draft.id, member.cookie)).status).toBe(403);
       expect((await serverFetchDraftStatus(workspaceSlug, draft.id, guest.cookie)).status).toBe(403);
@@ -137,15 +149,15 @@ test(
   }
 );
 
-// The update and retrieve actions declare a creator bypass but point it
-// at work-item rows, so it never matches a draft id; DRAFT-025 requires
-// admin-or-creator. The fix is backend work owned by NEWFRONT-299 and
-// filed as PDASHOSS01-320, which is still open — so this reproduces the
-// refusal on whichever app is under test rather than asserting a target
-// the server cannot yet meet. DRAFT-025 stays oracle green, never new
-// green, until PDASHOSS01-320 lands; the gate flips it then.
+// Update and single fetch must admit a draft's creator at any workspace
+// role (DRAFT-025, spec §9). They used to run their creator bypass against
+// work-item rows, so an owned PATCH or GET was refused with 403
+// (NEWFRONT-299); PDASHOSS01-320 fixed the endpoints (#2840) and both
+// frontends read the same corrected API, so this is a plain regression
+// scenario now: the refusal is what the row used to pin, and the contract
+// below is what spec §9 requires of both apps.
 test(
-  specTitle(["DRAFT-025"], "bug: creator bypass refuses owned-draft edits and fetches (NEWFRONT-299)"),
+  specTitle(["DRAFT-025"], "an owner patches and fetches their own draft at any role"),
   { tag: specTags(["DRAFT-025"]) },
   async ({ driver }) => {
     const harness = await draftsHarness("parity-d25bug");
@@ -161,14 +173,23 @@ test(
       project_id: projectId,
     });
 
-    await test.step("owned edits and fetches are refused and nothing changes", async () => {
+    await test.step("owned edits and fetches succeed for a guest and a member", async () => {
       expect(
         (await serverPatchDraftStatus(workspaceSlug, guestDraft.id, guest.cookie, { priority: "high" })).status
-      ).toBe(403);
-      expect((await serverFetchDraftStatus(workspaceSlug, memberDraft.id, member.cookie)).status).toBe(403);
-      expect((await serverFetchDraftStatus(workspaceSlug, guestDraft.id, guest.cookie)).status).toBe(403);
+      ).toBe(204);
+      expect((await serverFetchDraftStatus(workspaceSlug, memberDraft.id, member.cookie)).status).toBe(200);
+      expect((await serverFetchDraftStatus(workspaceSlug, guestDraft.id, guest.cookie)).status).toBe(200);
+      expect(
+        (await serverPatchDraftStatus(workspaceSlug, memberDraft.id, member.cookie, { name: "renamed" })).status
+      ).toBe(204);
+    });
+
+    await test.step("the write lands on the owner's row and leaves the other owner's alone", async () => {
+      expect((await serverDraftRecord(workspaceSlug, guestDraft.id, guest.cookie)).priority).toBe("high");
+      const memberRow = await serverDraftRecord(workspaceSlug, memberDraft.id, member.cookie);
+      expect(memberRow.name).toBe("renamed");
+      expect(memberRow.priority).toBe("none");
       expect(await serverDraftNames(workspaceSlug, guest.cookie)).toContain(guestDraft.name);
-      expect(await serverDraftNames(workspaceSlug, member.cookie)).toContain(memberDraft.name);
     });
 
     await test.step("the owners still see their rows", async () => {

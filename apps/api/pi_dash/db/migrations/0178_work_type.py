@@ -22,7 +22,7 @@ def _stamp_existing_projects_software(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0176_update_timezone_choices_pytz_2025_2"),
+        ("db", "0177_git_provider_app_columns"),
     ]
 
     operations = [

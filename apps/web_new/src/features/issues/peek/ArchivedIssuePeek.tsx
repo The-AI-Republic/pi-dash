@@ -6,7 +6,9 @@
 // locked: the title is a heading, the description is a static view, the
 // property sidebar is disabled, and the activity timeline drops its
 // composer and card menus. The body reads the archive-scoped detail, not
-// the live detail route.
+// the live detail route. Properties sit between the description and the
+// comments (NEWPIDASH-233) so narrow stack order is title → Properties
+// → activity.
 
 import { useQuery } from "@tanstack/react-query";
 import type { ArchivedIssue, Issue, IssueListItem } from "@pidash/api-client";
@@ -83,22 +85,22 @@ export function ArchivedIssuePeek({
           issue={issue}
           editable={false}
           showTitle={false}
-          activity={
-            <CommentThread
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              issueId={issue.id}
-              archived
-              published={false}
-              assigneeIds={issue.assignee_ids}
-              memberRole={project.data?.member_role ?? null}
-            />
-          }
         />
         <section aria-label="Properties" className="flex min-w-0 flex-col gap-(--space-4)">
           <p className="text-meta font-medium text-(--text-muted)">Properties</p>
           <IssuePropertiesSidebar workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={false} />
         </section>
+        <div data-slot="activity" className="min-w-0">
+          <CommentThread
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issue.id}
+            archived
+            published={false}
+            assigneeIds={issue.assignee_ids}
+            memberRole={project.data?.member_role ?? null}
+          />
+        </div>
       </div>
     </PeekChrome>
   );

@@ -23,17 +23,34 @@ describe("defaultWorkspaceDisplay", () => {
 });
 
 describe("prefillWorkspaceDisplay", () => {
-  it("keeps the stored settings and pins the layout", () => {
+  it("keeps the stored settings and the stored layout", () => {
     const prefs = prefillWorkspaceDisplay(
       { layout: "list", group_by: "priority", order_by: "-updated_at" },
       { priority: true }
     );
     expect(prefs).toEqual({
       ...parseDisplayPrefs({ layout: "list", group_by: "priority", order_by: "-updated_at" }, { priority: true }),
-      layout: "spreadsheet",
+      layout: "list",
     });
     expect(prefs.groupBy).toBe("priority");
     expect(prefs.orderBy).toBe("-updated_at");
+  });
+
+  it("keeps every valid stored layout", () => {
+    for (const layout of ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"] as const) {
+      expect(prefillWorkspaceDisplay({ layout }, {}).layout).toBe(layout);
+    }
+  });
+
+  it("falls back to spreadsheet when the layout is absent", () => {
+    expect(prefillWorkspaceDisplay({}, {}).layout).toBe("spreadsheet");
+    expect(prefillWorkspaceDisplay({ group_by: "priority" }, {}).layout).toBe("spreadsheet");
+  });
+
+  it("falls back to spreadsheet when the layout is invalid", () => {
+    expect(prefillWorkspaceDisplay({ layout: "bogus" }, {}).layout).toBe("spreadsheet");
+    expect(prefillWorkspaceDisplay({ layout: 42 }, {}).layout).toBe("spreadsheet");
+    expect(prefillWorkspaceDisplay({ layout: null }, {}).layout).toBe("spreadsheet");
   });
 });
 
@@ -55,8 +72,13 @@ describe("serializeWorkspaceDisplay", () => {
     expect(WORKSPACE_VIEW_ORDER_BY).toBe("-created_at");
   });
 
-  it("pins a stored layout back to spreadsheet", () => {
+  it("writes the prefetched layout instead of pinning spreadsheet", () => {
     const prefs = { ...defaultWorkspaceDisplay(), layout: "kanban" as const };
-    expect(serializeWorkspaceDisplay(prefs).displayFilters["layout"]).toBe("spreadsheet");
+    expect(serializeWorkspaceDisplay(prefs).displayFilters["layout"]).toBe("kanban");
+  });
+
+  it("round-trips a stored list layout through prefill and serialize", () => {
+    const prefs = prefillWorkspaceDisplay({ layout: "list", group_by: "priority" }, {});
+    expect(serializeWorkspaceDisplay(prefs).displayFilters["layout"]).toBe("list");
   });
 });

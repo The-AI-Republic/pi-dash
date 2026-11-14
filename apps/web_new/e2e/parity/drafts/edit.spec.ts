@@ -6,9 +6,9 @@
 // performing their own outcome. Rows: DRAFT-008, DRAFT-009. Green on
 // apps/web first.
 //
-// DRAFT-009's translated-labels half is a bug: scenario (the oracle
-// renders raw i18n keys); that scenario lives in this file once its
-// linked issue exists.
+// DRAFT-009's menu labels are plain behaviour: main#532 translated the
+// old app's draft row menu, so both legs render Edit / Make a copy /
+// Move to project / Delete rather than raw i18n keys.
 import { test, expect } from "../fixtures";
 import { serverCreateDraft, serverDraftNames, serverDraftRecord } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -125,33 +125,25 @@ test(
   }
 );
 
-// The oracle renders the row-menu titles untranslated; DRAFT-009 (as
-// amended to the main#532 target) requires translated labels. Spec §7
-// makes the labels the target for the new app, so the oracle leg pins
-// the old keys and the web_new leg asserts the translated catalog
-// (NEWFRONT-298).
+// DRAFT-009 (amended to the main#532 target) requires translated labels.
+// main#532 translated the old app's drafts menu too, so both apps now
+// render the catalog text and this scenario asserts it on either leg; the
+// labels stay pinned here so a regression to raw keys fails (NEWFRONT-298).
 const DRAFT_MENU_TARGET_LABELS = ["Edit", "Make a copy", "Move to project", "Delete"];
 
 test(
-  specTitle(["DRAFT-009"], "bug: row menus render raw i18n keys (NEWFRONT-298)"),
+  specTitle(["DRAFT-009"], "both menu openers expose the translated row actions in order"),
   { tag: specTags(["DRAFT-009"]) },
   async ({ driver }) => {
     const harness = await draftsHarness("parity-d9bug");
     const { owner, workspaceSlug, projectId } = harness;
     const name = `D9 Keys ${harness.tag}`;
     await serverCreateDraft(workspaceSlug, owner.cookie, { name, project_id: projectId });
-    const expected =
-      driver.target === "web_new" ? DRAFT_MENU_TARGET_LABELS : ["edit", "make_a_copy", "move_to_project", "delete"];
 
-    await test.step(
-      driver.target === "web_new"
-        ? "both openers expose the translated labels in order"
-        : "both openers expose the raw keys in order",
-      async () => {
-        await draftsOpenAs(driver, harness);
-        expect(await driver.draftRowMenuEntries(name)).toEqual(expected);
-        expect(await driver.draftContextMenuEntries(name)).toEqual(expected);
-      }
-    );
+    await test.step("both openers expose the translated labels in order", async () => {
+      await draftsOpenAs(driver, harness);
+      expect(await driver.draftRowMenuEntries(name)).toEqual(DRAFT_MENU_TARGET_LABELS);
+      expect(await driver.draftContextMenuEntries(name)).toEqual(DRAFT_MENU_TARGET_LABELS);
+    });
   }
 );

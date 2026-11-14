@@ -289,3 +289,105 @@ def test_archived_points_keeps_unestimated_contributors(points_tenant):
     assert ctx["label_b"] in labels, dist["labels"]
     assert _empty_sums(labels[ctx["label_b"]]), labels[ctx["label_b"]]
     assert labels[ctx["label_a"]]["total_estimates"] == 5.0
+
+
+def _dated_keys(start_iso, end_iso):
+    """Inclusive ``YYYY-MM-DD`` keys Django renders for a cycle range."""
+    from datetime import datetime as _dt
+
+    start = _dt.fromisoformat(start_iso).date()
+    end = _dt.fromisoformat(end_iso).date()
+    keys = []
+    cur = start
+    while cur <= end:
+        keys.append(cur.isoformat())
+        cur = cur + timedelta(days=1)
+    return keys
+
+
+def test_analytics_points_completion_chart_int_when_unestimated(points_tenant):
+    """NEWPIDASH-215: no estimated issue renders int 0, not 0.0.
+
+    Django ``sum([])`` is the int ``0`` (``analytics_plot.py:143``) and the
+    per-day ``sum`` stays int, so every past day is ``0``. The Rust port
+    used ``.unwrap_or(0.0)`` with ``as_float=true`` and rendered ``0.0``
+    on every day. Both bodies are otherwise identical; the first
+    differing byte is after ``"2026-...":`` (``0,`` vs ``0.0``).
+    """
+    tenant = points_tenant
+    conn = tenant["conn"]
+    ws = tenant["workspace"]["id"]
+    proj = tenant["project"]["id"]
+    state = tenant["state"]["id"]
+    owner = tenant["user"]["id"]
+
+    _seed_points_estimate(conn, project_id=proj, workspace_id=ws, value="5")
+    start, end = _past_range(15, 5)
+    cycle_id = _create_dated_cycle(
+        conn, workspace_id=ws, project_id=proj, owner_id=owner,
+        name="No estimates", start_date=start, end_date=end,
+    )
+    tenant["seed"].track("cycles", "id", cycle_id)
+    for n, seq in enumerate((9201, 9202)):
+        issue = _seed_issue(
+            conn, workspace_id=ws, project_id=proj, state_id=state,
+            created_by_id=owner, name=f"Unestimated {n}", sequence_id=seq,
+        )
+        _add_to_cycle(conn, cycle_id=cycle_id, issue_id=issue,
+                      project_id=proj, workspace_id=ws)
+
+    urls = cycle_urls(points_tenant)
+    r = points_tenant["client"].get(urls["analytics"](cycle_id) + "?type=points")
+    assert r.status_code == 200, r.text[:500]
+    chart = r.json()["completion_chart"]
+
+    keys = _dated_keys(start, end)
+    assert sorted(chart.keys()) == sorted(keys), chart
+    for key in keys:
+        assert type(chart[key]) is int, (key, chart[key], r.text[:800])
+        assert chart[key] == 0, (key, chart[key])
+    # Exact bytes: every value is :0, never :0.0 (the Rust bug).
+    assert '":0.0' not in r.text, r.text[:1200]
+    assert '":0' in r.text, r.text[:1200]
+
+
+def test_analytics_points_completion_chart_float_when_estimated(points_tenant):
+    """NEWPIDASH-215 control: an estimated-but-uncompleted issue stays float.
+
+    Django ``sum([float(v)])`` is float, so ``total - sum([])`` is float
+    on every past day even before the first completion. Guards the fix
+    from flipping the whole points chart to int.
+    """
+    tenant = points_tenant
+    conn = tenant["conn"]
+    ws = tenant["workspace"]["id"]
+    proj = tenant["project"]["id"]
+    state = tenant["state"]["id"]
+    owner = tenant["user"]["id"]
+
+    ep_id = _seed_points_estimate(conn, project_id=proj, workspace_id=ws, value="5")
+    start, end = _past_range(15, 5)
+    cycle_id = _create_dated_cycle(
+        conn, workspace_id=ws, project_id=proj, owner_id=owner,
+        name="One estimate", start_date=start, end_date=end,
+    )
+    tenant["seed"].track("cycles", "id", cycle_id)
+    issue = _seed_issue(
+        conn, workspace_id=ws, project_id=proj, state_id=state,
+        created_by_id=owner, name="Estimated open", sequence_id=9211,
+        estimate_point_id=ep_id,
+    )
+    _add_to_cycle(conn, cycle_id=cycle_id, issue_id=issue,
+                  project_id=proj, workspace_id=ws)
+
+    urls = cycle_urls(points_tenant)
+    r = points_tenant["client"].get(urls["analytics"](cycle_id) + "?type=points")
+    assert r.status_code == 200, r.text[:500]
+    chart = r.json()["completion_chart"]
+
+    keys = _dated_keys(start, end)
+    assert sorted(chart.keys()) == sorted(keys), chart
+    for key in keys:
+        assert type(chart[key]) is float, (key, chart[key], r.text[:800])
+        assert chart[key] == 5.0, (key, chart[key])
+    assert '":5.0' in r.text, r.text[:1200]

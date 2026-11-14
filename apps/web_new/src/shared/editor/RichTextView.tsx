@@ -7,7 +7,9 @@
 
 import * as React from "react";
 
-import { renderableHtml } from "./sanitize.js";
+import { Markdown } from "@pidash/kit";
+
+import { extractMarkdownSource, renderableHtml } from "./sanitize.js";
 import { mentionDirectoryVersion, subscribeMentionDirectory } from "./mentionDirectory.js";
 import { parseEntityPeekAttributes } from "./entityPeekAttributes.js";
 import { requestEntityPeek } from "../shell/entityPeek.js";
@@ -41,6 +43,11 @@ export function RichTextView({
     () => renderableHtml(html, resolveAsset, workspaceSlug),
     [html, resolveAsset, workspaceSlug, directoryVersion]
   );
+  // NEWPIDASH-232: Bodies stored by the pre-fix assistant path wrap raw markdown
+  // inside <p> tags. When the sanitized form would render those markers
+  // literally, fall back to the markdown renderer so headings, lists, code,
+  // tables, links and emphasis paint correctly without a data backfill.
+  const markdownSource = React.useMemo(() => extractMarkdownSource(html), [html]);
   const classes = className === undefined ? "rich-text-content" : `rich-text-content ${className}`;
   // A reference preview's stored identifiers are copied onto its rendered
   // span; activation forwards them to the shell peek (PAGE-043).
@@ -62,6 +69,22 @@ export function RichTextView({
     );
     if (request !== null) requestEntityPeek(request);
   };
+  if (markdownSource !== null) {
+    return (
+      <div
+        aria-label={label}
+        role="region"
+        className={classes}
+        onClick={(event) => activatePreview(event.target)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          activatePreview(event.target);
+        }}
+      >
+        <Markdown source={markdownSource} />
+      </div>
+    );
+  }
   return (
     <div
       aria-label={label}
