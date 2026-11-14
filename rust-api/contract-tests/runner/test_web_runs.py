@@ -455,7 +455,7 @@ def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
 
 
 def test_web_runs_create_direct_cloud_default(user_client, seeder, daemon_world):
-    """Cloud-default direct create: Django gates, Rust resolves local (DIFF-17).
+    """Cloud-default direct create: Django gates, Rust resolves local (DIFF-21).
 
     Contract CI runs both backends with CLOUD_AGENT_ENABLED off. Django
     answers the executor-resolution arm with 409 `cloud_agent_unavailable`.
@@ -471,7 +471,7 @@ def test_web_runs_create_direct_cloud_default(user_client, seeder, daemon_world)
         user_client, f"{WEB}/runs/",
         {"prompt": "hello cloud", "workspace": daemon_world["workspace"]["id"]},
     )
-    assert response.status_code == expect("DIFF-17", django=409, rust=201), response.text
+    assert response.status_code == expect("DIFF-21", django=409, rust=201), response.text
     assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     if is_rust():
         body = response.json()
@@ -838,7 +838,7 @@ def _seed_llm_config(seeder, user_id):
 def test_web_runs_create_runai_201_body_is_predispatch_for_cloud(
     user_client, seeder, daemon_world
 ):
-    """Cloud run_ai 201: Django leases a cloud run, Rust resolves local (DIFF-17).
+    """Cloud run_ai 201: Django leases a cloud run, Rust resolves local (DIFF-21).
 
     Regime: servers booted with ``CLOUD_AGENT_ENABLED=true``
     (``CONTRACT_CLOUD_AGENT_ENABLED=true``); skipped otherwise — CI runs the
