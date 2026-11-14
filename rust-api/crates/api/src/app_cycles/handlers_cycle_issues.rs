@@ -873,9 +873,9 @@ fn cycle_filtered_set(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_sql_text = String::new();
     for (name, value) in legacy.predicates() {
-        // UTC keeps this slice's current truncation; its own actor-zone
-        // fix follows the app_issues pattern separately.
-        let fragment = legacy_sql(&mut binder, name, value, &chrono_tz::UTC)?;
+        // Actor-zone truncation (Django's `TimezoneMixin` + `TruncDate`):
+        // `created_at__date` etc. are in the acting user's zone, not UTC.
+        let fragment = legacy_sql(&mut binder, name, value, tz)?;
         if legacy_sql_text.is_empty() {
             legacy_sql_text = fragment;
         } else {
