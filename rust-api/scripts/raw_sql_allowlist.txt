@@ -2,6 +2,9 @@
 # Counts only go down: lower an entry (or delete it at 0) in the PR
 # that migrates sites to SeaORM. Never raise one; mark a justified
 # exception with `// raw-sql: <reason>` instead.
+crates/api/src/v1_work_items/handlers_pr_links.rs 33
+crates/services/src/operations/pull_requests.rs 1
+crates/services/src/read/pr_links.rs 3
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).

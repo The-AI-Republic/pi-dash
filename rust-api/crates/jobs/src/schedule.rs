@@ -303,6 +303,14 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
             task: "runner.sweep_stranded_dedicated_runs",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
+        // Unsatisfiable-pin recovery: releases wedged-busy pinned runners
+        // and auto-clears pins held past RUNNER_PIN_AUTO_RELEASE_SECS,
+        // then drains the affected pods (PDASHOSS01-233).
+        BeatEntry {
+            name: "runner-reconcile-unsatisfiable-pins",
+            task: "runner.reconcile_unsatisfiable_pins",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
         BeatEntry {
             name: "runner-reconcile-stalled-runs",
             task: "runner.reconcile_stalled_runs",
@@ -515,9 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn literal_schedule_has_all_27_entries() {
+    fn literal_schedule_has_all_28_entries() {
         let schedule = literal_schedule();
-        assert_eq!(schedule.len(), 27);
+        assert_eq!(schedule.len(), 28);
         let names: Vec<_> = schedule.iter().map(|e| e.name).collect();
         for expected in [
             "check-every-five-minutes-to-send-email-notifications",
@@ -539,6 +547,7 @@ mod tests {
             "runner-fail-runs-on-offline-runners",
             "runner-fail-dedicated-runs",
             "runner-sweep-stranded-dedicated-runs",
+            "runner-reconcile-unsatisfiable-pins",
             "runner-reconcile-stalled-runs",
             "runner-sweep-agent-chat-state",
             "assistant-sweep-stale-turns",
@@ -566,7 +575,7 @@ mod tests {
             std::env::remove_var(var);
         }
         let schedule = beat_schedule();
-        assert_eq!(schedule.len(), 31);
+        assert_eq!(schedule.len(), 32);
         let find = |name: &str| schedule.iter().find(|e| e.name == name).expect(name);
         assert_eq!(
             find("cloud-agent-scan-queued-runs").cadence,

@@ -2140,3 +2140,91 @@ def test_rust_issue_activity_assignee_subscribes_and_writes_row(db_conn):
     assert sub["created_at"] is not None
     assert sub["updated_at"] is not None
 
+
+
+def _relation_second_issue(db_conn, chain):
+    """A second issue (sequence_id 2) for relation payloads."""
+    return insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": str(uuid.uuid4()),
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+
+
+def _relation_rows(conn, before):
+    rows = _added_rows(conn, "issue_activities", before)
+    return rows if len(rows) == 2 else None
+
+
+def test_rust_issue_activity_relation_create_writes_rows(db_conn):
+    """Relation created, Rust side: blocked_by forward + blocking mirror (NEWPIDASH-198).
+
+    Mirrors ``test_issue_activity_relation_create_writes_rows`` (same
+    payload): settlement plus the row diff is the proof — with the Django
+    worker stopped, a forward could never produce local rows. Pre-fix the
+    relation snapshot decodes ``issues.sequence_id`` (``INT4``) as ``i64``
+    and the task fails with ``mismatched types``, so neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrrelation")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    second = _relation_second_issue(db_conn, chain)
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue_relation.activity.created",
+            "requested_data": json.dumps(
+                {"relation_type": "blocked_by", "issues": [str(second["id"])]}
+            ),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    rows = wait_for(
+        lambda: _relation_rows(db_conn, before),
+        what="relation issue_activities rows",
+    )
+    by_issue = {row["issue_id"]: row for row in rows}
+    assert set(by_issue) == {str(issue["id"]), str(second["id"])}
+    forward = by_issue[str(issue["id"])]
+    assert forward["field"] == "blocked_by"
+    assert forward["verb"] == "updated"
+    assert forward["comment"] == "added blocked_by relation"
+    assert forward["old_value"] == ""
+    assert forward["new_value"] == "CT-2"
+    assert forward["old_identifier"] == str(second["id"])
+    assert forward["project_id"] == str(project["id"])
+    assert forward["workspace_id"] == str(chain["workspace"]["id"])
+    assert forward["actor_id"] == str(owner["id"])
+    assert forward["epoch"] == epoch
+    mirror = by_issue[str(second["id"])]
+    assert mirror["field"] == "blocking"
+    assert mirror["verb"] == "updated"
+    assert mirror["comment"] == "added blocking relation"
+    assert mirror["old_value"] == ""
+    assert mirror["new_value"] == "CT-1"
+    assert mirror["old_identifier"] == str(issue["id"])
+    assert mirror["project_id"] == str(project["id"])
+    assert mirror["workspace_id"] == str(chain["workspace"]["id"])
+    assert mirror["actor_id"] == str(owner["id"])
+    assert mirror["epoch"] == epoch

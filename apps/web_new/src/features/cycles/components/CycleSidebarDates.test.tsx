@@ -15,7 +15,15 @@ import type { CycleRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const harness = vi.hoisted(() => ({
+  meData: undefined as { user_timezone: string } | undefined,
+}));
+
 vi.mock("../../../shared/shell/toaster.js", () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
+vi.mock("../../../core/session/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../core/session/index.js")>()),
+  useMe: () => ({ data: harness.meData }),
+}));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";

@@ -15,9 +15,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { issueKeys } from "../../../../../../../features/issues/api/keys.js";
 
-// The view's header mounts the whole-list ellipsis (ISS-067), which reads
-// the address it copies from the router. This file renders the screen
-// component alone, so the hook answers a fixed address.
+// The view's header mounts the detail overflow menu (VIEW-017 detail half),
+// which copies the canonical address; other headers still mount the
+// whole-list ellipsis (ISS-067). This file renders the screen component
+// alone, so the hook answers a fixed address where still used.
 vi.mock("../../../../../../../features/issues/menus/useCurrentPageHref.js", () => ({
   useCurrentPageHref: () =>
     "/acme/projects/223e4567-e89b-12d3-a456-426614174001/views/323e4567-e89b-12d3-a456-426614174002",
@@ -180,7 +181,7 @@ describe("saved-view detail route preload", () => {
     resetAppClient();
   });
 
-  it("offers the whole-list actions in the view's header (ISS-067)", async () => {
+  it("offers the detail header overflow menu in the view's header (VIEW-017 detail half)", async () => {
     await loadSavedViewDetail();
     const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
     const searchSpy = vi.spyOn(Route, "useSearch").mockReturnValue({} as never);
@@ -207,7 +208,7 @@ describe("saved-view detail route preload", () => {
         <Component />
       </QueryClientProvider>
     );
-    expect(await screen.findByRole("button", { name: "List actions" })).toBeInTheDocument();
+    expect(await screen.findByTestId("project-view-detail-menu-trigger")).toBeInTheDocument();
     paramsSpy.mockRestore();
     searchSpy.mockRestore();
     resetAppClient();

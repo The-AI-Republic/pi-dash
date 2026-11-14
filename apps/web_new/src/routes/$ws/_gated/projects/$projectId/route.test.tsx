@@ -54,6 +54,14 @@ vi.mock("../../../../../features/modules/palette/ModulePaletteEntries.js", async
   };
 });
 
+// The cycles palette entries load on their own chunk too (CYC-014).
+vi.mock("../../../../../features/cycles/palette/CyclesPaletteEntries.js", async () => {
+  const ReactModule = await import("react");
+  return {
+    CyclesPaletteEntries: () => ReactModule.createElement("div", { "data-testid": "cycles-palette-entries" }),
+  };
+});
+
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -271,6 +279,12 @@ describe("project layout", () => {
   it("mounts the modules palette entries beside the views ones (MOD-037)", async () => {
     renderLayout(200);
     await screen.findByTestId("modules-palette-entries");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
+  });
+
+  it("mounts the cycles palette entries beside the others (CYC-014)", async () => {
+    renderLayout(200);
+    await screen.findByTestId("cycles-palette-entries");
     expect(screen.getByText("Issues page")).toBeInTheDocument();
   });
 

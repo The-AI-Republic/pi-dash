@@ -125,6 +125,35 @@ def test_workspace_seed_before_after(db_conn, broker_url):
         or None,
         what="seed issues created",
     )
+    # Tail entities land after issues (PIDASHCONV-900 shape): poll them
+    # too instead of asserting once. Without this a loaded worker is read
+    # mid-seed and pages/views counts flake (NEWPIDASH-228: 1 vs 2).
+    wait_for(
+        lambda: (
+            _count(
+                db_conn,
+                "issue_views",
+                "WHERE project_id = %s::uuid",
+                (str(project["id"]),),
+            )
+            == len(seed_views)
+        )
+        or None,
+        what="seed views created",
+    )
+    wait_for(
+        lambda: (
+            _count(
+                db_conn,
+                "pages",
+                "WHERE workspace_id = %s::uuid AND deleted_at IS NULL",
+                (str(workspace["id"]),),
+            )
+            == len(seed_pages)
+        )
+        or None,
+        what="seed pages created",
+    )
 
     # Project shape: workspace name, derived identifier, seed payload,
     # bot audit, first-project default, workspace timezone.

@@ -280,9 +280,9 @@ NON_PI_DASH_TASKS = {
 # pinned truth; any mismatch is beat drift. Once main merges into
 # rust-dev, Django gains the entry and the map row goes stale (the
 # check fails until the row is deleted).
-# Currently empty: PIDASHCONV-1087 deleted the last rows
-# (PIDASHCONV-1063's two offline-runner sweeps) after the
-# PIDASHCONV-1055 merge (2d029396).
+# Currently empty: PIDASHCONV-1087 deleted the PIDASHCONV-1063 rows
+# after the PIDASHCONV-1055 merge (2d029396), and the PDASHOSS01-233
+# row went once Python PR #541 reached main.
 RUST_AHEAD_BEAT_ENTRIES = {}
 
 # Beat cadence the Rust entry must equal, rendered deterministically.
