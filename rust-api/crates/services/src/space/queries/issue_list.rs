@@ -65,11 +65,13 @@
 //!   not `"intake_status"`. This endpoint only uses `"GET"`, so the quirk
 //!   never fires here; it is recorded so a shared compiler does not
 //!   "fix" it.
-//! * QUIRK-count-filter-intake (`views/issue.py:170-177,196-203`): the
+//! * QUIRK-count-filter-intake (`views/issue.py:170-177,196-203`): Django's
 //!   grouped totals `count_filter` counts intake rows with `status IN
-//!   (1, -1, 2)` OR no intake row at all — status `0` (pending triage) and
-//!   any other status contribute zero to `total_results` while the row still
-//!   appears in `results`. [`count_filter_sql`] keeps that predicate as-is.
+//!   (1, -1, 2)` OR no intake row at all — status `-2` (pending) and `0`
+//!   (snoozed) contribute zero to `total_results` while the row still
+//!   appears in `results`, so the header reads short of the rows beneath
+//!   it (NEWPIDASH-276). The fixed behaviour (DIFF-37) drops the intake
+//!   leg: [`count_filter_sql`] counts every row the group returns.
 
 use serde::{Deserialize, Serialize};
 
@@ -754,12 +756,17 @@ pub fn default_annotation_sql(key: &str) -> Option<String> {
 pub const GROUP_MISMATCH_BODY: &str =
     r#"{"error": "Group by and sub group by cannot have same parameters"}"#;
 
-/// Intake/archived/draft totals predicate shared by the grouped and
-/// sub-grouped paginators (`count_filter=Q(...)`, `views/issue.py:170-177`
-/// and `:196-203`; QUIRK-count-filter-intake documented at the top of this
-/// module).
+/// Archived/draft totals predicate shared by the grouped and sub-grouped
+/// paginators. Django's `count_filter=Q(...)` (`views/issue.py:170-177`
+/// and `:196-203`) also carries an intake leg (status 1/-1/2 or no intake
+/// row) that excludes pending (-2) and snoozed (0) intake issues from the
+/// totals while the rows still render them, so the group header reads
+/// short of the rows beneath it. The fixed behaviour (DIFF-37,
+/// NEWPIDASH-276) drops that leg so the totals count every row the group
+/// returns; the archived/draft legs are already implied by the base
+/// `WHERE` (`ISSUE_OBJECTS_WHERE`) and are kept for shape stability.
 pub fn count_filter_sql() -> String {
-    "((\"issue_intake\".\"status\" = 1 OR \"issue_intake\".\"status\" = -1 OR \"issue_intake\".\"status\" = 2 OR \"issue_intake\".\"id\" IS NULL) AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false)".to_string()
+    "(\"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false)".to_string()
 }
 
 /// Per-group totals query behind `__get_total_queryset`
@@ -1539,17 +1546,18 @@ mod tests {
         assert!(
             squashed(FIXTURE_SQL).contains("Group by and sub group by cannot have same parameters")
         );
-        // QUIRK-count-filter-intake: 1/-1/2-or-null + archived-null + draft.
+        // DIFF-37 (NEWPIDASH-276): the totals count every row the group
+        // returns — no intake leg, so pending/snoozed intake issues are
+        // counted instead of rendering uncounted.
         let count = count_filter_sql();
         for frag in [
-            "\"issue_intake\".\"status\" = 1",
-            "\"issue_intake\".\"status\" = -1",
-            "\"issue_intake\".\"status\" = 2",
-            "\"issue_intake\".\"id\" IS NULL",
             "\"issues\".\"archived_at\" IS NULL",
             "\"issues\".\"is_draft\" = false",
         ] {
             assert!(count.contains(frag), "{frag}");
+        }
+        for frag in ["issue_intake", "\"status\""] {
+            assert!(!count.contains(frag), "{frag} must not appear in {count}");
         }
         let grouped = grouped_window_sql("priority", "-created_at");
         assert!(grouped.contains("PARTITION BY priority"));
