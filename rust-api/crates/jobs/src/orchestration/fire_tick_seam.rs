@@ -3040,9 +3040,9 @@ mod tests {
         .expect("read agent user");
         assert_eq!(row.0, "pi_dash_agent");
         assert_eq!(row.1.as_deref(), Some("agent@example.com"));
-        assert_eq!(row.2, "agent");
+        assert_eq!(row.2, "Pi Dash Bot");
         assert_eq!(row.3, "Pi Dash");
-        assert_eq!(row.4, "Agent");
+        assert_eq!(row.4, "Bot");
         assert!(row.5);
         assert!(row.6);
         assert_eq!(row.7, "UTC");
