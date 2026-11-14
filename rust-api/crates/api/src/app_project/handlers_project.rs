@@ -1857,8 +1857,12 @@ async fn executor_options(
     workspace_id: &uuid::Uuid,
     viewer: Option<(&uuid::Uuid, &ExecutorUser)>,
 ) -> Result<[pidash_services::run_creation::executor_policy::ExecutorOption; 3], Denial> {
-    use pidash_services::run_creation::pidash_agent_availability::{pidash_agent_availability, HEARTBEAT_GRACE_SECS};
-    use pidash_services::run_creation::executor_policy::{local_runner_available_exists, local_runner_exists};
+    use pidash_services::run_creation::executor_policy::{
+        local_runner_available_exists, local_runner_exists,
+    };
+    use pidash_services::run_creation::pidash_agent_availability::{
+        pidash_agent_availability, HEARTBEAT_GRACE_SECS,
+    };
     // `agent_execution.py:112-121`: the unpaused leg always runs; the
     // online-incl-paused leg runs only when nothing is available (the
     // `elif` distinguishes "paused" from "none"). SeaORM (no raw SQL).
@@ -7674,10 +7678,10 @@ mod live_tests {
     use std::sync::Arc;
 
     use super::*;
-    use pidash_services::run_creation::executor_policy::UserFlags;
     use pidash_services::extensions::{
-        PidashAgentProfile, AssistantModelSeam, SeamFuture, TitleError, TitleRequest,
+        AssistantModelSeam, PidashAgentProfile, SeamFuture, TitleError, TitleRequest,
     };
+    use pidash_services::run_creation::executor_policy::UserFlags;
 
     /// Overlay-shaped seam: a keyless viewer still counts as configured,
     /// and the desktop profile lane is available.

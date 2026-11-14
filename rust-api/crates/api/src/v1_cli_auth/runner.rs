@@ -733,11 +733,12 @@ pub async fn list_runners(
                 // (`serializers.py:186-189`): the stored state is derived
                 // through `current_pidash_agent_sign_in_state`, never emitted raw
                 // (the `runner_enroll::manage` precedent).
-                let engine_sign_in_state = pidash_agent_credential::current_pidash_agent_sign_in_state(
-                    row.dm_engine_sign_in_state.as_deref().unwrap_or(""),
-                    row.dm_engine_credential_expires_at,
-                    Utc::now(),
-                );
+                let engine_sign_in_state =
+                    pidash_agent_credential::current_pidash_agent_sign_in_state(
+                        row.dm_engine_sign_in_state.as_deref().unwrap_or(""),
+                        row.dm_engine_credential_expires_at,
+                        Utc::now(),
+                    );
                 serde_json::json!({
                     "id": dm_id.to_string(),
                     "host_label": row.dm_host_label.clone().unwrap_or_default(),

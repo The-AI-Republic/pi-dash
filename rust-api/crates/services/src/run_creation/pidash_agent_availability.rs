@@ -376,14 +376,12 @@ pub fn pidash_agent_configuration_check(
     errors
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use serde_json::Value;
     use std::cell::Cell;
-    
 
     static FIXTURE: &str =
         include_str!("../../../../fixtures/dispatch/fx-disp-04-admission-checks.golden.json");

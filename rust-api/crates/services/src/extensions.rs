@@ -175,7 +175,6 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
         Box::pin(async move { crate::assistant::seams::has_usable_llm_config(has_api_key) })
     }
 
-
     /// Describe the model endpoint the Pi Dash Agent may call. CE has
     /// exactly one lane, BYOK, which the desktop does not serve — so this
     /// is always unavailable; only the reason differs.

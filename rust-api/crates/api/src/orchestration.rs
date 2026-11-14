@@ -24,7 +24,6 @@
 //! move's dispatch precedes its cancel send and pod drains,
 //! `issue_move.py:353-372`).
 
-
 use chrono::Utc;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::{Map, Value};
@@ -78,7 +77,6 @@ pub(crate) async fn drain_terminal_effects(
     })
     .await;
 }
-
 
 // Shared with both move drivers (app + v1): one copy of the twins that
 // lived in each move handler file. Failures answer `MoveDrainError`

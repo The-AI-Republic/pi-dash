@@ -71,5 +71,4 @@ mod tests {
         assert_eq!(doc.usage_providers().expect("providers").len(), 43);
         assert_eq!(doc.usage_vectors().expect("vectors").len(), 66);
     }
-
 }

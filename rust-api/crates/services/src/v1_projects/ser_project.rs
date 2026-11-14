@@ -649,10 +649,7 @@ mod tests {
             check_default_agent_executor(Some("managed_runner"), false),
             ExecutorCheck::Ok
         );
-        assert_eq!(
-            check_default_agent_executor(None, false),
-            ExecutorCheck::Ok
-        );
+        assert_eq!(check_default_agent_executor(None, false), ExecutorCheck::Ok);
         assert_eq!(
             check_default_agent_executor(Some("local_runner"), false),
             ExecutorCheck::Ok

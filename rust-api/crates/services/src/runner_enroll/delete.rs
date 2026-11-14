@@ -755,7 +755,9 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
         store.delete_machine_sessions(machine_id).await?;
         store.null_runner_machines(machine_id).await?;
         store.null_token_machines(machine_id).await?;
-        store.delete_machine_pidash_agent_credentials(machine_id).await?;
+        store
+            .delete_machine_pidash_agent_credentials(machine_id)
+            .await?;
         store.delete_machine_row(machine_id).await?;
     }
     Ok(DeleteMachineOutcome {

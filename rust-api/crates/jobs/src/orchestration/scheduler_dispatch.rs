@@ -33,8 +33,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::agent_runs::status::AgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::{
     agent_run, issue_agent_ticker, issues, pod, scheduler_bindings, schedulers, workspaces,
 };
@@ -43,7 +43,6 @@ use pidash_db::orchestration::querysets::{
 };
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::run_creation::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
 use pidash_services::extensions::AssistantModelSeam;
@@ -56,6 +55,7 @@ use pidash_services::orchestration::entries::{
     SchedulerView, WorkspaceView, SCHEDULER_ALLOWED_ROLES,
 };
 use pidash_services::prompting::{composer, context};
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 use pidash_types::agent_runs::AgentExecutorKind;
 
@@ -663,8 +663,7 @@ where
     }
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions =
-        drain_dispatch(pool, dispatches, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,

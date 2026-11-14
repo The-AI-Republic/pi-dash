@@ -391,7 +391,10 @@ mod tests {
     struct FixedGate(bool);
 
     impl PidashAgentDesktopRequestGate for FixedGate {
-        fn is_desktop(&self, credential: &crate::desktop_gate::PidashAgentDesktopCredential) -> bool {
+        fn is_desktop(
+            &self,
+            credential: &crate::desktop_gate::PidashAgentDesktopCredential,
+        ) -> bool {
             let _ = credential;
             self.0
         }

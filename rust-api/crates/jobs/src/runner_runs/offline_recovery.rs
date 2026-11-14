@@ -280,7 +280,9 @@ async fn finalize_offline_run(
     };
     let now = Utc::now();
     finalization::finalize_update(&conn, &values, *run_id, now).await?;
-    if AgentExecutorKind::from_value(&locked.executor_kind) == Some(AgentExecutorKind::RetiredCloudRun) {
+    if AgentExecutorKind::from_value(&locked.executor_kind)
+        == Some(AgentExecutorKind::RetiredCloudRun)
+    {
         finalization::append_terminal_event_once(
             &conn,
             *run_id,

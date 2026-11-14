@@ -49,16 +49,16 @@ use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::pod::Pod;
 use pidash_db::runner_runs::AgentRun;
 use pidash_db::tx::Transaction as DbTransaction;
+use pidash_jobs::orchestration::LiveCreationStore;
 use pidash_jobs::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DispatchDecision,
 };
-use pidash_jobs::orchestration::LiveCreationStore;
-use pidash_services::run_creation::executor_policy::UserFlags;
-use pidash_services::run_creation::{ExecutionFieldsError, ExecutionInputs, ProjectScope};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
 use pidash_services::orchestration::creation::CreationSeam;
 use pidash_services::orchestration::dispatch::DispatchSeam;
+use pidash_services::run_creation::executor_policy::UserFlags;
+use pidash_services::run_creation::{ExecutionFieldsError, ExecutionInputs, ProjectScope};
 use pidash_services::runner_enroll::validation::{
     self, IssueProbe, RunCreationError, RunCreationStore, StoreError, ValidatedRunContext,
     ValidationError,
@@ -1219,9 +1219,7 @@ pub async fn post_direct(
         requested: scope.requested.as_deref(),
         now_unix_secs: now.timestamp(),
     };
-    let fields = match resolve_execution_fields(&inputs)
-    .await
-    {
+    let fields = match resolve_execution_fields(&inputs).await {
         Ok(fields) => fields,
         Err(error) => {
             let denial = execution_fields_denial(&error);
@@ -1293,9 +1291,7 @@ pub async fn post_direct(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if let Err(response) =
-        drain_direct_dispatch(pool, state, dispatches, now).await
-    {
+    if let Err(response) = drain_direct_dispatch(pool, state, dispatches, now).await {
         return response;
     }
     // The one-shot pod path records its system comment on commit
@@ -1618,9 +1614,7 @@ async fn post_issue_dispatch(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if let Err(response) =
-        drain_direct_dispatch(pool, state, dispatches, now).await
-    {
+    if let Err(response) = drain_direct_dispatch(pool, state, dispatches, now).await {
         return response;
     }
     render_created_snapshot(pool, &snapshot).await
@@ -1916,5 +1910,4 @@ mod dispatch_tests {
         let too_wide: Value = serde_json::from_str(&(u128::MAX.to_string() + "0")).unwrap();
         assert_eq!(coerce_filter_uuid(Some(&too_wide)), UuidCoerce::Invalid);
     }
-
 }

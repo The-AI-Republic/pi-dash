@@ -28,10 +28,6 @@ pub mod assistant;
 /// usage limits, key resolution). Assistant code imports it; it
 /// imports nothing from the assistant (agent naming convention P2).
 pub mod cloud_agent;
-/// Creation + dispatch tasks (D-11 L6, PIDASHCONV-487): the executor-aware
-/// creation seam, the lease-and-offer dispatch engine with transactional
-/// enqueue, and the bounded run-event append.
-pub mod run_dispatch;
 /// Public domain-write hooks (OVL-16, PIDASHCONV-1660): OSS's own
 /// transition / enqueue / move-drain bindings over explicit deps, for
 /// any caller of `operations::*` and the domain writes. The api
@@ -73,6 +69,10 @@ pub mod orchestration;
 pub mod oss_worker;
 pub mod pyformat;
 pub mod queue;
+/// Creation + dispatch tasks (D-11 L6, PIDASHCONV-487): the executor-aware
+/// creation seam, the lease-and-offer dispatch engine with transactional
+/// enqueue, and the bounded run-event append.
+pub mod run_dispatch;
 /// Runner revoke/delete executor (OVL-06, PIDASHCONV-1544): the revoke
 /// bundle as one public service call over the services drivers.
 pub mod runner_enroll;

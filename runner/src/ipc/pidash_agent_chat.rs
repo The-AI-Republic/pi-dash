@@ -109,12 +109,14 @@ impl PidashAgentChatProfile {
         match &self.launch {
             Launch::Daemon => crate::pidash_agent::agent::prepare(&self.config),
             #[cfg(test)]
-            Launch::Fixed { binary, codex_home } => Ok(crate::pidash_agent::agent::engine_runner_config(
-                &self.config,
-                binary,
-                codex_home,
-                None,
-            )),
+            Launch::Fixed { binary, codex_home } => {
+                Ok(crate::pidash_agent::agent::engine_runner_config(
+                    &self.config,
+                    binary,
+                    codex_home,
+                    None,
+                ))
+            }
         }
     }
 

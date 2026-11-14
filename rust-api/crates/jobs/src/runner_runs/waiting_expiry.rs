@@ -167,9 +167,7 @@ impl ExecuteSeams for LiveExecuteSeams {
         call: FinalizeCall,
     ) -> impl std::future::Future<Output = Result<bool, SeamError>> + Send {
         let pool = self.pool.clone();
-        async move {
-            finalize_agent_run(&pool, call).await
-        }
+        async move { finalize_agent_run(&pool, call).await }
     }
 }
 
@@ -344,26 +342,18 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
             ),
             "ended_at" => update.col_expr(
                 run_entity::Column::EndedAt,
-                sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(
-                    now,
-                )),
+                sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
             ),
-            "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
-                match clause.column {
-                    "terminal_hooks_applied_at" => update.col_expr(
-                        run_entity::Column::TerminalHooksAppliedAt,
-                        sea_orm::sea_query::Expr::value(
-                            None::<sea_orm::prelude::DateTimeWithTimeZone>,
-                        ),
-                    ),
-                    _ => update.col_expr(
-                        run_entity::Column::TerminalCapacityReleasedAt,
-                        sea_orm::sea_query::Expr::value(
-                            None::<sea_orm::prelude::DateTimeWithTimeZone>,
-                        ),
-                    ),
-                }
-            }
+            "terminal_hooks_applied_at" | "terminal_capacity_released_at" => match clause.column {
+                "terminal_hooks_applied_at" => update.col_expr(
+                    run_entity::Column::TerminalHooksAppliedAt,
+                    sea_orm::sea_query::Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+                ),
+                _ => update.col_expr(
+                    run_entity::Column::TerminalCapacityReleasedAt,
+                    sea_orm::sea_query::Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+                ),
+            },
             // `error_code` / `error` are folded into `error_details`
             // (`ERROR_DETAILS_COLUMN`); `refusal_category` is a
             // generated column. Only `llm_model` is an own column.
@@ -391,11 +381,10 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
                         run_entity::Column::DonePayload,
                         sea_orm::sea_query::Expr::value(value.clone()),
                     ),
-                (pidash_services::runner_runs::SetValue::Json(value), "usage") => update
-                    .col_expr(
-                        run_entity::Column::Usage,
-                        sea_orm::sea_query::Expr::value(value.clone()),
-                    ),
+                (pidash_services::runner_runs::SetValue::Json(value), "usage") => update.col_expr(
+                    run_entity::Column::Usage,
+                    sea_orm::sea_query::Expr::value(value.clone()),
+                ),
                 _ => return Err(SeamError("json finalize clause".to_owned())),
             },
             "error_details" => update.col_expr(
@@ -426,9 +415,7 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
 
     for effect in finalization::plan_publish_effects(call.run_id) {
         match effect {
-            pidash_services::runner_runs::LifecycleEffect::PublishTerminalEffects {
-                run_id,
-            } => {
+            pidash_services::runner_runs::LifecycleEffect::PublishTerminalEffects { run_id } => {
                 let job = crate::runner_runs::sweeps_chat::terminal_effects_job(&run_id);
                 if let Err(error) = crate::queue::enqueue(pool, &job).await {
                     tracing::error!(%error, "failed to publish terminal effects for run {run_id}");

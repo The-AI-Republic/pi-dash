@@ -554,7 +554,7 @@ mod live_tests {
 
     use super::*;
     use pidash_services::extensions::{
-        PidashAgentProfile, AssistantModelSeam, CredentialError, SeamFuture, TitleError,
+        AssistantModelSeam, CredentialError, PidashAgentProfile, SeamFuture, TitleError,
         TitleRequest,
     };
     use serde_json::Value;

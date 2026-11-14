@@ -199,7 +199,10 @@ mod tests {
         }
         assert_eq!(AgentExecutorKind::from_value("bogus"), None);
         assert!(serde_json::from_str::<AgentExecutorKind>("\"bogus\"").is_err());
-        assert_eq!(AgentExecutorKind::RetiredCloudRun.to_string(), "cloud_agent");
+        assert_eq!(
+            AgentExecutorKind::RetiredCloudRun.to_string(),
+            "cloud_agent"
+        );
     }
 
     #[test]

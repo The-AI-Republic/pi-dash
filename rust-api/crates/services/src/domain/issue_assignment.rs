@@ -134,7 +134,9 @@ pub fn runner_paused_reason<'a>(
     if runner.paused_at.is_some() {
         return Some(Cow::Borrowed("dispatch_paused"));
     }
-    if runner.provisioning == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED {
+    if runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED
+    {
         if let Some(machine) = machine {
             if machine.engine_paused_by_owner {
                 return Some(Cow::Borrowed("owner_paused"));
@@ -835,7 +837,8 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         self, DevMachineMiniRow, LiveStateRow, PodMiniRow, RunnerRow,
     };
 
-    let is_pidash_agent = row.runner.provisioning == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = row.runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let dispatch_paused = row.runner.paused_at.is_some();
     // machine display: dev_machine display_name or host_label or name
     let machine_display = match &row.dev_machine {
@@ -1052,7 +1055,8 @@ pub async fn runner_may_take_run(
 ) -> Result<bool, sea_orm::DbErr> {
     let owner = runner_row.owner_id;
     let created_by_owner = created_by_id == Some(owner);
-    let is_pidash_agent = runner_row.provisioning == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = runner_row.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let team_runs = if is_pidash_agent {
         match runner_row.dev_machine_id {
             Some(machine_id) => dev_machine::Entity::find_by_id(machine_id)
@@ -1143,7 +1147,8 @@ pub async fn locality_runner_for(
             return Ok(None);
         }
     }
-    let is_pidash_agent = candidate.provisioning == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = candidate.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let machine = match candidate.dev_machine_id {
         Some(machine_id) => dev_machine::Entity::find_by_id(machine_id).one(db).await?,
         None => None,
@@ -3094,7 +3099,9 @@ mod tests {
     #[test]
     fn paused_reason_owner_pause_and_auto() {
         let mut runner = runner_fixture();
-        runner.provisioning = pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned();
+        runner.provisioning =
+            pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED
+                .to_owned();
         let mut machine = machine_fixture();
         machine.engine_paused_by_owner = true;
         assert_eq!(
