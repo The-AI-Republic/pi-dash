@@ -991,15 +991,16 @@ pub fn sidebar_pref_response_sql() -> String {
     )
 }
 
-/// R11 PATCH lookup (`:88`, ported bug 11): `filter(key, slug).first()` —
-/// `LIMIT 1` over default `-created_at` order, with NO user filter: a
-/// member can match (and rewrite, below) ANOTHER user's row. Per request
-/// row the handler pops `key` (`:84`), skips a missing key (`:85-86`) or a
-/// no-match (`:90-91`), and sets `is_pinned`/`sort_order` when present
-/// (`:93-97`).
+/// R11 PATCH lookup (`:88`): Django `filter(key, slug).first()` — `LIMIT 1`
+/// over default `-created_at` order with NO user filter — is the ported
+/// bug (PB-0771, PB-0860). Old bug fix (NEWPIDASH-267, DIFF-33): the new
+/// system scopes to the requesting user (`user=request.user`), like the
+/// neighboring user-properties endpoint. Per request row the handler pops
+/// `key` (`:84`), skips a missing key (`:85-86`) or a no-match (`:90-91`),
+/// and sets `is_pinned`/`sort_order` when present (`:93-97`).
 pub fn sidebar_pref_patch_lookup_sql() -> String {
     format!(
-        "SELECT workspace_user_preferences.* FROM workspace_user_preferences WHERE workspace_user_preferences.key = :key AND workspace_user_preferences.workspace_id = {} AND workspace_user_preferences.deleted_at IS NULL ORDER BY workspace_user_preferences.created_at DESC LIMIT 1",
+        "SELECT workspace_user_preferences.* FROM workspace_user_preferences WHERE workspace_user_preferences.key = :key AND workspace_user_preferences.workspace_id = {} AND workspace_user_preferences.user_id = :user AND workspace_user_preferences.deleted_at IS NULL ORDER BY workspace_user_preferences.created_at DESC LIMIT 1",
         workspace_id_by_slug_sql()
     )
 }
@@ -1559,11 +1560,11 @@ mod tests {
         );
         let response = sidebar_pref_response_sql();
         assert!(response.ends_with("ORDER BY workspace_user_preferences.sort_order ASC"));
-        // Ported bug 11: NO user filter on the PATCH lookup.
+        // Old bug fix (NEWPIDASH-267, DIFF-33): PATCH lookup IS user-scoped.
         let lookup = sidebar_pref_patch_lookup_sql();
         assert!(lookup.contains("workspace_user_preferences.key = :key"));
         assert!(lookup.contains("slug = :slug"));
-        assert!(!lookup.contains("user_id"));
+        assert!(lookup.contains("workspace_user_preferences.user_id = :user"));
         // update_fields writes both columns, no updated_at.
         let patch = sidebar_pref_patch_sql();
         assert!(patch.contains("SET is_pinned = :pinned, sort_order = :sort"));
