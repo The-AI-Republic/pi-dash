@@ -10,9 +10,9 @@
 //!   `AgentRunTrigger` (`models.py:237-253`), values verbatim.
 //! * [`agent_run`] — `AgentRun` (`models.py:872-1035`) read shape:
 //!   exactly the 22 columns dispatch touches, with defaults.
-//! * [`tool_call`] — `ToolCallStatus` (`models.py:1178-1184`) +
-//!   `AgentRunToolCall` (`models.py:1187-1216`) read shape (15
-//!   dispatch-touched columns).
+//!
+//! (P3 step B deleted `tool_call` with the retired run tools; run
+//! rows and their tool calls now serialize from `runner_runs`.)
 //!
 //! Sibling L3+ issues add their own files under their own modules;
 //! `executor_kind` reuses the L1
@@ -25,8 +25,6 @@
 
 pub mod agent_run;
 pub mod status;
-pub mod tool_call;
 
 pub use agent_run::AgentRun;
 pub use status::{AgentRunStatus, AgentRunTrigger};
-pub use tool_call::{AgentRunToolCall, ToolCallStatus};

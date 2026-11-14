@@ -35,10 +35,11 @@
 //!   the isolation loop (re-render each non-default section alone; the
 //!   first failure is the culprit), which is also Python's path for the
 //!   common `UndefinedError` case that carries no lineno.
-//! * `composer.py:286-321` (`compose`), `324-344` (`compose_cloud`),
-//!   `347-364` (`compile_template`) — [`compose`], [`compose_cloud`],
-//!   [`compile_template`]. `compose_cloud` drops Python's
-//!   accepted-and-ignored `workspace` / `project` parameters.
+//! * `composer.py:286-321` (`compose`), `347-364` (`compile_template`)
+//!   — [`compose`], [`compile_template`].
+//!
+//! P3 step B deleted `compose_cloud` (`composer.py:324-344`) with
+//! the retired cloud plane.
 //! * `composer.py:372-380` (`_user_for_run`) — [`user_id_for_run`]: the
 //!   `run_is_human_triggered` predicate owns to the runner layer, so this
 //!   takes its boolean result plus the triggering user's id.
@@ -462,47 +463,6 @@ pub fn compose(
     }
 }
 
-/// Compose an immutable Cloud recipe without user/workspace overrides
-/// (`composer.py:324-344`).
-pub fn compose_cloud(
-    kind: &str,
-    context: &serde_json::Value,
-) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::cloud_recipe_for(kind).map_err(|e| PromptComposeError::new(e.message()))?;
-    let mut resolved = Vec::with_capacity(recipe.len());
-    for key in recipe {
-        let section =
-            registry::get_section(key).map_err(|e| PromptComposeError::new(e.message()))?;
-        resolved.push(ResolvedSection {
-            key: key.to_string(),
-            title: section.title.to_owned(),
-            customizable: section.customizable.to_owned(),
-            body: section.default_body.clone(),
-            source: SOURCE_DEFAULT.to_owned(),
-            version: 0,
-        });
-    }
-    let (template_body, manifest) = assemble(&resolved);
-    match renderer::render(&template_body, context) {
-        Ok(text) => Ok(ComposedPrompt {
-            text,
-            manifest,
-            template_body,
-            resolved,
-        }),
-        Err(err) => Err(PromptComposeError::new(attributed_detail(
-            err.message(),
-            &manifest,
-            &resolved,
-            Some(context),
-        ))),
-    }
-}
-
-/// Assemble the recipe for `kind` **without rendering** (Jinja markers
-/// intact), powering the "see the final template" view
-/// (`composer.py:347-364`). The returned `text` is the raw assembled body.
 pub fn compile_template(
     kind: &str,
     workspace_id: Option<&str>,
@@ -987,24 +947,6 @@ mod tests {
         assert!(compiled.text.contains("{{"));
         assert_eq!(compiled.text, compiled.template_body);
         assert_eq!(compiled.manifest.len(), compiled.resolved.len());
-    }
-
-    #[test]
-    fn compose_cloud_resolves_defaults_only() {
-        // `FIX-compose / compose.cloud_direct_*`.
-        let ctx = crate::prompting::validation::sample_contexts(recipes::KIND_DIRECT)
-            .into_iter()
-            .next()
-            .expect("direct sample");
-        let composed = compose_cloud(recipes::KIND_DIRECT, &ctx).expect("cloud composes");
-        assert!(composed.manifest.iter().all(|e| e.source == SOURCE_DEFAULT));
-        assert!(composed.manifest.iter().all(|e| e.version == 0));
-        assert_eq!(
-            composed.manifest.len(),
-            recipes::cloud_recipe_for(recipes::KIND_DIRECT)
-                .expect("direct cloud recipe")
-                .len()
-        );
     }
 
     #[test]

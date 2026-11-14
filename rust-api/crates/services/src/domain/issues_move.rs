@@ -29,7 +29,7 @@ use crate::app_issues::issue_move::{
     MoveResult, MoveStore, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow,
     StateRow, StoreError,
 };
-use crate::dispatch::tools::{create_save_state_select, create_seq_scan_select};
+use crate::domain::issue_create_sql::{create_save_state_select, create_seq_scan_select};
 use crate::dispatch::DeferredConsume;
 use crate::orchestration::blockers::{has_open_blockers_statement, summary_statement, BlockerRow};
 use pidash_db::app_project::models::project::ProjectLookup;

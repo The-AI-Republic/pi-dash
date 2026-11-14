@@ -27,15 +27,12 @@ use pidash_db::entity::agent_run;
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
 
-/// The executor resolve + creation-capacity closure
-/// (`managed_refusal_detail` … `lock_cloud_creation_capacity`) now lives in
-/// `pidash_services::dispatch::execution` so the SeaORM-backed creation seam
-/// (domain move path) can call it; this re-export keeps every
+/// The executor resolve (`execution_fields`) now lives in
+/// `pidash_services::dispatch::execution`; this re-export keeps every
 /// `pidash_jobs::dispatch::…` path stable.
 pub use pidash_services::dispatch::execution::{
-    defer_admission_error, execution_fields, lock_cloud_creation_capacity, lock_workspace,
-    quota_verdict, ActorScope, DeferredAdmissionError, ExecutionFields, ExecutionFieldsError,
-    ExecutionInputs, ExecutionSeams, ProjectScope, QUEUED_CLOUD_COUNT_SQL, WORKSPACE_LOCK_SQL,
+    execution_fields, lock_workspace, ActorScope, DeferredAdmissionError, ExecutionFields,
+    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope, WORKSPACE_LOCK_SQL,
 };
 
 // ---------------------------------------------------------------------------
@@ -169,8 +166,6 @@ pub fn dispatch_after_commit(on_commit: &mut dyn FnMut(Uuid), run_id: Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_services::dispatch::{build_tool_plan, CloudAgentAdmissionError};
-    use serde_json::json;
 
     static FIXTURE: &str =
         include_str!("../../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");
@@ -179,148 +174,11 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    // -- quota verdict (pure core of both capacity gates) --------------------
-
-    #[test]
-    fn quota_verdict_matrix() {
-        // Under the cap: admitted either way.
-        assert_eq!(quota_verdict(19, 20, 10, false), Ok(None));
-        assert_eq!(quota_verdict(19, 20, 10, true), Ok(None));
-        // At the cap, manual raises with the retry-after (`creation.py:169-176`).
-        let err = quota_verdict(20, 20, 10, false).expect_err("manual raises");
-        assert_eq!(err.code(), "run_quota_exceeded");
-        assert_eq!(
-            err.to_string(),
-            "Cloud Agent queue is full for this workspace"
-        );
-        assert_eq!(err.retry_after_seconds(), Some(10));
-        // At the cap, automatic captures `{code, detail}` — the retry-after
-        // the raised error carries is dropped (`creation.py:70,175`).
-        let deferred = quota_verdict(20, 20, 10, true).expect("automatic defers");
-        assert_eq!(
-            deferred,
-            Some(DeferredAdmissionError {
-                code: "run_quota_exceeded".to_owned(),
-                detail: "Cloud Agent queue is full for this workspace".to_owned(),
-            })
-        );
-    }
-
-    #[test]
-    fn admission_capture_drops_retry_after() {
-        let exc = CloudAgentAdmissionError::new("run_quota_exceeded", "detail held", Some(42));
-        assert_eq!(
-            defer_admission_error(&exc),
-            DeferredAdmissionError {
-                code: "run_quota_exceeded".to_owned(),
-                detail: "detail held".to_owned(),
-            }
-        );
-    }
 
     // -- event shaping --------------------------------------------------------
 
     // -- Celery wire ----------------------------------------------------------
 
-    // -- tool-plan snapshot shape ---------------------------------------------
-
-    #[test]
-    fn tool_plan_snapshot_keeps_key_order_and_limits() {
-        // The cloud `tool_plan` half of `execution_fields` (`creation.py:73-81`)
-        // through the real L3 builder: key order, Django-default limits, the
-        // `extra_toolsets` sibling flag.
-        let cloud = CloudAgentSettings {
-            enabled: true,
-            github_tools_enabled: false,
-            ..django_cloud_settings()
-        };
-        let plan = build_tool_plan::<fn() -> bool, fn() -> bool>(
-            "issue",
-            true,
-            &[],
-            None,
-            Some(|| true),
-            &cloud,
-        )
-        .expect("empty requirements plan");
-        let value = serde_json::to_value(&plan).expect("plan serializes");
-        let keys: Vec<&str> = value
-            .as_object()
-            .expect("plan is an object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                "v",
-                "catalog_version",
-                "tools",
-                "required_tools",
-                "limits",
-                "unavailable_capabilities",
-                "extra_toolsets",
-            ],
-            "creation.py:135-158 dict order"
-        );
-        assert_eq!(
-            value["limits"],
-            json!({
-                "model_requests": 25,
-                "tool_calls": 20,
-                "writes": 3,
-                "input_tokens": 144_000,
-                "output_tokens": 16_000,
-                "total_tokens": 160_000,
-                "wall_seconds": 285,
-            }),
-            "settings/common.py defaults"
-        );
-        assert_eq!(value["extra_toolsets"], true);
-        assert_eq!(
-            value["unavailable_capabilities"],
-            json!(["filesystem", "shell", "worktree"])
-        );
-    }
 
     // -- post-commit dispatch --------------------------------------------------
 
@@ -349,22 +207,18 @@ mod tests {
 
     #[test]
     fn all_statements_parse_as_postgres() {
-        for sql in [WORKSPACE_LOCK_SQL, QUEUED_CLOUD_COUNT_SQL] {
-            parse_postgres(sql);
-        }
+        parse_postgres(WORKSPACE_LOCK_SQL);
     }
 
     #[test]
     fn statements_touch_dispatch_tables_only() {
-        for sql in [WORKSPACE_LOCK_SQL, QUEUED_CLOUD_COUNT_SQL] {
-            assert!(
-                sql.contains("agent_run")
-                    || sql.contains("workspaces")
-                    || sql.contains("runner")
-                    || sql.contains("pod"),
-                "unexpected table in: {sql}"
-            );
-        }
+        assert!(
+            WORKSPACE_LOCK_SQL.contains("agent_run")
+                || WORKSPACE_LOCK_SQL.contains("workspaces")
+                || WORKSPACE_LOCK_SQL.contains("runner")
+                || WORKSPACE_LOCK_SQL.contains("pod"),
+            "unexpected table in: {WORKSPACE_LOCK_SQL}"
+        );
     }
 
     // -- live Postgres (ignored; needs a migrated scratch DB) ------------------

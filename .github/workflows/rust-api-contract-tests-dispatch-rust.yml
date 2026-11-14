@@ -175,7 +175,10 @@ jobs:
         working-directory: rust-api/contract-tests
         # The API install puts pytest-django in this interpreter; the
         # dispatch oracle never touches Django.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django dispatch/test_beat_schedule.py dispatch/test_celery_wire.py dispatch/test_empty_tool_result.py dispatch/test_provider_http_error.py dispatch/test_provider_body_read_error.py dispatch/test_reasoning_output.py dispatch/test_transition_completion_comment.py dispatch/test_multi_tenant.py dispatch/test_concurrency.py dispatch/test_budgets.py dispatch/test_safety.py assistant/test_turn_isolation.py -v
+        # P3 step B: the retired cloud suites died with the cloud
+        # plane; only the surviving surface remains (beat pin, wire
+        # pin, expire oracle, turns' credential isolation).
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django dispatch/test_beat_schedule.py dispatch/test_celery_wire.py dispatch/test_expire_waiting_runs.py assistant/test_turn_isolation.py -v
 
       - name: SSRF step under a guard-on worker
         working-directory: rust-api/contract-tests
