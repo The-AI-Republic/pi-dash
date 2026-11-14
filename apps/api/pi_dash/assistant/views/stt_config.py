@@ -20,20 +20,27 @@ from rest_framework.throttling import UserRateThrottle
 
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.assistant import crypto, ssrf
+from pi_dash.assistant.dictation import dictation_disabled_response, dictation_is_enabled
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import UserSTTConfig
 from pi_dash.assistant.serializers import UserSTTConfigSerializer
 
 
 def _serialize(cfg: UserSTTConfig | None) -> dict:
+    # ``enabled`` travels on the config GET (the one read both the composer and
+    # the settings page already make) so the web app can hide dictation without
+    # a rebuild when the kill switch flips.
+    enabled = dictation_is_enabled()
     if cfg is None:
         return {
+            "enabled": enabled,
             "base_url": "",
             "model_name": "",
             "has_api_key": False,
             "last_verified_at": None,
         }
     return {
+        "enabled": enabled,
         "base_url": cfg.base_url,
         "model_name": cfg.model_name,
         "has_api_key": cfg.has_api_key,
@@ -47,6 +54,8 @@ class UserSTTConfigEndpoint(BaseAPIView):
         return Response(_serialize(cfg))
 
     def put(self, request):
+        if not dictation_is_enabled():
+            return dictation_disabled_response()
         cfg = UserSTTConfig.objects.filter(user=request.user).first()
         serializer = UserSTTConfigSerializer(instance=cfg, data=request.data, partial=cfg is not None)
         serializer.is_valid(raise_exception=True)
@@ -77,6 +86,8 @@ class UserSTTConfigEndpoint(BaseAPIView):
         return Response(_serialize(cfg))
 
     def delete(self, request):
+        # Deliberately not gated by the kill switch: a user must always be able
+        # to remove a key they saved, even while dictation is switched off.
         UserSTTConfig.objects.filter(user=request.user).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -89,6 +100,8 @@ class UserSTTConfigTestEndpoint(BaseAPIView):
     throttle_classes = [UserSTTConfigTestThrottle]
 
     def post(self, request):
+        if not dictation_is_enabled():
+            return dictation_disabled_response()
         cfg = UserSTTConfig.objects.filter(user=request.user).first()
         if cfg is None or not cfg.has_api_key:
             return Response({"ok": False, "error_code": "stt_config_missing"})
