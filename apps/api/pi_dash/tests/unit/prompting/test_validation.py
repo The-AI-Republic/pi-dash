@@ -85,7 +85,7 @@ def test_validate_override_fails_closed_for_orphan_section(db, workspace, monkey
     # Force the "section used by no recipe" condition; validation must refuse
     # rather than save an unrendered (never-validated) override.
     monkeypatch.setattr(
-        "pi_dash.prompting.validation.kinds_for_section", lambda key: []
+        "pi_dash.prompting.validation.compositions_for_section", lambda key: []
     )
     with pytest.raises(OverrideValidationError):
         validate_override("implementation", "anything valid", workspace=workspace)
@@ -103,6 +103,10 @@ def test_kinds_for_section_shared_vs_unique():
     }
     # test-cycle is unique to the test kind.
     assert kinds_for_section("test-cycle") == ["test"]
+    # Work-type sections resolve through the slots of their stage's recipe.
+    assert kinds_for_section("software.execute") == ["coding-task"]
+    assert kinds_for_section("software.review") == ["review"]
+    assert set(kinds_for_section("software.context")) == {"coding-task", "review", "test"}
 
 
 # ----------------------------------------------------------------------

@@ -19,18 +19,28 @@ class PromptingConfig(AppConfig):
         # (The legacy ``PromptTemplate`` seed machinery in ``seed.py`` is kept
         # only for historical-migration replay; the table drop is deferred.)
         from pi_dash.orchestration.agent_phases import PHASES
-        from pi_dash.prompting import recipes, registry
+        from pi_dash.prompting import recipes, registry, work_types
 
-        for kind, section_keys in recipes.RECIPES.items():
-            for key in section_keys:
-                if key not in registry.REGISTRY:
-                    raise registry.PromptRegistryError(f"recipe {kind!r} references unknown section {key!r}")
-        for kind, section_keys in recipes.MANAGED_RECIPES.items():
-            for key in section_keys:
-                if key not in registry.REGISTRY:
-                    raise registry.PromptRegistryError(
-                        f"managed recipe {kind!r} references unknown section {key!r}"
-                    )
+        def _check_expanded(table_name: str, kind: str, entries) -> None:
+            # Slots must name known slot positions, and every (kind × work
+            # type) expansion must reference only real sections.
+            for entry in entries:
+                if isinstance(entry, recipes.Slot):
+                    if entry.name not in work_types.SLOT_NAMES:
+                        raise registry.PromptRegistryError(
+                            f"{table_name} recipe {kind!r} has unknown slot {entry.name!r}"
+                        )
+            for work_type in work_types.WORK_TYPES:
+                for key in work_types.expand(entries, work_type):
+                    if key not in registry.REGISTRY:
+                        raise registry.PromptRegistryError(
+                            f"{table_name} recipe {kind!r} (work type {work_type!r}) references unknown section {key!r}"
+                        )
+
+        for kind, entries in recipes.RECIPES.items():
+            _check_expanded("local", kind, entries)
+        for kind, entries in recipes.MANAGED_RECIPES.items():
+            _check_expanded("managed", kind, entries)
         for kind, section_keys in recipes.CLOUD_RECIPES.items():
             for key in section_keys:
                 section = registry.REGISTRY.get(key)
