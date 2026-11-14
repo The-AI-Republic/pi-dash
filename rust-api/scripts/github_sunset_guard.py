@@ -29,9 +29,11 @@ Two coordination lists live in this file:
   the list fails; a list entry with no hits fails too, so the list only
   shrinks. Current entries: the cascade-deletion sweep (which must still
   delete legacy rows until the drop-tables follow-up), the OpenAPI schema
-  name (wire compatibility, not table access), and the model-definition
-  files slated for deletion in NEWPIDASH-210 part 3 (after PDASHOSS01-358
-  merges).
+  name (wire compatibility, not table access), the app_issues PR-link
+  list/destroy reads (deliberate NEWPIDASH-227 coexistence revert: the
+  generic read breaks contract parity while Django still dual-writes,
+  removed with PDASHOSS01-359), and the model-definition files slated for
+  deletion in NEWPIDASH-210 part 3 (after PDASHOSS01-358 merges).
 
 Entity definitions (crates/db/src/entity/) and anything under a migrations/
 directory are never scanned.
