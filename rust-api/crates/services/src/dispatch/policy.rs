@@ -256,31 +256,27 @@ impl std::fmt::Display for RequiredToolUnavailable {
 
 impl std::error::Error for RequiredToolUnavailable {}
 
-/// The two `resolve_executor_kind` failure modes (`policy.py:57-72`, #2903).
+/// The `resolve_executor_kind` failure mode (`policy.py:57-72`, #2903).
+///
+/// P1 (agent naming convention): `CloudAgent` is unreachable — a stored
+/// `cloud_agent` value resolves to `LocalRunner` like `managed_runner`,
+/// so the former `CloudAgent` variant is gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveExecutorError {
     /// `ValueError("unknown agent executor")` (`policy.py:60`); a bare `ValueError`
     /// with no `code` attribute.
     UnknownExecutor,
-    /// `CloudAgentUnavailable` (`policy.py:61-62`).
-    CloudAgent(CloudAgentUnavailable),
 }
 
 impl std::fmt::Display for ResolveExecutorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ResolveExecutorError::UnknownExecutor => write!(f, "unknown agent executor"),
-            ResolveExecutorError::CloudAgent(err) => write!(f, "{err}"),
-        }
+        write!(f, "unknown agent executor")
     }
 }
 
 impl std::error::Error for ResolveExecutorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ResolveExecutorError::UnknownExecutor => None,
-            ResolveExecutorError::CloudAgent(err) => Some(err),
-        }
+        None
     }
 }
 
@@ -291,21 +287,20 @@ impl std::error::Error for ResolveExecutorError {
 /// legacy `managed_runner` value resolves to `local_runner` (the built-in
 /// engine is a runner; new runs are pod-level) — the instance kill switch no
 /// longer turns it away.
+///
+/// P1 (agent naming convention): a stored `cloud_agent` value resolves to
+/// `LocalRunner` too — the retired path is unreachable. The `cloud`
+/// parameter is kept for the P4 removal and is otherwise unused.
 pub fn resolve_executor_kind(
     requested: Option<&str>,
     project_default: &str,
-    cloud: &CloudAgentSettings,
+    _cloud: &CloudAgentSettings,
 ) -> Result<AgentExecutorKind, ResolveExecutorError> {
     let value = requested
         .filter(|r| !r.is_empty())
         .unwrap_or(project_default);
     let kind = AgentExecutorKind::from_value(value).ok_or(ResolveExecutorError::UnknownExecutor)?;
-    if kind == AgentExecutorKind::CloudAgent && !cloud_agent_is_configured(cloud) {
-        return Err(ResolveExecutorError::CloudAgent(
-            CloudAgentUnavailable::new("Pi Dash Cloud Agent is not currently available"),
-        ));
-    }
-    if kind == AgentExecutorKind::ManagedRunner {
+    if kind == AgentExecutorKind::ManagedRunner || kind == AgentExecutorKind::CloudAgent {
         return Ok(AgentExecutorKind::LocalRunner);
     }
     Ok(kind)
@@ -1044,10 +1039,11 @@ mod tests {
             resolve_executor_kind(None, "local_runner", &cloud_on),
             Ok(AgentExecutorKind::LocalRunner)
         );
-        // Explicit cloud request passes when configured.
+        // P1: an explicit cloud request resolves to local even when
+        // configured — the retired path is unreachable.
         assert_eq!(
             resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_on),
-            Ok(AgentExecutorKind::CloudAgent)
+            Ok(AgentExecutorKind::LocalRunner)
         );
         // #2903: a legacy managed value resolves to local (the kill
         // switch no longer turns it away).
@@ -1063,18 +1059,19 @@ mod tests {
         assert_eq!(err.to_string(), "unknown agent executor");
         assert_eq!(matrix[3]["raises"], "ValueError");
         assert_eq!(matrix[3]["message"], "unknown agent executor");
-        // Cloud on an unconfigured instance raises with its code.
-        let err = resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_off)
-            .expect_err("unconfigured cloud raises");
+        // P1: cloud on an unconfigured instance resolves to local instead
+        // of raising. This intentionally diverges from the Python matrix
+        // at matrix[4] (Django still gates on CLOUD_AGENT_ENABLED).
         assert_eq!(
-            err,
-            ResolveExecutorError::CloudAgent(CloudAgentUnavailable::new(
-                "Pi Dash Cloud Agent is not currently available"
-            ))
+            resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_off),
+            Ok(AgentExecutorKind::LocalRunner)
         );
-        assert_eq!(matrix[4]["raises"], "CloudAgentUnavailable");
-        assert_eq!(matrix[4]["code"], CloudAgentUnavailable::CODE);
-        // Local pass-through over a cloud default resolves local.
+        // A stored cloud default resolves to local, as does an explicit
+        // local override over a cloud default.
+        assert_eq!(
+            resolve_executor_kind(None, "cloud_agent", &cloud_on),
+            Ok(AgentExecutorKind::LocalRunner)
+        );
         assert_eq!(
             resolve_executor_kind(Some("local_runner"), "cloud_agent", &cloud_off),
             Ok(AgentExecutorKind::LocalRunner)
@@ -1111,8 +1108,6 @@ mod tests {
         let _: &dyn std::error::Error = &cloud_err;
         let _: &dyn std::error::Error = &CloudCapabilityUnavailable::new("m");
         let _: &dyn std::error::Error = &RequiredToolUnavailable::new("m");
-        let wrapped = ResolveExecutorError::CloudAgent(cloud_err);
-        assert!(wrapped.source().is_some());
         assert!(ResolveExecutorError::UnknownExecutor.source().is_none());
     }
 
