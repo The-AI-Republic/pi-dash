@@ -1122,15 +1122,16 @@ fn validate_write(
         Some(Value::Null) => errors.push(err("name", "This field may not be null.".to_owned())),
         Some(Value::String(text)) => {
             out.present.push("name");
-            if text.is_empty() {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
                 errors.push(err("name", "This field may not be blank.".to_owned()));
-            } else if text.chars().count() > 255 {
+            } else if trimmed.chars().count() > 255 {
                 errors.push(err(
                     "name",
                     "Ensure this field has no more than 255 characters.".to_owned(),
                 ));
             } else {
-                out.name = Some(text.clone());
+                out.name = Some(trimmed.to_owned());
             }
         }
         Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
@@ -1154,7 +1155,7 @@ fn validate_write(
         }
         Some(Value::String(text)) => {
             out.present.push("description");
-            out.description = Some(Value::String(text.clone()));
+            out.description = Some(Value::String(text.trim().to_owned()));
         }
         Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
             errors.push(err("description", "Not a valid string.".to_owned()));
@@ -1252,7 +1253,7 @@ fn validate_write(
                 out.present.push(field);
             }
             Some(Value::String(text)) => {
-                if text.chars().count() > 255 {
+                if text.trim().chars().count() > 255 {
                     errors.push(err(
                         field,
                         "Ensure this field has no more than 255 characters.".to_owned(),
@@ -1264,7 +1265,7 @@ fn validate_write(
                     } else {
                         &mut out.external_id
                     };
-                    *target = Some(Value::String(text.clone()));
+                    *target = Some(Value::String(text.trim().to_owned()));
                 }
             }
             Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
@@ -1296,6 +1297,8 @@ fn validate_write(
             // `pytz.common_timezones` membership; `chrono-tz` parses the
             // same IANA names (documented approximation for exotic
             // aliases, never hit by the suite).
+            // ChoiceField does not trim: padded input is rejected with
+            // the raw padded value in the message.
             if text.parse::<Tz>().is_err() {
                 errors.push(err(
                     "timezone",
