@@ -1641,7 +1641,8 @@ async fn reset_password(
             // `DjangoUnicodeDecodeError` subclass — the outer EXPIRED
             // branch is dead (`:103-116` vs `:167-176`).
             // Space: only `DjangoUnicodeDecodeError` maps to a redirect
-            // (EXPIRED, `:154-160`); a `binascii.Error` escapes (500).
+            // (EXPIRED, `:154-160`); a `binascii.Error` escapes (500 in
+            // Django; DIFF-26 in Rust answers 5125 instead).
             if !is_space {
                 let (code, message) =
                     pw::reset_app_failure_params(pw::ResetAppFailure::InvalidToken);
@@ -1655,17 +1656,23 @@ async fn reset_password(
                     let base = base_host_for(&state, false, true);
                     return redirect_302(pw::reset_space_error_location(&base, code, message));
                 }
-                pw::UidDecodeError::BadEncoding => return server_error(),
+                // DIFF-26 (NEWPIDASH-266; old bug fix for the
+                // undecodable-uid half of PB-1055/PB-1071): Django lets
+                // `binascii.Error` escape the space view (500). The new
+                // system answers the same INVALID_PASSWORD_TOKEN
+                // redirect the token-check failure produces.
+                pw::UidDecodeError::BadEncoding => return reset_invalid_redirect(&state, is_space),
             }
         }
     };
     // Lookup (`User.objects.get(id=id)`): a non-UUID pk raises
-    // `ValidationError` (500 on both twins, kept); an unknown id raises
-    // `DoesNotExist` (INVALID on app; DIFF-4: the space 500 was an old
-    // bug, fixed here to the same INVALID redirect).
+    // `ValidationError` (500 on both twins in Django; DIFF-26: an old
+    // bug, fixed here to the same INVALID redirect); an unknown id
+    // raises `DoesNotExist` (INVALID on app; DIFF-4: the space 500 was
+    // an old bug, fixed here to the same INVALID redirect).
     let user_id = match pk.parse::<uuid::Uuid>() {
         Ok(id) => id,
-        Err(_) => return server_error(),
+        Err(_) => return reset_invalid_redirect(&state, is_space),
     };
     let user = match reset_user_by_id(&pool, user_id).await {
         Ok(user) => user,
