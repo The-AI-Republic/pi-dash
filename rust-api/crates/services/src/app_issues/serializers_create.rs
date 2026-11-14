@@ -83,11 +83,11 @@ use base64::Engine as _;
 use serde::Serialize;
 
 use pidash_db::config::PidashAgentSettings;
-use pidash_types::issuing::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::v1_assets::sticky as sticky_kernel;
 
 use super::serializers_engage::issue_is_actively_synced;
-use crate::issuing::{LlmProfile, UserFlags};
+use crate::run_creation::{LlmProfile, UserFlags};
 use crate::tasks_cleanup::versions::chunk_ranges;
 
 // ---------------------------------------------------------------------------
@@ -674,13 +674,13 @@ pub struct ValidateProbes<'a> {
     /// The `managed_llm_profile` seam input to
     /// [`pidash_agent_availability`].
     pub llm_profile: &'a dyn Fn() -> LlmProfile,
-    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`](crate::issuing::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`](crate::run_creation::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
     /// verdict.
     pub enrolled_exists: &'a dyn Fn() -> bool,
-    /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::issuing::ONLINE_MANAGED_RUNNER_SQL)
+    /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::run_creation::ONLINE_MANAGED_RUNNER_SQL)
     /// verdict.
     pub online_exists: &'a dyn Fn() -> bool,
-    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::issuing::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::run_creation::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
     /// verdict (`09738d222`): consulted only when a runner is enrolled
     /// but none is online, exactly as Python's `if` runs the paused
     /// probe last.
@@ -848,7 +848,7 @@ pub fn issue_create_validate(
                     message: Cow::Borrowed(EXECUTOR_UNKNOWN_MESSAGE),
                 });
             }
-            let normalized = pidash_types::issuing::normalize_executor_write(executor)
+            let normalized = pidash_types::agent_runs::normalize_executor_write(executor)
                 .expect("known value parses")
                 .value()
                 .to_owned();

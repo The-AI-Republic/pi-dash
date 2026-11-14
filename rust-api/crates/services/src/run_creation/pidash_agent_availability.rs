@@ -63,9 +63,9 @@
 //! overshoot (`admission.py:40-42`) and the +5s consume overhang (`:24`) are
 //! documented-by-design and translated as-is.
 
-use super::resolution::{pidash_agent_is_enabled, PidashAgentAvailability, UserFlags};
+use super::executor_policy::{pidash_agent_is_enabled, PidashAgentAvailability, UserFlags};
 use pidash_db::config::PidashAgentSettings;
-use pidash_types::issuing::{AgentExecutorKind, PidashAgentReason};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------

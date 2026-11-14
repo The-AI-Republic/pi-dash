@@ -45,7 +45,7 @@ use pidash_db::entity::{assistant_user_llm_config, issues, projects};
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
 use pidash_services::assistant::seams::pidash_agent_profile_for_user;
-use pidash_services::issuing::LlmProfile;
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,

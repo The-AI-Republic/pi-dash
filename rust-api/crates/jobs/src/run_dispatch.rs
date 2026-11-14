@@ -4,7 +4,7 @@
 //!
 //! What survives P3 step A (agent naming convention): the creation
 //! re-exports (`execution_fields` and friends, owned by
-//! `pidash_services::issuing::execution_resolution`), the runner-plane
+//! `pidash_services::run_creation::execution_resolution`), the runner-plane
 //! `dispatch_agent_run` (non-cloud kinds drain their pod), and the
 //! post-commit collector. The cloud lease/offer engine, the event
 //! append, and their tests died with the retired plane; P4 removed
@@ -25,9 +25,9 @@ use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
 
 /// The executor resolve (`execution_fields`) now lives in
-/// `pidash_services::issuing::execution_resolution`; this re-export keeps every
-/// `pidash_jobs::issuing::…` path stable.
-pub use pidash_services::issuing::execution_resolution::{
+/// `pidash_services::run_creation::execution_resolution`; this re-export keeps every
+/// `pidash_jobs::run_dispatch::…` path stable.
+pub use pidash_services::run_creation::execution::{
     execution_fields, lock_workspace, ActorScope, DeferredAdmissionError, ExecutionFields,
 };
 
@@ -129,10 +129,10 @@ mod tests {
 
     use serde_json::Value;
 
-    use pidash_services::issuing::WORKSPACE_LOCK_SQL;
+    use pidash_services::run_creation::WORKSPACE_LOCK_SQL;
 
     static FIXTURE: &str =
-        include_str!("../../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");
+        include_str!("../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("fixture parses")

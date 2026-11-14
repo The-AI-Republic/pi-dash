@@ -320,7 +320,7 @@ pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"ag
 /// (`pod_member` and unpaused). The old `desktop_bundled` split is gone.
 fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
     let local = AgentExecutorKind::LocalRunner.value();
-    let managed = AgentExecutorKind::ManagedRunner.value();
+    let managed = AgentExecutorKind::PidashAgent.value();
     let pinned = col("agent_run", "pinned_runner_id");
     if facts.is_pidash_agent {
         let managed_arm = Condition::all()
@@ -434,7 +434,7 @@ pub fn next_for_runner_stmt(
         .from(Alias::new("agent_run"))
         .and_where(col("agent_run", "executor_kind").is_in([
             AgentExecutorKind::LocalRunner.value(),
-            AgentExecutorKind::ManagedRunner.value(),
+            AgentExecutorKind::PidashAgent.value(),
         ]))
         .and_where(col("agent_run", "pod_id").eq(pod_id))
         .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()))

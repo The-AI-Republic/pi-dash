@@ -17,7 +17,7 @@
 //! [`crate::domain::issue_create_sql`].
 //!
 //! Sibling L6+ issues add their own files under this module; L1 types live in
-//! `pidash_types::agent_runs` and L2 read shapes in `pidash_db::agent_runs`.
+//! `pidash_types::dispatch` and L2 read shapes in `pidash_db::dispatch`.
 //!
 //! Fixture ids replayed by the unit tests alongside each module:
 //! the producer half of `fx-disp-03-policy.golden.json` (FX-DISP-03)
@@ -31,8 +31,8 @@ pub mod executor_policy;
 pub mod pidash_agent_availability;
 
 pub use pidash_agent_availability::is_desktop_session;
-pub use pidash_agent_availability::managed_runner_availability;
-pub use pidash_agent_availability::managed_runner_configuration_check;
+pub use pidash_agent_availability::pidash_agent_availability;
+pub use pidash_agent_availability::pidash_agent_configuration_check;
 pub use pidash_agent_availability::ConfigurationError;
 pub use pidash_agent_availability::DesktopSessionRequiredBody;
 pub use pidash_agent_availability::LlmProfile;
@@ -54,12 +54,12 @@ pub use executor_policy::agent_executor_options;
 pub use executor_policy::effective_executor_for_issue;
 pub use executor_policy::local_runner_available_exists;
 pub use executor_policy::local_runner_exists;
-pub use executor_policy::managed_runner_is_enabled;
+pub use executor_policy::pidash_agent_is_enabled;
 pub use executor_policy::resolve_executor_kind;
 pub use executor_policy::user_has_llm_config;
 pub use executor_policy::CloudAgentUnavailable;
 pub use executor_policy::ExecutorOption;
-pub use executor_policy::ManagedAvailability;
+pub use executor_policy::PidashAgentAvailability;
 pub use executor_policy::ResolveExecutorError;
 pub use executor_policy::UserFlags;
 pub use executor_policy::LLM_CONFIG_MISSING_REASON;

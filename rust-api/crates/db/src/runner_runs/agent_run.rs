@@ -535,7 +535,7 @@ mod tests {
             MACHINE_EXECUTORS,
             [
                 AgentExecutorKind::LocalRunner,
-                AgentExecutorKind::ManagedRunner
+                AgentExecutorKind::PidashAgent
             ]
         );
         let some_id = Some(uuid::Uuid::nil());

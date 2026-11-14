@@ -1802,12 +1802,12 @@ async fn pidash_agent_exists(
 /// presence bit. Python re-reads the key config per project row; the
 /// verdict cannot change mid-request, so it is read once.
 struct ExecutorUser {
-    flags: pidash_services::issuing::resolution::UserFlags,
+    flags: pidash_services::run_creation::executor_policy::UserFlags,
     llm_has_key: bool,
 }
 
 async fn executor_user(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<ExecutorUser, Denial> {
-    use pidash_services::issuing::resolution::UserFlags;
+    use pidash_services::run_creation::executor_policy::UserFlags;
     // `resolve_actor` guarantees an authenticated, active row; only the
     // bot bit is still unknown.
     let db = sea_conn(pool);
@@ -1856,9 +1856,9 @@ async fn executor_options(
     project_id: &uuid::Uuid,
     workspace_id: &uuid::Uuid,
     viewer: Option<(&uuid::Uuid, &ExecutorUser)>,
-) -> Result<[pidash_services::issuing::resolution::ExecutorOption; 3], Denial> {
-    use pidash_services::issuing::admission::{pidash_agent_availability, HEARTBEAT_GRACE_SECS};
-    use pidash_services::issuing::resolution::{local_runner_available_exists, local_runner_exists};
+) -> Result<[pidash_services::run_creation::executor_policy::ExecutorOption; 3], Denial> {
+    use pidash_services::run_creation::pidash_agent_availability::{pidash_agent_availability, HEARTBEAT_GRACE_SECS};
+    use pidash_services::run_creation::executor_policy::{local_runner_available_exists, local_runner_exists};
     // `agent_execution.py:112-121`: the unpaused leg always runs; the
     // online-incl-paused leg runs only when nothing is available (the
     // `elif` distinguishes "paused" from "none"). SeaORM (no raw SQL).
@@ -1894,7 +1894,7 @@ async fn executor_options(
             (
                 Some(&user.flags),
                 llm_usable,
-                pidash_services::issuing::admission::LlmProfile {
+                pidash_services::run_creation::pidash_agent_availability::LlmProfile {
                     available: seam_profile.available,
                     reason_code: seam_profile.reason_code,
                 },
@@ -1903,7 +1903,7 @@ async fn executor_options(
         None => (
             None,
             false,
-            pidash_services::issuing::admission::LlmProfile {
+            pidash_services::run_creation::pidash_agent_availability::LlmProfile {
                 available: false,
                 reason_code: String::new(),
             },
@@ -1911,7 +1911,7 @@ async fn executor_options(
     };
     let managed = match viewer {
         Some((user_id, _))
-            if pidash_services::issuing::resolution::pidash_agent_is_enabled(
+            if pidash_services::run_creation::executor_policy::pidash_agent_is_enabled(
                 &settings.pidash_agent,
             ) =>
         {
@@ -4322,7 +4322,7 @@ fn run_serializer_validate(
     // (deprecated choices become local_runner) — no gate remains.
     // Unknown values pass through to the choice validation (400).
     if let Some(inner) = &validated.default_agent_executor {
-        if let Some(normalized) = pidash_types::issuing::normalize_executor_write(inner) {
+        if let Some(normalized) = pidash_types::agent_runs::normalize_executor_write(inner) {
             validated.default_agent_executor = Some(normalized.value().to_owned());
         }
     }
@@ -7674,7 +7674,7 @@ mod live_tests {
     use std::sync::Arc;
 
     use super::*;
-    use pidash_services::issuing::resolution::UserFlags;
+    use pidash_services::run_creation::executor_policy::UserFlags;
     use pidash_services::extensions::{
         PidashAgentProfile, AssistantModelSeam, SeamFuture, TitleError, TitleRequest,
     };

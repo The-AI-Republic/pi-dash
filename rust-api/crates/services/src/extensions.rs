@@ -41,7 +41,7 @@ use uuid::Uuid;
 /// `Arc<dyn AssistantModelSeam>` the serving state carries (the jobs
 /// registry's `Pin<Box<dyn Future>>` precedent — no new dependency).
 pub type SeamFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-/// Reason codes from `managed_runner/errors.py::ManagedRunnerReason`,
+/// Reason codes from `managed_runner/errors.py::PidashAgentReason`,
 /// in the values the desktop profile endpoint actually serialises.
 pub mod reason {
     /// The viewer has no usable LLM configuration at all.
@@ -67,7 +67,7 @@ pub struct PidashAgentProfile {
     pub top_up_url: String,
 }
 
-/// CE credential failure (`ManagedRunnerUnavailable`): raising rather than
+/// CE credential failure (`PidashAgentUnavailable`): raising rather than
 /// returning empty keeps the failure loud — a caller that ignored the
 /// profile must not silently receive a blank credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub struct CredentialUnavailable {
 
 /// Desktop-credential failure: the two `AgentModelTokenEndpoint.post`
 /// error arms (`agent_profile.py:87-99`). `Unavailable` is the
-/// `ManagedRunnerUnavailable` arm (the client should have consulted the
+/// `PidashAgentUnavailable` arm (the client should have consulted the
 /// profile first); `Classified` is the `_classify_credential_error` arm —
 /// the cloud seam's pre-classified gateway outcome. CE only ever produces
 /// `Unavailable`. `WalletEmpty` is the Pi Dash Agent's model-token
