@@ -137,7 +137,6 @@
 //! (FX-APROJ-01).
 
 use crate::dispatch::policy::{ExecutorOption, ManagedAvailability, UserFlags};
-use pidash_db::config::CloudAgentSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -734,7 +733,6 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 /// `[cloud_agent, local_runner, managed_runner]`, each carrying
 /// `deprecated` (#2903: true for cloud/managed).
 pub fn project_executor_options<F>(
-    cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
     is_authenticated: bool,
     has_usable_llm_config: F,
@@ -746,7 +744,6 @@ where
     F: FnOnce() -> bool,
 {
     crate::dispatch::policy::agent_executor_options(
-        cloud,
         resolve_options_user(user, is_authenticated),
         has_usable_llm_config,
         local_runner_available,
@@ -1842,48 +1839,6 @@ mod tests {
         panic!("key {key} not found at top level");
     }
 
-    /// Django-default cloud settings with the kill switch off, as in the
-    /// fixture env (`CLOUD_AGENT_ENABLED` unset). Only `enabled` feeds
-    /// this layer's gate; the rest are Django defaults (see D-11 tests).
-    fn cloud_settings(enabled: bool) -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
     fn managed_disabled() -> ManagedAvailability {
         ManagedAvailability {
             available: false,
@@ -2575,7 +2530,6 @@ mod tests {
             // The EE seam must not run: cloud is off, so D-11 short-circuits
             // before consulting it.
             let rows = project_executor_options(
-                &cloud_settings(false),
                 user,
                 authed,
                 || panic!("seam must not run while cloud is off"),
@@ -2591,7 +2545,6 @@ mod tests {
             );
         }
         let rows = project_executor_options(
-            &cloud_settings(false),
             None,
             false,
             || panic!("seam must not run while cloud is off"),

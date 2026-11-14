@@ -343,7 +343,6 @@ pidash_sdk::db::ADMIN_INSERT_SQL
 pidash_sdk::db::ADMIN_PERMISSION_ROLE_GTE
 pidash_sdk::db::AgentRunStatus
 pidash_sdk::db::AssistantSettings
-pidash_sdk::db::CloudAgentSettings
 pidash_sdk::db::ConfigRegistry
 pidash_sdk::db::ConfigSource
 pidash_sdk::db::DEFAULT_TIMEOUT_SECONDS
@@ -835,9 +834,6 @@ pidash_sdk::state::CredentialError
 pidash_sdk::state::CredentialUnavailable
 pidash_sdk::state::DesktopCredential
 pidash_sdk::state::DesktopRequestGate
-pidash_sdk::state::ExecuteModelInputs
-pidash_sdk::state::ResolvedRunModel
-pidash_sdk::state::RunModelKey
 pidash_sdk::state::SeamFuture
 pidash_sdk::state::TitleError
 pidash_sdk::state::TitleRequest

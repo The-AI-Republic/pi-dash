@@ -767,18 +767,17 @@ pub(crate) fn emit_logs(logs: &[LogLine]) {
     }
 }
 
-/// Drain post-commit dispatch plus the deferred admission consumes —
-/// the same collaborators as the L6 `drain` (a private helper this
-/// module cannot name), over the same ordering.
+/// Drain post-commit dispatch — the same collaborators as the L6
+/// `drain` (a private helper this module cannot name), over the same
+/// ordering.
 pub(crate) async fn drain_dispatch(
     pool: &PgPool,
-    cloud: &pidash_db::config::CloudAgentSettings,
     dispatches: Vec<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<Vec<(Uuid, DispatchDecision)>, DispatchJobsError> {
     let mut decisions = Vec::with_capacity(dispatches.len());
     for run_id in dispatches {
-        let decision = dispatch_agent_run(pool, cloud, run_id, now).await?;
+        let decision = dispatch_agent_run(pool, run_id, now).await?;
         decisions.push((run_id, decision));
     }
     Ok(decisions)
@@ -804,7 +803,6 @@ macro_rules! dispatch_driver {
             H: Fn(Uuid) -> bool + Clone + Send + Sync,
             P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
         {
-            let cloud = deps.cloud.clone();
             let tx = Transaction::begin(pool).await?;
             let mut store = LiveCreationStore::new(tx, pool, deps);
             let outcome: $out = $svc(&mut store, $($arg,)* matcher, now, jitter_secs).await?;
@@ -821,7 +819,7 @@ macro_rules! dispatch_driver {
             }
             tx.commit().await?;
             let dispatch_decisions =
-                drain_dispatch(pool, &cloud, dispatches, now).await?;
+                drain_dispatch(pool, dispatches, now).await?;
             let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
             Ok(DispatchOutcome {
                 outcome,
@@ -883,7 +881,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome = pidash_services::orchestration::dispatch::bounce_issue_no_eligible_runner(
@@ -899,7 +896,7 @@ where
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, dispatches, now).await?;
+        drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -950,7 +947,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome = pidash_services::orchestration::dispatch::run_ai_for_human(
@@ -976,7 +972,7 @@ where
     }
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, dispatches, now).await?;
+        drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -1007,7 +1003,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome = pidash_services::orchestration::dispatch::wait_ticker(
@@ -1024,7 +1019,7 @@ where
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, dispatches, now).await?;
+        drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     let outcome = DispatchOutcome {
         outcome,
@@ -1050,7 +1045,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome = pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
@@ -1063,7 +1057,7 @@ where
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
     let dispatch_decisions =
-        drain_dispatch(pool, &cloud, dispatches, now).await?;
+        drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -1239,7 +1233,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+    use pidash_db::config::{ManagedRunnerSettings};
     use pidash_services::orchestration::dispatch::BOUNCE_BODY_DEFAULT;
     use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
@@ -1492,45 +1486,6 @@ mod tests {
     /// like R3b/R4/W5.
     const JITTER: f64 = 846.3222537664747;
 
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
@@ -1560,7 +1515,6 @@ mod tests {
 
     fn deps() -> TestDeps {
         StoreDeps {
-            cloud: django_cloud_settings(),
             managed: django_managed_settings(),
             has_usable_llm_config: no_llm,
             llm_profile: unavailable_profile,

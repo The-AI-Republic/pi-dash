@@ -34,7 +34,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::policy::UserFlags;
@@ -113,7 +113,6 @@ pub async fn fire_transition<H, P, M>(
     store_deps: StoreDeps<H, P>,
     preflight_deps: StoreDeps<H, P>,
     matcher: M,
-    cloud: &CloudAgentSettings,
     request: FireRequest,
     publish_drain: &dyn PublishEffectsDrain,
     pod_drain: &dyn PodDrain,
@@ -169,7 +168,7 @@ where
         publish_drain.drain(pairs).await;
     }
     for run_id in dispatches {
-        match dispatch_agent_run(pool, cloud, run_id, request.now).await {
+        match dispatch_agent_run(pool, run_id, request.now).await {
             Ok(DispatchDecision::PodDrain { pod_id }) => {
                 if let Err(()) = pod_drain.drain_pod(pod_id).await {
                     // The drain logs its own cause where the storage error
@@ -791,7 +790,6 @@ impl WorkerTransitionHook {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
-        cloud: CloudAgentSettings,
         managed: ManagedRunnerSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
@@ -806,7 +804,6 @@ impl WorkerTransitionHook {
         let terminal = Arc::new(QueueTerminalEffectsDrain::new(&pool));
         let deps = HookDeps {
             pool,
-            cloud,
             managed,
             redis,
             runner,

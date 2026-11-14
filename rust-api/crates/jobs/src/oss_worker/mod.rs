@@ -183,7 +183,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         ctx.seed_dir.clone(),
-        ctx.settings.cloud_agent.clone(),
         ctx.settings.managed_runner.clone(),
         ctx.assistant_seam.clone(),
     );
@@ -286,7 +285,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         std::sync::Arc::new(crate::orchestration::LiveFireTickSeam::new(
             ctx.pools.primary().clone(),
-            ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
@@ -298,7 +296,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         crate::orchestration::live_scheduler_dispatch(
             ctx.pools.primary().clone(),
-            ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
@@ -316,7 +313,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         dyn pidash_services::domain::transition::IssueTransitionHook,
     > = std::sync::Arc::new(crate::issue_transition::WorkerTransitionHook::new(
         ctx.pools.primary().clone(),
-        ctx.settings.cloud_agent.clone(),
         ctx.settings.managed_runner.clone(),
         redis.clone(),
         ctx.settings.runner.clone(),

@@ -31,7 +31,7 @@
 //!
 //! ```rust,ignore
 //! let deps = pidash_sdk::hooks::HookDeps {
-//!     pool, cloud, managed, redis, runner,
+//!     pool, managed, redis, runner,
 //!     assistant_seam,
 //!     publish: std::sync::Arc::new(pidash_sdk::hooks::QueuePublishDrain::new(&pool)),
 //!     pods: std::sync::Arc::new(pidash_sdk::hooks::LivePodDrain::new(&pool, redis.clone(), runner.clone())),
@@ -71,7 +71,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues_move::{
     CreationDeps, MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
@@ -285,7 +285,6 @@ impl TerminalEffectsDrain for QueueTerminalEffectsDrain {
 #[derive(Clone)]
 pub struct HookDeps {
     pub pool: PgPool,
-    pub cloud: CloudAgentSettings,
     pub managed: ManagedRunnerSettings,
     pub redis: Option<redis::Client>,
     pub runner: RunnerSettings,
@@ -317,7 +316,6 @@ impl HookDeps {
     pub fn move_hook(&self) -> MoveHook {
         MoveHook::new(
             &self.pool,
-            &self.cloud,
             self.redis.clone(),
             &self.runner,
             Arc::clone(&self.terminal),
@@ -436,7 +434,6 @@ impl IssueTransitionHook for TransitionHook {
             )?);
             let verdicts = Arc::new(gate_verdicts(&deps.assistant_seam, &presence).await);
             let build_deps = || StoreDeps {
-                cloud: deps.cloud.clone(),
                 managed: deps.managed.clone(),
                 has_usable_llm_config: gate_fn(Arc::clone(&verdicts)),
                 llm_profile: profile_fn(Arc::clone(&presence)),
@@ -447,7 +444,6 @@ impl IssueTransitionHook for TransitionHook {
                 build_deps(),
                 build_deps(),
                 matcher,
-                &deps.cloud,
                 request,
                 &*deps.publish,
                 &*deps.pods,
@@ -499,7 +495,6 @@ impl TaskEnqueueHook for EnqueueHook {
 #[derive(Clone)]
 pub struct MoveHook {
     pool: PgPool,
-    cloud: CloudAgentSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
     terminal: Arc<dyn TerminalEffectsDrain>,
@@ -509,7 +504,6 @@ pub struct MoveHook {
 impl MoveHook {
     pub fn new(
         pool: &PgPool,
-        cloud: &CloudAgentSettings,
         redis: Option<redis::Client>,
         runner: &RunnerSettings,
         terminal: Arc<dyn TerminalEffectsDrain>,
@@ -517,7 +511,6 @@ impl MoveHook {
     ) -> Self {
         Self {
             pool: pool.clone(),
-            cloud: cloud.clone(),
             redis,
             runner: runner.clone(),
             terminal,
@@ -553,7 +546,7 @@ impl MovePostCommitHook for MoveHook {
             }
             let now = now_micros();
             for id in outboxes.dispatches {
-                match dispatch_agent_run(&this.pool, &this.cloud, id, now).await {
+                match dispatch_agent_run(&this.pool, id, now).await {
                     Ok(DispatchDecision::PodDrain { pod_id }) => {
                         this.pods.drain_pod(pod_id).await.map_err(|()| {
                             MoveDrainError("move creation pod drain failed".to_owned())
@@ -631,7 +624,6 @@ mod tests {
         let settings = pidash_db::config::Settings::test_defaults();
         HookDeps {
             pool: pool.clone(),
-            cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
             redis: None,
             runner: settings.runner.clone(),

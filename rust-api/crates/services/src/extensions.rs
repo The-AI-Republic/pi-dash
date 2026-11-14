@@ -27,7 +27,6 @@
 //! |---|---|---|
 //! | `AssistantModelSeam` | `ee/assistant/model_provider.py` | api `CeAssistantSeam` | platform credentials (OpenHub lane) |
 //! | `SttSeam` | `ee/assistant/stt_provider.py` | `ByoSttSeam` | OpenHub relay endpoint |
-//! | `CloudAgentModelSeam` | `ee/cloud_agent/model_provider.py` | `CreatorModelSeam` | admission/model routing |
 //! | `DesktopGate` (in `pidash-auth`) | `ee/authentication/desktop.py` | `SessionDesktopGate` | OIDC `client` claim |
 //! | `UserSettingsSchema` (in `user_settings`) | `ee/settings/user_settings.py` | `CeUserSettings` | extended schema |
 
@@ -120,49 +119,6 @@ pub struct ByokTitleInputs {
     pub has_api_key: bool,
 }
 
-/// Execute-path model inputs: the caller's read of the creator's BYOK row
-/// (`get_config`, `llm.py:67-68`) plus the execution-time SSRF verdict —
-/// data, not handles, exactly like the presence bits the other methods
-/// take.
-#[derive(Debug, Clone)]
-pub struct ExecuteModelInputs {
-    /// `cfg is not None and cfg.has_api_key`.
-    pub has_api_key: bool,
-    pub model_name: String,
-    pub provider_kind: String,
-    pub base_url: String,
-    /// The caller's execution-time SSRF verdict on `base_url`.
-    pub base_url_blocked: bool,
-    /// Raw `api_key_encrypted` bytes; the executor decrypts them on the
-    /// BYOK lane, exactly as Django's key resolver does.
-    pub api_key_encrypted: Option<Vec<u8>>,
-}
-
-/// The credential a resolved run model executes with. The CE path answers
-/// the BYOK row's ciphertext ([`RunModelKey::ByokEncrypted`]): the model
-/// runtime decrypts it inside the invocation with its key cache, exactly
-/// as Django's `get_decrypted_api_key` does (PIDASHCONV-866). Overlay
-/// lanes answer [`RunModelKey::Direct`]: the credential the overlay
-/// minted for the lane (a short-lived gateway token, a Codex credential).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunModelKey {
-    /// Decrypt the creator's BYOK row inside the model runtime.
-    ByokEncrypted(Vec<u8>),
-    /// Seam-minted lane credential, used verbatim.
-    Direct(String),
-}
-
-/// The resolved model + lane credential for one creator: the
-/// `resolve_model_for_user` outcome, CE-shaped (`resolve_model_for_run`'s
-/// third leg: `ee/cloud_agent/model_provider.py` →
-/// `cloud_agent/model.py` → `ee/assistant/model_provider.py`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedRunModel {
-    pub model: crate::assistant::llm::ModelRef,
-    /// The credential the invocation executes with.
-    pub key: RunModelKey,
-}
-
 /// One title-generation call (`generate_title_for_user`, `ee` seam): who
 /// it is for, what to title, and the BYOK row the CE path runs on.
 #[derive(Debug, Clone)]
@@ -197,10 +153,9 @@ pub enum TitleError {
 /// The serving state carries one of these (`Arc<dyn AssistantModelSeam>`)
 /// and the non-turn HTTP callers consult it instead of the CE-concrete
 /// free functions, so the private crate implements this trait once and
-/// every caller follows — including the Cloud Agent execute path
-/// (PIDASHCONV-1725), which resolves its model through
-/// [`resolve_model_for_user`](AssistantModelSeam::resolve_model_for_user)
-/// exactly as Django resolves through `ee/assistant/model_provider.py`.
+/// every caller follows. (P4: the execute-path `resolve_model_for_user`
+/// died with the retired run plane; the chat free function
+/// [`crate::assistant::seams::resolve_model_for_user`] stays.)
 /// Turn-time model/toolset/label routing is NOT
 /// here — it stays with the jobs `TurnSeam`, which already covers it.
 /// Methods are async with the user id because the overlay branches on the
@@ -220,35 +175,6 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
         Box::pin(async move { crate::assistant::seams::has_usable_llm_config(has_api_key) })
     }
 
-    /// Build the in-process model for the user (`resolve_model_for_user`,
-    /// `ee/assistant/model_provider.py`) — the execute-path half of this
-    /// seam (PIDASHCONV-1725): the Cloud Agent `resolve_model_for_run`
-    /// chain ends here on every build. CE delegates to the ported
-    /// [`crate::assistant::seams::resolve_model_for_user`] logic over the
-    /// caller's reads and answers the row's ciphertext ([`RunModelKey::ByokEncrypted`]);
-    /// the overlay branches on the user's selected connection, which it
-    /// reads itself, and answers [`RunModelKey::Direct`] for the lanes it
-    /// mints credentials for (OpenHub gateway, Codex).
-    fn resolve_model_for_user(
-        &self,
-        user_id: Uuid,
-        inputs: ExecuteModelInputs,
-    ) -> SeamFuture<'_, Result<ResolvedRunModel, AssistantError>> {
-        let _ = user_id;
-        Box::pin(async move {
-            let model = crate::assistant::seams::resolve_model_for_user(
-                inputs.has_api_key,
-                &inputs.model_name,
-                &inputs.provider_kind,
-                &inputs.base_url,
-                inputs.base_url_blocked,
-            )?;
-            Ok(ResolvedRunModel {
-                model,
-                key: RunModelKey::ByokEncrypted(inputs.api_key_encrypted.unwrap_or_default()),
-            })
-        })
-    }
 
     /// Describe the model endpoint the desktop engine may call. CE has
     /// exactly one lane, BYOK, which the desktop does not serve — so this
@@ -392,25 +318,6 @@ impl SttSeam for ByoSttSeam {}
 
 /// Overlay seam for `ee/cloud_agent/model_provider.py`.
 ///
-/// The Cloud Agent has no platform model config of its own: every run
-/// executes against its creator's LLM config — the same resolution path
-/// Pi Dash AI uses, so the two always agree. `model_owner_for_run` pins
-/// that routing decision; the model construction itself goes through
-/// the [`AssistantModelSeam`] (PIDASHCONV-1725).
-pub trait CloudAgentModelSeam {
-    /// Whose LLM config this run executes against. CE always answers the
-    /// creator: `resolve_model_for_creator` delegates to
-    /// `resolve_model_for_user(run.created_by)`.
-    fn model_owner_for_run(&self, created_by: &str) -> String {
-        created_by.to_string()
-    }
-}
-
-/// CE cloud-agent model seam: the creator's config.
-pub struct CreatorModelSeam;
-
-impl CloudAgentModelSeam for CreatorModelSeam {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,98 +347,6 @@ mod tests {
         let seam = TestSeam;
         assert!(seam.has_usable_llm_config(user(), true).await);
         assert!(!seam.has_usable_llm_config(user(), false).await);
-    }
-
-    fn execute_inputs() -> ExecuteModelInputs {
-        ExecuteModelInputs {
-            has_api_key: true,
-            model_name: "claude-x".to_owned(),
-            provider_kind: "anthropic".to_owned(),
-            base_url: String::new(),
-            base_url_blocked: false,
-            api_key_encrypted: Some(vec![1, 2, 3]),
-        }
-    }
-
-    #[tokio::test]
-    async fn ce_resolve_defaults_to_byok() {
-        // The CE default is the ported `llm.rs` resolve over the caller's
-        // reads, carrying the row's ciphertext for invoke to decrypt
-        // (PIDASHCONV-1725). Any user id answers identically.
-        let seam = TestSeam;
-        let resolved = seam
-            .resolve_model_for_user(user(), execute_inputs())
-            .await
-            .expect("byok resolves");
-        assert_eq!(
-            resolved,
-            ResolvedRunModel {
-                model: crate::assistant::llm::ModelRef::Anthropic {
-                    model: "claude-x".to_owned(),
-                },
-                key: RunModelKey::ByokEncrypted(vec![1, 2, 3]),
-            }
-        );
-        let other = seam
-            .resolve_model_for_user(Uuid::new_v4(), execute_inputs())
-            .await
-            .expect("byok resolves");
-        assert_eq!(resolved, other);
-    }
-
-    #[tokio::test]
-    async fn ce_resolve_gates_match_resolve_byok_model() {
-        let seam = TestSeam;
-        // Keyless: the first gate (`llm_config_missing`).
-        let error = seam
-            .resolve_model_for_user(
-                user(),
-                ExecuteModelInputs {
-                    has_api_key: false,
-                    ..execute_inputs()
-                },
-            )
-            .await
-            .expect_err("keyless");
-        assert_eq!(
-            error,
-            AssistantError::LlmConfigMissing(crate::assistant::llm::MSG_NO_PROVIDER.to_owned(),)
-        );
-        // Empty model name: the second gate.
-        let error = seam
-            .resolve_model_for_user(
-                user(),
-                ExecuteModelInputs {
-                    model_name: String::new(),
-                    ..execute_inputs()
-                },
-            )
-            .await
-            .expect_err("modeless");
-        assert_eq!(
-            error,
-            AssistantError::LlmConfigMissing(crate::assistant::llm::MSG_NO_MODEL.to_owned())
-        );
-        // Blocked base URL: the third gate (a verdict is only
-        // consulted over a configured host: `cfg.base_url and ...`).
-        let error = seam
-            .resolve_model_for_user(
-                user(),
-                ExecuteModelInputs {
-                    provider_kind: "openai_compatible".to_owned(),
-                    base_url: "https://8.8.8.8/v1".to_owned(),
-                    base_url_blocked: true,
-                    ..execute_inputs()
-                },
-            )
-            .await
-            .expect_err("blocked");
-        assert_eq!(
-            error,
-            AssistantError::LlmConfigMissing(
-                crate::assistant::llm::MSG_ENDPOINT_BLOCKED.to_owned(),
-            )
-        );
     }
 
     #[tokio::test]
@@ -629,14 +444,6 @@ mod tests {
             ByoSttSeam.resolve_stt_provider(undecryptable),
             Err(SttError::KeyUndecryptable(_))
         ));
-    }
-
-    #[test]
-    fn cloud_agent_run_uses_its_creators_config() {
-        assert_eq!(
-            CreatorModelSeam.model_owner_for_run("user-1"),
-            "user-1".to_string(),
-        );
     }
 
     /// A replacement seam behind the trait changes behaviour without

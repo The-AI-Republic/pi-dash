@@ -54,9 +54,6 @@ pub mod state {
     pub use pidash_services::extensions::AssistantModelSeam;
     pub use pidash_services::extensions::CredentialError;
     pub use pidash_services::extensions::CredentialUnavailable;
-    pub use pidash_services::extensions::ExecuteModelInputs;
-    pub use pidash_services::extensions::ResolvedRunModel;
-    pub use pidash_services::extensions::RunModelKey;
     pub use pidash_services::extensions::SeamFuture;
     pub use pidash_services::extensions::TitleError;
     pub use pidash_services::extensions::TitleRequest;
@@ -910,7 +907,6 @@ pub mod db {
     pub use pidash_db::app_project::models::project_member;
     pub use pidash_db::config::registry::ConfigRegistry;
     pub use pidash_db::config::registry::ConfigSource;
-    pub use pidash_db::config::settings::CloudAgentSettings;
     pub use pidash_db::config::settings::ManagedRunnerSettings;
     pub use pidash_db::config::settings::RunnerSettings;
     pub use pidash_db::config::AssistantSettings;

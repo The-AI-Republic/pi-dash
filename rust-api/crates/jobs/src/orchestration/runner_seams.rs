@@ -40,7 +40,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, assistant_user_llm_config, issue_agent_ticker, issues, projects, states,
@@ -196,7 +196,6 @@ async fn drain_terminal_effects(
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     redis: Option<&redis::Client>,
     runner: &RunnerSettings,
@@ -208,7 +207,6 @@ pub async fn complete_project_move_handoff_live(
     let presence = Arc::new(fetch_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
         has_usable_llm_config: gate_fn(verdicts),
         llm_profile: profile_fn(presence),
@@ -240,13 +238,11 @@ pub async fn complete_project_move_handoff_live(
 /// unread on this path (`left_bucket` never retimes) — `0.0`.
 pub async fn maybe_apply_deferred_pause_live(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
         llm_profile: profile_fn(presence),
@@ -330,7 +326,6 @@ pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx:
 /// through `pidash-sdk::ops`.
 pub async fn post_run_orchestration(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
 ) {
@@ -341,7 +336,7 @@ pub async fn post_run_orchestration(
             "orchestration.error: run-ended reconcile failed"
         );
     }
-    if let Err(error) = maybe_apply_deferred_pause_live(pool, cloud, managed, run_id).await {
+    if let Err(error) = maybe_apply_deferred_pause_live(pool, managed, run_id).await {
         tracing::error!(
             ?error,
             run_id = %run_id,
@@ -370,7 +365,6 @@ pub async fn post_run_orchestration(
 pub async fn post_run_orchestration_in_tx<'t>(
     tx: Transaction<'t>,
     pool: &'t PgPool,
-    cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
 ) -> Transaction<'t> {
@@ -382,7 +376,6 @@ pub async fn post_run_orchestration_in_tx<'t>(
         );
     }
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
         // The pause path creates no runs: the presence closures are
         // unread (`maybe_apply_deferred_pause_live`), so the keyless
@@ -810,52 +803,14 @@ mod tests {
             .expect("pool connects")
     }
 
-    fn settings() -> (CloudAgentSettings, ManagedRunnerSettings) {
-        (
-            CloudAgentSettings {
-                enabled: false,
-                writes_enabled: false,
-                github_tools_enabled: true,
-                disabled_tools: Vec::new(),
-                job_queue: "celery".to_string(),
-                reconcile_interval_secs: 30,
-                model_request_timeout_secs: 60,
-                execution_timeout_secs: 285,
-                run_soft_limit_secs: 300,
-                run_hard_limit_secs: 330,
-                stale_grace_secs: 60,
-                dispatch_lease_secs: 60,
-                dispatch_backoff_secs: 10,
-                dispatch_scan_interval_secs: 10,
-                sweep_interval_secs: 30,
-                dispatch_scan_batch: 100,
-                max_queue_age_secs: 900,
-                model_request_limit: 25,
-                tool_call_limit: 20,
-                write_call_limit: 3,
-                input_token_limit: 144_000,
-                output_token_limit: 16_000,
-                total_token_limit: 160_000,
-                max_output_tokens_per_request: 4096,
-                max_queued_per_workspace: 20,
-                max_running_per_workspace: 2,
-                user_creation_rate_per_minute: 6,
-                workspace_creation_rate_per_minute: 30,
-                tool_timeout_secs: 20,
-                max_tool_result_bytes: 65536,
-                max_prompt_bytes: 262_144,
-                max_final_result_bytes: 65536,
-                max_events: 500,
-                block_private_urls: true,
-            },
-            ManagedRunnerSettings {
-                enabled: false,
-                queued_max_age_secs: 43200,
-                graceful_stop_secs: 30,
-                sweep_interval_secs: 300,
-                desktop_min_version: String::new(),
-            },
-        )
+    fn settings() -> ManagedRunnerSettings {
+        ManagedRunnerSettings {
+            enabled: false,
+            queued_max_age_secs: 43200,
+            graceful_stop_secs: 30,
+            sweep_interval_secs: 300,
+            desktop_min_version: String::new(),
+        }
     }
 
     /// Unknown run answers `Ok(None)` (the driver's unknown-run
@@ -864,11 +819,10 @@ mod tests {
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_handoff_unknown_run_is_none() {
         let pool = pool().await;
-        let (cloud, managed) = settings();
+        let managed = settings();
         let runner = pidash_db::config::Settings::test_defaults().runner;
         let replacement = complete_project_move_handoff_live(
             &pool,
-            &cloud,
             &managed,
             None,
             &runner,
@@ -885,10 +839,9 @@ mod tests {
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_pause_unknown_run_is_false() {
         let pool = pool().await;
-        let (cloud, managed) = settings();
+        let managed = settings();
         let applied = maybe_apply_deferred_pause_live(
             &pool,
-            &cloud,
             &managed,
             Uuid::new_v4(),
         )
