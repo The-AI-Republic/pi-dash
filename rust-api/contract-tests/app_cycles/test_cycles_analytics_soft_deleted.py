@@ -177,7 +177,7 @@ def _build_live_pair(tenant, *, with_estimates=False):
     label = _seed_label(conn, project_id=proj, workspace_id=ws, name="Keep")
     ep = _seed_points_estimate(conn, project_id=proj, workspace_id=ws, value="5") if with_estimates else None
     start, end = _past_range()
-    cycle_id = _create_dated_cycle(conn, workspace_id=ws, project_id=proj, owner_id=owner, name="DIFF19 cycle", start_date=start, end_date=end)
+    cycle_id = _create_dated_cycle(conn, workspace_id=ws, project_id=proj, owner_id=owner, name="DIFF21 cycle", start_date=start, end_date=end)
     tenant["seed"].track("cycles", "id", cycle_id)
     i1 = _seed_issue(conn, workspace_id=ws, project_id=proj, state_id=state, created_by_id=owner, name="I1", sequence_id=9201, estimate_point_id=ep)
     i2 = _seed_issue(conn, workspace_id=ws, project_id=proj, state_id=state, created_by_id=owner, name="I2", sequence_id=9202, estimate_point_id=ep)
