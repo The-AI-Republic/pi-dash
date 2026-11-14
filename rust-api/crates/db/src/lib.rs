@@ -46,7 +46,7 @@ pub mod assistant;
 pub mod auth_oauth;
 pub mod config;
 pub mod context;
-pub mod dispatch;
+pub mod agent_runs;
 pub mod entity;
 pub mod filter;
 pub mod filterset;

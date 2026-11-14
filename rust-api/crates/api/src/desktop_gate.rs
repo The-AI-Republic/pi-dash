@@ -5,7 +5,7 @@
 //! hardcoding the CE session-key check, so the private overlay
 //! substitutes its OIDC `client`-claim check without touching the
 //! callers. The verdict routes through the admission closure form
-//! ([`pidash_services::dispatch::is_desktop_session`], the DRF
+//! ([`pidash_services::run_creation::is_desktop_session`], the DRF
 //! `IsDesktopSession.has_permission` shape: the authentication fold,
 //! then the EE seam verdict), and the closure consults the gate the
 //! overlay installed on [`crate::state::AppState`].

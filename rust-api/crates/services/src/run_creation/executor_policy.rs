@@ -60,7 +60,7 @@
 
 use pidash_db::config::ManagedRunnerSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;

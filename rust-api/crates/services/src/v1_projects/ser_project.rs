@@ -662,12 +662,12 @@ mod tests {
             ExecutorCheck::Ok
         );
         assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("cloud_agent"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("cloud_agent"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
         assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("managed_runner"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("managed_runner"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
     }
 

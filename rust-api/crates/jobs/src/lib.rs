@@ -30,11 +30,8 @@ pub mod assistant;
 pub mod cloud_agent;
 /// Creation + dispatch tasks (D-11 L6, PIDASHCONV-487): the executor-aware
 /// creation seam, the lease-and-offer dispatch engine with transactional
-/// enqueue, and the bounded run-event append. Lives at
-/// `dispatch/dispatch.rs` via an explicit path — the single file the issue
-/// owns, no `mod.rs`.
-#[path = "dispatch/dispatch.rs"]
-pub mod dispatch;
+/// enqueue, and the bounded run-event append.
+pub mod run_dispatch;
 /// Public domain-write hooks (OVL-16, PIDASHCONV-1660): OSS's own
 /// transition / enqueue / move-drain bindings over explicit deps, for
 /// any caller of `operations::*` and the domain writes. The api

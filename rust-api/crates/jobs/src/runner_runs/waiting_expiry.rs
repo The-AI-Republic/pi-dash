@@ -25,7 +25,7 @@ use pidash_db::config::ManagedRunnerSettings;
 use pidash_db::entity::agent_run;
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
-use pidash_types::dispatch::ManagedRunnerReason;
+use pidash_types::agent_runs::ManagedRunnerReason;
 
 use crate::queue::{JobRow, NewJob};
 use crate::task_message::TaskMessage;
@@ -468,9 +468,9 @@ pub async fn drive_expire_waiting_runs<S: ExecuteSeams>(
         if seams
             .finalize_agent_run(FinalizeCall {
                 run_id,
-                new_status: pidash_db::dispatch::AgentRunStatus::Failed.value(),
+                new_status: pidash_db::agent_runs::AgentRunStatus::Failed.value(),
                 updates: expire_updates(),
-                expected_status: Some(pidash_db::dispatch::AgentRunStatus::Queued.value()),
+                expected_status: Some(pidash_db::agent_runs::AgentRunStatus::Queued.value()),
             })
             .await?
         {

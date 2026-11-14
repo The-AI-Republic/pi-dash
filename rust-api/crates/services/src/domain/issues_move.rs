@@ -640,7 +640,7 @@ fn map_handoff_row(row: &QueryResult) -> Result<HandoffRunRow, StoreError> {
     let run_config: Option<Value> = get(row, "run_config")?;
     Ok(HandoffRunRow {
         id: get(row, "id")?,
-        status: pidash_db::dispatch::AgentRunStatus::from_value(&status).ok_or_else(|| {
+        status: pidash_db::agent_runs::AgentRunStatus::from_value(&status).ok_or_else(|| {
             StoreError(format!("move store: unknown agent_run.status {status:?}"))
         })?,
         runner_id: get(row, "runner_id")?,

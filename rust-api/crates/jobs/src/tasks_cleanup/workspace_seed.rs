@@ -1875,7 +1875,7 @@ impl SeedStore for PgSeedStore {
             creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
         };
         use crate::orchestration::{LiveCreationStore, StoreDeps};
-        use pidash_db::dispatch::status::AgentRunTrigger;
+        use pidash_db::agent_runs::status::AgentRunTrigger;
         use pidash_services::orchestration::creation::{
             resolve_fallback_creator, resolve_pod_for_issue,
         };
@@ -2162,7 +2162,7 @@ impl SeedStore for PgSeedStore {
                 // dispatch never fails the save.
                 for run_id in dispatches {
                     if let Err(error) =
-                        crate::dispatch::dispatch_agent_run(pool, run_id, now).await
+                        crate::run_dispatch::dispatch_agent_run(pool, run_id, now).await
                     {
                         tracing::error!(
                             %error,

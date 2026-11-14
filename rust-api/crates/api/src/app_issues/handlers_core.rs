@@ -128,11 +128,11 @@ use pidash_services::app_issues::serializers_detail::{
 };
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
+use pidash_services::run_creation::pidash_agent_availability::{
     managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
     HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::dispatch::policy::{managed_runner_is_enabled, UserFlags};
+use pidash_services::run_creation::executor_policy::{managed_runner_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -140,7 +140,7 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 
@@ -2618,8 +2618,8 @@ async fn run_validate(
     });
 
     // Step 1 probes. `issue_is_actively_synced` short-circuits: empty /
-    // missing source runs nothing; otherwise git-only (PDASHOSS01-354) —
-    // ahead of the blocked-keys check either way.
+    // missing source runs nothing; otherwise git, then github iff git
+    // misses — ahead of the blocked-keys check either way.
     let synced_source = current
         .as_ref()
         .and_then(|row| row.external_source)
@@ -2627,6 +2627,13 @@ async fn run_validate(
     // `synced_source` implies `instance` (the source comes from the row).
     let instance_id = instance.map(|row| row.id).unwrap_or(Uuid::nil());
     let git_sync = if synced_source {
+        git_issue_synced(pool, &instance_id)
+            .await
+            .map_err(|_| db_error())?
+    } else {
+        false
+    };
+    let github_sync = if synced_source && !git_sync {
         git_issue_synced(pool, &instance_id)
             .await
             .map_err(|_| db_error())?
@@ -2886,6 +2893,7 @@ async fn run_validate(
     };
     let probes = ValidateProbes {
         git_sync_exists: &|| git_sync,
+        github_sync_exists: &|| github_sync,
         has_active_run: &|| run_value,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),
@@ -3777,7 +3785,10 @@ async fn render_detail_map(
         .as_deref()
         .is_some_and(|source| !source.is_empty())
     {
-        git_issue_synced(pool, &row.save.id)
+        let git = git_issue_synced(pool, &row.save.id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        git || git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?
     } else {
@@ -5105,10 +5116,13 @@ async fn destroy_issue_inner(
     let Some(mut row) = fetch_destroy_issue(&pool, &slug, &tenant.project_id, &pk).await? else {
         return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
     };
-    // Git-only synced guard (PDASHOSS01-354).
+    // `GitIssueSync...exists() or GithubIssueSync...exists()` — short-circuit.
     let synced = git_issue_synced(&pool, &pk)
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        || git_issue_synced(&pool, &pk)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     if synced {
         return Ok(not_found_detail(DESTROY_SYNCED_BODY, StatusCode::CONFLICT));
     }

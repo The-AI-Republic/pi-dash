@@ -28,9 +28,9 @@ use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
-    agent_run, dev_machine, git_code_review_links,
+    agent_run, agent_run_event, dev_machine, git_code_review_links,
     git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
     issue_labels, issue_relations, issues, labels, pod, projects, prompt_section_override, runner,
     states, users, workspaces,
@@ -38,7 +38,7 @@ use pidash_db::entity::{
 use pidash_db::orm_tx::TxConn;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::dispatch::{
+use pidash_services::run_creation::{
     ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::AssistantModelSeam;
@@ -53,9 +53,9 @@ use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
-use crate::dispatch::{
+use crate::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
     DispatchDecision,
@@ -908,7 +908,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
 
 }
 
-fn twin_map_execution_fields(fields: crate::dispatch::ExecutionFields) -> ServiceExecutionFields {
+fn twin_map_execution_fields(fields: crate::run_dispatch::ExecutionFields) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
         AgentExecutorKind::CloudAgent => Some(None),
         AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
@@ -1967,6 +1967,58 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
                 .exec(&conn)
                 .await
                 .map_err(twin_db)?;
+        }
+        if locked.executor_kind == AgentExecutorKind::CloudAgent {
+            let exists_count = {
+                let conn = TxConn::new(self.tx.inner());
+                agent_run_event::Entity::find()
+                    .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+                    .filter(agent_run_event::Column::Kind.eq("terminal"))
+                    .count(&conn)
+                    .await
+                    .map_err(twin_db)?
+            };
+            if exists_count == 0 {
+                let seq = {
+                    #[derive(Debug, FromQueryResult)]
+                    struct SeqRow {
+                        max_seq: Option<i32>,
+                    }
+                    let conn = TxConn::new(self.tx.inner());
+                    agent_run_event::Entity::find()
+                        .select_only()
+                        .expr_as(
+                            Func::max(Expr::col((
+                                agent_run_event::Entity,
+                                agent_run_event::Column::Seq,
+                            ))),
+                            "max_seq",
+                        )
+                        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+                        .into_model::<SeqRow>()
+                        .one(&conn)
+                        .await
+                        .map_err(twin_db)?
+                        .and_then(|row| row.max_seq)
+                        .map(|max| max + 1)
+                        .unwrap_or(1)
+                };
+                let payload = serde_json::json!({"status": "failed", "error_code": error_code});
+                {
+                    let conn = TxConn::new(self.tx.inner());
+                    agent_run_event::ActiveModel {
+                        seq: Set(seq),
+                        kind: Set("terminal".to_owned()),
+                        payload: Set(payload),
+                        created_at: Set(now.into()),
+                        agent_run_id: Set(run_id),
+                        ..Default::default()
+                    }
+                    .insert(&conn)
+                    .await
+                    .map_err(twin_db)?;
+                }
+            }
         }
         // The `on_commit` lambda (`_publish_effects`): captured for the
         // handoff drain below (the jobs twin returns it pending for D-15;

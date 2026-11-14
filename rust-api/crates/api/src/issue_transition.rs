@@ -183,7 +183,7 @@ impl IssueTransitionHook for AppTransitionHook {
 #[cfg(test)]
 pub(crate) mod test_support {
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-    use pidash_services::dispatch::policy::UserFlags;
+    use pidash_services::run_creation::executor_policy::UserFlags;
     use pidash_services::domain::identity::AgentUserCollisionError;
     use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use pidash_services::orchestration::creation::{

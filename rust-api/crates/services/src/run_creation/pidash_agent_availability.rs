@@ -63,9 +63,9 @@
 //! overshoot (`admission.py:40-42`) and the +5s consume overhang (`:24`) are
 //! documented-by-design and translated as-is.
 
-use super::policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
+use super::executor_policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
 use pidash_db::config::ManagedRunnerSettings;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
