@@ -14,6 +14,7 @@ import type {
   IPromptSectionUpsertPayload,
   TPromptKind,
   TPromptScope,
+  TWorkTypeKey,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
 
@@ -30,8 +31,15 @@ export class PromptSectionService extends APIService {
     super(BASE_URL || API_BASE_URL);
   }
 
-  async list(workspaceSlug: string, kind: TPromptKind, scope: TPromptScope): Promise<IPromptSectionListResponse> {
-    return this.get(`/api/workspaces/${workspaceSlug}/prompt-sections`, { params: { kind, scope } })
+  async list(
+    workspaceSlug: string,
+    kind: TPromptKind,
+    scope: TPromptScope,
+    workType: TWorkTypeKey
+  ): Promise<IPromptSectionListResponse> {
+    return this.get(`/api/workspaces/${workspaceSlug}/prompt-sections`, {
+      params: { kind, scope, work_type: workType },
+    })
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
@@ -58,8 +66,15 @@ export class PromptSectionService extends APIService {
       });
   }
 
-  async compiled(workspaceSlug: string, kind: TPromptKind, scope: TPromptScope): Promise<IPromptCompiledResponse> {
-    return this.get(`/api/workspaces/${workspaceSlug}/prompts/${kind}/compiled`, { params: { scope } })
+  async compiled(
+    workspaceSlug: string,
+    kind: TPromptKind,
+    scope: TPromptScope,
+    workType: TWorkTypeKey
+  ): Promise<IPromptCompiledResponse> {
+    return this.get(`/api/workspaces/${workspaceSlug}/prompts/${kind}/compiled`, {
+      params: { scope, work_type: workType },
+    })
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
