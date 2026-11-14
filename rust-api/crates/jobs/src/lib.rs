@@ -36,12 +36,6 @@ pub mod cloud_agent;
 /// owns, no `mod.rs`.
 #[path = "dispatch/dispatch.rs"]
 pub mod dispatch;
-/// Execution tasks (D-11 L7, PIDASHCONV-488): claim/run/fail, queue
-/// scan, stale sweep, managed wait expiry, and the model runtime.
-/// Same explicit-path form as [`dispatch`] — the single file the issue
-/// owns, no `mod.rs`.
-#[path = "dispatch/execute.rs"]
-pub mod dispatch_execute;
 /// Public domain-write hooks (OVL-16, PIDASHCONV-1660): OSS's own
 /// transition / enqueue / move-drain bindings over explicit deps, for
 /// any caller of `operations::*` and the domain writes. The api

@@ -13,14 +13,7 @@
 //! composes the same builders with its own settings, seams, routes and
 //! jobs (see the runbook), so OSS and overlay boot through one code path.
 
-/// Re-export shims for the inventory mirror test (PIDASHCONV-918):
-/// the providers moved to `pidash_jobs::oss_worker`, and only the
-/// `#[cfg(test)]` mirror still addresses them through the binary.
-#[cfg(test)]
-mod execute_seams;
 mod inventory;
-#[cfg(test)]
-mod model_runtime;
 #[cfg(test)]
 mod runner_seams;
 
