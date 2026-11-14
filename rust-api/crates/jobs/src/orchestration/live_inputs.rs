@@ -8,7 +8,6 @@
 //! closures, and `now`. This module builds those inputs live:
 //!
 //! * The admission cache: the shared
-//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache]
 //!   (PIDASHCONV-1487), built by each fire handler from `REDIS_URL` —
 //!   the same buckets the HTTP plane and the Django worker use.
 //! * [`JobsMatcher`]: the live [`PodRunnerMatcher`]. Mirrors the api
@@ -45,12 +44,12 @@ use pidash_db::assistant::models::has_secret;
 use pidash_db::entity::{assistant_user_llm_config, issues, projects};
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
-use pidash_services::assistant::seams::agent_model_profile_for_user;
-use pidash_services::dispatch::LlmProfile;
+use pidash_services::assistant::seams::pidash_agent_profile_for_user;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,
 };
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions;
 
 // ---------------------------------------------------------------------------
@@ -252,7 +251,7 @@ pub(crate) fn profile_fn(
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = agent_model_profile_for_user(key);
+        let profile = pidash_agent_profile_for_user(key);
         LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,

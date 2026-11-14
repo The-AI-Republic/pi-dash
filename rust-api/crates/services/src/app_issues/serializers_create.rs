@@ -23,8 +23,8 @@
 //!
 //! Reuse (merged, called not copied): [`super::serializers_engage`]'s
 //! [`issue_is_actively_synced`](super::serializers_engage::issue_is_actively_synced)
-//! for the sync lock; [`AgentExecutorKind`], [`ManagedRunnerReason`],
-//! [`cloud_agent_is_configured`], [`managed_runner_availability`] for the
+//! for the sync lock; [`AgentExecutorKind`], [`PidashAgentReason`],
+//! [`cloud_agent_is_configured`], [`pidash_agent_availability`] for the
 //! executor branch; [`sticky_kernel`] for the HTML/binary arms (the same
 //! `nh3.clean` transcription as `api::space::sanitize`, which this crate
 //! cannot depend on without a dependency cycle — verified byte-identical
@@ -82,12 +82,12 @@ use std::borrow::Cow;
 use base64::Engine as _;
 use serde::Serialize;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_db::config::PidashAgentSettings;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::v1_assets::sticky as sticky_kernel;
 
 use super::serializers_engage::issue_is_actively_synced;
-use crate::dispatch::{LlmProfile, UserFlags};
+use crate::run_creation::{LlmProfile, UserFlags};
 use crate::tasks_cleanup::versions::chunk_ranges;
 
 // ---------------------------------------------------------------------------
@@ -629,10 +629,8 @@ pub struct ValidateInstance<'a> {
 /// kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExecutorPolicy<'a> {
-    /// `CLOUD_AGENT_ENABLED` for [`cloud_agent_is_configured`].
-    pub cloud: &'a CloudAgentSettings,
     /// `MANAGED_RUNNER_ENABLED` for [`managed_runner_availability`].
-    pub managed: &'a ManagedRunnerSettings,
+    pub managed: &'a PidashAgentSettings,
     /// `request.user` flags (`None` = anonymous / absent request).
     pub viewer: Option<&'a UserFlags>,
 }
@@ -647,8 +645,11 @@ pub struct ExecutorPolicy<'a> {
 #[derive(Clone, Copy)]
 pub struct ValidateProbes<'a> {
     /// [`GIT_ISSUE_SYNC_PROBE_SQL`](super::serializers_engage::GIT_ISSUE_SYNC_PROBE_SQL)
-    /// verdict (git-only after PDASHOSS01-354).
+    /// verdict.
     pub git_sync_exists: &'a dyn Fn() -> bool,
+    /// [`GITHUB_ISSUE_SYNC_PROBE_SQL`](super::serializers_engage::GITHUB_ISSUE_SYNC_PROBE_SQL)
+    /// verdict.
+    pub github_sync_exists: &'a dyn Fn() -> bool,
     /// [`HAS_ACTIVE_RUN_SQL`] verdict. Called up to twice (pod + executor
     /// mid-flight checks), exactly like the `has_active_run` property.
     pub has_active_run: &'a dyn Fn() -> bool,
@@ -671,15 +672,15 @@ pub struct ValidateProbes<'a> {
     /// runs only when neither the instance nor attrs resolved a project.
     pub fetch_project: &'a dyn Fn() -> Option<ResolvedProject>,
     /// The `managed_llm_profile` seam input to
-    /// [`managed_runner_availability`].
+    /// [`pidash_agent_availability`].
     pub llm_profile: &'a dyn Fn() -> LlmProfile,
-    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`](crate::dispatch::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`](crate::run_creation::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
     /// verdict.
     pub enrolled_exists: &'a dyn Fn() -> bool,
-    /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::dispatch::ONLINE_MANAGED_RUNNER_SQL)
+    /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::run_creation::ONLINE_MANAGED_RUNNER_SQL)
     /// verdict.
     pub online_exists: &'a dyn Fn() -> bool,
-    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::dispatch::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::run_creation::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
     /// verdict (`09738d222`): consulted only when a runner is enrolled
     /// but none is online, exactly as Python's `if` runs the paused
     /// probe last.
@@ -845,7 +846,7 @@ pub fn issue_create_validate(
                     message: Cow::Borrowed(EXECUTOR_UNKNOWN_MESSAGE),
                 });
             }
-            let normalized = pidash_types::dispatch::normalize_executor_write(executor)
+            let normalized = pidash_types::agent_runs::normalize_executor_write(executor)
                 .expect("known value parses")
                 .value()
                 .to_owned();
@@ -1004,7 +1005,7 @@ pub const ESTIMATE_EXISTS_SQL: &str =
 /// `Project.objects.filter(pk).first()` for the managed arm (`:296-299`):
 /// default soft-delete guard; `.first()` applies the model ordering
 /// (`-created_at`, `db/models/project.py:254`). Projection covers exactly
-/// the consumed columns (`managed_runner_availability` reads `id` +
+/// the consumed columns (`pidash_agent_availability` reads `id` +
 /// `workspace_id`). Params: `$1` project id (uuid). A `None` context
 /// project renders `IS NULL` (no row: a PK is never null).
 pub const PROJECT_FETCH_SQL: &str = "SELECT id, workspace_id FROM projects WHERE id = $1 \
@@ -1487,6 +1488,7 @@ mod tests {
     /// Owned probe closures with a borrowing [`ValidateProbes`] view.
     struct ProbeBank {
         git_sync_exists: Box<dyn Fn() -> bool>,
+        github_sync_exists: Box<dyn Fn() -> bool>,
         has_active_run: Box<dyn Fn() -> bool>,
         filter_assignees: IdFilter,
         filter_labels: IdFilter,
@@ -1508,6 +1510,7 @@ mod tests {
             let resolved = project();
             Self {
                 git_sync_exists: Box::new(|| false),
+                github_sync_exists: Box::new(|| false),
                 has_active_run: Box::new(|| false),
                 filter_assignees: Box::new(|ids| ids.to_vec()),
                 filter_labels: Box::new(|ids| ids.to_vec()),
@@ -1530,6 +1533,7 @@ mod tests {
         fn probes(&self) -> ValidateProbes<'_> {
             ValidateProbes {
                 git_sync_exists: &self.git_sync_exists,
+                github_sync_exists: &self.github_sync_exists,
                 has_active_run: &self.has_active_run,
                 filter_assignees: &self.filter_assignees,
                 filter_labels: &self.filter_labels,
@@ -1547,47 +1551,8 @@ mod tests {
         }
     }
 
-    fn cloud_settings(enabled: bool) -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    fn managed_settings(enabled: bool) -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn managed_settings(enabled: bool) -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -1696,10 +1661,8 @@ mod tests {
         }
         let probes = bank.probes();
 
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -1895,10 +1858,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -1961,13 +1922,21 @@ mod tests {
         // Create path (no instance) skips the lock entirely.
         issue_create_validate(&attrs, &ctx, None, &policy, &probes).expect("create skips lock");
 
-        // Unsynced instance skips the lock; the git probe decides (git-only after the sunset).
+        // Unsynced instance skips the lock; the git probe short-circuits.
         current.annotated_is_synced = None;
         let git_calls = Rc::new(Cell::new(0u32));
+        let github_calls = Rc::new(Cell::new(0u32));
         let mut counting = ProbeBank::permissive();
         {
             let calls = Rc::clone(&git_calls);
             counting.git_sync_exists = Box::new(move || {
+                calls.set(calls.get() + 1);
+                true
+            });
+        }
+        {
+            let calls = Rc::clone(&github_calls);
+            counting.github_sync_exists = Box::new(move || {
                 calls.set(calls.get() + 1);
                 true
             });
@@ -1977,6 +1946,7 @@ mod tests {
             .expect_err("git probe hit locks");
         assert!(matches!(err, CreateValidateError::Fields(_)));
         assert_eq!(git_calls.get(), 1);
+        assert_eq!(github_calls.get(), 0, "git hit short-circuits github");
     }
 
     #[test]
@@ -2004,10 +1974,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2139,10 +2107,8 @@ mod tests {
         // Unknown executor (fires only for values past the ChoiceField).
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2220,10 +2186,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2272,10 +2236,8 @@ mod tests {
     fn assignee_label_filters_silently_drop() {
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2359,10 +2321,8 @@ mod tests {
                 .expect("estimate message")
         );
 
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2446,6 +2406,7 @@ mod tests {
         };
         // Each closure owns its counter; probes must stay silent on empty attrs.
         let git = bump(0);
+        let github = bump(1);
         let active = bump(2);
         let assignees = bump(3);
         let labels = bump(4);
@@ -2459,6 +2420,10 @@ mod tests {
         let bank = ProbeBank {
             git_sync_exists: Box::new(move || {
                 git();
+                false
+            }),
+            github_sync_exists: Box::new(move || {
+                github();
                 false
             }),
             has_active_run: Box::new(move || {
@@ -2518,10 +2483,8 @@ mod tests {
             runner_error: Box::new(|| None),
         };
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };

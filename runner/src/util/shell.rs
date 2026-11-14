@@ -86,7 +86,7 @@ fn apply_run_env(cmd: &mut Command) {
 /// `export CODEX_HOME=...` or a `PATH` rewrite in their profile would silently
 /// win over the daemon. Passing our values under `PIDASH_*` names and
 /// re-exporting them here is the same trick the working directory has always
-/// used, extended to the managed runner's environment.
+/// used, extended to the Pi Dash Agent's environment.
 ///
 /// Every clause is a no-op when its `PIDASH_*` variable is unset, so a
 /// user-enrolled runner produces exactly the command line it always did.
@@ -102,7 +102,7 @@ exec "$@""#;
 /// Pi Dash-controlled environment for a spawned agent process.
 ///
 /// All fields are `None` for a user-enrolled runner, which is what keeps that
-/// path byte-identical. The managed runner fills them from its `CodexSection`
+/// path byte-identical. The Pi Dash Agent fills them from its `CodexSection`
 /// so the bundled engine reads Pi Dash's own config, finds the bundled CLI,
 /// and receives a credential that never touches `config.toml` or a command
 /// line.

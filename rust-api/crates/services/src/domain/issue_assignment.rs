@@ -12,7 +12,7 @@
 //! `local_runner` is the only executor an issue can have (design rev 2),
 //! so there is no executor arm here; the E6/`executor_not_local` code is
 //! gone with I2. The engine rules this module composes (`runner_may_take`,
-//! `locality_pin_allowed`, `engine_takes_pod_work`, `can_use_runner`) live
+//! `locality_pin_allowed`, `pidash_agent_takes_pod_work`, `can_use_runner`) live
 //! in `pidash_auth::permissions::runner` (NEWPIDASH-49 port of #2903) and
 //! are reused, never re-implemented.
 
@@ -58,7 +58,6 @@ pub const PIN_LOCALITY: &str = "locality";
 pub const PIN_DEDICATED: &str = "dedicated";
 
 /// The engine provisioning value (`RunnerProvisioning.DESKTOP_BUNDLED`).
-pub const PROVISIONING_DESKTOP_BUNDLED: &str = "desktop_bundled";
 /// `RunnerPodDispatch.PINNED_ONLY`.
 pub const POD_DISPATCH_PINNED_ONLY: &str = "pinned_only";
 /// `RunnerPodDispatch.POD_MEMBER`.
@@ -135,7 +134,9 @@ pub fn runner_paused_reason<'a>(
     if runner.paused_at.is_some() {
         return Some(Cow::Borrowed("dispatch_paused"));
     }
-    if runner.provisioning == PROVISIONING_DESKTOP_BUNDLED {
+    if runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED
+    {
         if let Some(machine) = machine {
             if machine.engine_paused_by_owner {
                 return Some(Cow::Borrowed("owner_paused"));
@@ -836,7 +837,8 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         self, DevMachineMiniRow, LiveStateRow, PodMiniRow, RunnerRow,
     };
 
-    let is_engine = row.runner.provisioning == PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = row.runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let dispatch_paused = row.runner.paused_at.is_some();
     // machine display: dev_machine display_name or host_label or name
     let machine_display = match &row.dev_machine {
@@ -860,7 +862,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         }
     };
     let engine_paused = match &row.dev_machine {
-        Some(join) if is_engine => {
+        Some(join) if is_pidash_agent => {
             join.dm_engine_paused_by_owner.unwrap_or(false)
                 || !join
                     .dm_engine_auto_pause_reason
@@ -909,7 +911,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         .dev_machine
         .as_ref()
         .and_then(|j| j.dm_engine_credential_expires_at);
-    let dm_sign_in = crate::domain::engine_credential::current_engine_sign_in_state(
+    let dm_sign_in = crate::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
         &dm_stored_sign_in,
         dm_expires_at,
         Utc::now(),
@@ -999,7 +1001,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         name: &row.runner.name,
         status: &row.runner.status,
         host_label: &row.runner.host_label,
-        is_engine,
+        is_pidash_agent,
         engine_paused,
         dispatch_paused,
         machine_display_name: &machine_display,
@@ -1053,8 +1055,9 @@ pub async fn runner_may_take_run(
 ) -> Result<bool, sea_orm::DbErr> {
     let owner = runner_row.owner_id;
     let created_by_owner = created_by_id == Some(owner);
-    let is_engine = runner_row.provisioning == PROVISIONING_DESKTOP_BUNDLED;
-    let team_runs = if is_engine {
+    let is_pidash_agent = runner_row.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let team_runs = if is_pidash_agent {
         match runner_row.dev_machine_id {
             Some(machine_id) => dev_machine::Entity::find_by_id(machine_id)
                 .one(db)
@@ -1081,7 +1084,7 @@ pub async fn runner_may_take_run(
     // authored by the owner. Callers that know the binding pass it through
     // [`runner_may_take_binding`]; this entry has no binding facts.
     Ok(auth_runner_may_take(
-        is_engine,
+        is_pidash_agent,
         team_runs,
         created_by_owner,
         human,
@@ -1111,7 +1114,7 @@ impl ResolvedPin {
 ///
 /// Keeps every rule `_pinned_runner_for` had on main: online, heartbeat-
 /// fresh, not paused, same pod, `locality_pin_allowed` (an engine only
-/// while `engine_takes_pod_work`), and for an engine `runner_may_take`
+/// while `pidash_agent_takes_pod_work`), and for an engine `runner_may_take`
 /// for the new run's creator and trigger.
 pub async fn locality_runner_for(
     db: &impl ConnectionTrait,
@@ -1144,7 +1147,8 @@ pub async fn locality_runner_for(
             return Ok(None);
         }
     }
-    let is_engine = candidate.provisioning == PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = candidate.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let machine = match candidate.dev_machine_id {
         Some(machine_id) => dev_machine::Entity::find_by_id(machine_id).one(db).await?,
         None => None,
@@ -1154,10 +1158,10 @@ pub async fn locality_runner_for(
         .as_ref()
         .map(|m| m.engine_paused_by_owner || !m.engine_auto_pause_reason.is_empty())
         .unwrap_or(false);
-    if !auth_locality_pin_allowed(true, is_engine, pod_member, engine_paused) {
+    if !auth_locality_pin_allowed(true, is_pidash_agent, pod_member, engine_paused) {
         return Ok(None);
     }
-    if is_engine {
+    if is_pidash_agent {
         let human = HUMAN_TRIGGERS.contains(&trigger);
         if !runner_may_take_run(db, &candidate, creator_id, human, issue).await? {
             return Ok(None);
@@ -3095,7 +3099,9 @@ mod tests {
     #[test]
     fn paused_reason_owner_pause_and_auto() {
         let mut runner = runner_fixture();
-        runner.provisioning = PROVISIONING_DESKTOP_BUNDLED.to_owned();
+        runner.provisioning =
+            pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED
+                .to_owned();
         let mut machine = machine_fixture();
         machine.engine_paused_by_owner = true;
         assert_eq!(

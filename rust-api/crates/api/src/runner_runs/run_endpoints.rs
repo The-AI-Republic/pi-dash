@@ -64,7 +64,7 @@ use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
 use pidash_services::runner_sessions::live_drains;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
 };
@@ -648,7 +648,7 @@ pub async fn execute_finalize_terminal(
     finalize_kernel::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
+    if locked.executor_kind == AgentExecutorKind::RetiredCloudRun.value() {
         finalize_kernel::append_terminal_event_once(
             &conn,
             run_id,
@@ -1006,15 +1006,10 @@ pub async fn execute_terminal_effects(
         ));
     };
     if capacity.terminal_capacity_released_at.is_none() {
-        // Drains and dispatch run *before* the marker write,
-        // unisolated — a failure leaves the marker unset for the
-        // reconciler.
-        if capacity.executor_kind == AgentExecutorKind::CloudAgent.value() {
-            ports
-                .dispatch_waiting(capacity.workspace_id)
-                .await
-                .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
-        } else {
+        // Drains run *before* the marker write, unisolated — a
+        // failure leaves the marker unset for the reconciler.
+        // (P4: the cloud dispatch arm died with dispatch_waiting.)
+        {
             if let Some(runner_id) = capacity.runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): every
                 // finalization path frees a stale `busy` runner before
@@ -1232,12 +1227,6 @@ pub async fn drain_lifecycle_effects(
             LifecycleEffect::DrainPod { pod_id } => {
                 ports
                     .drain_pod_by_id(pod_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
-            LifecycleEffect::DispatchWaiting { workspace_id } => {
-                ports
-                    .dispatch_waiting(workspace_id)
                     .await
                     .map_err(|_| server_error())?;
             }

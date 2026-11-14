@@ -1133,7 +1133,7 @@ pub const ERROR_DIAGNOSTIC_FIELDS: [&str; 5] =
 /// The eight `AgentRunStatus` values that gate the active run
 /// (`issue.py:1386-1402`): `WAITING_FOR_WORKTREE` is retired but historical
 /// rows still gate. Each literal equals the merged
-/// `pidash_db::dispatch::AgentRunStatus` value (pinned by test).
+/// `pidash_db::agent_runs::AgentRunStatus` value (pinned by test).
 pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
     "queued",
     "assigned",
@@ -1148,7 +1148,7 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::dispatch::AgentRunStatus;
+    use pidash_db::agent_runs::AgentRunStatus;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker as TickerRowCheck;
 
     fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {

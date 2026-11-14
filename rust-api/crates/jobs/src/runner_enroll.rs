@@ -64,7 +64,6 @@
 //! Re-exported through `pidash-sdk::ops`.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pidash_db::orm_tx::{into_sqlx, TxConn};
@@ -72,7 +71,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
 use pidash_db::runner_sessions::outbox as runner_outbox;
@@ -85,7 +84,6 @@ use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains;
 use pidash_services::runner_sessions::pubsub as pubsub_svc;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::{remove_runner_frame, revoke_frame};
 
@@ -340,40 +338,31 @@ where
 
 /// Build the minimal [`StoreDeps`](crate::orchestration::StoreDeps) for
 /// the revoke post-commit effects: the pool's cloud/managed settings and
-/// the carried toolsets seam, with a fail-closed admission cache and the
-/// no-LLM / unavailable-profile closures. No [`AppState`] needed — the
+/// the no-LLM / unavailable-profile closures. No [`AppState`] needed — the
 /// overlay platform consumer (`platform/access.rs`) has only
 /// [`EventContext`](crate::runner_enroll::RevokeCtx) fields and calls the
 /// helpers below with error-logged isolation, exactly Django's
 /// `on_commit` sweep.
 #[allow(clippy::type_complexity)]
 pub fn overlay_store_deps(
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
-    now: DateTime<Utc>,
+    managed: &PidashAgentSettings,
 ) -> crate::orchestration::StoreDeps<
-    pidash_services::dispatch::admission::RedisAdmissionCache,
     fn(Uuid) -> bool,
-    fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile,
+    fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile,
 > {
     fn no_llm(_: Uuid) -> bool {
         false
     }
-    fn no_profile(_: Option<Uuid>) -> pidash_services::dispatch::LlmProfile {
-        pidash_services::dispatch::LlmProfile {
+    fn no_profile(_: Option<Uuid>) -> pidash_services::run_creation::LlmProfile {
+        pidash_services::run_creation::LlmProfile {
             available: false,
             reason_code: "revoke-no-profile".to_owned(),
         }
     }
     crate::orchestration::StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: pidash_services::dispatch::admission::RedisAdmissionCache::from_env(),
         has_usable_llm_config: no_llm,
-        toolsets,
         llm_profile: no_profile,
-        now_unix_secs: now.timestamp(),
     }
 }
 
@@ -385,9 +374,7 @@ pub fn overlay_store_deps(
 #[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_for_revoke(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
     jitter_secs: f64,
     issue_id: Uuid,
@@ -398,7 +385,7 @@ pub async fn bounce_issue_for_revoke(
     crate::orchestration::DispatchOutcome<pidash_services::orchestration::dispatch::BounceOutcome>,
     crate::orchestration::DispatchJobsError,
 > {
-    let deps = overlay_store_deps(cloud, managed, toolsets, now);
+    let deps = overlay_store_deps(managed);
     crate::orchestration::bounce_issue_no_eligible_runner(
         pool,
         deps,
@@ -421,9 +408,7 @@ pub async fn bounce_issue_for_revoke(
 #[allow(clippy::too_many_arguments)]
 pub async fn recreate_issue_for_revoke(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
     issue_id: Uuid,
     pod_id: Uuid,
@@ -435,7 +420,7 @@ pub async fn recreate_issue_for_revoke(
     >,
     crate::orchestration::creation_jobs::CreationJobsError,
 > {
-    let deps = overlay_store_deps(cloud, managed, toolsets, now);
+    let deps = overlay_store_deps(managed);
     let req = pidash_services::orchestration::creation::CreateDispatchRequest {
         issue_id,
         parent: None,
@@ -589,7 +574,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         // First-writer-wins lock with the expected-runner predicate; a
         // miss is `Ok(())` — Python ignores the `False`.
         let conn = TxConn::new(self.tx);
-        let Some(locked) = revoke::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
+        let Some(_locked) = revoke::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
             .await
             .map_err(store_err)?
         else {
@@ -598,17 +583,6 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         revoke::execute_revoke_finalize_update(&conn, &values, run_id, now_micros())
             .await
             .map_err(store_err)?;
-        if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
-            revoke::append_terminal_event_once(
-                &conn,
-                run_id,
-                AgentRunStatus::Cancelled,
-                &finalize_kernel::finalize_error_code(&values),
-                now_micros(),
-            )
-            .await
-            .map_err(store_err)?;
-        }
         // D-15's terminal-effects `on_commit` (registered in-tx, fires
         // first post-commit).
         self.effects.extend(
@@ -869,7 +843,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
         let (_revoked, _effects) =
-            pidash_services::domain::engine_credential::revoke_engine_credential(
+            pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
                 &pidash_db::orm_tx::TxConn::new(self.tx),
                 machine_id,
                 "machine_removed",
@@ -1028,11 +1002,11 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
             .map_err(store_err)
     }
 
-    async fn delete_machine_engine_credentials(
+    async fn delete_machine_pidash_agent_credentials(
         &mut self,
         machine_id: Uuid,
     ) -> Result<(), RevokeError> {
-        delete_svc::delete_machine_engine_credentials(&TxConn::new(self.tx), machine_id)
+        delete_svc::delete_machine_pidash_agent_credentials(&TxConn::new(self.tx), machine_id)
             .await
             .map_err(store_err)
     }
@@ -1136,8 +1110,8 @@ mod tests {
                 access_token_ttl_secs: 900,
                 offline_threshold_secs: 90,
                 offline_pin_release_secs: 60,
-                pin_auto_release_secs: 600,
                 offline_run_fail_secs: 300,
+                pin_auto_release_secs: 0,
                 offline_stream_ttl_secs: 86400,
                 offline_stream_maxlen: 1000,
                 stream_min_retention_secs: 3600,

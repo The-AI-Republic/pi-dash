@@ -24,7 +24,6 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::dispatch::dispatch_waiting;
 use crate::orchestration::runner_seams::{
     complete_project_move_handoff_live, disarm_on_terminal_signal as disarm_executor,
     maybe_apply_deferred_pause_live,
@@ -35,10 +34,10 @@ use crate::runner_runs::sweeps_chat::{
 use crate::runner_runs::sweeps_runs::{
     InlineTerminalEffects, SendOfflineError, SweepsError, SweepsRunsOutbox,
 };
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings, Settings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings, Settings};
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_services::domain::identity::get_agent_system_user;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::runner_sessions::live_drains::{
     drain_for_runner_by_id, drain_pod_by_id, PoolPubsubStore,
 };
@@ -53,9 +52,7 @@ pub struct RunnerSeams {
     pool: PgPool,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    managed: PidashAgentSettings,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
@@ -63,22 +60,19 @@ impl RunnerSeams {
     /// Build the providers from the worker pool, the shared Redis
     /// client (the `LivePorts::new` shape — `None` when `REDIS_URL`
     /// is unset or unparsable), the resolved [`Settings`], and the
-    /// injected cloud-agent toolsets and assistant seams. No I/O:
+    /// injected assistant seam. No I/O:
     /// everything is stored for the per-call effects.
     pub fn new(
         pool: PgPool,
         redis: Option<redis::Client>,
         settings: &Settings,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
             redis,
             runner: settings.runner.clone(),
-            cloud: settings.cloud_agent.clone(),
-            managed: settings.managed_runner.clone(),
-            toolsets,
+            managed: settings.pidash_agent.clone(),
             assistant_seam,
         }
     }
@@ -139,18 +133,6 @@ impl RunnerRunsSeams for RunnerSeams {
         })
     }
 
-    fn dispatch_waiting(
-        &self,
-        workspace_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-        Box::pin(async move {
-            dispatch_waiting(&self.pool, &self.cloud, workspace_id, Utc::now())
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    }
-
     fn complete_project_move_handoff(
         &self,
         run_id: Uuid,
@@ -158,12 +140,10 @@ impl RunnerRunsSeams for RunnerSeams {
         Box::pin(async move {
             complete_project_move_handoff_live(
                 &self.pool,
-                &self.cloud,
                 &self.managed,
                 self.redis.as_ref(),
                 &self.runner,
                 run_id,
-                self.toolsets.clone(),
                 self.assistant_seam.clone(),
             )
             .await
@@ -189,16 +169,10 @@ impl RunnerRunsSeams for RunnerSeams {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
         Box::pin(async move {
-            maybe_apply_deferred_pause_live(
-                &self.pool,
-                &self.cloud,
-                &self.managed,
-                run_id,
-                self.toolsets.clone(),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+            maybe_apply_deferred_pause_live(&self.pool, &self.managed, run_id)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         })
     }
 

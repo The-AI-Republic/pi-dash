@@ -73,7 +73,7 @@ use pidash_services::runner_runs::guards;
 use pidash_services::runner_runs::shape;
 use pidash_services::runner_runs::shape::SchedulerBindingDetailRow;
 use pidash_services::runner_runs::SetValue;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
 use pidash_types::WorkspaceId;
 
@@ -1834,7 +1834,7 @@ async fn cancel_run_inner(
 
     // Cloud fast-path (`runs.py:561-567`): stamp-only, 202. A lost race
     // (0 rows) falls through to the locked branches — no early return.
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent
+    if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun
         && guarded.run.status == AgentRunStatus::Running
     {
         let stamped = cloud_fast_stamp_statement(Utc::now(), &reason, run_id)
@@ -1931,7 +1931,7 @@ async fn cancel_locked(
         let _ = tx.rollback().await;
         return proxy_with_body(state.clone(), parts, bytes).await;
     }
-    if locked.executor_kind == AgentExecutorKind::CloudAgent
+    if locked.executor_kind == AgentExecutorKind::RetiredCloudRun
         && locked.status == AgentRunStatus::Running
     {
         // Cloud duplicate (`runs.py:579-592`): record the request and let
@@ -1951,7 +1951,7 @@ async fn cancel_locked(
         }
         return render_cancelled(pool, run_id, StatusCode::OK).await;
     }
-    if locked.executor_kind != AgentExecutorKind::CloudAgent
+    if locked.executor_kind != AgentExecutorKind::RetiredCloudRun
         && locked.runner_id.is_some()
         && !matches!(
             locked.status,
@@ -2028,7 +2028,7 @@ async fn finalize_cancelled(
     finalization::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent {
+    if locked.executor_kind == AgentExecutorKind::RetiredCloudRun {
         finalization::append_terminal_event_once(
             &conn,
             locked.id,
@@ -2092,7 +2092,7 @@ async fn release_pin_inner(
     if !guards::can_cancel_run(&facts) {
         return not_found();
     }
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent {
+    if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
         return json_response(StatusCode::CONFLICT, EXECUTOR_NOT_LOCAL_BODY.to_owned());
     }
     let mut tx = match pool.begin().await {

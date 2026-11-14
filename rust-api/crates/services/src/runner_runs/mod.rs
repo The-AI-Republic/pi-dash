@@ -105,11 +105,9 @@ pub use finalization::{
     apply_done_payload_merge, effects_lock_passes, error_details_patch, finalize_error_code,
     finalize_lock_passes, finalize_update_sql, lock_issue_sql, lock_run_for_effects_sql,
     lock_run_for_finalize_sql, merge_done_payload, plan_finalize_values, plan_publish_effects,
-    plan_terminal_effects, plan_terminal_event, select_run_for_capacity_sql,
-    select_run_work_item_id_sql, terminal_event_exists_sql, terminal_event_insert_sql,
-    terminal_event_max_seq_sql, terminal_event_payload, update_capacity_marker_sql,
-    update_hooks_marker_sql, CapacityPlan, EffectsSql, FinalizeError, FinalizeValues, HooksPlan,
-    TerminalEffectsInputs, TerminalEffectsOutcome, TerminalEffectsPlan, TerminalEventPlan,
+    plan_terminal_effects, select_run_for_capacity_sql, select_run_work_item_id_sql,
+    update_capacity_marker_sql, update_hooks_marker_sql, CapacityPlan, EffectsSql, FinalizeError,
+    FinalizeValues, HooksPlan, TerminalEffectsInputs, TerminalEffectsOutcome, TerminalEffectsPlan,
 };
 pub use lifecycle::{
     comment_dedupe_exists_sql, failure_reread_sql, has_project_move_handoff,
@@ -157,10 +155,6 @@ pub enum LifecycleEffect {
     DrainRunner { runner_id: Uuid },
     /// `drain_pod_by_id(pod_id)` (D-14).
     DrainPod { pod_id: Uuid },
-    /// `dispatch_waiting(workspace_id)` (D-11): synchronous, *not*
-    /// isolated — a failure propagates and the capacity marker stays
-    /// unset so the reconciler retries.
-    DispatchWaiting { workspace_id: Uuid },
     /// `complete_project_move_handoff(run_id)` (D-12): after the
     /// hooks transaction commits, isolated.
     CompleteProjectMoveHandoff { run_id: Uuid },

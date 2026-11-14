@@ -2,10 +2,11 @@
 //!
 //! The wiring behind `drive_turn` (`pidash_jobs::assistant::run_turn`), built
 //! from the modules the split issues shipped: the agent loop
-//! ([`super::agent`], 863 phase 6), the `ModelMessage` codec
-//! ([`super::history`], 1110), provider streaming ([`super::streaming`],
-//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 18 local
-//! tools ([`super::tools_local`], 1113), plus the D-11 model runtime in the
+//! (`pidash_jobs::cloud_agent::agent`, 863 phase 6), the `ModelMessage`
+//! codec (`pidash_jobs::cloud_agent::history`, 1110), provider streaming
+//! (`pidash_jobs::cloud_agent::streaming`, 1111), the MCP client
+//! ([`super::mcp_client`], 1112) and the 18 local tools
+//! ([`super::tools_local`], 1113), plus the D-11 model runtime in the
 //! jobs crate (`Lane`, `ProviderTable`, `WireTool`) and the ported decision
 //! surfaces in `pidash_services` (BYOK gates, key cache, MCP planning,
 //! SSRF).
@@ -48,12 +49,11 @@ use pidash_db::entity::{
 };
 use pidash_jobs::assistant::run_turn as rt;
 use pidash_jobs::assistant::run_turn::{
-    AgentError, ModelError, SeamError, SkippedServer, StreamItem, ToolsetHandle, TurnContext,
-    TurnSeam, TurnUsage,
+    ModelError, SeamError, SkippedServer, ToolsetHandle, TurnContext, TurnSeam, TurnUsage,
 };
-use pidash_jobs::oss_worker::model_runtime::provider::{self, Lane, WireTool};
-use pidash_jobs::oss_worker::model_runtime::schemas::Golden;
-use pidash_jobs::oss_worker::model_runtime::usage::{ProviderTable, RunUsage, UsageNumber};
+use pidash_jobs::cloud_agent::provider::{self, Lane, WireTool};
+use pidash_jobs::cloud_agent::usage::{ProviderTable, RunUsage, UsageLimits, UsageNumber};
+use pidash_jobs::cloud_agent::{usage_table, AgentError, StreamItem};
 use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::assistant::crypto::CryptoError;
 use pidash_services::assistant::llm::{self as llm_service, KeyCache};
@@ -69,16 +69,33 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::agent::{
-    ensure_ascii, run_agent, ToolCallOutcome, ToolKind, Toolset as AgentToolset, TurnAgentConfig,
-    TurnAgentOutcome, DEFAULT_TIMEOUT_SECS,
-};
-use super::history::{self, TurnMessage};
 use super::instructions::{self, InstructionsContext};
 use super::mcp_client::{CallResult, McpContent, McpToolDef, McpValue, ResilientSession};
 use super::tool_schemas;
 use super::tools_local::{self, ToolFailure};
 use super::tools_local_store::{PgToolStore, RedisClient, ToolEnv};
+use pidash_jobs::cloud_agent::agent::{
+    ensure_ascii, run_agent, ToolCallOutcome, ToolKind, Toolset as AgentToolset, TurnAgentConfig,
+    TurnAgentOutcome, DEFAULT_TIMEOUT_SECS,
+};
+use pidash_jobs::cloud_agent::history::{self, TurnMessage};
+
+/// The assistant's usage limits (`UsageLimits(request_limit=25,
+/// tool_calls_limit=20)`, `assistant/tasks.py:342`).
+///
+/// Built from the constants in `pidash_jobs::assistant::run_turn` so the
+/// drive and the live run cannot drift apart. Lives here (not on the
+/// engine) so the cloud agent module imports nothing from the
+/// assistant (agent naming convention P2).
+pub fn turn_usage_limits() -> UsageLimits {
+    UsageLimits {
+        request_limit: Some(i64::from(rt::REQUEST_LIMIT)),
+        tool_calls_limit: Some(i64::from(rt::TOOL_CALLS_LIMIT)),
+        input_tokens_limit: None,
+        output_tokens_limit: None,
+        total_tokens_limit: None,
+    }
+}
 
 // --------------------------------------------------------------------------- //
 // Queries the seam owns (every other shape is already ported)
@@ -319,19 +336,21 @@ impl McpLeg {
         }
     }
 
-    fn wire_tools(&self, anthropic: bool) -> Vec<WireTool> {
+    fn wire_tools(&self, lane: &Lane) -> Vec<WireTool> {
         match self.defs.lock() {
-            Ok(defs) => defs
-                .iter()
-                .map(|def| {
-                    wire_tool(
-                        &def.name,
-                        def.description.as_deref().unwrap_or_default(),
-                        &def.input_schema,
-                        anthropic,
-                    )
-                })
-                .collect(),
+            Ok(defs) => {
+                let schemas: Vec<(String, String, Value)> = defs
+                    .iter()
+                    .map(|def| {
+                        (
+                            def.name.clone(),
+                            def.description.as_deref().unwrap_or_default().to_owned(),
+                            def.input_schema.clone(),
+                        )
+                    })
+                    .collect();
+                provider::wire_tools_for(lane, &schemas)
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -346,27 +365,27 @@ pub struct LiveToolset {
     store: Arc<PgToolStore>,
     deps: tokio::sync::Mutex<AssistantDeps>,
     env: ToolEnv,
-    anthropic: bool,
+    lane: Lane,
     local: Vec<tool_schemas::ToolSchema>,
     legs: Vec<McpLeg>,
 }
 
 impl AgentToolset for LiveToolset {
     fn wire_tools(&self) -> Vec<WireTool> {
-        let mut tools: Vec<WireTool> = self
+        let local_schemas: Vec<(String, String, Value)> = self
             .local
             .iter()
             .map(|schema| {
-                wire_tool(
-                    schema.name,
-                    schema.description,
-                    &schema.parameters,
-                    self.anthropic,
+                (
+                    schema.name.to_owned(),
+                    schema.description.to_owned(),
+                    schema.parameters.clone(),
                 )
             })
             .collect();
+        let mut tools = provider::wire_tools_for(&self.lane, &local_schemas);
         for leg in &self.legs {
-            tools.extend(leg.wire_tools(self.anthropic));
+            tools.extend(leg.wire_tools(&self.lane));
         }
         tools
     }
@@ -423,27 +442,8 @@ impl AgentToolset for LiveToolset {
     }
 }
 
-/// Transform one tool schema for the lane and infer `strict`
-/// (`_customize_tool_def` through the model profile; the turn path never
-/// sets `strict`).
-fn wire_tool(name: &str, description: &str, parameters: &Value, anthropic: bool) -> WireTool {
-    if anthropic {
-        WireTool {
-            name: name.to_owned(),
-            description: description.to_owned(),
-            parameters: provider::transform_anthropic_schema(parameters),
-            strict: None,
-        }
-    } else {
-        let (parameters, _compatible) = provider::transform_openai_schema(parameters);
-        WireTool {
-            name: name.to_owned(),
-            description: description.to_owned(),
-            parameters,
-            strict: None,
-        }
-    }
-}
+// `wire_tool` moved to `provider::wire_tool_for` in P2; the legs
+// call `provider::wire_tools_for` so this module holds no engine logic.
 
 /// The trust boundary between a tool server and the model
 /// (`ResilientToolset.call_tool`, `runtime/mcp.py:224-256`): values
@@ -867,20 +867,16 @@ impl LiveTurnSeam {
         settings: Arc<Settings>,
         redis: Option<RedisClient>,
     ) -> Result<Self, SeamError> {
-        let golden = Golden::load().map_err(|error| SeamError(error.to_string()))?;
-        let extract = ProviderTable::load(&golden).map_err(|error| SeamError(error.to_string()))?;
+        let usage_document = usage_table::load().map_err(|error| SeamError(error.to_string()))?;
+        let extract =
+            ProviderTable::load(&usage_document).map_err(|error| SeamError(error.to_string()))?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
             .map_err(|error| SeamError(error.to_string()))?;
         let tool_store = Arc::new(
-            PgToolStore::new(
-                pool.clone(),
-                redis.clone(),
-                settings.cloud_agent.clone(),
-                settings.managed_runner.clone(),
-            )
-            .map_err(|error| SeamError(error.message()))?,
+            PgToolStore::new(pool.clone(), redis.clone(), settings.pidash_agent.clone())
+                .map_err(|error| SeamError(error.message()))?,
         );
         let key_cache = KeyCache::new(
             settings.assistant.key_cache_ttl_secs,
@@ -1160,7 +1156,7 @@ impl LiveTurnSeam {
             store: self.tool_store.clone(),
             deps: tokio::sync::Mutex::new(Self::deps_for(ctx)),
             env: self.run_env(Utc::now()),
-            anthropic: matches!(lane, Lane::Anthropic { .. }),
+            lane: lane.clone(),
             local: tool_schemas::all_tool_schemas(),
             legs: Vec::new(),
         }
@@ -1716,7 +1712,7 @@ impl TurnSeam for LiveTurnSeam {
         let prompt = ctx.user_text.clone();
         let client = self.http.clone();
         let extract = self.extract.clone();
-        let limits = super::agent::turn_usage_limits();
+        let limits = turn_usage_limits();
         let handle = tokio::spawn(async move {
             let config = TurnAgentConfig {
                 lane: &lane,
@@ -2337,8 +2333,27 @@ mod tests {
     #[test]
     fn wire_tool_uses_the_lane_transform() {
         let schema = &tool_schemas::tool_schema("create_comment").expect("local tool");
-        let openai = wire_tool(schema.name, schema.description, &schema.parameters, false);
-        let anthropic = wire_tool(schema.name, schema.description, &schema.parameters, true);
+        let openai_lane = Lane::OpenAICompatible {
+            model: "test-model".to_owned(),
+            base_url: "http://127.0.0.1:1/v1".to_owned(),
+            api_key: "test-key".to_owned(),
+        };
+        let anthropic_lane = Lane::Anthropic {
+            model: "test-model".to_owned(),
+            api_key: "test-key".to_owned(),
+        };
+        let openai = provider::wire_tool_for(
+            &openai_lane,
+            schema.name,
+            schema.description,
+            &schema.parameters,
+        );
+        let anthropic = provider::wire_tool_for(
+            &anthropic_lane,
+            schema.name,
+            schema.description,
+            &schema.parameters,
+        );
 
         let (name, parameters) = capture_wire_tools("tool_local")
             .into_iter()
@@ -2663,7 +2678,11 @@ mod tests {
             store: seam.tool_store.clone(),
             deps: tokio::sync::Mutex::new(AssistantDeps::default()),
             env: seam.run_env(Utc::now()),
-            anthropic: false,
+            lane: Lane::OpenAICompatible {
+                model: "test-model".to_owned(),
+                base_url: "http://127.0.0.1:1/v1".to_owned(),
+                api_key: "test-key".to_owned(),
+            },
             local: Vec::new(),
             legs: vec![McpLeg {
                 server_name: "demo".to_owned(),
@@ -2887,7 +2906,11 @@ mod tests {
             store: seam.tool_store.clone(),
             deps: tokio::sync::Mutex::new(AssistantDeps::default()),
             env: seam.run_env(Utc::now()),
-            anthropic: false,
+            lane: Lane::OpenAICompatible {
+                model: "test-model".to_owned(),
+                base_url: "http://127.0.0.1:1/v1".to_owned(),
+                api_key: "test-key".to_owned(),
+            },
             local: Vec::new(),
             legs: vec![McpLeg {
                 server_name: "hang".to_owned(),

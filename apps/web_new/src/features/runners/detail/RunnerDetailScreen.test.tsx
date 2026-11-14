@@ -160,9 +160,9 @@ describe("RunnerDetailScreen", () => {
     expect(rows["Revoked reason"]).toBe("parity-probe-revoke");
   });
 
-  it("names a built-in engine by its machine, badges it and explains renaming", () => {
+  it("names a Pi Dash Agent by its machine, badges it and explains renaming", () => {
     setup({ runner: runner({ provisioning: "desktop_bundled", pod_dispatch: "pinned_only", name: "builtin-x" }) });
-    expect(screen.getByRole("heading", { name: "Built-in engine · build box" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Pi Dash Agent · build box" })).toBeInTheDocument();
     expect(screen.getByTestId("runner-built-in-badge")).toHaveTextContent("Built-in");
     expect(screen.getByText(ENGINE_RENAME_HINT)).toBeInTheDocument();
     expect(meta()["Pod work"]).toBe("Off");

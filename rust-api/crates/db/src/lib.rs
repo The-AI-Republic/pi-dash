@@ -33,6 +33,7 @@
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
 
+pub mod agent_runs;
 pub mod app_analytics;
 pub mod app_assets;
 pub mod app_cycles;
@@ -46,7 +47,6 @@ pub mod assistant;
 pub mod auth_oauth;
 pub mod config;
 pub mod context;
-pub mod dispatch;
 pub mod entity;
 pub mod filter;
 pub mod filterset;

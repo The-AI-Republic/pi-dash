@@ -2936,8 +2936,7 @@ pub async fn create_project_inner(
     };
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
-        cloud_configured: state.settings().cloud_agent.enabled,
-        managed_enabled: state.settings().managed_runner.enabled,
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -2980,11 +2979,11 @@ pub async fn create_project_inner(
         // (deprecated choices become local_runner). An absent key falls
         // back to the instance default (always local_runner since #2903).
         match field_str(&data, "default_agent_executor") {
-            Some(written) => match pidash_types::dispatch::normalize_executor_write(&written) {
+            Some(written) => match pidash_types::agent_runs::normalize_executor_write(&written) {
                 Some(kind) => kind.value().to_owned(),
                 None => "local_runner".to_owned(),
             },
-            None => pidash_types::dispatch::get_default_agent_executor()
+            None => pidash_types::agent_runs::get_default_agent_executor()
                 .value()
                 .to_owned(),
         }
@@ -3388,8 +3387,7 @@ pub async fn patch_project_inner(
     };
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
-        cloud_configured: state.settings().cloud_agent.enabled,
-        managed_enabled: state.settings().managed_runner.enabled,
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -3626,7 +3624,7 @@ pub async fn apply_project_update(
     }
     if let Some(v) = field_str(data, "default_agent_executor") {
         // #2903: deprecated choices translate to local_runner on write.
-        let stored = match pidash_types::dispatch::normalize_executor_write(&v) {
+        let stored = match pidash_types::agent_runs::normalize_executor_write(&v) {
             Some(kind) => kind.value().to_owned(),
             None => v,
         };

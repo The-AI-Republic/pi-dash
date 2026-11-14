@@ -719,9 +719,7 @@ pub struct PgToolStore {
     redis: Option<RedisClient>,
     http: reqwest::Client,
     keyring: pidash_db::config::encryption::Keyring,
-    cloud: pidash_db::config::CloudAgentSettings,
-    managed: pidash_db::config::ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: pidash_db::config::PidashAgentSettings,
 }
 
 impl PgToolStore {
@@ -826,8 +824,7 @@ impl PgToolStore {
     pub fn new(
         pool: PgPool,
         redis: Option<RedisClient>,
-        cloud: pidash_db::config::CloudAgentSettings,
-        managed: pidash_db::config::ManagedRunnerSettings,
+        managed: pidash_db::config::PidashAgentSettings,
     ) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
@@ -841,9 +838,7 @@ impl PgToolStore {
             redis,
             http,
             keyring: pidash_db::config::encryption::Keyring::from_env(),
-            cloud,
             managed,
-            toolsets: Arc::new(pidash_services::extensions::NoExtraToolsets),
         })
     }
 
@@ -2441,7 +2436,6 @@ impl ToolStore for PgToolStore {
         actor_id: &Uuid,
         now: &DateTime<Utc>,
     ) -> Result<(IssueRow, Option<TransitionOutcome>), StoreError> {
-        use pidash_jobs::admission::RedisAdmissionCache;
         use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_services::orchestration::entries::{
             handle_issue_state_transition, TransitionRequest,
@@ -2459,27 +2453,20 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
-        let toolsets = Arc::clone(&self.toolsets);
-        let now_unix_secs = now.timestamp();
         // Built up to three times (the probe, drive, and bounce stores
         // each take owned deps).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: RedisAdmissionCache::from_env(),
-            toolsets: Arc::clone(&toolsets),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-                pidash_services::dispatch::LlmProfile {
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+                pidash_services::run_creation::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
                 }
             },
-            now_unix_secs,
         };
         // One transaction for lock + save + drive (`issues.py:334-381`
         // runs all three under one `transaction.atomic()`): a mid-drive
@@ -2639,7 +2626,7 @@ impl ToolStore for PgToolStore {
             let matcher =
                 crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
             let triggered_by =
-                pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
+                pidash_db::agent_runs::status::AgentRunTrigger::StateTransition.value();
             self.probe_savepoint(&mut tx).await?;
             let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
             // `resolve_pod_for_issue` reads issue + pods only (no
@@ -2678,7 +2665,7 @@ impl ToolStore for PgToolStore {
             // recovered; the savepoint rollback erases the probe's
             // writes, and its log lines are dropped (the re-run emits
             // the real bounce's lines once).
-            let (mut tx, _, _, _, _, _) = probe_store.into_parts();
+            let (mut tx, _, _, _) = probe_store.into_parts();
             self.rollback_probe_savepoint(&mut tx).await?;
             let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
             let mut stub = FixedPreflight {
@@ -2687,8 +2674,7 @@ impl ToolStore for PgToolStore {
             };
             let outcome =
                 handle_issue_state_transition(&mut drive_store, &mut stub, &request).await;
-            let (tx, _, cache, mut dispatches, mut deferred, mut terminal_effects) =
-                drive_store.into_parts();
+            let (tx, _, mut dispatches, mut terminal_effects) = drive_store.into_parts();
             let outcome = outcome.map_err(|error| match error {
                 pidash_services::orchestration::entries::EntriesError::Store(store) => {
                     StoreError::Transition(store.to_string())
@@ -2740,9 +2726,8 @@ impl ToolStore for PgToolStore {
                         "turn fused drive: pod vanished mid-drive for issue {issue_id}, skipping bounce",
                     );
                 }
-                let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+                let (tx, _, redispatches, reterminal) = bounce_store.into_parts();
                 dispatches.extend(redispatches);
-                deferred.extend(redeferred);
                 terminal_effects.extend(reterminal);
                 tx
             } else {
@@ -2754,7 +2739,7 @@ impl ToolStore for PgToolStore {
                     created_run_id: outcome.created_run,
                     reason: outcome.reason,
                 }),
-                Some((cache, dispatches, deferred, terminal_effects)),
+                Some((dispatches, terminal_effects)),
             )
         } else {
             (tx, None, None)
@@ -2796,7 +2781,7 @@ impl ToolStore for PgToolStore {
         // shape, duplicated: unlike D-11 — whose `moved_by_run` makes
         // the outbox unreachable — human moves dispatch here, after the
         // commit, so the runner read sees the rows).
-        if let Some((cache, dispatches, deferred, terminal_effects)) = post_commit {
+        if let Some((dispatches, terminal_effects)) = post_commit {
             // A finalized run is a normal outcome, not an error: the
             // prompt-build failure path (`service.py:820-832`)
             // finalizes the run FAILED and returns `render-failed`
@@ -2806,12 +2791,9 @@ impl ToolStore for PgToolStore {
                 drain_finalized_run(&self.pool, *run_id).await;
             }
             for run_id in dispatches {
-                pidash_jobs::dispatch::dispatch_agent_run(&self.pool, &self.cloud, run_id, *now)
+                pidash_jobs::run_dispatch::dispatch_agent_run(&self.pool, run_id, *now)
                     .await
                     .map_err(StoreError::from)?;
-            }
-            for consume in &deferred {
-                pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
             }
         }
         Ok((row, drive_outcome))
@@ -2828,7 +2810,6 @@ impl ToolStore for PgToolStore {
         now: &DateTime<Utc>,
         pod_once: bool,
     ) -> Result<TransitionOutcome, StoreError> {
-        use pidash_jobs::admission::RedisAdmissionCache;
         use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_services::orchestration::entries::{
             handle_issue_state_transition, TransitionRequest,
@@ -2845,27 +2826,20 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
-        let toolsets = Arc::clone(&self.toolsets);
-        let now_unix_secs = now.timestamp();
         // Built twice (store + preflight take owned deps; the driver
         // consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: RedisAdmissionCache::from_env(),
-            toolsets: Arc::clone(&toolsets),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-                pidash_services::dispatch::LlmProfile {
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+                pidash_services::run_creation::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
                 }
             },
-            now_unix_secs,
         };
         // `jitter_secs: 0.0`: the L5 quirk-5 precedent (the v1 human-move
         // drivers pass 0.0 as well). `moved_by_run: None`: the tools are
@@ -2898,7 +2872,7 @@ impl ToolStore for PgToolStore {
             now: *now,
         };
         let outcome = handle_issue_state_transition(&mut store, &mut preflight, &request).await;
-        let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+        let (tx, pool, dispatches, terminal_effects) = store.into_parts();
         let outcome = outcome.map_err(|error| match error {
             pidash_services::orchestration::entries::EntriesError::Store(store) => {
                 StoreError::Transition(store.to_string())
@@ -2925,12 +2899,9 @@ impl ToolStore for PgToolStore {
         // `on_commit`, outside the signal `try`, so its tool fails
         // there too (the save stands either way).
         for run_id in dispatches {
-            pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
+            pidash_jobs::run_dispatch::dispatch_agent_run(pool, run_id, *now)
                 .await
                 .map_err(StoreError::from)?;
-        }
-        for consume in &deferred {
-            pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
         }
         Ok(TransitionOutcome {
             created_run_id: outcome.created_run,
@@ -2945,7 +2916,6 @@ impl ToolStore for PgToolStore {
         actor_id: &Uuid,
         now: &DateTime<Utc>,
     ) -> Result<Option<TransitionOutcome>, StoreError> {
-        use pidash_jobs::admission::RedisAdmissionCache;
         use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_services::orchestration::entries::{
             fire_state_transition, FireOutcome, FireRequest,
@@ -2962,27 +2932,20 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
-        let toolsets = Arc::clone(&self.toolsets);
-        let now_unix_secs = now.timestamp();
         // Built twice (store + preflight take owned deps; the driver
         // consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: RedisAdmissionCache::from_env(),
-            toolsets: Arc::clone(&toolsets),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-                pidash_services::dispatch::LlmProfile {
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+                pidash_services::run_creation::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
                 }
             },
-            now_unix_secs,
         };
         // `fire_state_transition` (`signals.py:74-108`): prior state
         // None (a create has no pre-save row), the saved state, the
@@ -3019,7 +2982,7 @@ impl ToolStore for PgToolStore {
         // re-run the services preflight after the drive, so the real
         // bounce lands post-reconcile, exactly as in Python.
         let matcher = crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
-        let triggered_by = pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
+        let triggered_by = pidash_db::agent_runs::status::AgentRunTrigger::StateTransition.value();
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         self.probe_savepoint(&mut tx).await?;
         let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
@@ -3059,7 +3022,7 @@ impl ToolStore for PgToolStore {
         // recovered; the savepoint rollback erases the probe's
         // writes, and its log lines are dropped (the re-run emits
         // the real bounce's lines once).
-        let (mut tx, _, _, _, _, _) = probe_store.into_parts();
+        let (mut tx, _, _, _) = probe_store.into_parts();
         self.rollback_probe_savepoint(&mut tx).await?;
         let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
         let mut stub = FixedPreflight {
@@ -3067,8 +3030,7 @@ impl ToolStore for PgToolStore {
             consulted: false,
         };
         let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
-        let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
-            drive_store.into_parts();
+        let (tx, pool, mut dispatches, mut terminal_effects) = drive_store.into_parts();
         // Only a state-*lookup* storage failure propagates (Python's
         // `try` wraps the handler call alone, `signals.py:89-98`); a
         // handler failure arrives as `Failed` and is swallowed below.
@@ -3081,7 +3043,7 @@ impl ToolStore for PgToolStore {
         // Only a consulted stub owes the re-run: early returns
         // (parked, queued, no creator/pod, race lost) consult
         // nothing, and Python bounces on none of them.
-        let (tx, dispatches, deferred, terminal_effects) = if !proceed && stub.consulted {
+        let (tx, dispatches, terminal_effects) = if !proceed && stub.consulted {
             // The re-run IS the real bounce when it still says so
             // (same services fn, same tx, post-reconcile state);
             // when eligibility flipped concurrently it proceeds and
@@ -3123,13 +3085,12 @@ impl ToolStore for PgToolStore {
                     "turn create drive: pod vanished mid-drive for issue {issue_id}, skipping bounce",
                 );
             }
-            let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+            let (tx, _, redispatches, reterminal) = bounce_store.into_parts();
             dispatches.extend(redispatches);
-            deferred.extend(redeferred);
             terminal_effects.extend(reterminal);
-            (tx, dispatches, deferred, terminal_effects)
+            (tx, dispatches, terminal_effects)
         } else {
-            (tx, dispatches, deferred, terminal_effects)
+            (tx, dispatches, terminal_effects)
         };
         match outcome {
             FireOutcome::NoTransition => {
@@ -3166,12 +3127,9 @@ impl ToolStore for PgToolStore {
                 // from `on_commit`, outside the signal `try`, so its
                 // tool fails there too (the save stands either way).
                 for run_id in dispatches {
-                    pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
+                    pidash_jobs::run_dispatch::dispatch_agent_run(pool, run_id, *now)
                         .await
                         .map_err(StoreError::from)?;
-                }
-                for consume in &deferred {
-                    pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
                 }
                 Ok(Some(TransitionOutcome {
                     created_run_id: transition.created_run,
@@ -3583,18 +3541,17 @@ impl pidash_services::orchestration::entries::PreflightSeam for FixedPreflight {
 /// because the driver takes them by value while the seam only lends
 /// `&mut self`; the driver consults preflight at most once per
 /// drive, so the `None` arm is defensive.
-struct TurnPreflight<C, H, P> {
+struct TurnPreflight<H, P> {
     pool: PgPool,
-    deps: Option<pidash_jobs::orchestration::StoreDeps<C, H, P>>,
+    deps: Option<pidash_jobs::orchestration::StoreDeps<H, P>>,
     matcher: crate::v1_work_items::handlers_actions::LiveMatcher,
     now: DateTime<Utc>,
 }
 
-impl<C, H, P> pidash_services::orchestration::entries::PreflightSeam for TurnPreflight<C, H, P>
+impl<H, P> pidash_services::orchestration::entries::PreflightSeam for TurnPreflight<H, P>
 where
-    C: pidash_services::dispatch::admission::AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    P: Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
 {
     async fn preflight_eligibility_or_bounce(
         &mut self,
@@ -3858,47 +3815,8 @@ mod tests {
         pool
     }
 
-    fn live_cloud_settings() -> pidash_db::config::CloudAgentSettings {
-        pidash_db::config::CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    fn live_managed_settings() -> pidash_db::config::ManagedRunnerSettings {
-        pidash_db::config::ManagedRunnerSettings {
+    fn live_managed_settings() -> pidash_db::config::PidashAgentSettings {
+        pidash_db::config::PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -4109,13 +4027,8 @@ mod tests {
     async fn live_fused_update_rolls_back_save_on_middrive_error() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store = PgToolStore::new(
-            pool.clone(),
-            None,
-            live_cloud_settings(),
-            live_managed_settings(),
-        )
-        .expect("build store");
+        let store =
+            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);
@@ -4171,13 +4084,8 @@ mod tests {
     async fn live_create_comment_row_stores_empty_varchar_attachments() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store = PgToolStore::new(
-            pool.clone(),
-            None,
-            live_cloud_settings(),
-            live_managed_settings(),
-        )
-        .expect("build store");
+        let store =
+            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);
@@ -4242,13 +4150,8 @@ mod tests {
     async fn live_fused_runner_apply_and_list() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store = PgToolStore::new(
-            pool.clone(),
-            None,
-            live_cloud_settings(),
-            live_managed_settings(),
-        )
-        .expect("build store");
+        let store =
+            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);

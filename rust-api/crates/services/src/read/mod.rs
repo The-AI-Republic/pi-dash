@@ -180,7 +180,7 @@ mod surface {
     // fails to compile if its home ever goes private again.
     use crate::app_issues::issue_move::MoveStore;
     use crate::app_issues::pr_links::PrLinksStore;
-    use crate::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
+    use crate::assistant::seams::{has_usable_llm_config, pidash_agent_profile_for_user};
     use crate::integrations::adapters_github::GithubClient;
 
     #[test]
@@ -193,6 +193,6 @@ mod surface {
         // The assistant seams are callable pure decisions.
         assert!(has_usable_llm_config(true));
         assert!(!has_usable_llm_config(false));
-        let _ = agent_model_profile_for_user(true);
+        let _ = pidash_agent_profile_for_user(true);
     }
 }

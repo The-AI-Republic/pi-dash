@@ -234,9 +234,10 @@ describe("formatNextTick", () => {
 
 describe("runStatusView", () => {
   it("covers the queued branches", () => {
+    // A queued cloud run cannot exist; it renders like any other.
     const cloud = runStatusView(runFixture({ status: "queued", executor_kind: "cloud_agent" }), null, 1, NOW);
     expect(cloud).toMatchObject({ title: "Agent run queued", badge: "Queued", tone: "neutral", icon: "clock" });
-    expect(cloud.detail).toContain("cloud");
+    expect(cloud.detail).toBe("Runner runner-1");
     const runner = runStatusView(runFixture({ status: "queued" }), null, 1, NOW);
     expect(runner.detail).toBe("Runner runner-1");
     const bare = runStatusView(runFixture({ status: "queued", runner_name: null }), null, 1, NOW);
@@ -250,6 +251,7 @@ describe("runStatusView", () => {
   });
 
   it("covers the running branches", () => {
+    // A running cloud run cannot exist; it renders like any other.
     const cloud = runStatusView(
       runFixture({ status: "running", executor_kind: "cloud_agent", live_state: liveFixture() }),
       null,
@@ -257,7 +259,7 @@ describe("runStatusView", () => {
       NOW
     );
     expect(cloud).toMatchObject({ title: "Agent at work", badge: "Working", tone: "accent" });
-    expect(cloud.detail).toContain("cloud agent");
+    expect(cloud.detail).toBe("Reviewing the diff (5m ago)");
     const live = runStatusView(runFixture({ status: "running", live_state: liveFixture() }), null, 1, NOW);
     expect(live.detail).toBe("Reviewing the diff (5m ago)");
     const runner = runStatusView(runFixture({ status: "running" }), null, 1, NOW);
@@ -488,8 +490,9 @@ describe("agentStatusView", () => {
 });
 
 describe("executorLabel", () => {
-  it("names the cloud agent and the local runner", () => {
-    expect(executorLabel("cloud_agent")).toBe("Cloud agent");
+  it("names Pi Dash Agent, the local runner, and the retired cloud run", () => {
+    expect(executorLabel("managed_runner")).toBe("Pi Dash Agent");
+    expect(executorLabel("cloud_agent")).toBe("Cloud agent run (retired)");
     expect(executorLabel("local_runner")).toBe("Local runner");
     expect(executorLabel("other")).toBe("Local runner");
   });

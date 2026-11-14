@@ -103,9 +103,7 @@ use pidash_db::runner_enroll::columns::revoke_reasons::{
     KNOWN_REVOKE_REASONS, REVOKE_REASON_MAX_LEN,
 };
 
-use crate::runner_runs::finalization::{
-    plan_terminal_event, FinalizeValues, TerminalEventPlan, ERROR_DETAILS_COLUMN,
-};
+use crate::runner_runs::finalization::{FinalizeValues, ERROR_DETAILS_COLUMN};
 use crate::runner_runs::SetValue;
 use crate::runner_sessions::guards;
 use pidash_types::runner_runs::AgentRunStatus;
@@ -426,85 +424,6 @@ pub async fn finalize_update(
         .rows_affected)
 }
 
-/// The terminal event's `kind`.
-pub const TERMINAL_EVENT_KIND: &str = "terminal";
-
-/// Terminal-event existence
-/// ([`finalization::terminal_event_exists_sql`](crate::runner_runs::finalization::terminal_event_exists_sql)).
-pub async fn terminal_event_exists(db: &impl ConnectionTrait, run_id: Uuid) -> Result<bool, DbErr> {
-    use pidash_db::entity::agent_run_event::{Column, Entity};
-    Ok(Entity::find()
-        .select_only()
-        .column(Column::Id)
-        .filter(Column::AgentRunId.eq(run_id))
-        .filter(Column::Kind.eq(TERMINAL_EVENT_KIND))
-        .into_tuple::<i64>()
-        .one(db)
-        .await?
-        .is_some())
-}
-
-/// Terminal-event max sequence
-/// ([`finalization::terminal_event_max_seq_sql`](crate::runner_runs::finalization::terminal_event_max_seq_sql)):
-/// the highest `seq` for the run, or `None` without events.
-pub async fn terminal_event_max_seq(
-    db: &impl ConnectionTrait,
-    run_id: Uuid,
-) -> Result<Option<i32>, DbErr> {
-    use pidash_db::entity::agent_run_event::{Column, Entity};
-    Entity::find()
-        .select_only()
-        .column(Column::Seq)
-        .filter(Column::AgentRunId.eq(run_id))
-        .order_by_desc(Column::Seq)
-        .into_tuple::<i32>()
-        .one(db)
-        .await
-}
-
-/// Terminal-event `INSERT`
-/// ([`finalization::insert_terminal_event`](crate::runner_runs::finalization::insert_terminal_event))
-/// on SeaORM: the planned row, `kind = terminal`, `created_at = now`;
-/// the id is the database default.
-pub async fn insert_terminal_event_orm(
-    db: &impl ConnectionTrait,
-    run_id: Uuid,
-    plan: TerminalEventPlan,
-    now: DateTime<Utc>,
-) -> Result<(), DbErr> {
-    use pidash_db::entity::agent_run_event::{ActiveModel, Entity};
-    use sea_orm::{NotSet, Set};
-    Entity::insert(ActiveModel {
-        id: NotSet,
-        seq: Set(plan.seq),
-        kind: Set(TERMINAL_EVENT_KIND.to_owned()),
-        payload: Set(plan.payload),
-        created_at: Set(now.into()),
-        agent_run_id: Set(run_id),
-    })
-    .exec_without_returning(db)
-    .await
-    .map(drop)
-}
-
-/// `finalize_agent_run:73-84` for a cloud run: append the terminal
-/// event unless one exists (exists check, max-seq read, insert: the
-/// same three statements, in order).
-pub async fn append_terminal_event_once(
-    db: &impl ConnectionTrait,
-    run_id: Uuid,
-    new_status: AgentRunStatus,
-    error_code: &str,
-    now: DateTime<Utc>,
-) -> Result<(), DbErr> {
-    if terminal_event_exists(db, run_id).await? {
-        return Ok(());
-    }
-    let max_seq = terminal_event_max_seq(db, run_id).await?;
-    let plan = plan_terminal_event(max_seq, new_status, error_code);
-    insert_terminal_event_orm(db, run_id, plan, now).await
-}
-
 // ---------------------------------------------------------------------------
 // Seam + driver
 // ---------------------------------------------------------------------------
@@ -570,10 +489,8 @@ pub trait RevokeStore {
     /// `lock_run_for_finalize_sql(with_runner=true)` first-writer-wins
     /// (a miss is `Ok(())` — Python ignores the `False`),
     /// [`execute_revoke_finalize_update`] with
-    /// [`FINALIZE_ERROR`]/[`FINALIZE_ERROR_CODE`]/`cancel_reason`, the
-    /// cloud-only terminal event (via
-    /// [`insert_terminal_event`](crate::runner_runs::finalization::insert_terminal_event)),
-    /// and — on success only — the terminal-effects publication
+    /// [`FINALIZE_ERROR`]/[`FINALIZE_ERROR_CODE`]/`cancel_reason`, and
+    /// — on success only — the terminal-effects publication
     /// captured into the executor's post-commit drain
     /// (`plan_publish_effects`; it registers before this driver's own
     /// collectors, as in Python). No `done_payload` merge: these
@@ -1273,21 +1190,6 @@ mod tests {
                 .await
                 .expect("finalize");
             assert_eq!(rows, 1);
-            // Terminal event is idempotent: insert once, exists + max seq.
-            assert!(!terminal_event_exists(&conn, queued).await.expect("exists"));
-            assert_eq!(
-                terminal_event_max_seq(&conn, queued).await.expect("max"),
-                None
-            );
-            let plan = plan_terminal_event(None, AgentRunStatus::Cancelled, "runner_revoked");
-            insert_terminal_event_orm(&conn, queued, plan, now)
-                .await
-                .expect("insert terminal");
-            assert!(terminal_event_exists(&conn, queued).await.expect("exists"));
-            assert_eq!(
-                terminal_event_max_seq(&conn, queued).await.expect("max"),
-                Some(1)
-            );
             // S4b unpins every queued run pinned to the runner.
             unpin_queued_runs_for_runner(&conn, runner_id)
                 .await

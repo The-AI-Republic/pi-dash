@@ -128,13 +128,6 @@ use pidash_services::app_issues::serializers_detail::{
 };
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
-    managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
-    HEARTBEAT_GRACE_SECS,
-};
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
-};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -142,7 +135,12 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
+use pidash_services::run_creation::pidash_agent_availability::{
+    pidash_agent_availability, pidash_agent_probe, LlmProfile, PidashAgentProbe,
+    HEARTBEAT_GRACE_SECS,
+};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 
@@ -2414,9 +2412,9 @@ pub(crate) async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Enrolled,
+        PidashAgentProbe::Enrolled,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2432,9 +2430,9 @@ pub(crate) async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Online(bound),
+        PidashAgentProbe::Online(bound),
         *user_id,
         *project_id,
         *workspace_id,
@@ -2450,9 +2448,9 @@ pub(crate) async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Paused,
+        PidashAgentProbe::Paused,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2620,8 +2618,8 @@ async fn run_validate(
     });
 
     // Step 1 probes. `issue_is_actively_synced` short-circuits: empty /
-    // missing source runs nothing; otherwise git-only (PDASHOSS01-354) —
-    // ahead of the blocked-keys check either way.
+    // missing source runs nothing; otherwise git, then github iff git
+    // misses — ahead of the blocked-keys check either way.
     let synced_source = current
         .as_ref()
         .and_then(|row| row.external_source)
@@ -2629,6 +2627,13 @@ async fn run_validate(
     // `synced_source` implies `instance` (the source comes from the row).
     let instance_id = instance.map(|row| row.id).unwrap_or(Uuid::nil());
     let git_sync = if synced_source {
+        git_issue_synced(pool, &instance_id)
+            .await
+            .map_err(|_| db_error())?
+    } else {
+        false
+    };
+    let github_sync = if synced_source && !git_sync {
         git_issue_synced(pool, &instance_id)
             .await
             .map_err(|_| db_error())?
@@ -2666,7 +2671,7 @@ async fn run_validate(
     let mut fetched_project: Option<ResolvedProject> = None;
     let mut llm_profile = LlmProfile {
         available: false,
-        reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+        reason_code: PidashAgentReason::LLM_CONFIG_MISSING.to_owned(),
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
@@ -2681,11 +2686,10 @@ async fn run_validate(
             match AgentExecutorKind::from_value(executor) {
                 None => executor_returns = true,
                 Some(kind) => {
-                    if kind == AgentExecutorKind::CloudAgent
-                        && !cloud_agent_is_configured(&state.settings().cloud_agent)
-                    {
-                        executor_returns = true;
-                    } else if kind == AgentExecutorKind::ManagedRunner {
+                    // P1 (agent naming convention): a `cloud_agent` write
+                    // on this non-pod path is normalized, not gated on
+                    // CLOUD_AGENT_ENABLED — it must not block the run.
+                    if kind == AgentExecutorKind::PidashAgent {
                         let project = match instance {
                             Some(row) => Some(row.resolved_project()),
                             None => match project_id {
@@ -2702,14 +2706,14 @@ async fn run_validate(
                         match project {
                             None => executor_returns = true,
                             Some(project) => {
-                                // `managed_runner_availability` gates in
+                                // `pidash_agent_availability` gates in
                                 // fixed order: the LLM seam runs only
                                 // past the instance switch + viewer
                                 // legs; enrolled/online only past a
                                 // usable profile (never in CE — the
                                 // profile is always unavailable — but
                                 // the structure mirrors the policy).
-                                if managed_runner_is_enabled(&state.settings().managed_runner)
+                                if pidash_agent_is_enabled(&state.settings().pidash_agent)
                                     && viewer.is_active
                                     && !viewer.is_bot
                                 {
@@ -2719,9 +2723,9 @@ async fn run_validate(
                                     llm_profile = LlmProfile {
                                         available: false,
                                         reason_code: if keyed {
-                                            ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                                            PidashAgentReason::BYOK_UNSUPPORTED.to_owned()
                                         } else {
-                                            ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                                            PidashAgentReason::LLM_CONFIG_MISSING.to_owned()
                                         },
                                     };
                                     if llm_profile.available {
@@ -2758,8 +2762,8 @@ async fn run_validate(
                                         }
                                     }
                                 }
-                                let verdict = managed_runner_availability(
-                                    &state.settings().managed_runner,
+                                let verdict = pidash_agent_availability(
+                                    &state.settings().pidash_agent,
                                     Some(&viewer),
                                     || llm_profile.clone(),
                                     enrolled_exists,
@@ -2768,7 +2772,7 @@ async fn run_validate(
                                 );
                                 if !verdict.available
                                     && verdict.reason_code
-                                        != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+                                        != PidashAgentReason::NO_RUNNER_FOR_PROJECT
                                 {
                                     executor_returns = true;
                                 }
@@ -2884,12 +2888,12 @@ async fn run_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        cloud: &state.settings().cloud_agent,
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: Some(&viewer),
     };
     let probes = ValidateProbes {
         git_sync_exists: &|| git_sync,
+        github_sync_exists: &|| github_sync,
         has_active_run: &|| run_value,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),
@@ -3781,7 +3785,10 @@ async fn render_detail_map(
         .as_deref()
         .is_some_and(|source| !source.is_empty())
     {
-        git_issue_synced(pool, &row.save.id)
+        let git = git_issue_synced(pool, &row.save.id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        git || git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?
     } else {
@@ -5109,10 +5116,13 @@ async fn destroy_issue_inner(
     let Some(mut row) = fetch_destroy_issue(&pool, &slug, &tenant.project_id, &pk).await? else {
         return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
     };
-    // Git-only synced guard (PDASHOSS01-354).
+    // `GitIssueSync...exists() or GithubIssueSync...exists()` — short-circuit.
     let synced = git_issue_synced(&pool, &pk)
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        || git_issue_synced(&pool, &pk)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     if synced {
         return Ok(not_found_detail(DESTROY_SYNCED_BODY, StatusCode::CONFLICT));
     }

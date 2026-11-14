@@ -128,7 +128,7 @@
 
 use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::agent_run::COLUMNS as AGENT_RUN_COLUMNS;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::envelopes::build_assign_msg;
 use sea_query::{
@@ -175,7 +175,7 @@ pub const POD_COLUMNS: [&str; 10] = [
 /// `DevMachine.engine_team_runs` (any value for own-agent runners).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchFacts {
-    pub is_engine: bool,
+    pub is_pidash_agent: bool,
     pub pod_member: bool,
     pub paused: bool,
     pub team_runs: bool,
@@ -320,9 +320,9 @@ pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"ag
 /// (`pod_member` and unpaused). The old `desktop_bundled` split is gone.
 fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
     let local = AgentExecutorKind::LocalRunner.value();
-    let managed = AgentExecutorKind::ManagedRunner.value();
+    let managed = AgentExecutorKind::PidashAgent.value();
     let pinned = col("agent_run", "pinned_runner_id");
-    if facts.is_engine {
+    if facts.is_pidash_agent {
         let managed_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(managed))
             .add(pinned.clone().eq(runner_id));
@@ -411,7 +411,7 @@ pub fn next_for_runner_stmt(
         visibility,
         owner_id,
         "agent_run",
-        facts.is_engine,
+        facts.is_pidash_agent,
         facts.team_runs,
     )?;
     let mut query = Query::select().to_owned();
@@ -434,7 +434,7 @@ pub fn next_for_runner_stmt(
         .from(Alias::new("agent_run"))
         .and_where(col("agent_run", "executor_kind").is_in([
             AgentExecutorKind::LocalRunner.value(),
-            AgentExecutorKind::ManagedRunner.value(),
+            AgentExecutorKind::PidashAgent.value(),
         ]))
         .and_where(col("agent_run", "pod_id").eq(pod_id))
         .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()))
@@ -608,7 +608,7 @@ mod tests {
     use crate::runner_sessions::guards::{BUSY_STATUSES, RUNNER_COLUMNS};
     use chrono::TimeZone;
     use pidash_auth::permissions::runner::VISIBILITY_PRIVATE;
-    use pidash_types::dispatch::MACHINE_EXECUTORS;
+    use pidash_types::agent_runs::MACHINE_EXECUTORS;
     use sea_query::PostgresQueryBuilder;
     use serde_json::Value;
 
@@ -880,7 +880,7 @@ mod tests {
 
     fn manual_facts() -> DispatchFacts {
         DispatchFacts {
-            is_engine: false,
+            is_pidash_agent: false,
             pod_member: true,
             paused: false,
             team_runs: true,
@@ -890,7 +890,7 @@ mod tests {
 
     fn engine_facts(pod_member: bool, paused: bool) -> DispatchFacts {
         DispatchFacts {
-            is_engine: true,
+            is_pidash_agent: true,
             pod_member,
             paused,
             team_runs: false,
@@ -1035,7 +1035,7 @@ mod tests {
     #[test]
     fn next_for_runner_team_runs_restores_ordinary_rule() {
         let team = DispatchFacts {
-            is_engine: true,
+            is_pidash_agent: true,
             pod_member: true,
             paused: false,
             team_runs: true,

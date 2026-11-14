@@ -60,7 +60,7 @@ impl AppPaths {
 
     /// The legacy engine home of one account:
     /// `managed/accounts/<account-key>/codex-home`, keyed like the chat store.
-    pub(crate) fn legacy_engine_home(&self, account: &str) -> Result<PathBuf, String> {
+    pub(crate) fn legacy_pidash_agent_home(&self, account: &str) -> Result<PathBuf, String> {
         Ok(self
             .accounts_dir
             .join(crate::chat_history::account_key(account)?)
@@ -123,14 +123,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_engine_home_is_per_account() {
+    fn legacy_pidash_agent_home_is_per_account() {
         let paths = AppPaths::at(PathBuf::from("/data/managed"));
-        let a = paths.legacy_engine_home("user-a").unwrap();
-        let b = paths.legacy_engine_home("user-b").unwrap();
+        let a = paths.legacy_pidash_agent_home("user-a").unwrap();
+        let b = paths.legacy_pidash_agent_home("user-b").unwrap();
         assert_ne!(a, b);
         let key = crate::chat_history::account_key("user-a").unwrap();
         assert_eq!(a, paths.accounts_dir.join(key).join("codex-home"));
-        assert!(paths.legacy_engine_home("").is_err());
+        assert!(paths.legacy_pidash_agent_home("").is_err());
     }
 
     #[test]

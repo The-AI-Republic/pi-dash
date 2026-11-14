@@ -10,7 +10,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 
 import { getProject, type ProjectDetail } from "@pidash/api-client";
 
-import { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./queries.js";
+import { isPidashAgentAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./queries.js";
 
 describe("runtimeKeys", () => {
   it("scopes availability under the workspace", () => {
@@ -38,9 +38,9 @@ describe("projectAvailabilityQueryOptions", () => {
   });
 });
 
-describe("isManagedRunnerAvailable", () => {
+describe("isPidashAgentAvailable", () => {
   it("is false without a project", () => {
-    expect(isManagedRunnerAvailable(undefined)).toBe(false);
+    expect(isPidashAgentAvailable(undefined)).toBe(false);
   });
 
   it("is true when the managed runner is available", () => {
@@ -50,17 +50,17 @@ describe("isManagedRunnerAvailable", () => {
         { kind: "managed_runner", available: true, reason_code: "" },
       ],
     } as ProjectDetail;
-    expect(isManagedRunnerAvailable(project)).toBe(true);
+    expect(isPidashAgentAvailable(project)).toBe(true);
   });
 
   it("is false when the managed runner is missing or unavailable", () => {
     const missing = { agent_executor_options: [{ kind: "local_runner", available: true, reason_code: "" }] };
-    expect(isManagedRunnerAvailable(missing as ProjectDetail)).toBe(false);
+    expect(isPidashAgentAvailable(missing as ProjectDetail)).toBe(false);
     const unavailable = {
       agent_executor_options: [{ kind: "managed_runner", available: false, reason_code: "offline" }],
     };
-    expect(isManagedRunnerAvailable(unavailable as ProjectDetail)).toBe(false);
+    expect(isPidashAgentAvailable(unavailable as ProjectDetail)).toBe(false);
     const empty = { agent_executor_options: [] as ProjectDetail["agent_executor_options"] };
-    expect(isManagedRunnerAvailable(empty as ProjectDetail)).toBe(false);
+    expect(isPidashAgentAvailable(empty as ProjectDetail)).toBe(false);
   });
 });

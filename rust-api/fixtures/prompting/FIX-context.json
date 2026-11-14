@@ -126,7 +126,7 @@
       "comment_labels": {
         "agent_bot": "AI agent: Helper (submitted by a@b.c)",
         "agent_human_token": "AI agent: Helper (submitted by H)",
-        "bot_actor": "AI agent: Pi Dash Agent",
+        "bot_actor": "AI agent: Pi Dash Bot",
         "human": "Human: a@b.c",
         "integration": "Integration: GH",
         "none_actor": "Unknown",

@@ -673,13 +673,15 @@ pub async fn update_user_fields(
 pub const AGENT_USERNAME: &str = "pi_dash_agent";
 /// Bot email (`workpad.py:30`).
 pub const AGENT_USER_EMAIL: &str = "agent@example.com";
-/// Bot first name (`workpad.py:31`).
+/// Bot first name (`workpad.py:31`). Unchanged by P6a: the pair is
+/// "Pi Dash" / "Bot" (full "Pi Dash Bot").
 pub const AGENT_USER_FIRST_NAME: &str = "Pi Dash";
-/// Bot last name (`workpad.py:32`).
-pub const AGENT_USER_LAST_NAME: &str = "Agent";
-/// `display_name` the `User.save()` override derives when the field
-/// is blank (`db/models/user.py:176-182`): the email prefix.
-pub const AGENT_DISPLAY_NAME: &str = "agent";
+/// Bot last name (`workpad.py:32`, P6a: "Agent" → "Bot").
+pub const AGENT_USER_LAST_NAME: &str = "Bot";
+/// `display_name` the create path sets explicitly (P6a, decision 1):
+/// "Pi Dash Bot" — the full bot name, no longer the email-prefix
+/// derivation `User.save()` applies when the field is blank.
+pub const AGENT_DISPLAY_NAME: &str = "Pi Dash Bot";
 
 /// A real human account holds the reserved agent username
 /// (`workpad.py:35-41`). The message is verbatim.
@@ -3336,13 +3338,9 @@ mod tests {
             AGENT_USER_LAST_NAME,
             parsed["constants"]["AGENT_USER_LAST_NAME"]
         );
-        // `User.save()` derives the blank display name from the email
-        // prefix (`user.py:176-182`).
-        assert_eq!(AGENT_DISPLAY_NAME, "agent");
-        assert_eq!(
-            AGENT_USER_EMAIL.split('@').next().expect("prefix"),
-            AGENT_DISPLAY_NAME
-        );
+        // The create path sets the display name explicitly (P6a):
+        // "Pi Dash Bot", no longer the email-prefix derivation.
+        assert_eq!(AGENT_DISPLAY_NAME, "Pi Dash Bot");
         assert_eq!(
             AgentUserCollisionError.to_string(),
             parsed["collision_error"].as_str().expect("collision_error")

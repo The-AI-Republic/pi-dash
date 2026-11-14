@@ -46,7 +46,7 @@ use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::{LifecycleEffect, SetValue};
 use pidash_services::runner_sessions::offline_recovery as kernel;
 use pidash_services::runner_sessions::session_service::RUNNER_OFFLINE_ERROR_CODE;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 
 use super::sweeps_chat::{
@@ -280,7 +280,9 @@ async fn finalize_offline_run(
     };
     let now = Utc::now();
     finalization::finalize_update(&conn, &values, *run_id, now).await?;
-    if AgentExecutorKind::from_value(&locked.executor_kind) == Some(AgentExecutorKind::CloudAgent) {
+    if AgentExecutorKind::from_value(&locked.executor_kind)
+        == Some(AgentExecutorKind::RetiredCloudRun)
+    {
         finalization::append_terminal_event_once(
             &conn,
             *run_id,
@@ -665,12 +667,6 @@ mod tests {
             _pod_id: Uuid,
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             panic!("disabled sweep must not drain")
-        }
-        fn dispatch_waiting(
-            &self,
-            _workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            panic!("disabled sweep must not dispatch")
         }
         fn complete_project_move_handoff(
             &self,

@@ -316,14 +316,10 @@ pub fn sample_contexts(kind: &str) -> Vec<serde_json::Value> {
 
 /// All recipe kinds whose ordered section list contains `section_key`
 /// (`validation.py:285-294`): local recipes, then managed (an alias —
-/// contributes nothing new), then Cloud, each deduplicated in order.
+/// contributes nothing new), each deduplicated in order.
 pub fn kinds_for_section(section_key: &str) -> Vec<&'static str> {
     let mut kinds: Vec<&'static str> = Vec::new();
-    for table in [
-        recipes::RECIPES,
-        recipes::MANAGED_RECIPES,
-        recipes::CLOUD_RECIPES,
-    ] {
+    for table in [recipes::RECIPES, recipes::MANAGED_RECIPES] {
         for (kind, keys) in table {
             if keys.contains(&section_key) && !kinds.contains(kind) {
                 kinds.push(*kind);
@@ -537,17 +533,8 @@ mod tests {
             .map(|k| k.as_str().expect("kind").to_owned())
             .collect();
         assert_eq!(kinds, expected);
-        let kinds: Vec<String> = kinds_for_section("cloud-intro")
-            .iter()
-            .map(|k| k.to_string())
-            .collect();
-        let expected: Vec<String> = data["kinds_for_cloud_intro"]
-            .as_array()
-            .expect("array")
-            .iter()
-            .map(|k| k.as_str().expect("kind").to_owned())
-            .collect();
-        assert_eq!(kinds, expected);
+        // P3 step B: the cloud intro check died with the cloud
+        // recipes (a deleted section key yields no kinds).
         assert!(kinds_for_section("definitely-not-a-registry-key").is_empty());
         assert_eq!(
             kinds_for_section("no-such-key").len(),

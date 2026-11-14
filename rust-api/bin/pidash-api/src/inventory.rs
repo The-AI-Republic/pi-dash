@@ -1212,15 +1212,6 @@ pub const TASKS: &[TaskRow] = &[
         name: "assistant.sweep_stale_turns",
     },
     TaskRow {
-        name: "cloud_agent.run_agent_run",
-    },
-    TaskRow {
-        name: "cloud_agent.scan_queued_runs",
-    },
-    TaskRow {
-        name: "cloud_agent.sweep_stale_runs",
-    },
-    TaskRow {
         name: "managed_runner.expire_waiting_runs",
     },
     TaskRow {
@@ -1420,9 +1411,6 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.reconcile_stalled_runs",
-    },
-    TaskRow {
-        name: "runner.reconcile_unsatisfiable_pins",
     },
     TaskRow {
         name: "runner.release_pins_on_offline_runners",
@@ -1759,43 +1747,6 @@ mod tests {
     /// on any registration change): `PgPool` groups register for real
     /// over a lazy pool (no I/O); `Pools` groups register stubs over
     /// the same name constants the real register fns consume (`Pools`
-    /// cannot be built without a database). The table's rust set must
-    /// equal the const union, and the registry must own exactly the
-    /// table's rust names. Residual: a registration outside these
-    /// consts is invisible here (`Registry` has no iterator) — review
-    /// catches it, and the parity diff flags the behavior change.
-    /// The mirror's `ToolCtx` needs a transition hook; handlers never run
-    /// here, so it is never called.
-    struct NoopTransitionHook;
-
-    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
-        fn enqueue_completion_comment(
-            &self,
-            _issue_id: uuid::Uuid,
-            _prev_state_id: Option<uuid::Uuid>,
-            _current_state_id: Option<uuid::Uuid>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-            Box::pin(async move {})
-        }
-
-        fn fire(
-            &self,
-            _actor_id: uuid::Uuid,
-            _request: pidash_services::orchestration::entries::FireRequest,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            Box::pin(async move {
-                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
-            })
-        }
-    }
-
     #[tokio::test]
     async fn mirror_registry_matches_tasks_table() {
         use pidash_jobs::tasks_cleanup;
@@ -1872,9 +1823,7 @@ mod tests {
             &mut registry,
             pool.clone(),
             std::env::temp_dir(),
-            seed_settings.cloud_agent.clone(),
-            seed_settings.managed_runner.clone(),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            seed_settings.pidash_agent.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
@@ -1929,11 +1878,9 @@ mod tests {
             pool.clone(),
             std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
                 pool.clone(),
-                dispatch_settings.cloud_agent.clone(),
-                dispatch_settings.managed_runner.clone(),
+                dispatch_settings.pidash_agent.clone(),
                 None,
                 dispatch_settings.runner.clone(),
-                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam.clone(),
             )),
         );
@@ -1942,11 +1889,9 @@ mod tests {
             pool.clone(),
             pidash_jobs::orchestration::live_scheduler_dispatch(
                 pool.clone(),
-                dispatch_settings.cloud_agent,
-                dispatch_settings.managed_runner,
+                dispatch_settings.pidash_agent,
                 None,
                 dispatch_settings.runner.clone(),
-                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam,
             ),
         );
@@ -1966,7 +1911,6 @@ mod tests {
             pool.clone(),
             None,
             &runner_settings,
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
                 std::sync::Arc::new(runner_settings.clone()),
             )),
@@ -1985,58 +1929,22 @@ mod tests {
         pidash_jobs::runner_runs::register_offline_recovery_tasks(
             &mut registry,
             pool.clone(),
-            runner_seams.clone(),
-        );
-        pidash_jobs::runner_runs::register_unsatisfiable_pins_tasks(
-            &mut registry,
-            pool.clone(),
             runner_seams,
         );
-        pidash_jobs::runner_runs::register_engine_pause_tasks(&mut registry, pool.clone());
-        // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
-        // the same calls the worker builder makes — real register over the
-        // lazy pool, no forward override (handlers never run here).
+        pidash_jobs::runner_runs::register_pidash_agent_pause_tasks(&mut registry, pool.clone());
+        // Managed wait expiry (P3 step A): the only execute-plane
+        // handler that survives; same call the worker builder makes —
+        // real register over the lazy pool, no forward override
+        // (handlers never run here).
         let execute_settings =
             pidash_db::config::Settings::from_env().expect("settings parse in test env");
-        let invoke = crate::model_runtime::invoke::InvokeCtx {
-            tools: crate::model_runtime::tools_exec::ToolCtx {
-                toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
-                pool: pool.clone(),
-                orm: pidash_db::pool::sea_orm_connection(&pool),
-                cloud: execute_settings.cloud_agent.clone(),
-                managed: execute_settings.managed_runner.clone(),
-                http: reqwest::Client::new(),
-                github: crate::model_runtime::github::GithubAppContext::new(
-                    pool.clone(),
-                    pidash_db::redis::RedisHandle::from_settings(&execute_settings),
-                    execute_settings.secret_key.clone(),
-                ),
-                // No Redis client in the mirror (handlers never run
-                // here), like the runner-seams and turn-seam mirrors
-                // above; the worker builder builds this from REDIS_URL.
-                redis: None,
-                runner: execute_settings.runner.clone(),
-                transition_hook: std::sync::Arc::new(NoopTransitionHook),
-            },
-            keys: crate::model_runtime::keys::KeyResolver::from_env(
-                execute_settings.assistant.key_cache_ttl_secs,
-                execute_settings.assistant.key_cache_maxsize,
-            ),
-        };
-        pidash_jobs::dispatch_execute::register_execute_tasks(
+        pidash_jobs::runner_runs::waiting_expiry::register_waiting_expiry_tasks(
             &mut registry,
             pool.clone(),
-            execute_settings.cloud_agent.clone(),
-            execute_settings.managed_runner.clone(),
-            std::sync::Arc::new(crate::execute_seams::LiveExecuteSeams::new(
-                pool.clone(),
-                execute_settings.cloud_agent.block_private_urls,
-                invoke,
-                std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
-                    std::sync::Arc::new(execute_settings.clone()),
-                )),
-            )),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            execute_settings.pidash_agent.clone(),
+            std::sync::Arc::new(
+                pidash_jobs::runner_runs::waiting_expiry::LiveExecuteSeams::new(pool.clone()),
+            ),
         );
         // The same call the worker builder makes (PIDASHCONV-865): every seam
         // constructor is lazy (no I/O), so the mirror builds them over
@@ -2122,10 +2030,7 @@ mod tests {
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
             pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK,
             pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK,
-            pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
-            pidash_jobs::dispatch_execute::SCAN_QUEUED_RUNS_TASK,
-            pidash_jobs::dispatch_execute::SWEEP_STALE_RUNS_TASK,
-            pidash_jobs::dispatch_execute::EXPIRE_WAITING_RUNS_TASK,
+            pidash_jobs::runner_runs::waiting_expiry::EXPIRE_WAITING_RUNS_TASK,
         ]);
         expected_rust.insert(pidash_jobs::tasks_mail::NOTIFICATIONS_TASK);
         expected_rust.extend(pidash_jobs::runner_runs::TASK_NAMES);
@@ -2169,7 +2074,7 @@ mod tests {
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            17,
+            16,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2182,7 +2087,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 81, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2209,7 +2114,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 32);
+        assert_eq!(schedule.len(), 29);
         let find = |name: &str| {
             schedule
                 .iter()

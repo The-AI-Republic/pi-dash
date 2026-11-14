@@ -9,10 +9,10 @@ pub mod config_cmd;
 pub mod connect;
 pub mod context;
 pub mod doctor;
-pub mod engine_cmd;
 mod install;
 pub mod issue;
 pub mod managed;
+pub mod pidash_agent_cmd;
 // `pub` so the CLI contract tests can drive the label subcommands directly.
 pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
@@ -127,10 +127,10 @@ pub enum Command {
     /// also restart so the new code takes effect immediately.
     Update(update::Args),
 
-    /// The built-in agent engine shipped with this release (`engine install`
+    /// The Pi Dash Agent engine shipped with this release (`engine install`
     /// / `path` / `status` / `pause` / `resume`). Installed next to pidash,
     /// never on PATH.
-    Engine(engine_cmd::EngineArgs),
+    Engine(pidash_agent_cmd::PidashAgentArgs),
 
     /// Deregister with the cloud and delete local credentials.
     Remove(remove::Args),
@@ -183,10 +183,10 @@ pub enum Command {
     #[command(name = "__managed", hide = true)]
     Managed(managed::ManagedArgs),
 
-    /// Internal: verbs the built-in engine runs (its model-token auth
+    /// Internal: verbs the Pi Dash Agent runs (its model-token auth
     /// helper). Not a user-facing verb.
     #[command(name = "__engine", hide = true)]
-    EngineHelper(engine_cmd::EngineHelperArgs),
+    EngineHelper(pidash_agent_cmd::PidashAgentHelperArgs),
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -216,7 +216,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
         Command::Update(args) => update::run(args, &paths).await,
-        Command::Engine(args) => engine_cmd::run(args, &paths).await,
+        Command::Engine(args) => pidash_agent_cmd::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
@@ -230,7 +230,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
         Command::Managed(args) => managed::run(args, &paths).await,
-        Command::EngineHelper(args) => engine_cmd::run_helper(args, &paths).await,
+        Command::EngineHelper(args) => pidash_agent_cmd::run_helper(args, &paths).await,
     }
 }
 

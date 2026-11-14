@@ -914,7 +914,7 @@ mod tests {
     // and the ported-quirk negatives (quirk 1).
     #[test]
     fn past_runs_sql_matches_f36_08() {
-        assert_eq!(pidash_db::dispatch::agent_run::TABLE, "agent_run");
+        assert_eq!(pidash_db::agent_runs::agent_run::TABLE, "agent_run");
 
         let sql = past_runs_sql();
         for fragment in [

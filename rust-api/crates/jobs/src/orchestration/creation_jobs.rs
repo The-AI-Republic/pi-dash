@@ -22,9 +22,9 @@
 //! The drivers ([`create_and_dispatch_run`], [`create_continuation_run`],
 //! [`create_project_move_handoff_run`], [`complete_project_move_handoff`])
 //! open the insertion transaction, run the services control flow,
-//! commit, then drain: dispatches via [`dispatch_agent_run`][crate::dispatch::dispatch_agent_run],
+//! commit, then drain: dispatches via [`dispatch_agent_run`][crate::run_dispatch::dispatch_agent_run],
 //! deferred admission consumes via
-//! [`consume_admission_token`][pidash_services::dispatch::consume_admission_token].
+
 //! Terminal effects are returned pending for D-15 — never executed here.
 //!
 //! The render-bundle loader mirrors the api prompt-preview fetch side
@@ -35,7 +35,6 @@
 //! replayed by the live suite below.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -47,8 +46,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus;
+use pidash_db::config::PidashAgentSettings;
 use pidash_db::entity::{
     agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
     git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
@@ -59,12 +58,6 @@ use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
 use pidash_db::runner_runs::agent_run as run_bag;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::{
-    consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags,
-};
-use pidash_services::extensions::CloudAgentToolsetsSeam;
-#[cfg(test)]
-use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::creation::{
     state_name_group, user_id_for_run, AdmissionError as ServiceAdmissionError, CreationError,
     CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
@@ -72,14 +65,15 @@ use pidash_services::orchestration::creation::{
     PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
-use pidash_types::dispatch::AgentExecutorKind;
-
-use crate::dispatch::{
-    dispatch_after_commit as collect_dispatch, dispatch_agent_run,
-    lock_cloud_creation_capacity as lock_capacity, ActorScope, DispatchDecision,
-    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
+use pidash_services::run_creation::{
+    ExecutionFieldsError, ExecutionInputs, LlmProfile, ProjectScope, UserFlags,
 };
-use crate::dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
+use pidash_types::agent_runs::AgentExecutorKind;
+
+use crate::run_dispatch::{
+    dispatch_after_commit as collect_dispatch, dispatch_agent_run, ActorScope, DispatchDecision,
+};
+use crate::run_dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
 use pidash_compat::datetime::render_isoformat;
 
 // ---------------------------------------------------------------------------
@@ -87,19 +81,15 @@ use pidash_compat::datetime::render_isoformat;
 // ---------------------------------------------------------------------------
 
 /// The jobs-owned inputs behind a [`LiveCreationStore`].
-pub struct StoreDeps<C, H, P> {
-    pub cloud: CloudAgentSettings,
-    pub managed: ManagedRunnerSettings,
-    pub cache: C,
+/// (P4: the cache/toolsets admission inputs died with the cache
+/// family; the `cloud` drain argument died with the cloud drain.)
+pub struct StoreDeps<H, P> {
+    /// Managed settings (the `managed_runner_enabled` kill switch).
+    pub managed: PidashAgentSettings,
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
     pub has_usable_llm_config: H,
-    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`): the
-    /// injected toolsets seam (also answers the schema-tool name).
-    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`).
     pub llm_profile: P,
-    /// `int(time.time())` for the admission buckets.
-    pub now_unix_secs: i64,
 }
 
 /// The live creation store: the services seam traits over one
@@ -107,36 +97,26 @@ pub struct StoreDeps<C, H, P> {
 ///
 /// `H`/`P` are `Clone` so each `execution_fields` call can wrap a
 /// lazy `FnOnce` over the call's actor without borrowing the store.
-pub struct LiveCreationStore<'c, C, H, P> {
+pub struct LiveCreationStore<'c, H, P> {
     tx: Transaction<'c>,
     pool: &'c PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
-    cache: C,
+    managed: PidashAgentSettings,
     has_usable_llm_config: H,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     llm_profile: P,
-    now_unix_secs: i64,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     terminal_effects: Vec<Uuid>,
     rollback: bool,
 }
 
-impl<'c, C, H, P> LiveCreationStore<'c, C, H, P> {
-    pub fn new(tx: Transaction<'c>, pool: &'c PgPool, deps: StoreDeps<C, H, P>) -> Self {
+impl<'c, H, P> LiveCreationStore<'c, H, P> {
+    pub fn new(tx: Transaction<'c>, pool: &'c PgPool, deps: StoreDeps<H, P>) -> Self {
         Self {
             tx,
             pool,
-            cloud: deps.cloud,
             managed: deps.managed,
-            cache: deps.cache,
             has_usable_llm_config: deps.has_usable_llm_config,
-            toolsets: deps.toolsets,
             llm_profile: deps.llm_profile,
-            now_unix_secs: deps.now_unix_secs,
             dispatches: Vec::new(),
-            deferred: Vec::new(),
             terminal_effects: Vec::new(),
             rollback: false,
         }
@@ -144,28 +124,8 @@ impl<'c, C, H, P> LiveCreationStore<'c, C, H, P> {
 
     /// Recover the transaction (to commit) plus the outboxes (to drain
     /// after commit).
-    pub fn into_parts(
-        self,
-    ) -> (
-        Transaction<'c>,
-        &'c PgPool,
-        C,
-        Vec<Uuid>,
-        Vec<DeferredConsume>,
-        Vec<Uuid>,
-    ) {
-        (
-            self.tx,
-            self.pool,
-            self.cache,
-            self.dispatches,
-            self.deferred,
-            self.terminal_effects,
-        )
-    }
-
-    fn db(error: sqlx::Error) -> CreationError {
-        CreationError::Db(error.to_string())
+    pub fn into_parts(self) -> (Transaction<'c>, &'c PgPool, Vec<Uuid>, Vec<Uuid>) {
+        (self.tx, self.pool, self.dispatches, self.terminal_effects)
     }
 
     // -- L8 dispatch sharing -------------------------------------------------
@@ -198,9 +158,9 @@ impl<'c, C, H, P> LiveCreationStore<'c, C, H, P> {
         (self.llm_profile)(Some(user_id))
     }
 
-    /// The operator kill switch (`managed_runner_is_enabled`, L3).
+    /// The operator kill switch (`pidash_agent_is_enabled`, L3).
     pub(crate) fn dispatch_managed_runner_enabled(&self) -> bool {
-        pidash_services::dispatch::managed_runner_is_enabled(&self.managed)
+        pidash_services::run_creation::pidash_agent_is_enabled(&self.managed)
     }
 
     /// Record an entries driver's rollback request
@@ -516,9 +476,8 @@ struct PodRow {
 // Seam implementation
 // ---------------------------------------------------------------------------
 
-impl<C, H, P> CreationSeam for LiveCreationStore<'_, C, H, P>
+impl<H, P> CreationSeam for LiveCreationStore<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -910,21 +869,8 @@ where
             id: actor.id,
             flags: actor.flags,
         });
-        let actor_id = actor.as_ref().map(|actor| actor.id);
-        // Split borrows: the short transaction borrows the pool only,
-        // so the outbox + delegation inputs stay usable.
-        let Self {
-            pool,
-            cache,
-            cloud,
-            managed,
-            has_usable_llm_config,
-            toolsets,
-            now_unix_secs,
-            deferred,
-            ..
-        } = self;
-        let mut short = Transaction::begin(pool)
+        // The short transaction drains through commit below.
+        let short = Transaction::begin(self.pool)
             .await
             .map_err(|error| ExecutionError::Store(CreationError::Db(error.to_string())))?;
         let inputs = ExecutionInputs {
@@ -935,24 +881,9 @@ where
             actor: actor.as_ref(),
             automatic: req.automatic,
             requested: req.requested.as_deref(),
-            now_unix_secs: *now_unix_secs,
+            now_unix_secs: 0,
         };
-        let has_llm = has_usable_llm_config.clone();
-        let toolsets = toolsets.clone();
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let fields = resolve_execution_fields(
-            &mut short,
-            &inputs,
-            cloud,
-            managed,
-            cache,
-            &mut collect,
-            ExecutionSeams {
-                has_usable_llm_config: move || actor_id.is_some_and(&has_llm),
-                toolsets,
-            },
-        )
-        .await;
+        let fields = resolve_execution_fields(&inputs).await;
         short
             .commit()
             .await
@@ -960,32 +891,6 @@ where
         fields
             .map(map_execution_fields)
             .map_err(map_execution_error)
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        let outcome = lock_capacity(
-            &mut self.tx,
-            workspace_id,
-            &executor_kind,
-            automatic,
-            &self.cloud,
-        )
-        .await;
-        match outcome {
-            Ok(deferred) => Ok(deferred.map(map_admission_error)),
-            Err(ExecutionFieldsError::Admission(exc)) => {
-                Err(CreationError::CapacityRefused(exc.detail().to_owned()))
-            }
-            Err(ExecutionFieldsError::Db(error)) => Err(Self::db(error)),
-            // Unreachable: the lock path only locks, counts and
-            // verdicts (no resolve/LLM/tool gates).
-            Err(other) => Err(CreationError::Db(format!("unexpected lock error: {other}"))),
-        }
     }
 
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
@@ -1009,10 +914,6 @@ where
             created_by_id,
         )
         .await
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        self.toolsets.schema_tool_name().to_owned()
     }
 
     async fn dedicated_pin(
@@ -1071,10 +972,10 @@ where
 /// follows the executor (`creation.py` shapes): cloud always carries
 /// `pinned_runner: None`, managed carries the pick, local carries no
 /// key.
-fn map_execution_fields(fields: crate::dispatch::ExecutionFields) -> ServiceExecutionFields {
+fn map_execution_fields(fields: crate::run_dispatch::ExecutionFields) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -1093,7 +994,6 @@ fn map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }
@@ -2034,9 +1934,8 @@ async fn load_render_bundle(
 // Finalize seam implementation (row effects only — D-15 owns the pipeline)
 // ---------------------------------------------------------------------------
 
-impl<C, H, P> FinalizeAgentRunSeam for LiveCreationStore<'_, C, H, P>
+impl<H, P> FinalizeAgentRunSeam for LiveCreationStore<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -2113,7 +2012,7 @@ where
                 .await
                 .map_err(sea_db)?;
         }
-        if locked.executor_kind == AgentExecutorKind::CloudAgent {
+        if locked.executor_kind == AgentExecutorKind::RetiredCloudRun {
             let exists = {
                 let conn = TxConn::new(self.tx.inner());
                 agent_run_event::Entity::find()
@@ -2180,21 +2079,15 @@ pub struct CreationOutcome<T> {
     pub terminal_effects: Vec<Uuid>,
 }
 
-async fn drain<C: AdmissionCache>(
+async fn drain(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    cache: &C,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     now: DateTime<Utc>,
 ) -> Result<Vec<(Uuid, DispatchDecision)>, CreationJobsError> {
     let mut decisions = Vec::with_capacity(dispatches.len());
     for run_id in dispatches {
-        let decision = dispatch_agent_run(pool, cloud, run_id, now).await?;
+        let decision = dispatch_agent_run(pool, run_id, now).await?;
         decisions.push((run_id, decision));
-    }
-    for consume in &deferred {
-        consume_admission_token(cache, consume);
     }
     Ok(decisions)
 }
@@ -2202,24 +2095,22 @@ async fn drain<C: AdmissionCache>(
 /// Open the insertion transaction, run
 /// [`create_and_dispatch_run`][pidash_services::orchestration::creation::create_and_dispatch_run],
 /// commit, then drain post-commit dispatch.
-pub async fn create_and_dispatch_run<C, H, P>(
+pub async fn create_and_dispatch_run<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     req: &pidash_services::orchestration::creation::CreateDispatchRequest,
 ) -> Result<CreationOutcome<pidash_types::orchestration::TransitionOutcome>, CreationJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
         pidash_services::orchestration::creation::create_and_dispatch_run(&mut store, req).await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, &cache, dispatches, deferred, req.now).await?;
+    let dispatch_decisions = drain(pool, dispatches, req.now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2231,24 +2122,22 @@ where
 /// Open the insertion transaction, run
 /// [`create_continuation_run`][pidash_services::orchestration::creation::create_continuation_run],
 /// commit, then drain post-commit dispatch.
-pub async fn create_continuation_run<C, H, P>(
+pub async fn create_continuation_run<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     req: &pidash_services::orchestration::creation::ContinuationRequest,
 ) -> Result<CreationOutcome<pidash_types::orchestration::ContinuationOutcome>, CreationJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
         pidash_services::orchestration::creation::create_continuation_run(&mut store, req).await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, &cache, dispatches, deferred, req.now).await?;
+    let dispatch_decisions = drain(pool, dispatches, req.now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2260,25 +2149,23 @@ where
 /// Open the insertion transaction, run
 /// [`create_project_move_handoff_run`][pidash_services::orchestration::creation::create_project_move_handoff_run],
 /// commit, then drain post-commit dispatch.
-pub async fn create_project_move_handoff_run<C, H, P>(
+pub async fn create_project_move_handoff_run<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     req: &pidash_services::orchestration::creation::HandoffCreateRequest,
 ) -> Result<CreationOutcome<RunView>, CreationJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
         pidash_services::orchestration::creation::create_project_move_handoff_run(&mut store, req)
             .await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, &cache, dispatches, deferred, req.now).await?;
+    let dispatch_decisions = drain(pool, dispatches, req.now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2290,27 +2177,25 @@ where
 /// Open the transaction, run
 /// [`complete_project_move_handoff`][pidash_services::orchestration::creation::complete_project_move_handoff],
 /// commit, then drain post-commit dispatch.
-pub async fn complete_project_move_handoff<C, H, P>(
+pub async fn complete_project_move_handoff<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     run_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<CreationOutcome<Option<RunView>>, CreationJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome = pidash_services::orchestration::creation::complete_project_move_handoff(
         &mut store, run_id, now,
     )
     .await?;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain(pool, &cloud, &cache, dispatches, deferred, now).await?;
+    let dispatch_decisions = drain(pool, dispatches, now).await?;
     Ok(CreationOutcome {
         outcome,
         dispatched: dispatch_decisions.iter().map(|(id, _)| *id).collect(),
@@ -2322,16 +2207,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::dispatch::status::AgentRunTrigger;
-    use pidash_services::dispatch::CloudAgentAdmissionError;
+    use pidash_db::agent_runs::status::AgentRunTrigger;
     use pidash_services::orchestration::creation::{
         ContinuationRequest, CreateDispatchRequest, HandoffCreateRequest,
     };
     use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
-    use std::cell::RefCell;
-    use std::sync::Mutex;
 
     static CREATE_DISPATCH: &str = include_str!(
         "../../../../fixtures/orchestration/fx06_creation/create_dispatch.before_after.json"
@@ -2350,7 +2232,7 @@ mod tests {
 
     #[test]
     fn pin_key_presence_follows_executor() {
-        let base = crate::dispatch::ExecutionFields {
+        let base = crate::run_dispatch::ExecutionFields {
             executor_kind: AgentExecutorKind::LocalRunner,
             tool_plan: json!({}),
             pinned_runner_id: None,
@@ -2360,15 +2242,15 @@ mod tests {
         // Local carries no key: the computed pin survives.
         assert_eq!(map_execution_fields(base.clone()).pinned_runner_entry, None);
         // Cloud always carries `None`: the computed pin is clobbered.
-        let cloud = crate::dispatch::ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
+        let cloud = crate::run_dispatch::ExecutionFields {
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             ..base.clone()
         };
         assert_eq!(map_execution_fields(cloud).pinned_runner_entry, Some(None));
         // Managed carries the pick.
         let pin = Uuid::new_v4();
-        let managed = crate::dispatch::ExecutionFields {
-            executor_kind: AgentExecutorKind::ManagedRunner,
+        let managed = crate::run_dispatch::ExecutionFields {
+            executor_kind: AgentExecutorKind::PidashAgent,
             pinned_runner_id: Some(pin),
             ..base
         };
@@ -2380,14 +2262,7 @@ mod tests {
 
     #[test]
     fn execution_error_routing() {
-        // Refusals surface `str(exc)` for the catch …
-        let refused = map_execution_error(ExecutionFieldsError::Admission(
-            CloudAgentAdmissionError::new("run_quota_exceeded", "Cloud Agent queue is full", None),
-        ));
-        assert!(
-            matches!(refused, ExecutionError::Refused(message) if message == "Cloud Agent queue is full")
-        );
-        // … while database failures propagate.
+        // Database failures propagate as store errors.
         let db = map_execution_error(ExecutionFieldsError::Db(sqlx::Error::RowNotFound));
         assert!(matches!(db, ExecutionError::Store(CreationError::Db(_))));
     }
@@ -2442,47 +2317,8 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -2491,50 +2327,8 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct CacheError(String);
-
-    impl std::fmt::Display for CacheError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "cache error: {}", self.0)
-        }
-    }
-
-    impl std::error::Error for CacheError {}
-
-    #[derive(Default)]
-    struct FakeCache {
-        counts: Mutex<HashMap<String, i64>>,
-        consumed: RefCell<Vec<(String, i64)>>,
-    }
-
-    impl AdmissionCache for FakeCache {
-        type Error = CacheError;
-
-        fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-            Ok(self.counts.lock().expect("cache lock").get(key).copied())
-        }
-
-        fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), Self::Error> {
-            *self
-                .counts
-                .lock()
-                .expect("cache lock")
-                .entry(key.to_owned())
-                .or_insert(0) += 1;
-            self.consumed
-                .borrow_mut()
-                .push((key.to_owned(), timeout_secs));
-            Ok(())
-        }
-    }
-
     fn no_llm(_user: Uuid) -> bool {
         false
-    }
-
-    fn llm_ok(_user: Uuid) -> bool {
-        true
     }
 
     fn unavailable_profile(_user: Option<Uuid>) -> LlmProfile {
@@ -2544,46 +2338,17 @@ mod tests {
         }
     }
 
-    type TestDeps = StoreDeps<FakeCache, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
+    type TestDeps = StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
 
     fn deps() -> TestDeps {
         StoreDeps {
-            cloud: django_cloud_settings(),
             managed: django_managed_settings(),
-            cache: FakeCache::default(),
             has_usable_llm_config: no_llm,
-            toolsets: Arc::new(NoExtraToolsets),
             llm_profile: unavailable_profile,
-            now_unix_secs: now().timestamp(),
         }
     }
 
-    /// A replacement seam naming its schema tool: the store answers the
-    /// injected name, not the CE default.
-    #[derive(Debug)]
-    struct AcmeToolsets;
-
-    impl CloudAgentToolsetsSeam for AcmeToolsets {
-        fn schema_tool_name(&self) -> &'static str {
-            "acme_get_tool_schema"
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
-    async fn live_store_schema_tool_name_flows_from_injected_seam() {
-        let pool = pool().await;
-        let tx = Transaction::begin(&pool).await.expect("begin");
-        let mut store_deps = deps();
-        store_deps.toolsets = Arc::new(AcmeToolsets);
-        let store = LiveCreationStore::new(tx, &pool, store_deps);
-        assert_eq!(
-            store.extra_toolsets_schema_tool(),
-            "acme_get_tool_schema".to_owned()
-        );
-        let (tx, _, _, _, _, _) = store.into_parts();
-        tx.rollback().await.expect("rollback");
-    }
+    // (P4: AcmeToolsets + schema-tool flow test died with the seam.)
 
     struct Graph {
         ws: Uuid,
@@ -3127,7 +2892,7 @@ mod tests {
             .await
             .expect("parent")
             .expect("row");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         let result =
             create_and_dispatch_run(&pool, deps(), &dispatch_req(&graph, Some(parent_view)))
@@ -3184,7 +2949,7 @@ mod tests {
             .await
             .expect("parent")
             .expect("row");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         let mut req = dispatch_req(&graph, Some(parent_view));
         req.fresh_session = true;
@@ -3210,62 +2975,6 @@ mod tests {
             &[],
         )
         .await;
-    }
-
-    #[tokio::test]
-    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
-    async fn live_c4_admission_error_failed() {
-        let pool = pool().await;
-        let graph = seed_graph(&pool, "c4").await;
-        let cases = fixture(CREATE_DISPATCH);
-        let case = &cases["cases"]["C4_admission_error_failed"];
-        sqlx::query("UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = $1")
-            .bind(graph.project)
-            .execute(&pool)
-            .await
-            .expect("cloud project");
-        let mut settings = deps();
-        settings.cloud.enabled = true;
-        settings.cloud.github_tools_enabled = false;
-        settings.cloud.max_queued_per_workspace = 0;
-        settings.has_usable_llm_config = llm_ok;
-        let mut req = dispatch_req(&graph, None);
-        req.trigger = AgentRunTrigger::Tick.value().to_owned();
-        let result = create_and_dispatch_run(&pool, settings, &req)
-            .await
-            .expect("failed, not error");
-        assert_eq!(result.outcome.reason, case["reason"].as_str().unwrap());
-        let created = result.outcome.created_run.expect("row exists");
-        assert!(result.dispatched.is_empty());
-        assert!(result.dispatch_decisions.is_empty());
-        assert_eq!(result.terminal_effects, vec![created]);
-        let row = run_row(&pool, created).await;
-        let after = &case["after"];
-        assert_eq!(row.0, after["status"].as_str().unwrap());
-        assert_eq!(row.5, "tick");
-        assert_eq!(row.7, "cloud_agent");
-        assert_eq!(row.8, after["error_code"].as_str().unwrap());
-        assert_eq!(row.9, after["error"].as_str().unwrap());
-        assert_eq!(row.10, Some(now()));
-        assert!(row.11.is_empty());
-        assert_eq!(row.12, None);
-        // The cloud terminal event lands exactly once.
-        let events: Vec<(i32, String, Value)> = sqlx::query_as(
-            "SELECT seq, kind, payload FROM agent_run_event WHERE agent_run_id = $1",
-        )
-        .bind(created)
-        .fetch_all(&pool)
-        .await
-        .expect("events");
-        assert_eq!(
-            events,
-            vec![(
-                1,
-                "terminal".to_owned(),
-                json!({"status": "failed", "error_code": "run_quota_exceeded"})
-            )]
-        );
-        cleanup(&pool, graph, &[created], &[], &[], &[], &[], &[]).await;
     }
 
     #[tokio::test]
@@ -3358,7 +3067,7 @@ mod tests {
             .await
             .expect("parent")
             .expect("row");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         let result = create_continuation_run(&pool, deps(), &continuation_req(&graph, parent_view))
             .await
@@ -3408,44 +3117,9 @@ mod tests {
             .await
             .expect("parent")
             .expect("row");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         view
-    }
-
-    #[tokio::test]
-    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
-    async fn live_k2_admission_error_failed() {
-        let pool = pool().await;
-        let graph = seed_graph(&pool, "k2").await;
-        let cases = fixture(CONTINUATION);
-        let case = &cases["cases"]["K2_admission_error_failed"];
-        sqlx::query("UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = $1")
-            .bind(graph.project)
-            .execute(&pool)
-            .await
-            .expect("cloud project");
-        let mut settings = deps();
-        settings.cloud.enabled = true;
-        settings.cloud.github_tools_enabled = false;
-        settings.cloud.max_queued_per_workspace = 0;
-        settings.has_usable_llm_config = llm_ok;
-        let parent = continuation_parent(&pool, &graph).await;
-        let parent_id = parent.id;
-        let mut req = continuation_req(&graph, parent);
-        req.trigger = AgentRunTrigger::Tick.value().to_owned();
-        let result = create_continuation_run(&pool, settings, &req)
-            .await
-            .expect("failed, not error");
-        assert_eq!(result.outcome.reason, case["reason"].as_str().unwrap());
-        assert_eq!(result.outcome.coalesced_into, None);
-        let created = result.outcome.created_run.expect("row exists");
-        assert!(result.dispatched.is_empty());
-        let row = run_row(&pool, created).await;
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.8, "run_quota_exceeded");
-        assert_eq!(row.10, Some(now()));
-        cleanup(&pool, graph, &[parent_id, created], &[], &[], &[], &[], &[]).await;
     }
 
     #[tokio::test]
@@ -3506,7 +3180,7 @@ mod tests {
             .await
             .expect("parent")
             .expect("row");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         let result = create_continuation_run(&pool, deps(), &continuation_req(&graph, parent_view))
             .await
@@ -3922,7 +3596,7 @@ mod tests {
             .await
             .expect("source")
             .expect("row");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         let result = create_project_move_handoff_run(
             &pool,
@@ -3950,7 +3624,7 @@ mod tests {
             pidash_services::orchestration::creation::resolve_fallback_creator(&mut store, issue)
                 .await
                 .expect("resolver");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         out
     }
@@ -3962,7 +3636,7 @@ mod tests {
             pidash_services::orchestration::creation::resolve_pod_for_issue(&mut store, issue)
                 .await
                 .expect("resolver");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         out
     }
@@ -4081,7 +3755,7 @@ mod tests {
         )
         .await
         .expect("parents");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         assert!(!fresh);
         assert_eq!(parent.map(|run| run.id), Some(resume));
@@ -4143,7 +3817,7 @@ mod tests {
             .expect("prior read tolerates unknown trigger")
             .expect("row");
         assert_eq!(prior.trigger, "human");
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         cleanup(&pool, graph, &[id], &[], &[], &[], &[], &[]).await;
     }

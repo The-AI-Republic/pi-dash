@@ -57,10 +57,9 @@ pub enum ExecutorCheck {
 
 /// Ports the translation: `executor` is the raw
 /// `default_agent_executor` input (`None` when absent); the kill-switch
-/// booleans are ignored. Never refuses.
+/// boolean is ignored. Never refuses.
 pub fn check_default_agent_executor(
     executor: Option<&str>,
-    _cloud_configured: bool,
     _managed_enabled: bool,
 ) -> ExecutorCheck {
     let _ = executor;
@@ -462,9 +461,7 @@ pub fn check_description_html(
 pub struct SharedChecks<'a> {
     /// Raw `default_agent_executor` input.
     pub executor: Option<&'a str>,
-    /// `cloud_agent_is_configured()`.
-    pub cloud_configured: bool,
-    /// `managed_runner_is_enabled()`.
+    /// `pidash_agent_is_enabled()`.
     pub managed_enabled: bool,
     /// Raw `name` input.
     pub name: Option<&'a str>,
@@ -504,7 +501,6 @@ fn check_membership(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
 pub fn validate_shared(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
     Result::<(), ProjectSerError>::from(check_default_agent_executor(
         input.executor,
-        input.cloud_configured,
         input.managed_enabled,
     ))?;
     check_name_identifier(input)?;
@@ -583,7 +579,6 @@ pub fn validate_read(
 ) -> Result<Option<String>, ProjectSerError> {
     Result::<(), ProjectSerError>::from(check_default_agent_executor(
         shared.executor,
-        shared.cloud_configured,
         shared.managed_enabled,
     ))?;
     check_name_identifier(shared)?;
@@ -626,7 +621,6 @@ mod tests {
     fn quiet_shared() -> SharedChecks<'static> {
         SharedChecks {
             executor: None,
-            cloud_configured: false,
             managed_enabled: false,
             name: None,
             identifier: None,
@@ -640,40 +634,37 @@ mod tests {
         // #2903: both refusals are gone — every input passes, and
         // deprecated values translate (normalize_executor_write).
         assert_eq!(
-            check_default_agent_executor(Some("cloud_agent"), false, false),
+            check_default_agent_executor(Some("cloud_agent"), false),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(Some("cloud_agent"), true, false),
+            check_default_agent_executor(Some("cloud_agent"), true),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(Some("managed_runner"), false, false),
+            check_default_agent_executor(Some("managed_runner"), false),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(Some("managed_runner"), false, true),
+            check_default_agent_executor(Some("managed_runner"), false),
+            ExecutorCheck::Ok
+        );
+        assert_eq!(check_default_agent_executor(None, false), ExecutorCheck::Ok);
+        assert_eq!(
+            check_default_agent_executor(Some("local_runner"), false),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(None, false, false),
+            check_default_agent_executor(Some("other"), false),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(Some("local_runner"), false, false),
-            ExecutorCheck::Ok
+            pidash_types::agent_runs::normalize_executor_write("cloud_agent"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
         assert_eq!(
-            check_default_agent_executor(Some("other"), false, false),
-            ExecutorCheck::Ok
-        );
-        assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("cloud_agent"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
-        );
-        assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("managed_runner"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("managed_runner"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
     }
 
@@ -799,7 +790,6 @@ mod tests {
         let mut input = quiet_shared();
         input.name = Some("Engine");
         input.identifier = Some(" eng ");
-        input.cloud_configured = true;
         input.managed_enabled = true;
         assert!(validate_shared(&input).is_ok());
         // First failure wins, in source order: name beats lead.

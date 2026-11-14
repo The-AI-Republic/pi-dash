@@ -24,7 +24,7 @@ export { CliSetupPanel, CLI_SETUP_HEADING, CLI_SETUP_INTRO } from "./components/
 // the app shell) owns sign-out registration; the hooks below are its API.
 export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes } from "./runtime/approvalModes.js";
 export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
-export { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
+export { isPidashAgentAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
 export {
   canSignOutComputer,
   compatibleHello,
@@ -33,22 +33,28 @@ export {
   discoverDaemon,
   discoveryProblem,
   disposeRuntimeForSignOut,
-  EngineUnavailableError,
-  engineActionFor,
+  PidashAgentUnavailableError,
+  pidashAgentActionFor,
   ensureChatRuntime,
   getRuntimeAccount,
   HEARTBEAT_POLL_ATTEMPTS,
   HEARTBEAT_POLL_INTERVAL_MS,
-  MANAGED_RUNNER_KIND,
+  PIDASH_AGENT_EXECUTOR_KIND,
   prepareAgentRun,
   refreshRuntime,
-  renewEngineIfAllowed,
+  renewPidashAgentIfAllowed,
   resumeRuntime,
   setUpDaemon,
   signInWorkspace,
-  turnOnEngineForProject,
+  turnOnPidashAgentForProject,
 } from "./runtime/service.js";
-export type { AgentRunTarget, DaemonSetUpStep, EngineAction, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export type {
+  AgentRunTarget,
+  DaemonSetUpStep,
+  PidashAgentAction,
+  HeartbeatPoll,
+  RuntimeDeps,
+} from "./runtime/service.js";
 export { migrateLegacyTrees } from "./runtime/desktop-migration.js";
 export type { MigrationOutcome, MigrationDeps } from "./runtime/desktop-migration.js";
 export {

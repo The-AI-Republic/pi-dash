@@ -35,7 +35,7 @@
 //! (pure — the drivers lock, call, and save around it), L6 builders /
 //! parenting / resolvers, the F-06 [`check_project_role`](pidash_auth::permissions::membership::check_project_role)
 //! kernel over L2 role-fact SQL, D-11 L3
-//! [`user_has_llm_config`](crate::dispatch::policy::user_has_llm_config), and
+//! [`user_has_llm_config`](crate::run_creation::executor_policy::user_has_llm_config), and
 //! the merged prompting scheduler composer. `run_config` for scheduler runs
 //! is the literal `{}` (`service.py:963`); scheduler rows stamp no
 //! `phase_kind` (the model default `""`).
@@ -88,21 +88,21 @@ use uuid::Uuid;
 use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::check_project_role;
 pub use pidash_auth::permissions::membership::ProjectRoleFacts;
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::app_project::models::state::StateGroup;
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::querysets::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{
     is_ticking_state, ContinuationOutcome, StateRef, TickerDecision, TickerEvent,
     TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
 };
 
-use crate::dispatch::policy::{user_has_llm_config, UserFlags};
 use crate::prompting::composer::OverrideRow;
 use crate::prompting::context::SchedulerContextInput;
 use crate::prompting::{composer, context};
+use crate::run_creation::executor_policy::{user_has_llm_config, UserFlags};
 
 use super::clock::ClockError;
 use super::clock::{self, ClockIssue, ClockWrite, ProjectClockPolicy};
@@ -1170,7 +1170,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
     let project = seam.project(project_id).await?;
     let workspace = seam.workspace(binding.workspace_id).await?;
     let (creator, creator_valid): (Option<Uuid>, bool) =
-        if project.default_agent_executor == AgentExecutorKind::CloudAgent.value() {
+        if project.default_agent_executor == AgentExecutorKind::RetiredCloudRun.value() {
             // Cloud runs execute against the creator's BYOK LLM config, so
             // the execution principal must also have a usable provider key.
             let mut creator = None;
@@ -1235,25 +1235,11 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error.into()),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
+    let admission_error = execution.cloud_admission_error.clone();
 
-    // Permanent misconfiguration — refuse BEFORE creating a run so a
-    // broken binding writes last_error once instead of minting a FAILED
-    // AgentRun on every scheduler firing. Note the execution's executor
-    // kind, not the project default.
-    if execution.executor_kind == AgentExecutorKind::CloudAgent
-        && binding.outcome_mode != OUTCOME_MODE_CREATE_ISSUE
-    {
-        return Ok(SchedulerOutcome {
-            run: None,
-            error: Some(SCHEDULER_OUTCOME_MODE_REFUSAL.to_owned()),
-        });
-    }
-
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, true)
-        .await?
-        .or(admission_error);
+    // P3 step C: the cloud misconfiguration arm died with the
+    // retired plane. Admission stays as recorded on the execution
+    // fields (P3 step B: the capacity gate's seam call is gone).
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_scheduler_run(&NewSchedulerRun {
@@ -1337,15 +1323,9 @@ async fn render_scheduler_turn<S: EntriesSeam>(
     // attribute (`run.prompt = build_scheduler_turn(binding, run)` before
     // any `refresh_from_db`; `service.py:977`). The `Limits:` line must
     // print `policy.py` dict order (PIDASHCONV-1072).
-    let extra_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let schema_tool = if extra_enabled {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
+    // P4: extra toolsets died; keys render always-false/empty.
+    let extra_enabled = false;
+    let schema_tool = String::new();
     let input = SchedulerContextInput {
         workspace_slug: workspace.slug.clone(),
         workspace_name: workspace.name.clone(),
@@ -1499,13 +1479,12 @@ mod tests {
 
     use crate::domain::identity::AgentUserCollisionError;
     use pidash_auth::permissions::membership::ProjectRoleFacts;
-    use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+    use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-    use pidash_types::dispatch::AgentExecutorKind;
+    use pidash_types::agent_runs::AgentExecutorKind;
     use pidash_types::orchestration::StateRef;
 
     use super::*;
-    use crate::dispatch::UserFlags;
     use crate::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use crate::orchestration::creation::{
         AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, IssueView, NewAgentRun,
@@ -1517,6 +1496,7 @@ mod tests {
     };
     use crate::prompting::composer::OverrideRow;
     use crate::prompting::{composer, context};
+    use crate::run_creation::UserFlags;
 
     static TRANSITION_FIXTURE: &str =
         include_str!("../../../../fixtures/orchestration/fx07_entries/transition.matrix.json");
@@ -2041,15 +2021,6 @@ mod tests {
             self.execution.clone().expect("script execution")
         }
 
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
-        }
-
         fn dispatch_after_commit(&mut self, run_id: Uuid) {
             self.dispatched.push(run_id);
         }
@@ -2067,9 +2038,6 @@ mod tests {
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
-        }
         async fn dedicated_pin(
             &mut self,
             args: &DedicatedPinArgs<'_>,
@@ -3236,7 +3204,7 @@ mod tests {
         seam.projects
             .get_mut(&uid(0x20))
             .expect("project")
-            .default_agent_executor = AgentExecutorKind::CloudAgent.value().to_owned();
+            .default_agent_executor = AgentExecutorKind::RetiredCloudRun.value().to_owned();
     }
 
     #[tokio::test]
@@ -3592,180 +3560,6 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored");
         assert_eq!(run.created_by_id, uid(0x43));
         assert_eq!(seam.dispatched, vec![run_id]);
-    }
-
-    #[tokio::test]
-    async fn s6_cloud_outcome_mode_refusal_before_insert() {
-        let case = scheduler_case("S6_outcome_mode_refusal");
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        cloud_project(&mut seam);
-        role_pass(&mut seam, uid(0x40));
-        seam.llm.insert(uid(0x40), true);
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({}),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        seam.bindings
-            .get_mut(&uid(0x80))
-            .expect("binding")
-            .outcome_mode = "apply_fix".to_owned();
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.run.is_none());
-        assert_eq!(outcome.error.as_deref(), case["returned"]["error"].as_str());
-        assert_eq!(
-            outcome.error.as_deref(),
-            Some(SCHEDULER_OUTCOME_MODE_REFUSAL)
-        );
-        assert!(seam.scheduler_runs.is_empty());
-        assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
-    async fn scheduler_renders_limits_from_in_memory_plan() {
-        // PIDASHCONV-1072: Django composes from the in-memory plan
-        // (`run.prompt = build_scheduler_turn(binding, run)` before any
-        // `refresh_from_db`; `service.py:977`), so the `Limits:` line
-        // prints `policy.py` dict order even though the stored row
-        // carries jsonb order. The seam round-trips the plan to prove
-        // the render does not read the row back.
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        cloud_project(&mut seam);
-        role_pass(&mut seam, uid(0x40));
-        seam.llm.insert(uid(0x40), true);
-        seam.normalize_tool_plan = true;
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({
-                "v": 1,
-                "catalog_version": 1,
-                "tools": [],
-                "required_tools": [],
-                "limits": {
-                    "model_requests": 25,
-                    "tool_calls": 20,
-                    "writes": 3,
-                    "input_tokens": 144_000,
-                    "output_tokens": 16_000,
-                    "total_tokens": 160_000,
-                    "wall_seconds": 285,
-                },
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-            }),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.error.is_none());
-        let run_id = outcome.run.expect("run returned");
-        // The stored row carries jsonb order (the seam round-tripped it).
-        let stored: Vec<String> = seam.runs[&run_id].tool_plan["limits"]
-            .as_object()
-            .expect("limits object")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                "writes",
-                "tool_calls",
-                "input_tokens",
-                "total_tokens",
-                "wall_seconds",
-                "output_tokens",
-                "model_requests",
-            ]
-        );
-        // The composed prompt prints policy.py dict order.
-        let run = seam.runs.get(&run_id).expect("run stored");
-        let line = run
-            .prompt
-            .lines()
-            .find(|line| line.starts_with("Limits:"))
-            .expect("Limits line");
-        assert_eq!(
-            line,
-            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}."
-        );
-    }
-
-    #[tokio::test]
-    async fn s7_admission_failure_returns_failed_run() {
-        let case = scheduler_case("S7_admission_failed_returned");
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.error.is_none());
-        let run_id = outcome.run.expect("failed run returned");
-        let run = seam.runs.get(&run_id).expect("run stored").clone();
-        let golden = &case["after"];
-        assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
-        assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
-        assert_eq!(run.parent_run_id, None);
-        assert_eq!(run.pinned_runner_id, None);
-        assert_eq!(run.created_by_id, uid(0x40));
-        assert_eq!(run.pod_id, uid(0x50));
-        assert_eq!(run.work_item_id, None);
-        assert_eq!(run.prompt, golden["prompt"].as_str().unwrap());
-        assert!(run.prompt_manifest.is_none());
-        assert!(golden["prompt_manifest"].is_null());
-        assert_eq!(run.run_config, golden["run_config"]);
-        assert_eq!(
-            run.executor_kind.value(),
-            golden["executor_kind"].as_str().unwrap()
-        );
-        assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error(), golden["error"].as_str().unwrap());
-        assert_eq!(run.ended_at, Some(now));
-        assert_eq!(
-            seam.finalized,
-            vec![(
-                run_id,
-                "run_quota_exceeded".to_owned(),
-                "Cloud Agent queue is full for this workspace".to_owned()
-            )]
-        );
-        assert!(seam.dispatched.is_empty());
-        assert_eq!(seam.compose_calls, 0);
     }
 
     #[tokio::test]

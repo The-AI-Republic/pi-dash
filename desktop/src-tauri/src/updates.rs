@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
 use tauri::utils::config::BundleType;
 use tauri::utils::platform::bundle_type;
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -643,26 +643,42 @@ mod tests {
     fn deb_install_is_not_served_by_the_generic_appimage_entry() {
         // PIDESKAPP-59: the only Linux entry is the AppImage payload.
         let manifest = manifest_with(&["linux-x86_64"]);
-        assert!(!manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+        assert!(!manifest_may_serve(
+            Some(BundleType::Deb),
+            Some("x86_64"),
+            &manifest
+        ));
     }
 
     #[test]
     fn deb_install_is_served_by_its_own_entry() {
         let manifest = manifest_with(&["linux-x86_64", "linux-x86_64-deb"]);
-        assert!(manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+        assert!(manifest_may_serve(
+            Some(BundleType::Deb),
+            Some("x86_64"),
+            &manifest
+        ));
     }
 
     #[test]
     fn msi_install_is_not_served_by_the_generic_nsis_entry() {
         // PIDESKAPP-91: the only Windows entry is the NSIS payload.
         let manifest = manifest_with(&["windows-x86_64"]);
-        assert!(!manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+        assert!(!manifest_may_serve(
+            Some(BundleType::Msi),
+            Some("x86_64"),
+            &manifest
+        ));
     }
 
     #[test]
     fn msi_install_is_served_by_its_own_entry() {
         let manifest = manifest_with(&["windows-x86_64", "windows-x86_64-msi"]);
-        assert!(manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+        assert!(manifest_may_serve(
+            Some(BundleType::Msi),
+            Some("x86_64"),
+            &manifest
+        ));
     }
 
     #[test]
@@ -678,7 +694,11 @@ mod tests {
     #[test]
     fn nsis_install_keeps_working_via_the_generic_entry() {
         let manifest = manifest_with(&["windows-x86_64"]);
-        assert!(manifest_may_serve(Some(BundleType::Nsis), Some("x86_64"), &manifest));
+        assert!(manifest_may_serve(
+            Some(BundleType::Nsis),
+            Some("x86_64"),
+            &manifest
+        ));
     }
 
     #[test]
@@ -704,8 +724,16 @@ mod tests {
             serde_json::json!({"version": "0.4.0"}),
             serde_json::json!({"version": "0.4.0", "url": "https://dl.example.com/x", "signature": "s"}),
         ] {
-            assert!(manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
-            assert!(manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+            assert!(manifest_may_serve(
+                Some(BundleType::Deb),
+                Some("x86_64"),
+                &manifest
+            ));
+            assert!(manifest_may_serve(
+                Some(BundleType::Msi),
+                Some("x86_64"),
+                &manifest
+            ));
         }
         // macOS bundles and unstamped dev builds keep today's behavior.
         let manifest = manifest_with(&["linux-x86_64"]);

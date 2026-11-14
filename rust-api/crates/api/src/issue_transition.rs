@@ -136,14 +136,10 @@ impl AppTransitionHook {
         });
         let deps = HookDeps {
             pool: self.pool.clone(),
-            cloud: settings.cloud_agent.clone(),
-            managed: settings.managed_runner.clone(),
-            cache: pidash_services::dispatch::admission::RedisAdmissionCache::new(
-                client_from_settings(settings),
-            ),
+            managed: settings.pidash_agent.clone(),
+
             redis: client_from_settings(settings),
             runner: settings.runner.clone(),
-            toolsets: self.state.toolsets().clone(),
             assistant_seam: self.state.assistant_seam().clone(),
             publish: drains.clone(),
             pods: drains,
@@ -188,21 +184,20 @@ impl IssueTransitionHook for AppTransitionHook {
 #[cfg(test)]
 pub(crate) mod test_support {
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-    use pidash_services::dispatch::policy::UserFlags;
     use pidash_services::domain::identity::AgentUserCollisionError;
     use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use pidash_services::orchestration::creation::{
-        AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
-        ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue,
-        NewAgentRun, NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle,
-        RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+        CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+        ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun,
+        NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
+        RunnerView, StateView, STATE_SELECT_SQL,
     };
     use pidash_services::orchestration::entries::{
         BindingView, EntriesSeam, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
         WorkspaceView, PRIOR_STATE_SELECT_SQL,
     };
     use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
-    use pidash_types::dispatch::AgentExecutorKind;
+    use pidash_services::run_creation::executor_policy::UserFlags;
     use serde_json::Value;
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -326,14 +321,6 @@ pub(crate) mod test_support {
         ) -> Result<ExecutionFields, ExecutionError> {
             unreachable!("lazy seam method is unreachable on this path")
         }
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _w: Uuid,
-            _k: AgentExecutorKind,
-            _a: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            unreached()
-        }
         fn dispatch_after_commit(&mut self, _id: Uuid) {
             unreachable!("lazy seam method is unreachable on this path")
         }
@@ -346,9 +333,6 @@ pub(crate) mod test_support {
             _c: Uuid,
         ) -> Result<RenderBundle, CreationError> {
             unreached()
-        }
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
         }
     }
 

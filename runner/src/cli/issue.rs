@@ -1855,7 +1855,10 @@ mod tests {
     fn pagination_note_stays_silent_when_the_field_is_absent() {
         // Servers predating `next_page_results` in the envelope: a complete
         // list and a truncated one are indistinguishable, so say nothing.
-        assert_eq!(pagination_note(&json!({"count": 1000, "results": []})), None);
+        assert_eq!(
+            pagination_note(&json!({"count": 1000, "results": []})),
+            None
+        );
     }
 
     #[test]

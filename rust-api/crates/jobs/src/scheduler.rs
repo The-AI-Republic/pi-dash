@@ -254,7 +254,7 @@ pub fn default_schedule() -> Vec<BeatEntry> {
 /// means an allowlist: an empty/whitespace-only value yields `Some(empty)`
 /// and fires nothing. This fail-closed choice matters during
 /// coexistence: a blank SSM value left from an earlier overlay must not
-/// silently re-enable all 31 entries next to Python beat (Finding 7 review).
+/// silently re-enable all 29 entries next to Python beat (Finding 7 review).
 /// Set to a comma-separated list of exact `BeatEntry::name` values to
 /// fire only those entries while Python beat stays live beside Rust.
 /// The allowlist is consulted by [`WorkerBuilder::with_scheduler`]'s
@@ -359,15 +359,15 @@ mod tests {
         // Phase 2 (2.2): None keeps all; Some(set) keeps only named entries
         // in beat order.
         let schedule = default_schedule();
-        assert_eq!(schedule.len(), 32);
+        assert_eq!(schedule.len(), 29);
         assert_eq!(
             filter_schedule_by_allowlist(schedule.clone(), &None),
             schedule
         );
         let allowed = Some(
             [
-                "cloud-agent-scan-queued-runs",
-                "cloud-agent-sweep-stale-runs",
+                "check-every-five-minutes-to-send-email-notifications",
+                "managed-runner-expire-waiting-runs",
                 "agent-run-reconcile-terminal-effects",
             ]
             .into_iter()
@@ -379,8 +379,8 @@ mod tests {
         assert_eq!(
             filtered.iter().map(|entry| entry.name).collect::<Vec<_>>(),
             vec![
-                "cloud-agent-scan-queued-runs",
-                "cloud-agent-sweep-stale-runs",
+                "check-every-five-minutes-to-send-email-notifications",
+                "managed-runner-expire-waiting-runs",
                 "agent-run-reconcile-terminal-effects",
             ]
         );
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn default_schedule_is_the_full_beat_table() {
-        assert_eq!(default_schedule().len(), 32);
+        assert_eq!(default_schedule().len(), 29);
     }
 
     #[test]

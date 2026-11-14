@@ -88,7 +88,7 @@ use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
 use pidash_services::runner_runs::lifecycle::{self, LifecycleError};
 use pidash_services::runner_runs::scheduler_hook::{self, SchedulerHookPlan};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     classify_run_error, run_message_dedupe_ttl_secs, AgentChatMessageRole, AgentChatMessageStatus,
     AgentChatSessionStatus, AgentRunStatus, DevMachineInfo, RunErrorKind, RunnerInfo,
@@ -257,12 +257,6 @@ pub trait RunnerRunsSeams: Send + Sync {
     fn drain_pod(
         &self,
         pod_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
-    /// `cloud_agent.dispatch.dispatch_waiting` (D-11). Unisolated: a
-    /// failure propagates and the capacity marker stays unset.
-    fn dispatch_waiting(
-        &self,
-        workspace_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.service.complete_project_move_handoff` (D-12):
     /// after the hooks transaction, isolated.
@@ -1040,7 +1034,7 @@ async fn run_finalize_transaction(
         );
         let now = Utc::now();
         finalization::finalize_update(&conn, values, *run_id, now).await?;
-        if facts.executor_kind == AgentExecutorKind::CloudAgent {
+        if facts.executor_kind == AgentExecutorKind::RetiredCloudRun {
             finalization::append_terminal_event_once(
                 &conn,
                 *run_id,
@@ -1461,10 +1455,6 @@ async fn run_capacity_plan(
     plan: &finalization::CapacityPlan,
 ) -> Result<(), SweepError> {
     match plan {
-        finalization::CapacityPlan::Cloud { workspace_id } => seams
-            .dispatch_waiting(*workspace_id)
-            .await
-            .map_err(SweepError::Seam),
         finalization::CapacityPlan::Local { runner_id, pod_id } => {
             if let Some(runner_id) = runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): free a
@@ -2042,12 +2032,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             Box::pin(async move { Ok(()) })
         }
-        fn dispatch_waiting(
-            &self,
-            _workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
-        }
         fn complete_project_move_handoff(
             &self,
             _run_id: Uuid,
@@ -2194,13 +2178,6 @@ mod tests {
             pod_id: Uuid,
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             self.record(json!({"fn": "drain_pod", "args": [pod_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
-        }
-        fn dispatch_waiting(
-            &self,
-            workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            self.record(json!({"fn": "dispatch_waiting", "args": [workspace_id.to_string()]}));
             Box::pin(async move { Ok(()) })
         }
         fn complete_project_move_handoff(

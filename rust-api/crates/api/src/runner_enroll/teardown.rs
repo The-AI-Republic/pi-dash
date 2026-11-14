@@ -881,17 +881,18 @@ pub async fn dev_machine_revoke(
     }
     // The engine credential goes with the machine (`:207`, #2910):
     // revoking the machine signs the engine out with it.
-    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
-        &pidash_db::orm_tx::TxConn::new(&mut tx),
-        machine_id,
-        "machine_removed",
-        now,
-    )
-    .await
-    {
-        Ok((_revoked, effects)) => effects,
-        Err(_) => return server_error(),
-    };
+    let revoke_effects =
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            machine_id,
+            "machine_removed",
+            now,
+        )
+        .await
+        {
+            Ok((_revoked, effects)) => effects,
+            Err(_) => return server_error(),
+        };
     // Locked active-runner list (`:199`).
     let runner_rows =
         match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
@@ -1046,17 +1047,18 @@ pub async fn dev_machine_engine_sign_out(
             Err(response) => return response,
         }
     };
-    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
-        &TxConn::new(&mut tx),
-        machine_id,
-        "signed_out",
-        now_micros(),
-    )
-    .await
-    {
-        Ok((_revoked, effects)) => effects,
-        Err(_) => return server_error(),
-    };
+    let revoke_effects =
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            &TxConn::new(&mut tx),
+            machine_id,
+            "signed_out",
+            now_micros(),
+        )
+        .await
+        {
+            Ok((_revoked, effects)) => effects,
+            Err(_) => return server_error(),
+        };
     // `refresh_from_db`: re-read the row so the render sees the
     // sign-in state's new value.
     let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
@@ -1507,7 +1509,7 @@ async fn serialize_machine(
             None => (machine.revoked_at, machine.updated_at),
         };
         let fallback_state =
-            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+            pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                 &machine.engine_sign_in_state,
                 machine.engine_credential_expires_at,
                 Utc::now(),
@@ -1546,11 +1548,12 @@ async fn serialize_machine(
         }
         .to_json();
     };
-    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
-        &row.engine_sign_in_state,
-        row.engine_credential_expires_at,
-        Utc::now(),
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &row.engine_sign_in_state,
+            row.engine_credential_expires_at,
+            Utc::now(),
+        );
     MachineRender {
         id: machine.id.to_string(),
         host_label: row.host_label,
@@ -1796,7 +1799,7 @@ impl RunnerRender {
         let dev_machine = match self.dev_machine_detail.as_ref() {
             Some(detail) => {
                 dev_mini_state =
-                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                         &detail.engine_sign_in_state,
                         detail.engine_credential_expires_at,
                         now,
@@ -1838,7 +1841,7 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
-            is_engine: self.is_engine,
+            is_pidash_agent: self.is_engine,
             engine_paused: self.engine_paused,
             dispatch_paused: self.dispatch_paused,
             machine_display_name: &self.machine_display_name,
@@ -2452,7 +2455,7 @@ use pidash_jobs::runner_enroll::{
 use pidash_services::runner_enroll::delete as delete_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 
 // Executors: the first pool-backed `PubsubStore`s (F8: called, never inlined)

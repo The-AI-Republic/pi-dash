@@ -94,16 +94,16 @@ use uuid::Uuid;
 
 use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::runner_runs::agent_run;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
-use crate::dispatch::UserFlags;
 use crate::prompting::{composer, context, recipes};
+use crate::run_creation::UserFlags;
 
 // ---------------------------------------------------------------------------
 // Reasons, triggers, literals
@@ -1722,7 +1722,7 @@ pub struct AdmissionError {
 }
 
 /// The executor-specific fields for one creation (`execution_fields`,
-/// `creation.py:11-89`): mirrors `jobs::dispatch::ExecutionFields`
+/// `creation.py:11-89`): mirrors `jobs::run_dispatch::ExecutionFields`
 /// without importing jobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionFields {
@@ -1953,13 +1953,13 @@ pub fn pinned_runner_for(
     now: DateTime<Utc>,
 ) -> Option<Uuid> {
     let runner = runner?;
-    let is_engine = runner.provisioning
+    let is_pidash_agent = runner.provisioning
         == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let pod_member = runner.pod_dispatch
         == pidash_db::runner_enroll::columns::enums::RUNNER_POD_DISPATCH_POD_MEMBER;
     if !pidash_auth::permissions::runner::locality_pin_allowed(
         true,
-        is_engine,
+        is_pidash_agent,
         pod_member,
         runner.engine_paused,
     ) {
@@ -2154,7 +2154,6 @@ pub fn render_first_turn(
     bundle: &RenderBundle,
     kind: &str,
     run: &RunRenderRef,
-    extra_toolsets_schema_tool: &str,
 ) -> Result<RenderedTurn, String> {
     let issue = &bundle.issue;
     let project = &bundle.project;
@@ -2213,14 +2212,10 @@ pub fn render_first_turn(
             .get("unavailable_capabilities")
             .cloned()
             .unwrap_or(Value::Null),
-        extra_toolsets_enabled: run
-            .tool_plan
-            .get("extra_toolsets")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        // Named by the EE seam, consulted only when enabled
-        // (`context.py:514-517`); CE names none.
-        extra_toolsets_schema_tool: extra_toolsets_schema_tool.to_owned(),
+        // P4: extra toolsets died with the retired plane; the
+        // keys still render (always false/empty).
+        extra_toolsets_enabled: false,
+        extra_toolsets_schema_tool: String::new(),
         limits: run.tool_plan.get("limits").cloned().unwrap_or(Value::Null),
         tick: tick_value(
             bundle.ticker.as_ref(),
@@ -2356,15 +2351,6 @@ pub trait CreationSeam {
         &mut self,
         req: &ExecutionRequest,
     ) -> Result<ExecutionFields, ExecutionError>;
-    /// `lock_cloud_creation_capacity` (`creation.py:155-177`) on the
-    /// caller's insertion transaction. A manual over-capacity raise
-    /// surfaces as [`CreationError::CapacityRefused`] and propagates.
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError>;
     /// `dispatch_after_commit` (`creation.py:148-152`): collect the run
     /// id for post-commit dispatch. Nothing executes inline.
     fn dispatch_after_commit(&mut self, run_id: Uuid);
@@ -2380,10 +2366,7 @@ pub trait CreationSeam {
         trigger: &str,
         created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError>;
-    /// The EE schema-tool name (`extra_toolsets_schema_tool`,
-    /// `context.py:512-517`): consulted only when the run's plan
-    /// enables extra toolsets. CE names none.
-    fn extra_toolsets_schema_tool(&self) -> String;
+    /// (P4: the extra-toolsets schema tool died with the toolsets seam.)
     /// The dedicated-runner pin decision for one creation (design
     /// §9.1/§9.2 + §11.2/§23.3): the H-11/H-10 refusal answered in
     /// the same probe as the pin (Django `dedicated_run_refusal`
@@ -2536,17 +2519,7 @@ async fn render_new_run<C: CreationSeam>(
             run_ref.created_by_id,
         )
         .await?;
-    let schema_tool = if run_ref
-        .tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
-    Ok(render_first_turn(&bundle, kind, run_ref, &schema_tool))
+    Ok(render_first_turn(&bundle, kind, run_ref))
 }
 
 /// Create a fresh `AgentRun` and dispatch it
@@ -2591,11 +2564,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     let effective_parent = if req.fresh_session {
         None
     } else {
@@ -2757,11 +2726,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     // The dedicated pin (§9.2): a dedicated issue pins its runner,
     // whatever the parent/locality path computed.
     let pin_kind = if issue.assigned_runner_id.is_some() {
@@ -3432,7 +3397,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: uid(0x02),
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: json!({}),
             tool_plan: json!({}),
             trigger: "direct".to_owned(),
@@ -3907,15 +3872,6 @@ mod tests {
             self.execution.clone().expect("script execution")
         }
 
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
-        }
-
         fn dispatch_after_commit(&mut self, run_id: Uuid) {
             self.dispatched.push(run_id);
         }
@@ -3934,10 +3890,6 @@ mod tests {
             self.bundle
                 .clone()
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
-        }
-
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
         }
 
         async fn dedicated_pin(
@@ -4414,7 +4366,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         for marker in [
@@ -4438,47 +4389,6 @@ mod tests {
     }
 
     #[test]
-    fn render_names_injected_schema_tool_for_snapshotted_cloud_runs() {
-        let bundle = test_bundle(
-            issue_view(),
-            project_view(),
-            Some(state_view("In Progress", "started")),
-        );
-        let snapshotted = RunRenderRef {
-            run_id: uid(0x80),
-            parent_run_id: None,
-            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({"extra_toolsets": true}),
-            created_by_id: uid(0x40),
-        };
-        let turn = render_first_turn(&bundle, "coding-task", &snapshotted, "acme_get_tool_schema")
-            .expect("renders");
-        assert!(
-            turn.text.contains("acme_get_tool_schema"),
-            "injected name reaches the shared prompt"
-        );
-        // No snapshot, no instruction — even with a name on hand, the
-        // section stays hidden (`context.py:514-517`).
-        let unsnapshotted = RunRenderRef {
-            run_id: uid(0x80),
-            parent_run_id: None,
-            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({}),
-            created_by_id: uid(0x40),
-        };
-        let ce = render_first_turn(
-            &bundle,
-            "coding-task",
-            &unsnapshotted,
-            "acme_get_tool_schema",
-        )
-        .expect("renders");
-        assert!(!ce.text.contains("acme_get_tool_schema"));
-    }
-
-    #[test]
     fn render_review_turn_matches_c3_shape() {
         let dispatch = fixture(CREATE_DISPATCH);
         let after = &dispatch["cases"]["C3_fresh_session_drops_parent_and_pin"]["after"];
@@ -4498,7 +4408,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         assert!(turn.text.contains("You are reviewing"));
@@ -4635,42 +4544,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn c4_admission_error_failed() {
-        let dispatch = fixture(CREATE_DISPATCH);
-        let case = &dispatch["cases"]["C4_admission_error_failed"];
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(None))
-            .await
-            .expect("failed, not error");
-        assert_eq!(outcome.reason, case["reason"].as_str().unwrap());
-        let created = outcome.created_run.expect("row exists");
-        assert!(seam.dispatched.is_empty());
-        assert!(seam.saved_prompts.borrow().is_empty());
-        assert_eq!(
-            seam.finalized,
-            vec![(
-                created,
-                "run_quota_exceeded".to_owned(),
-                "Cloud Agent queue is full for this workspace".to_owned()
-            )]
-        );
-        let run = seam.runs.borrow()[&created].clone();
-        assert_eq!(run.status, AgentRunStatus::Failed);
-        assert_eq!(
-            run.error_code(),
-            case["after"]["error_code"].as_str().unwrap()
-        );
-        assert_eq!(run.error(), case["after"]["error"].as_str().unwrap());
-        assert_eq!(run.ended_at, Some(now()));
-        assert!(run.prompt.is_empty());
-        assert_eq!(run.prompt_manifest, None);
-    }
-
-    #[tokio::test]
     async fn c5_render_failed() {
         let mut seam = FakeSeam::minimal().with_bundle().fail_render("{{ broken");
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(None))
@@ -4698,18 +4571,6 @@ mod tests {
         assert_eq!(outcome.created_run, None);
         assert!(seam.inserted.borrow().is_empty());
         assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
-    async fn lock_capacity_raise_propagates() {
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Err(CreationError::CapacityRefused(
-            "Cloud Agent queue is full for this workspace".to_owned(),
-        )));
-        let err = create_and_dispatch_run(&mut seam, &dispatch_req(None))
-            .await
-            .expect_err("propagates");
-        assert!(matches!(err, CreationError::CapacityRefused(_)));
     }
 
     fn continuation_req(parent: RunView) -> ContinuationRequest {
@@ -4760,92 +4621,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_renders_limits_from_in_memory_plan() {
-        // PIDASHCONV-1072: Django composes from the in-memory plan
-        // (`run.prompt = build_first_turn(issue, run)` before any
-        // `refresh_from_db`; `service.py:507`), so the `Limits:` line
-        // prints `policy.py` dict order even though the stored row
-        // carries jsonb order. The seam round-trips the plan to prove
-        // the render does not read the row back.
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.normalize_tool_plan = true;
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({
-                "v": 1,
-                "catalog_version": 1,
-                "tools": [],
-                "required_tools": [],
-                "limits": {
-                    "model_requests": 25,
-                    "tool_calls": 20,
-                    "writes": 3,
-                    "input_tokens": 144_000,
-                    "output_tokens": 16_000,
-                    "total_tokens": 160_000,
-                    "wall_seconds": 285,
-                },
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-            }),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
-            .await
-            .expect("creates");
-        assert_eq!(outcome.reason, REASON_CREATED);
-        let created = outcome.created_run.expect("created");
-        // The stored row carries jsonb order (the seam round-tripped it).
-        let stored: Vec<String> = seam.runs.borrow()[&created].tool_plan["limits"]
-            .as_object()
-            .expect("limits object")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                "writes",
-                "tool_calls",
-                "input_tokens",
-                "total_tokens",
-                "wall_seconds",
-                "output_tokens",
-                "model_requests",
-            ]
-        );
-        // The composed prompt prints policy.py dict order.
-        let prompts = seam.saved_prompts.borrow();
-        let (prompt, _) = &prompts[&created];
-        let line = prompt
-            .lines()
-            .find(|line| line.starts_with("Limits:"))
-            .expect("Limits line");
-        assert_eq!(
-            line,
-            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}."
-        );
-    }
-
-    #[tokio::test]
-    async fn k2_admission_error_failed() {
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
-            .await
-            .expect("failed, not error");
-        assert_eq!(outcome.reason, "run_quota_exceeded");
-        assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
     async fn k3_render_failed() {
         let mut seam = FakeSeam::minimal().with_bundle().fail_render("{{ broken");
         let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
@@ -4889,7 +4664,7 @@ mod tests {
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::ManagedRunner,
+            executor_kind: AgentExecutorKind::PidashAgent,
             tool_plan: json!({}),
             pinned_runner_entry: Some(Some(uid(0x61))),
             error_code: None,
@@ -4921,7 +4696,7 @@ mod tests {
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             tool_plan: json!({"tools": []}),
             pinned_runner_entry: Some(None),
             error_code: None,

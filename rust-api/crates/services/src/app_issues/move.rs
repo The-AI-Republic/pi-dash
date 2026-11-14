@@ -104,11 +104,11 @@
 
 use std::fmt::Write as _;
 
+use pidash_db::agent_runs::AgentRunStatus;
 /// Re-exported for the pool implementation + the 404 handler: the
 /// generic resolve-miss detail (`"Project not found"`).
 pub use pidash_db::app_project::models::project::NOT_FOUND_DETAIL;
 use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
-use pidash_db::dispatch::AgentRunStatus;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use serde_json::{Map, Value};
@@ -117,7 +117,7 @@ use uuid::Uuid;
 use super::pr_links::TaskEnqueue;
 use super::serializers_detail::serialize_drf_datetime;
 use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
-use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
+use crate::domain::issue_create_sql::{advisory_lock_key, saved_sequence_id};
 use crate::domain::issues_move::{REPOINT_DESCRIPTION_SQL, REPOINT_ISSUE_COMMENT_SQL};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};

@@ -7,8 +7,6 @@
 //! outbox [`EnqueueHook`][pidash_jobs::hooks::EnqueueHook],
 //! [`AppMovePostCommitHook`] the [`MoveHook`][pidash_jobs::hooks::MoveHook]
 //! over this binary's inline terminal drain and move pod drain, and
-//! [`AppMoveAdmissionCache`] the
-//! [`LiveMoveAdmissionCache`][pidash_jobs::hooks::LiveMoveAdmissionCache].
 //! Handlers that drive domain writes register them on the
 //! [`WriteTxn`][pidash_services::domain::WriteTxn] hook registry so domain
 //! chains can reach the binary's pool, pubsub and runner settings without
@@ -19,20 +17,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use pidash_db::redis::client_from_settings;
-use pidash_jobs::hooks::{
-    EnqueueHook, LiveMoveAdmissionCache, MoveHook, OutboxTaskSink, TerminalEffectsDrain,
-};
+use pidash_jobs::hooks::{EnqueueHook, MoveHook, OutboxTaskSink, TerminalEffectsDrain};
 use pidash_jobs::issue_transition::PodDrain;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues_move::{
-    MoveAdmissionCache, MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
+    MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
 };
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::orchestration::{drain_pod_by_id, drain_terminal_effects, MovePubsub};
-use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 
 /// `task.delay(*args, **kwargs)` through the jobs kernel: unported tasks
@@ -123,7 +118,7 @@ pub struct AppMovePostCommitHook {
 }
 
 impl AppMovePostCommitHook {
-    pub fn new(pool: &PgPool, state: &AppState, cache: RedisAdmissionCache) -> Self {
+    pub fn new(pool: &PgPool, state: &AppState) -> Self {
         let settings = state.settings();
         let terminal = Arc::new(ApiTerminalEffectsDrain {
             pool: pool.clone(),
@@ -136,8 +131,6 @@ impl AppMovePostCommitHook {
         Self {
             hook: MoveHook::new(
                 pool,
-                &settings.cloud_agent,
-                cache,
                 client_from_settings(settings),
                 &settings.runner,
                 terminal,
@@ -169,31 +162,5 @@ impl MovePostCommitHook for AppMovePostCommitHook {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.hook.send_cancel(runner_id, run_id)
-    }
-}
-
-/// The admission cache over the binary's Redis cache: the two reads the
-/// execution resolve needs, with string errors. Both move drivers pass
-/// one through their creation facts.
-#[derive(Clone)]
-pub struct AppMoveAdmissionCache {
-    inner: LiveMoveAdmissionCache,
-}
-
-impl AppMoveAdmissionCache {
-    pub fn new(cache: RedisAdmissionCache) -> Self {
-        Self {
-            inner: LiveMoveAdmissionCache::new(cache),
-        }
-    }
-}
-
-impl MoveAdmissionCache for AppMoveAdmissionCache {
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, String> {
-        self.inner.bucket_count(key)
-    }
-
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), String> {
-        self.inner.add_or_incr(key, timeout_secs)
     }
 }

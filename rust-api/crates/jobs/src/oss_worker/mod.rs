@@ -15,12 +15,8 @@
 //! * [`runner_seams::RunnerSeams`] — live providers for the 11 runner
 //!   tasks (PIDASHCONV-859), plus the chat-event publish it shares with
 //!   the API chat handler.
-//! * [`execute_seams::LiveExecuteSeams`] — live execute seams over
-//!   [`model_runtime`] (PIDASHCONV-832 + PIDASHCONV-866).
 //! * [`redis_origin::OriginRedis`] — live sync origin writer for
 //!   `issue_activity` (PIDASHCONV-836).
-//! * [`model_runtime`] — the live model runtime the execute seams
-//!   invoke on.
 //! * [`kms_transport::HttpKmsTransport`] — the production KMS transport
 //!   (moved from `pidash-api`, which re-exports it under its old path):
 //!   the key resolver's second caller after the assistant handlers.
@@ -38,10 +34,7 @@
 //! step — the inventory suite, not this module, pins the
 //! worker-owned set.
 
-pub mod aws_credentials;
-pub mod execute_seams;
 pub mod kms_transport;
-pub mod model_runtime;
 pub mod redis_origin;
 pub mod runner_seams;
 
@@ -50,7 +43,8 @@ use std::path::PathBuf;
 use pidash_db::config::Settings;
 use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
 use pidash_db::Pools;
-use pidash_services::extensions::{AssistantModelSeam, NoExtraToolsets};
+
+use pidash_services::extensions::AssistantModelSeam;
 
 use crate::worker::Registry;
 
@@ -189,9 +183,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         ctx.seed_dir.clone(),
-        ctx.settings.cloud_agent.clone(),
-        ctx.settings.managed_runner.clone(),
-        std::sync::Arc::new(NoExtraToolsets),
+        ctx.settings.pidash_agent.clone(),
         ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
@@ -293,11 +285,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         std::sync::Arc::new(crate::orchestration::LiveFireTickSeam::new(
             ctx.pools.primary().clone(),
-            ctx.settings.cloud_agent.clone(),
-            ctx.settings.managed_runner.clone(),
+            ctx.settings.pidash_agent.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
-            std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         )),
     );
@@ -306,11 +296,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         crate::orchestration::live_scheduler_dispatch(
             ctx.pools.primary().clone(),
-            ctx.settings.cloud_agent.clone(),
-            ctx.settings.managed_runner.clone(),
+            ctx.settings.pidash_agent.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
-            std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         ),
     );
@@ -325,11 +313,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         dyn pidash_services::domain::transition::IssueTransitionHook,
     > = std::sync::Arc::new(crate::issue_transition::WorkerTransitionHook::new(
         ctx.pools.primary().clone(),
-        ctx.settings.cloud_agent.clone(),
-        ctx.settings.managed_runner.clone(),
+        ctx.settings.pidash_agent.clone(),
         redis.clone(),
         ctx.settings.runner.clone(),
-        std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
     ));
     crate::integrations::git_sync::register_git_sync_tasks(
@@ -405,7 +391,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         redis.clone(),
         &ctx.settings,
-        std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
     ));
     crate::runner_runs::register_runner_runs_tasks(
@@ -422,56 +407,20 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::runner_runs::register_offline_recovery_tasks(
         registry,
         ctx.pools.primary().clone(),
-        runner_seams.clone(),
-    );
-    crate::runner_runs::register_unsatisfiable_pins_tasks(
-        registry,
-        ctx.pools.primary().clone(),
         runner_seams,
     );
-    crate::runner_runs::register_engine_pause_tasks(registry, ctx.pools.primary().clone());
-    // D-11 execution tasks (PIDASHCONV-832; kept in sync with
-    // `inventory::tests::mirror_registry_matches_tasks_table`). All
-    // four handlers execute here on live seams
-    // (`oss_worker::execute_seams::LiveExecuteSeams`), including the run
-    // task's model runtime (PIDASHCONV-866 — no forward override). The
-    // register call also owns `managed_runner.expire_waiting_runs`
-    // (beat-published every `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`;
-    // Django registers it too since PDASHOSS01-224).
-    let invoke = model_runtime::invoke::InvokeCtx {
-        tools: model_runtime::tools_exec::ToolCtx {
-            pool: ctx.pools.primary().clone(),
-            orm: ctx.orm.clone(),
-            cloud: ctx.settings.cloud_agent.clone(),
-            managed: ctx.settings.managed_runner.clone(),
-            http: reqwest::Client::new(),
-            github: model_runtime::github::GithubAppContext::new(
-                ctx.pools.primary().clone(),
-                pidash_db::redis::RedisHandle::from_settings(&ctx.settings),
-                ctx.settings.secret_key.clone(),
-            ),
-            toolsets: std::sync::Arc::new(NoExtraToolsets),
-            redis: redis.clone(),
-            runner: ctx.settings.runner.clone(),
-            transition_hook: transition_hook.clone(),
-        },
-        keys: model_runtime::keys::KeyResolver::from_env(
-            ctx.settings.assistant.key_cache_ttl_secs,
-            ctx.settings.assistant.key_cache_maxsize,
-        ),
-    };
-    crate::dispatch_execute::register_execute_tasks(
+    crate::runner_runs::register_pidash_agent_pause_tasks(registry, ctx.pools.primary().clone());
+    // Managed wait expiry (P3 step A; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`):
+    // beat-published every `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`;
+    // Django registers it too since PDASHOSS01-224.
+    crate::runner_runs::waiting_expiry::register_waiting_expiry_tasks(
         registry,
         ctx.pools.primary().clone(),
-        ctx.settings.cloud_agent.clone(),
-        ctx.settings.managed_runner.clone(),
-        std::sync::Arc::new(execute_seams::LiveExecuteSeams::new(
+        ctx.settings.pidash_agent.clone(),
+        std::sync::Arc::new(crate::runner_runs::waiting_expiry::LiveExecuteSeams::new(
             ctx.pools.primary().clone(),
-            ctx.settings.cloud_agent.block_private_urls,
-            invoke,
-            ctx.assistant_seam.clone(),
         )),
-        std::sync::Arc::new(NoExtraToolsets),
     );
     // D-08 issue_activity (PIDASHCONV-836; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`, where the
@@ -608,10 +557,7 @@ mod tests {
             crate::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
             crate::tasks_ticker::scan::FIRE_TICK_TASK,
             crate::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK,
-            crate::dispatch::RUN_CLOUD_AGENT_TASK,
-            crate::dispatch_execute::SCAN_QUEUED_RUNS_TASK,
-            crate::dispatch_execute::SWEEP_STALE_RUNS_TASK,
-            crate::dispatch_execute::EXPIRE_WAITING_RUNS_TASK,
+            crate::runner_runs::waiting_expiry::EXPIRE_WAITING_RUNS_TASK,
         ]);
         expected.insert(crate::tasks_mail::NOTIFICATIONS_TASK);
         expected.extend(crate::runner_runs::TASK_NAMES);
@@ -637,7 +583,7 @@ mod tests {
             crate::tasks_export::ISSUE_EXPORT_TASK,
             crate::tasks_export::ANALYTIC_EXPORT_TASK,
         ]);
-        assert_eq!(expected.len(), 80, "worker-owned count drifted");
+        assert_eq!(expected.len(), 76, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

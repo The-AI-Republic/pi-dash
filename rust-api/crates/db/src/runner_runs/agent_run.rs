@@ -13,7 +13,7 @@
 //! live on the L1 [`pidash_types::runner_runs::AgentRunStatus`] and
 //! are reused, not re-ported.
 //!
-//! D-11's `db::dispatch::agent_run` keeps its own 22-column read
+//! D-11's `db::agent_runs::agent_run` keeps its own 22-column read
 //! shape for dispatch queries; this is the runner-domain full port.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-02-models-runs.golden.json`
@@ -32,7 +32,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::integrations::OnDelete;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, AgentRunTrigger};
 
 /// Physical table (`Meta.db_table`, `models.py:1038`).
@@ -286,7 +286,7 @@ pub fn cloud_assignment_valid(
     if executor_kind.is_machine_executor() {
         return true;
     }
-    executor_kind == AgentExecutorKind::CloudAgent
+    executor_kind == AgentExecutorKind::RetiredCloudRun
         && runner_id.is_none()
         && pinned_runner_id.is_none()
         && owner_id.is_none()
@@ -491,7 +491,7 @@ impl AgentRun {
 mod tests {
     use super::*;
     use crate::runner_runs::test_support as ts;
-    use pidash_types::dispatch::MACHINE_EXECUTORS;
+    use pidash_types::agent_runs::MACHINE_EXECUTORS;
 
     fn run_fixture() -> serde_json::Value {
         ts::model(&ts::fx02(), "AgentRun").clone()
@@ -535,7 +535,7 @@ mod tests {
             MACHINE_EXECUTORS,
             [
                 AgentExecutorKind::LocalRunner,
-                AgentExecutorKind::ManagedRunner
+                AgentExecutorKind::PidashAgent
             ]
         );
         let some_id = Some(uuid::Uuid::nil());
@@ -549,7 +549,7 @@ mod tests {
         }
         // Cloud agent with no local assignment is valid.
         assert!(cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             None,
@@ -557,28 +557,28 @@ mod tests {
         ));
         // Each local-assignment column alone invalidates a cloud run.
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             some_id,
             None,
             None,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             some_id,
             None,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             some_id,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             None,

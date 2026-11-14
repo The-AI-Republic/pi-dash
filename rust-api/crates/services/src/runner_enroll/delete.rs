@@ -416,7 +416,7 @@ pub async fn delete_machine_row(db: &impl ConnectionTrait, machine_id: Uuid) -> 
 
 /// CASCADE from the machine row: the credential rows die with the
 /// machine (Django's collector; the DB FK carries no cascade).
-pub async fn delete_machine_engine_credentials(
+pub async fn delete_machine_pidash_agent_credentials(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
 ) -> Result<(), DbErr> {
@@ -484,7 +484,7 @@ pub trait RunnerDeleteStore: RevokeStore {
     ) -> Result<(), RevokeError>;
 
     /// D2a: revoke the machine's engine credential
-    /// (`crate::domain::engine_credential::revoke_engine_credential`,
+    /// (`crate::domain::pidash_agent_credential::revoke_pidash_agent_credential`,
     /// `machine_removed`): the cascade step Django runs between the
     /// token revoke and the runner frames (`runner_delete.py:138`).
     async fn revoke_machine_engine_credential(
@@ -573,7 +573,7 @@ pub trait RunnerDeleteStore: RevokeStore {
     /// CASCADE from the machine row (`on_delete=CASCADE`, emulated by
     /// Django's collector — the DB FK carries no cascade of its own):
     /// the credential rows die with the machine.
-    async fn delete_machine_engine_credentials(
+    async fn delete_machine_pidash_agent_credentials(
         &mut self,
         machine_id: Uuid,
     ) -> Result<(), RevokeError>;
@@ -755,7 +755,9 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
         store.delete_machine_sessions(machine_id).await?;
         store.null_runner_machines(machine_id).await?;
         store.null_token_machines(machine_id).await?;
-        store.delete_machine_engine_credentials(machine_id).await?;
+        store
+            .delete_machine_pidash_agent_credentials(machine_id)
+            .await?;
         store.delete_machine_row(machine_id).await?;
     }
     Ok(DeleteMachineOutcome {
@@ -1162,7 +1164,7 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_machine_engine_credentials(
+        async fn delete_machine_pidash_agent_credentials(
             &mut self,
             machine_id: Uuid,
         ) -> Result<(), RevokeError> {

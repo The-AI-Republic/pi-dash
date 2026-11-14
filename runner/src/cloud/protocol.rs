@@ -453,16 +453,16 @@ pub struct CreateRunnerCmd {
 pub struct MachinePollBody {
     /// Stream ids of the messages handled since the last poll.
     pub ack: Vec<String>,
-    /// The machine's built-in engine state (PIDESKAPP-121, design §8): the
+    /// The machine's Pi Dash Agent state (PIDESKAPP-121, design §8): the
     /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
     /// from daemons before the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_state: Option<EngineStateReport>,
+    pub engine_state: Option<PidashAgentStateReport>,
 }
 
 /// `engine_state` in [`MachinePollBody`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineStateReport {
+pub struct PidashAgentStateReport {
     /// `available` / `signed_out` / `expiring` / `unavailable`.
     pub state: pidash_ipc::protocol::EngineState,
     /// Why it is not available (`engine_sign_in_required`,
@@ -476,7 +476,7 @@ pub struct EngineStateReport {
     pub credential_expires_at: Option<DateTime<Utc>>,
 }
 
-impl From<&pidash_ipc::protocol::EngineStatusInfo> for EngineStateReport {
+impl From<&pidash_ipc::protocol::EngineStatusInfo> for PidashAgentStateReport {
     fn from(s: &pidash_ipc::protocol::EngineStatusInfo) -> Self {
         Self {
             state: s.state,
@@ -746,7 +746,7 @@ mod tests {
     fn machine_poll_body_carries_the_engine_state() {
         let body = MachinePollBody {
             ack: vec!["1-0".into()],
-            engine_state: Some(EngineStateReport {
+            engine_state: Some(PidashAgentStateReport {
                 state: pidash_ipc::protocol::EngineState::SignedOut,
                 reason_code: Some("engine_sign_in_required".into()),
                 sign_in_state: pidash_ipc::protocol::EngineSignInState::Expired,

@@ -6,9 +6,7 @@
 //! (PIDASHCONV-539):
 //!
 //! * [`EXPIRE_TASK`] — `expire_stale_approvals` (`:42-97`).
-//! * [`MARK_OFFLINE_TASK`] — `mark_offline_runners` (`:100-111`), plus
-//!   the BUSY-but-dead flip (`_sweep_dead_busy_runners`, PDASHOSS01-233)
-//!   shared with `sweep_stale_runners`.
+//! * [`MARK_OFFLINE_TASK`] — `mark_offline_runners` (`:100-111`).
 //! * [`SWEEP_IDLE_TASK`] — `sweep_idle_sessions` (`:117-138`).
 //! * [`SWEEP_STALE_TASK`] — `sweep_stale_runners` (`:141-153`).
 //! * [`SWEEP_STREAMS_TASK`] — `sweep_old_streams` (`:155-202`).
@@ -98,14 +96,11 @@ use uuid::Uuid;
 use pidash_db::entity as orm;
 use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
-use pidash_db::runner_enroll::columns::enums::{
-    RUNNER_STATUS_BUSY, RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE,
-};
+use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE};
 use pidash_services::runner_runs::finalization::{
     self, finalize_error_code, plan_finalize_values, TERMINAL_EFFECTS_TASK,
 };
-use pidash_services::runner_sessions::guards::BUSY_STATUSES;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus};
 
 use crate::queue::{self, JobRow, NewJob};
@@ -302,44 +297,6 @@ pub fn mark_online_runners_offline_statement(
                 .add(Column::LastHeartbeatAt.is_not_null())
                 .not(),
         )
-}
-
-/// BUSY-but-dead flip (`_sweep_dead_busy_runners`, PDASHOSS01-233):
-/// `BUSY` runners past the threshold holding no busy-status run go
-/// `OFFLINE` (a runner still holding one is left to the stall reaper,
-/// whose finalization releases it). Same heartbeat `NOT (… IS NOT
-/// NULL)` shape as the online flip, so a `NULL` heartbeat counts as
-/// stale. The `.exclude(agent_runs__status__in=BUSY_STATUSES)` reverse
-/// join is a correlated `NOT EXISTS` (values in [`BUSY_STATUSES`]
-/// order).
-pub fn mark_dead_busy_runners_offline_statement(
-    threshold: DateTime<Utc>,
-) -> sea_orm::UpdateMany<orm::runner::Entity> {
-    use orm::runner::{Column, Entity};
-    use sea_orm::sea_query::{Alias, Query};
-    let serving = Alias::new("U1");
-    let holds_busy_run = Query::select()
-        .expr_as(Expr::val(1), Alias::new("a"))
-        .from_as(orm::agent_run::Entity, serving.clone())
-        .and_where(
-            Expr::col((serving.clone(), orm::agent_run::Column::Status))
-                .is_in(BUSY_STATUSES.iter().map(AgentRunStatus::value)),
-        )
-        .and_where(
-            Expr::col((serving, orm::agent_run::Column::RunnerId)).equals((Entity, Column::Id)),
-        )
-        .limit(1)
-        .to_owned();
-    Entity::update_many()
-        .col_expr(Column::Status, Expr::value(RUNNER_STATUS_OFFLINE))
-        .filter(Column::Status.eq(RUNNER_STATUS_BUSY))
-        .filter(
-            Condition::all()
-                .add(Column::LastHeartbeatAt.gte(threshold))
-                .add(Column::LastHeartbeatAt.is_not_null())
-                .not(),
-        )
-        .filter(Condition::all().add(Expr::exists(holds_busy_run)).not())
 }
 
 /// Idle-session candidates (`tasks.py:127-129`): unrevoked rows with
@@ -587,12 +544,6 @@ pub trait SweepsRunsStore: Send + Sync {
         &self,
         threshold: DateTime<Utc>,
     ) -> impl Future<Output = Result<u64, SweepsError>> + Send;
-    /// BUSY-but-dead flip (`_sweep_dead_busy_runners`): idle `BUSY` rows
-    /// past `threshold` to `OFFLINE`. Returns the affected count.
-    fn mark_dead_busy_runners_offline(
-        &self,
-        threshold: DateTime<Utc>,
-    ) -> impl Future<Output = Result<u64, SweepsError>> + Send;
     /// Idle-session candidates (`tasks.py:127-129`): `(id, runner_id)` in
     /// `values_list` order.
     fn idle_sessions(
@@ -745,8 +696,8 @@ where
 
 /// `mark_offline_runners` (`tasks.py:100-111`): one `UPDATE` flipping
 /// `ONLINE` runners with no heartbeat in
-/// [`HEARTBEAT_OFFLINE_GRACE_SECS`] to `OFFLINE`, then the BUSY-but-dead
-/// flip at the same threshold. Returns the summed affected count.
+/// [`HEARTBEAT_OFFLINE_GRACE_SECS`] to `OFFLINE`. Returns the affected
+/// count.
 pub async fn drive_mark_offline_runners<S>(
     store: &S,
     now: &DateTime<Utc>,
@@ -759,11 +710,7 @@ where
     if affected > 0 {
         tracing::info!("marked {affected} runner(s) offline via heartbeat timeout");
     }
-    let dead_busy = store.mark_dead_busy_runners_offline(threshold).await?;
-    if dead_busy > 0 {
-        tracing::info!("marked {dead_busy} dead busy runner(s) offline via heartbeat timeout");
-    }
-    Ok(affected + dead_busy)
+    Ok(affected)
 }
 
 /// `sweep_idle_sessions` (`tasks.py:117-138`): revoke unrevoked sessions
@@ -797,9 +744,9 @@ where
     Ok(sessions.len())
 }
 
-/// `sweep_stale_runners` (`tasks.py:141-153`): the same two flips as
+/// `sweep_stale_runners` (`tasks.py:141-153`): the same flip as
 /// [`drive_mark_offline_runners`] with the configured threshold
-/// (default 50s). Returns the summed affected count.
+/// (default 50s). Returns the affected count.
 pub async fn drive_sweep_stale_runners<S>(
     store: &S,
     now: &DateTime<Utc>,
@@ -813,11 +760,7 @@ where
     if affected > 0 {
         tracing::info!("sweep_stale_runners flipped {affected} offline");
     }
-    let dead_busy = store.mark_dead_busy_runners_offline(threshold).await?;
-    if dead_busy > 0 {
-        tracing::info!("sweep_stale_runners flipped {dead_busy} dead busy runner(s) offline");
-    }
-    Ok(affected + dead_busy)
+    Ok(affected)
 }
 
 /// `sweep_old_streams` (`tasks.py:155-202`): per runner with sessions,
@@ -953,16 +896,6 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         Ok(result.rows_affected)
     }
 
-    async fn mark_dead_busy_runners_offline(
-        &self,
-        threshold: DateTime<Utc>,
-    ) -> Result<u64, SweepsError> {
-        let result = mark_dead_busy_runners_offline_statement(threshold)
-            .exec(&sea_orm_connection(&self.pool))
-            .await?;
-        Ok(result.rows_affected)
-    }
-
     async fn idle_sessions(
         &self,
         threshold: DateTime<Utc>,
@@ -1071,7 +1004,7 @@ async fn expire_approval_locked(
     };
     finalization::finalize_update(conn, &values, row.run_id, now).await?;
     if AgentExecutorKind::from_value(&finalized.executor_kind)
-        == Some(AgentExecutorKind::CloudAgent)
+        == Some(AgentExecutorKind::RetiredCloudRun)
     {
         finalization::append_terminal_event_once(
             conn,
@@ -1255,8 +1188,6 @@ mod tests {
         emitted: Mutex<Vec<Uuid>>,
         emit_err_runs: HashSet<Uuid>,
         offline_thresholds: Mutex<Vec<DateTime<Utc>>>,
-        dead_busy_affected: u64,
-        dead_busy_thresholds: Mutex<Vec<DateTime<Utc>>>,
         offline_affected: u64,
         idle: Vec<(Uuid, Uuid)>,
         revoked: Mutex<Vec<Vec<Uuid>>>,
@@ -1299,13 +1230,6 @@ mod tests {
         ) -> Result<u64, SweepsError> {
             self.offline_thresholds.lock().unwrap().push(threshold);
             Ok(self.offline_affected)
-        }
-        async fn mark_dead_busy_runners_offline(
-            &self,
-            threshold: DateTime<Utc>,
-        ) -> Result<u64, SweepsError> {
-            self.dead_busy_thresholds.lock().unwrap().push(threshold);
-            Ok(self.dead_busy_affected)
         }
         async fn idle_sessions(
             &self,
@@ -1946,54 +1870,6 @@ mod tests {
         );
     }
 
-    /// PDASHOSS01-233: both sweepers also run the BUSY-but-dead flip at
-    /// their own threshold and return the summed count.
-    #[tokio::test]
-    async fn sweepers_also_flip_dead_busy_runners() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 2, 22, 53, 29).unwrap();
-        let store = FakeStore {
-            offline_affected: 2,
-            dead_busy_affected: 3,
-            ..Default::default()
-        };
-        assert_eq!(drive_mark_offline_runners(&store, &now).await.unwrap(), 5);
-        assert_eq!(
-            store.dead_busy_thresholds.lock().unwrap().as_slice(),
-            &[Utc.with_ymd_and_hms(2026, 10, 2, 22, 51, 59).unwrap()]
-        );
-        let store = FakeStore {
-            dead_busy_affected: 1,
-            ..Default::default()
-        };
-        assert_eq!(
-            drive_sweep_stale_runners(&store, &now, 50).await.unwrap(),
-            1
-        );
-        assert_eq!(
-            store.dead_busy_thresholds.lock().unwrap().as_slice(),
-            &[Utc.with_ymd_and_hms(2026, 10, 2, 22, 52, 39).unwrap()]
-        );
-    }
-
-    /// Django's `_sweep_dead_busy_runners` (PR #541): same predicates as
-    /// the captured `UPDATE "runner" SET "status" = 'offline' WHERE
-    /// ("runner"."status" = 'busy' AND NOT (heartbeat >= t AND heartbeat
-    /// IS NOT NULL) AND NOT (EXISTS(SELECT 1 AS "a" FROM "agent_run" U1
-    /// WHERE (U1."status" IN (…BUSY…) AND U1."runner_id" =
-    /// ("runner"."id")) LIMIT 1)))`.
-    #[test]
-    fn dead_busy_flip_statement_shape() {
-        assert_eq!(
-            pg_update(mark_dead_busy_runners_offline_statement(at())),
-            "UPDATE \"runner\" SET \"status\" = 'offline' WHERE \"runner\".\"status\" = 'busy' \
-             AND (NOT (\"runner\".\"last_heartbeat_at\" >= '2026-01-02 03:04:05.000000 +00:00' AND \
-             \"runner\".\"last_heartbeat_at\" IS NOT NULL)) AND (NOT EXISTS(SELECT 1 AS \"a\" FROM \
-             \"agent_run\" AS \"U1\" WHERE \"U1\".\"status\" IN ('assigned', 'waiting_for_worktree', \
-             'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND \
-             \"U1\".\"runner_id\" = \"runner\".\"id\" LIMIT 1))"
-        );
-    }
-
     #[tokio::test]
     async fn sweep_stale_uses_configured_threshold() {
         let store = FakeStore {
@@ -2240,7 +2116,7 @@ mod tests {
         for task in l6a {
             assert!(registry.owns(task), "{task} registered");
         }
-        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 17);
+        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 16);
         assert!(crate::runner_runs::is_runner_runs_task(EXPIRE_TASK));
         assert!(crate::runner_runs::is_runner_runs_task(
             "runner.reconcile_stalled_runs"

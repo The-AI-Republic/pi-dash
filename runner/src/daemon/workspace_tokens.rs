@@ -139,7 +139,7 @@ impl WorkspaceTokens {
     }
 
     /// The machine's engine credential, when one with a token is held.
-    pub(crate) fn engine_credential(&self) -> Option<crate::config::schema::EngineCredential> {
+    pub(crate) fn engine_credential(&self) -> Option<crate::config::schema::PidashAgentCredential> {
         self.read()
             .cli
             .engine_credential

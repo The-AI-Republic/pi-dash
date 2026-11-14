@@ -10,7 +10,7 @@
 // proves the refusal while stub tests prove the success shapes.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { getAgentProfile } from "./assistant-desktop.js";
+import { getPidashAgentProfile } from "./assistant-desktop.js";
 
 export interface AgentAvailability {
   available: boolean;
@@ -29,7 +29,7 @@ export const AGENT_AVAILABILITY_UNKNOWN = "agent_profile_unreachable";
  */
 export async function checkAgentAvailability(client: ApiClient): Promise<AgentAvailability> {
   try {
-    const profile = await getAgentProfile(client);
+    const profile = await getPidashAgentProfile(client);
     return { available: profile.available, reasonCode: profile.available ? "" : profile.reason_code };
   } catch {
     return { available: false, reasonCode: AGENT_AVAILABILITY_UNKNOWN };

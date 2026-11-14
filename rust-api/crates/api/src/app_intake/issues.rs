@@ -88,7 +88,7 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
 use super::{
@@ -1811,7 +1811,7 @@ pub struct IssueObjectValidation {
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
 /// `serializers/issue.py:63-76`): empty `external_source` short-circuits
-/// before any query. Git-only after PDASHOSS01-354.
+/// before any query.
 pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1819,10 +1819,9 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
     if source.is_empty() {
         return Ok(false);
     }
-    // No `is_synced` annotation rides these handlers, so the sync table
-    // decides (generic `git_issue_syncs`, provider='github' rows included;
-    // legacy GitHub tables sunset, PDASHOSS01-354).
-    use pidash_db::entity::git_issue_syncs as git_entity;
+    // No `is_synced` annotation rides these handlers, so the sync tables
+    // decide.
+    use pidash_db::entity::{git_issue_syncs as git_entity, github_issue_syncs as gh_entity};
     let db = sea_conn(pool);
     let git = git_entity::Entity::find()
         .filter(git_entity::Column::IssueId.eq(issue.id))
@@ -1832,7 +1831,18 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(git.is_some())
+    if git.is_some() {
+        return Ok(true);
+    }
+    let github = gh_entity::Entity::find()
+        .filter(gh_entity::Column::IssueId.eq(issue.id))
+        .select_only()
+        .column(gh_entity::Column::IssueId)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(github.is_some())
 }
 
 /// Table names for the sync probes above live behind Django model
@@ -2190,7 +2200,7 @@ async fn validate_executor(
         );
         return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+    let normalized = pidash_types::agent_runs::normalize_executor_write(&value)
         .expect("known value parses")
         .value()
         .to_owned();
@@ -4975,10 +4985,14 @@ fn compile_text_predicate(
         "issue__target_date" => "\"issues\".\"target_date\"",
         _ => return Ok(None),
     };
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
+    }
     if operator == "=" {
-        // Bare token: Django __contains is a text LIKE, no date validation
-        // (Django 200 for garbage / partial dates). The single-value form
-        // LIKEs the date text with metacharacters escaped.
+        // Single-value form on a date term: Django's `contains`
+        // lookup, i.e. LIKE with metacharacters escaped.
         let escaped = text
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -4986,11 +5000,6 @@ fn compile_text_predicate(
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
-    }
-    // Explicit bounds must parse as dates: Django's `get_prep_value`
-    // raises `ValidationError` (400 invalid detail) on garbage.
-    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
     }
     let holder = placeholder(next);
     binds.push(OwnedBind::Text(text.to_owned()));
@@ -6006,7 +6015,7 @@ async fn validate_issue_create(
         {
             // #2903: deprecated writes translate to local_runner.
             Some(
-                pidash_types::dispatch::normalize_executor_write(executor)
+                pidash_types::agent_runs::normalize_executor_write(executor)
                     .expect("choice passes")
                     .value()
                     .to_owned(),
@@ -6723,7 +6732,7 @@ fn opt_limited_string(
 /// * `cloud_agent` needs the instance kill switch
 ///   (`CLOUD_AGENT_ENABLED`); the per-run BYOK question is answered at
 ///   run creation, not here.
-/// * `managed_runner` evaluates `managed_runner_availability` in gate
+/// * `managed_runner` evaluates `pidash_agent_availability` in gate
 ///   order; the desktop-unenrolled case (`NO_RUNNER_FOR_PROJECT`) is
 ///   ACCEPTED (the client self-resolves on open). The deeper gates
 ///   (LLM profile, enrollment, online presence) need the managed-runner

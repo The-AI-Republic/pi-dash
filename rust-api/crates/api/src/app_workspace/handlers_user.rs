@@ -3171,7 +3171,7 @@ pub async fn me_deactivate(
     // #2910): every machine of the user loses its live credential.
     {
         let sea = pidash_db::pool::sea_orm_connection(pool);
-        match pidash_services::domain::engine_credential::revoke_engine_credentials_for_user(
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credentials_for_user(
             &sea, actor.id, now,
         )
         .await
@@ -3201,7 +3201,7 @@ pub async fn me_deactivate(
                     }
                 }
             }
-            Err(pidash_services::domain::engine_credential::RevokeError::Database(error)) => {
+            Err(pidash_services::domain::pidash_agent_credential::RevokeError::Database(error)) => {
                 return write_denial(error).into_response();
             }
             Err(_) => return Denial::ServerError.into_response(),

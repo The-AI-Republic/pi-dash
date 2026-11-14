@@ -37,7 +37,7 @@
       "all_sections_sorted": true,
       "get_section_unknown": "PromptRegistryError: unknown section key: 'no-such-section'",
       "max_section_body_length": 100000,
-      "section_count": 39,
+      "section_count": 24,
       "sections": [
         {
           "allows_personal_override": true,
@@ -71,171 +71,6 @@
           "is_overridable": false,
           "key": "blocking",
           "title": "Blocking the run"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 1325,
-          "body_sha256": "838ae36ea01592172c2abc7f535257f163b4c320e8bf994a9c17b1707db82f69",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-capabilities",
-          "title": "Cloud capabilities"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 170,
-          "body_sha256": "37bcc0d1da96ffe77af82a753b76a188513602c77e3cc78f3ebcdcf60b581c06",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-direct-task",
-          "title": "Cloud direct task"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 238,
-          "body_sha256": "1f8f38d9b349cc46363497ff7d6facd2305bfe9d89795c4fa3b0a6d07b7dcd0a",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-ending",
-          "title": "Cloud ending contract"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 336,
-          "body_sha256": "c0e378977ef50deb83102b428474af9e6460772d4363c49f88efdf8a75b2c852",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-execution-loop",
-          "title": "Cloud execution loop"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 248,
-          "body_sha256": "271013cfad6e27e37aa8ab9878c9fa9e33dd375de535c3092e9be8db0c1c3e73",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-intro",
-          "title": "Cloud Agent introduction"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 341,
-          "body_sha256": "ced74219d292c0c414d777ae22c1211ab732870471f02c24a8ca48ecc078393a",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-issue-context",
-          "title": "Cloud issue context"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 333,
-          "body_sha256": "7a8ed59792700e37ea354481c700945526784bb796fa75fef031afbac7f334b8",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-project-context",
-          "title": "Cloud project context"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 495,
-          "body_sha256": "7d7f24b80c66e7614abf2d94ec5f0a41bc63a74f47dcb52de0712513d5617bb0",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-review-intro",
-          "title": "Cloud review introduction"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 237,
-          "body_sha256": "fb74b02627d218086195f40891369fbc698d21993bcc5b942c6e3e139cee7107",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-review-loop",
-          "title": "Cloud review loop"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 185,
-          "body_sha256": "e8fda976bd32df8167789721d4f748958008634e445acf4f0126b97dc1c2a181",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-scheduler-intro",
-          "title": "Cloud scheduler introduction"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 247,
-          "body_sha256": "f37a244ffc88d0b8421d8206513b0ba39667a3290caa75fed9eeaee3f0cb4c61",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-scheduler-loop",
-          "title": "Cloud scheduler loop"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 141,
-          "body_sha256": "4bf7a37fd063600eb98534dcb3515cb54f37a54fe778fa2188e21a7f9002f631",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-scheduler-task",
-          "title": "Cloud scheduler task"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 678,
-          "body_sha256": "fcba1dc1bfcebefe4e585b0460dd77e0a3f333ef3388b4d6a3db6d632ab7e15c",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-test-intro",
-          "title": "Cloud test introduction"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 575,
-          "body_sha256": "301df924c6faa39592da3efc34c8071297380e12cd1038019f981ab27e4b6d4b",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-test-loop",
-          "title": "Cloud test loop"
-        },
-        {
-          "allows_personal_override": false,
-          "allows_workspace_override": false,
-          "body_len": 310,
-          "body_sha256": "83442deef7440cecd9dabcdd17570fefaef10430e4af16b1dcf74d27931dabdf",
-          "customizable": "locked",
-          "is_locked": true,
-          "is_overridable": false,
-          "key": "cloud-write-policy",
-          "title": "Cloud write policy"
         },
         {
           "allows_personal_override": true,
@@ -496,7 +331,7 @@
     }
   },
   "fixture_id": "FIX-registry",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django). NEWPIDASH-177: ported_from bumped to f92fe3c072cb57dee09aa7348a0bd3dc549d7881 — PDASHOSS01-350 added 14 lines to Django pidash-cli.md (#3067) and the mirror+hashes were synced in #3068; only pidash-cli.md differs between 7d64d46ad and f92fe3c07 in prompting/. PDASHOSS01-276: pidash-cli body_len/body_sha256 recomputed over the Rust mirror with the 4-line scheduled-run yield block added (the same block the Django half, #943, adds to apps/api pidash-cli.md); ported_from is unchanged until that half lands. NEWPIDASH-208: ported_from bumped to cc00fc6949466dd390e8ff622057589a592a93be — PDASHOSS01-352/351 and PDASHOSS01-276 drift (envelope with total_count/next_page_results and scheduled-run yield block) updated pidash-cli.md to 36925 bytes / 54c7088c; CI provisions the Django prompting tree at ported_from, so the stale 1567f8bc (35917 bytes) caused mirror diverged and registry mismatch.",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django). NEWPIDASH-177: ported_from bumped to f92fe3c072cb57dee09aa7348a0bd3dc549d7881 \u2014 PDASHOSS01-350 added 14 lines to Django pidash-cli.md (#3067) and the mirror+hashes were synced in #3068; only pidash-cli.md differs between 7d64d46ad and f92fe3c07 in prompting/. PDASHOSS01-276: pidash-cli body_len/body_sha256 recomputed over the Rust mirror with the 4-line scheduled-run yield block added (the same block the Django half, #943, adds to apps/api pidash-cli.md); ported_from is unchanged until that half lands. NEWPIDASH-208: ported_from bumped to cc00fc6949466dd390e8ff622057589a592a93be \u2014 PDASHOSS01-352/351 and PDASHOSS01-276 drift (envelope with total_count/next_page_results and scheduled-run yield block) updated pidash-cli.md to 36925 bytes / 54c7088c; CI provisions the Django prompting tree at ported_from, so the stale 1567f8bc (35917 bytes) caused mirror diverged and registry mismatch.",
   "notes": [],
   "ported_from": "cc00fc6949466dd390e8ff622057589a592a93be",
   "trace": [

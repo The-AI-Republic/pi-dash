@@ -10,7 +10,7 @@ import {
   devMachineName,
   devMachineStatus,
   devMachineSubline,
-  engineState,
+  pidashAgentState,
   machineActions,
   machineIsLive,
   machineSettings,
@@ -103,90 +103,97 @@ describe("machineActions", () => {
   });
 });
 
-describe("engineState", () => {
+describe("pidashAgentState", () => {
   const fmt = () => "Nov 7";
-  const engine = { hasEngine: true };
+  const engine = { hasPidashAgent: true };
   const online = { control_online: true };
   it("shows nothing for a machine with no engine runner or a revoked machine", () => {
-    expect(engineState(machine({ ...online, engine_paused_by_owner: false }), { hasEngine: false })).toBeNull();
     expect(
-      engineState(machine({ engine_paused_by_owner: true, revoked_at: "2026-01-01T00:00:00Z" }), engine)
+      pidashAgentState(machine({ ...online, engine_paused_by_owner: false }), { hasPidashAgent: false })
+    ).toBeNull();
+    expect(
+      pidashAgentState(machine({ engine_paused_by_owner: true, revoked_at: "2026-01-01T00:00:00Z" }), engine)
     ).toBeNull();
   });
 
   it("ranks the owner's pause, then the automatic pause, then the sign-in state", () => {
     const paused = { ...online, engine_paused_by_owner: true, engine_auto_pause_reason: "wallet_empty" };
-    expect(engineState(machine(paused), engine)?.label).toBe("Engine paused by you");
-    expect(engineState(machine({ ...paused, engine_paused_by_owner: false }), engine)?.label).toBe(
-      "Engine paused: wallet is empty"
+    expect(pidashAgentState(machine(paused), engine)?.label).toBe("Pi Dash Agent paused by you");
+    expect(pidashAgentState(machine({ ...paused, engine_paused_by_owner: false }), engine)?.label).toBe(
+      "Pi Dash Agent paused: wallet is empty"
     );
-    expect(engineState(machine({ ...online, engine_auto_pause_reason: "brand_new" }), engine)?.label).toBe(
-      "Engine paused: brand_new"
+    expect(pidashAgentState(machine({ ...online, engine_auto_pause_reason: "brand_new" }), engine)?.label).toBe(
+      "Pi Dash Agent paused: brand_new"
     );
-    expect(engineState(machine({ ...online, engine_paused_by_owner: false }), engine)).toEqual({
-      label: "Engine available",
+    expect(pidashAgentState(machine({ ...online, engine_paused_by_owner: false }), engine)).toEqual({
+      label: "Pi Dash Agent available",
       tone: "success",
     });
   });
 
   it("reads an offline machine's engine as unavailable", () => {
-    expect(engineState(machine({ engine_paused_by_owner: false, engine_sign_in_state: "active" }), engine)).toEqual({
-      label: "Engine unavailable",
+    expect(
+      pidashAgentState(machine({ engine_paused_by_owner: false, engine_sign_in_state: "active" }), engine)
+    ).toEqual({
+      label: "Pi Dash Agent unavailable",
       tone: "neutral",
     });
-    expect(engineState(machine({ online_runner_count: 1 }), engine)?.label).toBe("Engine available");
-    expect(engineState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe("Engine signed out");
+    expect(pidashAgentState(machine({ online_runner_count: 1 }), engine)?.label).toBe("Pi Dash Agent available");
+    expect(pidashAgentState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe(
+      "Pi Dash Agent signed out"
+    );
   });
 
   it("uses connection and pause state for legacy desktops without engine credentials", () => {
     const legacy = { provisioning: "desktop_bundled", engine_sign_in_state: "never" };
-    expect(engineState(machine({ ...legacy, ...online }), engine)?.label).toBe("Engine available");
-    expect(engineState(machine(legacy), engine)?.label).toBe("Engine unavailable");
-    expect(engineState(machine({ ...legacy, ...online, engine_paused_by_owner: true }), engine)?.label).toBe(
-      "Engine paused by you"
+    expect(pidashAgentState(machine({ ...legacy, ...online }), engine)?.label).toBe("Pi Dash Agent available");
+    expect(pidashAgentState(machine(legacy), engine)?.label).toBe("Pi Dash Agent unavailable");
+    expect(pidashAgentState(machine({ ...legacy, ...online, engine_paused_by_owner: true }), engine)?.label).toBe(
+      "Pi Dash Agent paused by you"
     );
     expect(
-      engineState(machine({ ...legacy, ...online, engine_auto_pause_reason: "wallet_empty" }), engine)?.label
-    ).toBe("Engine paused: wallet is empty");
+      pidashAgentState(machine({ ...legacy, ...online, engine_auto_pause_reason: "wallet_empty" }), engine)?.label
+    ).toBe("Pi Dash Agent paused: wallet is empty");
   });
 
   it("reads the sign-in state with its expiry", () => {
     const at = { ...online, engine_credential_expires_at: "2026-11-07T00:00:00Z" };
-    expect(engineState(machine({ ...at, engine_sign_in_state: "expiring" }), engine, fmt)?.label).toBe(
-      "Engine expiring on Nov 7"
+    expect(pidashAgentState(machine({ ...at, engine_sign_in_state: "expiring" }), engine, fmt)?.label).toBe(
+      "Pi Dash Agent expiring on Nov 7"
     );
-    const read = (state: string) => engineState(machine({ ...online, engine_sign_in_state: state }), engine)?.label;
-    expect(read("expiring")).toBe("Engine sign-in expiring");
-    expect(read("signed_out")).toBe("Engine signed out");
-    expect(read("expired")).toBe("Engine sign-in expired");
-    expect(read("never")).toBe("Engine not signed in");
-    expect(read("active")).toBe("Engine available");
+    const read = (state: string) =>
+      pidashAgentState(machine({ ...online, engine_sign_in_state: state }), engine)?.label;
+    expect(read("expiring")).toBe("Pi Dash Agent sign-in expiring");
+    expect(read("signed_out")).toBe("Pi Dash Agent signed out");
+    expect(read("expired")).toBe("Pi Dash Agent sign-in expired");
+    expect(read("never")).toBe("Pi Dash Agent not signed in");
+    expect(read("active")).toBe("Pi Dash Agent available");
   });
 });
 
 describe("machineSettings", () => {
-  const engine = { hasEngine: true };
+  const engine = { hasPidashAgent: true };
   it("offers each engine control only when its field is reported", () => {
     expect(machineSettings(machine(), engine)).toEqual({
       rename: true,
       pause: false,
       teamRuns: false,
-      signOutEngine: false,
+      signOutPidashAgent: false,
     });
     expect(
       machineSettings(
         machine({ engine_paused_by_owner: false, engine_team_runs: true, engine_sign_in_state: "active" }),
         engine
       )
-    ).toEqual({ rename: true, pause: true, teamRuns: true, signOutEngine: true });
-    expect(machineSettings(machine({ engine_sign_in_state: "signed_out" }), engine).signOutEngine).toBe(false);
+    ).toEqual({ rename: true, pause: true, teamRuns: true, signOutPidashAgent: true });
+    expect(machineSettings(machine({ engine_sign_in_state: "signed_out" }), engine).signOutPidashAgent).toBe(false);
     expect(
       machineSettings(machine({ revoked_at: "2026-01-01T00:00:00Z", engine_paused_by_owner: false }), engine)
     ).toEqual({
       rename: false,
       pause: false,
       teamRuns: false,
-      signOutEngine: false,
+      signOutPidashAgent: false,
     });
   });
 
@@ -194,9 +201,9 @@ describe("machineSettings", () => {
     expect(
       machineSettings(
         machine({ engine_paused_by_owner: false, engine_team_runs: false, engine_sign_in_state: "active" }),
-        { hasEngine: false }
+        { hasPidashAgent: false }
       )
-    ).toEqual({ rename: true, pause: false, teamRuns: false, signOutEngine: true });
+    ).toEqual({ rename: true, pause: false, teamRuns: false, signOutPidashAgent: true });
   });
 });
 

@@ -31,7 +31,7 @@
 //!   kernels over caller-supplied rows / `Max` verdict.
 //! * `get_agent_executor_options` (`:35-40,:147-152,:181-186`) — the
 //!   request-user derivation (`None` when missing or unauthenticated) plus
-//!   delegation to D-11's [`policy::agent_executor_options`](crate::dispatch::policy::agent_executor_options).
+//!   delegation to D-11's [`policy::agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options).
 //! * `DynamicBaseSerializer` `fields=` / `expand=` (`base.py:12-201`) — the
 //!   fields-dead rule, the `__init__` addition kernel with its
 //!   KeyError/TypeError edges, and the `to_representation` overwrite rule.
@@ -41,14 +41,14 @@
 //!   nested objects as [`Value`]).
 //!
 //! D-11 calls, consumed verbatim (PIDASHCONV-484/485, both Done):
-//! [`cloud_agent_is_configured`](crate::dispatch::policy::cloud_agent_is_configured),
-//! [`agent_executor_options`](crate::dispatch::policy::agent_executor_options)
-//! (+ [`UserFlags`](crate::dispatch::policy::UserFlags),
-//! [`ManagedAvailability`](crate::dispatch::policy::ManagedAvailability),
-//! [`ExecutorOption`](crate::dispatch::policy::ExecutorOption)) and
-//! [`CloudAgentUnavailableBody`](crate::dispatch::admission::CloudAgentUnavailableBody)
+//! [`cloud_agent_is_configured`](crate::run_creation::executor_policy::cloud_agent_is_configured),
+//! [`agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options)
+//! (+ [`UserFlags`](crate::run_creation::executor_policy::UserFlags),
+//! [`PidashAgentAvailability`](crate::run_creation::executor_policy::PidashAgentAvailability),
+//! [`ExecutorOption`](crate::run_creation::executor_policy::ExecutorOption)) and
+//! [`CloudAgentUnavailableBody`](crate::run_creation::pidash_agent_availability::CloudAgentUnavailableBody)
 //! (+
-//! [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`](crate::dispatch::admission::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS)).
+//! [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`](crate::run_creation::pidash_agent_availability::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS)).
 //!
 //! Wire rules (all verified against live DRF through the fixture or the
 //! repo Python: DRF 3.15.2 in the fixture env, 3.18.1 locally):
@@ -136,8 +136,7 @@
 //! Fixture: `rust-api/fixtures/app_project/FX-APROJ-01.serializers_project.json`
 //! (FX-APROJ-01).
 
-use crate::dispatch::policy::{ExecutorOption, ManagedAvailability, UserFlags};
-use pidash_db::config::CloudAgentSettings;
+use crate::run_creation::executor_policy::{ExecutorOption, PidashAgentAvailability, UserFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -722,31 +721,29 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 }
 
 /// Ports `get_agent_executor_options(project)` end to end by delegating to
-/// D-11's [`agent_executor_options`](crate::dispatch::policy::agent_executor_options):
+/// D-11's [`agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options):
 /// the cloud verdict consults the `has_usable_llm_config` EE seam only for
 /// authenticated users on configured instances (see D-11 docs);
 /// `local_runner_available` / `local_runner_exists` are the SeaORM
 /// pod-work verdicts (`local_runner_available_exists` /
 /// `local_runner_exists`, online incl. paused for the exists leg —
 /// evaluated only when unavailable, as Python's `elif`), and
-/// `managed` the L4 `managed_runner_availability` verdict, all passed
+/// `managed` the L4 `pidash_agent_availability` verdict, all passed
 /// through verbatim. Rows are always
 /// `[cloud_agent, local_runner, managed_runner]`, each carrying
 /// `deprecated` (#2903: true for cloud/managed).
 pub fn project_executor_options<F>(
-    cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
     is_authenticated: bool,
     has_usable_llm_config: F,
     local_runner_available: bool,
     local_runner_exists: bool,
-    managed: ManagedAvailability,
+    managed: PidashAgentAvailability,
 ) -> [ExecutorOption; 3]
 where
     F: FnOnce() -> bool,
 {
-    crate::dispatch::policy::agent_executor_options(
-        cloud,
+    crate::run_creation::executor_policy::agent_executor_options(
         resolve_options_user(user, is_authenticated),
         has_usable_llm_config,
         local_runner_available,
@@ -1842,50 +1839,8 @@ mod tests {
         panic!("key {key} not found at top level");
     }
 
-    /// Django-default cloud settings with the kill switch off, as in the
-    /// fixture env (`CLOUD_AGENT_ENABLED` unset). Only `enabled` feeds
-    /// this layer's gate; the rest are Django defaults (see D-11 tests).
-    fn cloud_settings(enabled: bool) -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    fn managed_disabled() -> ManagedAvailability {
-        ManagedAvailability {
+    fn managed_disabled() -> PidashAgentAvailability {
+        PidashAgentAvailability {
             available: false,
             reason_code: "managed_runner_disabled".to_string(),
         }
@@ -2287,12 +2242,12 @@ mod tests {
             ExecutorGate::Ok
         );
         assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("cloud_agent"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("cloud_agent"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
         assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("managed_runner"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("managed_runner"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
     }
 
@@ -2575,7 +2530,6 @@ mod tests {
             // The EE seam must not run: cloud is off, so D-11 short-circuits
             // before consulting it.
             let rows = project_executor_options(
-                &cloud_settings(false),
                 user,
                 authed,
                 || panic!("seam must not run while cloud is off"),
@@ -2591,7 +2545,6 @@ mod tests {
             );
         }
         let rows = project_executor_options(
-            &cloud_settings(false),
             None,
             false,
             || panic!("seam must not run while cloud is off"),

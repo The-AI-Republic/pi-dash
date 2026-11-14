@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Pod membership model (built-in engine design §7, §11). A runner always
+// Pod membership model (Pi Dash Agent design §7, §11). A runner always
 // sits in exactly one pod; whether it takes that pod's unpinned work is
 // its `pod_dispatch`. "Add to pod" makes it a pod member (moving it first
 // when it sits in another pod of the project), "Remove from pod" turns
@@ -11,7 +11,7 @@
 
 import { isApiError, type Pod, type Runner, type RunnerPatch, type RunnerPodDispatch } from "@pidash/api-client";
 
-import { isEngineRunner } from "../../shared/lib/runnerIdentity.js";
+import { isPidashAgentRunner } from "../../shared/lib/runnerIdentity.js";
 
 export const POD_MEMBERSHIP_LABELS: Record<RunnerPodDispatch, string> = {
   pod_member: "Takes pod work",
@@ -21,7 +21,7 @@ export const POD_MEMBERSHIP_LABELS: Record<RunnerPodDispatch, string> = {
 /** Own-agent runners predating the field take pod work, as before. */
 export function runnerPodDispatch(runner: Pick<Runner, "pod_dispatch" | "provisioning">): RunnerPodDispatch {
   if (runner.pod_dispatch !== undefined) return runner.pod_dispatch;
-  return isEngineRunner(runner) ? "pinned_only" : "pod_member";
+  return isPidashAgentRunner(runner) ? "pinned_only" : "pod_member";
 }
 
 /** Live runners sitting in the pod, with pod work on or off. */
@@ -68,7 +68,7 @@ export const RUNNER_UPDATE_FAILED_TITLE = "Couldn't change the runner's pod";
 export const RUNNER_UPDATE_FAILED = "The runner is unchanged. Try again.";
 export const RUNNER_BUSY_MESSAGE =
   "This runner has a run in progress or reserved for it. Wait for it to finish, or cancel it, then move the runner.";
-export const ENGINE_PROJECT_FIXED_MESSAGE = "A built-in engine can only move between pods of its own project.";
+export const ENGINE_PROJECT_FIXED_MESSAGE = "A Pi Dash Agent can only move between pods of its own project.";
 
 /**
  * What to tell the owner when a pod change is refused. Busy runners and

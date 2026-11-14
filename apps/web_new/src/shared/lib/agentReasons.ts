@@ -20,26 +20,26 @@ import { isApiError } from "@pidash/api-client";
  */
 export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   // Agent profile and machine gates (managed_runner/errors.py order).
-  managed_runner_disabled: "The built-in agent is switched off on this server.",
+  managed_runner_disabled: "The Pi Dash Agent is switched off on this server.",
   desktop_not_connected:
     "This computer is not connected to the server yet. Sign in again through the desktop app to link it.",
-  // Both the Cloud Agent row and the built-in agent row report this code
+  // Both the Cloud Agent row and the Pi Dash Agent row report this code
   // (pi_dash.core.agent_execution): the viewer has no model configured, so
   // the sentence names neither surface.
   llm_config_missing: "No model is configured for AI runs yet. Set one up in the AI settings.",
   gateway_scopes_missing:
     "Your sign-in is missing permission to reach the model gateway. Sign out, then sign in again to grant it.",
   byok_not_supported_on_desktop:
-    "The desktop agent runs on the hosted model lane. Choose that lane in AI Assistant settings; the provider key you supplied still serves cloud runs.",
-  no_managed_runner_for_project: "This computer has not enrolled a runner for this project yet.",
+    "The Pi Dash Agent runs on the hosted model lane. Choose that lane in AI Assistant settings; the provider key you supplied still serves cloud runs.",
+  no_managed_runner_for_project: "This computer has not enrolled a Pi Dash Agent for this project yet.",
 
   // Credential and permission literals from the profile and token endpoints.
-  desktop_session_required: "The built-in agent runs only from the desktop app. Sign in there to use it.",
-  gateway_session_revoked: "Your model gateway access was revoked. Sign in again to reconnect the built-in agent.",
-  gateway_unavailable: "The model gateway cannot be reached right now. The built-in agent will retry shortly.",
+  desktop_session_required: "The Pi Dash Agent runs only from the desktop app. Sign in there to use it.",
+  gateway_session_revoked: "Your model gateway access was revoked. Sign in again to reconnect the Pi Dash Agent.",
+  gateway_unavailable: "The model gateway cannot be reached right now. The Pi Dash Agent will retry shortly.",
 
   // Client-side marker for a profile read that never answered.
-  agent_profile_unreachable: "Could not reach the server to check whether the built-in agent can run.",
+  agent_profile_unreachable: "Could not reach the server to check whether the Pi Dash Agent can run.",
 
   // Other execution targets the same picker renders.
   cloud_agent_unavailable: "The Cloud Agent is switched off on this server.",

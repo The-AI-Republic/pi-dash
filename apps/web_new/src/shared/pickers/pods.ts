@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution-target option shaping (parity/specs/issues.md §17/§21,
-// ISS-218; built-in engine design §6, §7, §11; dedicated-runner
+// ISS-218; Pi Dash Agent design §6, §7, §11; dedicated-runner
 // design §14.4, §23.6). Runner is the only executor, so the picker
 // offers no agent rows: each pod offers an "any runner" row plus its
 // runners, each with the machine it runs on, a status line, an owner
-// name and an assignability answer. Built-in engine runners are listed
-// as "Built-in engine · <machine>" like any other runner, so an issue
+// name and an assignability answer. Pi Dash Agent runners are listed
+// as "Pi Dash Agent · <machine>" like any other runner, so an issue
 // can be dedicated to one engine. A pod pick pins the pod and clears
 // the runner; a runner pick pins the runner inside its pod. Both keep
 // the local executor.
 import type { ExecutorKind, Pod, PodList, Runner, RunnerList, WorkspaceMemberList } from "@pidash/api-client";
 
-import { isEngineRunner, runnerMachineName } from "../lib/runnerIdentity.js";
+import { isPidashAgentRunner, runnerMachineName } from "../lib/runnerIdentity.js";
 
 /** The one executor issues and projects run on. */
 export const LOCAL_EXECUTOR: ExecutorKind = "local_runner";
@@ -146,7 +146,7 @@ export type ExecutionTarget =
 /**
  * Ordered picker rows: each pod in server order with its squad row
  * followed by that pod's runners in server order. Engines are listed
- * as "Built-in engine · <machine>" (§23.6). Runners read
+ * as "Pi Dash Agent · <machine>" (§23.6). Runners read
  * assignable unless the server says otherwise, so plain list rows
  * without eligibility answers stay pickable.
  */
@@ -167,8 +167,8 @@ export function buildExecutionTargets(
         runnerId: runner.id,
         podId: pod.id,
         label:
-          isEngineRunner(runner) && runnerMachineName(runner)
-            ? `Built-in engine · ${runnerMachineName(runner)}`
+          isPidashAgentRunner(runner) && runnerMachineName(runner)
+            ? `Pi Dash Agent · ${runnerMachineName(runner)}`
             : runner.name,
         machineName: runnerMachineName(runner) ?? "",
         statusLine: runnerStatusLine(runner),

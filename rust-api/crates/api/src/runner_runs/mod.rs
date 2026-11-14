@@ -197,7 +197,6 @@ use sqlx::PgPool;
 
 use crate::state::AppState;
 pub use pidash_compat::response::{json_response, server_error, SERVER_ERROR_BODY};
-use pidash_db::redis::client_from_settings;
 
 // ---------------------------------------------------------------------------
 // Shared responses
@@ -1117,13 +1116,6 @@ pub trait RunnerPorts: Send + Sync {
     fn agent_system_user_id(
         &self,
     ) -> impl std::future::Future<Output = Result<uuid::Uuid, PortError>> + Send;
-    /// `dispatch_waiting(workspace_id)` (D-11, cloud-agent capacity).
-    /// Synchronous and unisolated in Python — a failure propagates and
-    /// the capacity marker stays unset for the reconciler.
-    fn dispatch_waiting(
-        &self,
-        workspace_id: uuid::Uuid,
-    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
     /// `apply_agent_run_terminal_effects.delay(str(run_id))`
     /// (`finalization.py:89-103`): the queued half of
     /// `_publish_effects`, isolated.
@@ -1371,9 +1363,7 @@ impl RunnerPorts for LivePorts {
         let settings = self.state.settings();
         pidash_jobs::orchestration::post_run_orchestration(
             &self.pool,
-            &settings.cloud_agent,
-            &settings.managed_runner,
-            self.state.toolsets().clone(),
+            &settings.pidash_agent,
             run_id,
         )
         .await;
@@ -1391,12 +1381,7 @@ impl RunnerPorts for LivePorts {
         let tx = pidash_jobs::orchestration::post_run_orchestration_in_tx(
             tx,
             pool,
-            &settings.cloud_agent,
-            &settings.managed_runner,
-            crate::project_move_handoff::RedisAdmissionCache {
-                client: client_from_settings(self.state.settings()),
-            },
-            self.state.toolsets().clone(),
+            &settings.pidash_agent,
             run_id,
         )
         .await;
@@ -1439,23 +1424,6 @@ impl RunnerPorts for LivePorts {
         pidash_services::domain::identity::agent_system_user_id(&self.pool)
             .await
             .map_err(|error| PortError::Transport(error.to_string()))
-    }
-
-    async fn dispatch_waiting(&self, workspace_id: uuid::Uuid) -> Result<(), PortError> {
-        // `dispatch_waiting(workspace_id)` (`dispatch.py:20-48`): lease and
-        // offer queued cloud runs up to workspace capacity (D-11). Disabled
-        // instances answer `0` without touching the database. Unisolated in
-        // Python (the capacity marker stays unset on failure).
-        let cloud = self.state.settings().cloud_agent.clone();
-        pidash_jobs::dispatch::dispatch_waiting(
-            &self.pool,
-            &cloud,
-            workspace_id,
-            chrono::Utc::now(),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn emit_terminal_effects(&self, run_id: uuid::Uuid) -> Result<(), PortError> {

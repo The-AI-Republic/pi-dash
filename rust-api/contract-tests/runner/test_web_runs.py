@@ -16,6 +16,7 @@ import uuid
 import pytest
 
 from _harness.auth import login_session
+from _harness.diffs import expect, is_rust
 from _harness.http import api_client, api_key_client, bearer_client
 from _harness.web import web_post
 
@@ -453,14 +454,14 @@ def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
     }
 
 
-def test_web_runs_create_direct_cloud_not_configured_409(user_client, seeder, daemon_world):
-    """Cloud-requested direct create with the instance switch off (PIDASHCONV-1051).
+def test_web_runs_create_direct_cloud_default(user_client, seeder, daemon_world):
+    """Cloud-default direct create: Django gates, Rust resolves local (DIFF-21).
 
-    Contract CI runs both backends with CLOUD_AGENT_ENABLED off, so the
-    executor-resolution arm — not the creator llm gate — answers here. This
-    pins the exact pre-gate 409 bytes around the seam consult: the llm gate
-    itself is pinned by the Rust seam tests (CE default answers the key bit,
-    an installed seam wins), since no HTTP path reaches it flags-off.
+    Contract CI runs both backends with CLOUD_AGENT_ENABLED off. Django
+    answers the executor-resolution arm with 409 `cloud_agent_unavailable`.
+    P1 (agent naming convention) makes the retired path unreachable on
+    Rust: a stored `cloud_agent` default resolves to `local_runner`, so
+    the same create succeeds as a local run.
     """
     seeder.db.execute(
         "UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = %s",
@@ -470,12 +471,19 @@ def test_web_runs_create_direct_cloud_not_configured_409(user_client, seeder, da
         user_client, f"{WEB}/runs/",
         {"prompt": "hello cloud", "workspace": daemon_world["workspace"]["id"]},
     )
-    assert response.status_code == 409, response.text
+    assert response.status_code == expect("DIFF-21", django=409, rust=201), response.text
     assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
-    assert response.json() == {
-        "error": "Pi Dash Cloud Agent is not currently available",
-        "code": "cloud_agent_unavailable",
-    }
+    if is_rust():
+        body = response.json()
+        assert RUN_KEYS <= set(body)
+        assert body["executor_kind"] == "local_runner"
+        assert body["status"] == "queued"
+        assert body["prompt"] == "hello cloud"
+    else:
+        assert response.json() == {
+            "error": "Pi Dash Cloud Agent is not currently available",
+            "code": "cloud_agent_unavailable",
+        }
 
 
 def test_web_runs_create_direct_validation(user_client, seeder, daemon_world):
@@ -830,11 +838,14 @@ def _seed_llm_config(seeder, user_id):
 def test_web_runs_create_runai_201_body_is_predispatch_for_cloud(
     user_client, seeder, daemon_world
 ):
-    """Cloud run_ai 201 keeps dispatch_attempts 0 while the row leases to 1 (PIDASHCONV-1482).
+    """Cloud run_ai 201: Django leases a cloud run, Rust resolves local (DIFF-21).
 
     Regime: servers booted with ``CLOUD_AGENT_ENABLED=true``
     (``CONTRACT_CLOUD_AGENT_ENABLED=true``); skipped otherwise — CI runs the
-    kill-switches off, where a cloud-default project refuses the create.
+    kill-switches off. On Django the 201 body stays pre-dispatch
+    (``dispatch_attempts`` 0) while the row leases to 1. P1 makes the
+    retired path unreachable on Rust, so the same cloud-default project
+    creates a local run.
     """
     if not CLOUD_ENABLED:
         pytest.skip("needs CLOUD_AGENT_ENABLED=true servers (CONTRACT_CLOUD_AGENT_ENABLED)")
@@ -857,16 +868,19 @@ def test_web_runs_create_runai_201_body_is_predispatch_for_cloud(
     assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
-    assert body["executor_kind"] == "cloud_agent"
     assert body["status"] == "queued"
     assert body["dispatch_attempts"] == 0
-    row = seeder.db.fetchone(
-        "SELECT status, dispatch_attempts, lease_expires_at FROM agent_run WHERE id = %s",
-        (body["id"],),
-    )
-    assert row["status"] == "queued"
-    assert row["dispatch_attempts"] == 1
-    assert row["lease_expires_at"] is not None
+    if is_rust():
+        assert body["executor_kind"] == "local_runner"
+    else:
+        assert body["executor_kind"] == "cloud_agent"
+        row = seeder.db.fetchone(
+            "SELECT status, dispatch_attempts, lease_expires_at FROM agent_run WHERE id = %s",
+            (body["id"],),
+        )
+        assert row["status"] == "queued"
+        assert row["dispatch_attempts"] == 1
+        assert row["lease_expires_at"] is not None
 
 
 def test_web_runs_create_runai_queued_202(user_client, seeder, daemon_world):

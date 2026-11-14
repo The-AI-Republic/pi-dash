@@ -1,0 +1,241 @@
+{
+  "function_schemas": {
+    "pidash_add_current_issue_comment": {
+      "description": "Add one Markdown comment to the current issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_create_project_issue": {
+      "description": "Create one backlog/default-state issue in the scheduler's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_get_current_issue": {
+      "description": "Read the issue bound to this run.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_get_project_issue": {
+      "description": "Get one issue by UUID, limited to this run's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_id"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_list_current_issue_comments": {
+      "description": "List the newest 50 comments on the issue bound to this run.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_list_issue_relations": {
+      "description": "List an issue's relations grouped by type from its side (blocked_by, blocking,\nrelates_to, ...), each with identifier, name and state. Defaults to the current issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "pidash_list_linked_code_reviews": {
+      "description": "List code reviews linked to the current issue.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_list_project_states": {
+      "description": "List valid workflow states for the bound project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "pidash_relate_issues": {
+      "description": "Record `issue <relation_type> each related issue` (identifiers like PROJ-12 or UUIDs).\nrelation_type is read from `issue`'s side: blocked_by, blocking, relates_to, duplicate,\nstart_before, start_after, finish_before, finish_after, implemented_by, implements.\nIdempotent: existing pairs come back under `unchanged`, pairs with a different relation\nunder `conflicts` (left as is). `issue` must be in this run's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "type": "string"
+          },
+          "relation_type": {
+            "type": "string"
+          },
+          "related_issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "relation_type",
+          "related_issues"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_search_project_issues": {
+      "description": "Search issue titles and descriptions in the bound project (max 50).",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_transition_current_issue": {
+      "description": "Move the current issue to a state in the same project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "state_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state_id"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_unrelate_issues": {
+      "description": "Remove the `relation_type` relation between `issue` and each related issue. Pairs\nwithout it come back under `not_related`. `issue` must be in this run's project.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "issue": {
+            "type": "string"
+          },
+          "relation_type": {
+            "type": "string"
+          },
+          "related_issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "issue",
+          "relation_type",
+          "related_issues"
+        ],
+        "type": "object"
+      }
+    },
+    "pidash_update_current_issue_workpad": {
+      "description": "Replace the current issue's durable Markdown workpad.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "output_schema": {
+    "name": "final_result",
+    "description": "The final response which ends this conversation",
+    "parameters": {
+      "properties": {
+        "outcome": {
+          "enum": [
+            "completed",
+            "blocked",
+            "noop"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 30000,
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "summary"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

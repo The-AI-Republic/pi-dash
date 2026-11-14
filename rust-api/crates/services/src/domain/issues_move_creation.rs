@@ -18,25 +18,21 @@
 //! [`FinalizeAgentRunSeam`]: creation::FinalizeAgentRunSeam
 //! [`creation::orm`]: crate::orchestration::creation::orm
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend, QueryResult, StatementBuilder, TryGetable};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
-use crate::dispatch::execution::{
+use crate::run_creation::execution::{
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
-    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
+    ExecutionFieldsError, ExecutionInputs, ProjectScope,
 };
-use crate::dispatch::DeferredConsume;
-use crate::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
     CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
@@ -46,7 +42,7 @@ use crate::orchestration::creation::{
 };
 use crate::prompting::{composer, context};
 
-use super::issues_move::{CreationDeps, MoveAdmissionCache};
+use super::issues_move::CreationDeps;
 use super::txn::TxnConn;
 
 /// Run one built statement on the transaction, returning at most one
@@ -98,14 +94,7 @@ fn expected_row(what: &str) -> CreationError {
 pub(crate) struct SeaHandoffStore<'t> {
     conn: TxnConn<'t>,
     pool: PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
-    now_unix_secs: i64,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    assistant_seam: Arc<dyn AssistantModelSeam>,
-    admission: Arc<dyn MoveAdmissionCache>,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     terminal_effects: Vec<Uuid>,
 }
 
@@ -114,20 +103,13 @@ impl<'t> SeaHandoffStore<'t> {
         Self {
             conn,
             pool: deps.pool.clone(),
-            cloud: deps.cloud.clone(),
-            managed: deps.managed.clone(),
-            now_unix_secs: deps.now_unix_secs,
-            toolsets: deps.toolsets.clone(),
-            assistant_seam: deps.assistant_seam.clone(),
-            admission: deps.admission.clone(),
             dispatches: Vec::new(),
-            deferred: Vec::new(),
             terminal_effects: Vec::new(),
         }
     }
 
-    pub(crate) fn outboxes(self) -> (Vec<Uuid>, Vec<DeferredConsume>, Vec<Uuid>) {
-        (self.dispatches, self.deferred, self.terminal_effects)
+    pub(crate) fn outboxes(self) -> (Vec<Uuid>, Vec<Uuid>) {
+        (self.dispatches, self.terminal_effects)
     }
 
     /// One pod `(id, project_id)` row, or none.
@@ -284,11 +266,11 @@ impl CreationSeam for SeaHandoffStore<'_> {
     async fn user_flags(
         &mut self,
         user_id: Uuid,
-    ) -> Result<crate::dispatch::UserFlags, CreationError> {
+    ) -> Result<crate::run_creation::UserFlags, CreationError> {
         let row = query_one(&self.conn, &orm::user_flags_select(user_id))
             .await?
             .ok_or_else(|| expected_row("user flags"))?;
-        Ok(crate::dispatch::UserFlags {
+        Ok(crate::run_creation::UserFlags {
             is_active: get(&row, "is_active")?,
             is_bot: get(&row, "is_bot")?,
         })
@@ -327,27 +309,9 @@ impl CreationSeam for SeaHandoffStore<'_> {
             id: actor.id,
             flags: actor.flags,
         });
-        let actor_id = actor.as_ref().map(|actor| actor.id);
-        // The jobs store's H/E/P closures have no production factory, so
-        // the twin prefetches their facts asynchronously and moves the
-        // values into the `FnOnce` seams (identical verdicts).
-        let has_key = match actor_id {
-            Some(id) => twin_has_api_key(&self.pool, id)
-                .await
-                .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
-            None => false,
-        };
-        // The driver short-circuits a missing actor before consulting
-        // the closure, so only a present actor consults the seam (and a
-        // missing one never pays for the overlay's reads). Clone the seam
-        // out: the store is `!Sync`, so the consult must not borrow
-        // `self` across the await.
-        let assistant_seam = self.assistant_seam.clone();
-        let has_llm = match actor_id {
-            Some(id) => twin_gate_allows(&assistant_seam, id, has_key).await,
-            None => false,
-        };
-        let mut short = DbTransaction::begin(&self.pool)
+        // (P4: the key/gate prefetch died with the cache family; the
+        // resolve reads only the actor flags the request carries.)
+        let short = DbTransaction::begin(&self.pool)
             .await
             .map_err(|error| ExecutionError::Store(CreationError::Db(error.to_string())))?;
         let inputs = ExecutionInputs {
@@ -358,24 +322,9 @@ impl CreationSeam for SeaHandoffStore<'_> {
             actor: actor.as_ref(),
             automatic: req.automatic,
             requested: req.requested.as_deref(),
-            now_unix_secs: self.now_unix_secs,
+            now_unix_secs: 0,
         };
-        let cache = DynCache(self.admission.as_ref());
-        let deferred = &mut self.deferred;
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let fields = resolve_execution_fields(
-            &mut short,
-            &inputs,
-            &self.cloud,
-            &self.managed,
-            &cache,
-            &mut collect,
-            ExecutionSeams {
-                has_usable_llm_config: move || has_llm,
-                toolsets: self.toolsets.clone(),
-            },
-        )
-        .await;
+        let fields = resolve_execution_fields(&inputs).await;
         short
             .commit()
             .await
@@ -383,40 +332,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
         fields
             .map(twin_map_execution_fields)
             .map_err(twin_map_execution_error)
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        // The relocated `lock_cloud_creation_capacity` needs the span's
-        // sqlx transaction, which the SeaORM transaction cannot lend, so
-        // the twin runs its three steps here: the workspace lock, the
-        // queued count, and the shared `quota_verdict`.
-        use crate::dispatch::execution::{
-            queued_cloud_count_select, quota_verdict, workspace_lock_select,
-        };
-        if executor_kind != AgentExecutorKind::CloudAgent {
-            return Ok(None);
-        }
-        query_one(&self.conn, &workspace_lock_select(workspace_id))
-            .await?
-            .ok_or_else(|| expected_row("workspace lock"))?;
-        let row = query_one(&self.conn, &queued_cloud_count_select(workspace_id))
-            .await?
-            .ok_or_else(|| expected_row("queued cloud count"))?;
-        let queued: i64 = get(&row, "n")?;
-        match quota_verdict(
-            queued,
-            self.cloud.max_queued_per_workspace,
-            self.cloud.dispatch_scan_interval_secs,
-            automatic,
-        ) {
-            Ok(deferred) => Ok(deferred.map(twin_map_admission_error)),
-            Err(exc) => Err(CreationError::CapacityRefused(exc.detail().to_owned())),
-        }
     }
 
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
@@ -441,10 +356,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
             created_by_id,
         )
         .await
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        self.toolsets.schema_tool_name().to_owned()
     }
 
     async fn dedicated_pin(
@@ -686,7 +597,7 @@ impl FinalizeAgentRunSeam for SeaHandoffStore<'_> {
         )
         .await?;
         let locked = locked.map(|row| twin_map_run_view(&row)).transpose()?;
-        if locked.is_some_and(|run| run.executor_kind == AgentExecutorKind::CloudAgent) {
+        if locked.is_some_and(|run| run.executor_kind == AgentExecutorKind::RetiredCloudRun) {
             let row = query_one(&self.conn, &orm::terminal_event_exists_select(run_id))
                 .await?
                 .ok_or_else(|| expected_row("terminal event probe"))?;
@@ -823,11 +734,11 @@ fn twin_map_state(row: &QueryResult) -> Result<StateView, CreationError> {
 }
 
 fn twin_map_execution_fields(
-    fields: crate::dispatch::execution::ExecutionFields,
+    fields: crate::run_creation::execution::ExecutionFields,
 ) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -844,7 +755,6 @@ fn twin_map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }
@@ -854,41 +764,6 @@ fn twin_map_admission_error(error: DeferredAdmissionError) -> ServiceAdmissionEr
         code: error.code,
         detail: error.detail,
     }
-}
-
-/// `get_config(user)` + `has_api_key` (`llm.py:67-68`,
-/// `models.py:260-262`): `UserLLMConfig.objects.filter(user).first()`
-/// (unordered, `LIMIT 1`), key present and non-empty. Runs on the pool
-/// (outside the span), as the twin does.
-async fn twin_has_api_key(pool: &PgPool, user_id: Uuid) -> Result<bool, String> {
-    use pidash_db::entity::assistant_user_llm_config as config;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let key: Option<Option<Vec<u8>>> = config::Entity::find()
-        .select_only()
-        .column(config::Column::ApiKeyEncrypted)
-        .filter(config::Column::UserId.eq(user_id))
-        .into_tuple()
-        .one(&pidash_db::pool::sea_orm_connection(pool))
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(key.flatten().is_some_and(|key| !key.is_empty()))
-}
-
-/// The handoff llm gate through the installed assistant seam
-/// (`user_has_llm_config`, `agent_execution.py:69-80`): the CE default
-/// answers the BYOK key bit; the overlay routes OpenHub/Codex/BYOK
-/// through the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
-/// A free function over the cloned seam: the store is `!Sync` (it owns
-/// the span transaction), so the consult must not borrow `self` across
-/// the await, or the handlers' futures stop being `Send`.
-async fn twin_gate_allows(
-    assistant_seam: &Arc<dyn AssistantModelSeam>,
-    actor_id: Uuid,
-    has_key: bool,
-) -> bool {
-    assistant_seam
-        .has_usable_llm_config(actor_id, has_key)
-        .await
 }
 
 /// Python `datetime.isoformat()` for an aware UTC timestamp (`+00:00`,
@@ -1414,34 +1289,6 @@ async fn twin_load_render_bundle(
     })
 }
 
-/// [`AdmissionCache`] over the driver-supplied [`MoveAdmissionCache`]:
-/// the relocated `execution_fields` resolves against this in its short
-/// transaction, exactly as the twin resolves against the api cache.
-struct DynCache<'a>(&'a dyn MoveAdmissionCache);
-
-#[derive(Debug, Clone)]
-struct CacheError(String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl crate::dispatch::AdmissionCache for DynCache<'_> {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.0.bucket_count(key).map_err(CacheError)
-    }
-
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), Self::Error> {
-        self.0.add_or_incr(key, timeout_secs).map_err(CacheError)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     //! Live coverage of the [`orm`] statements this seam runs: each
@@ -1526,7 +1373,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: json!({"other": 1, "code": "old"}),
             tool_plan: json!({"tools": ["a"]}),
             trigger: "state_transition".to_owned(),
@@ -1565,7 +1412,7 @@ mod tests {
         let view = twin_map_run_view(&inserted).expect("map run view");
         assert_eq!(view.id, run_id);
         assert_eq!(view.status, DbAgentRunStatus::Queued);
-        assert_eq!(view.executor_kind, AgentExecutorKind::CloudAgent);
+        assert_eq!(view.executor_kind, AgentExecutorKind::RetiredCloudRun);
         assert_eq!(view.work_item_id, Some(issue));
         assert_eq!(view.phase_kind, "implement");
         assert_eq!(view.trigger, "state_transition");
@@ -1730,25 +1577,16 @@ mod tests {
         assert_eq!(col::<Value>(&event, "payload"), json!({"status": "failed"}));
         assert_eq!(col::<Uuid>(&event, "agent_run_id"), run_id);
 
-        // The workspace mutex: live row locks, soft-deleted row misses;
-        // the queued-cloud count sees the one queued cloud run left.
-        use crate::dispatch::execution::{queued_cloud_count_select, workspace_lock_select};
+        // The workspace mutex: live row locks, soft-deleted row misses.
+        // (P3 step B: the queued-cloud count died with the cloud
+        // creation path.)
+        use crate::run_creation::execution::workspace_lock_select;
         assert!(one(&conn, &workspace_lock_select(uid(0x10)))
             .await
             .is_some());
         assert!(one(&conn, &workspace_lock_select(uid(0x11)))
             .await
             .is_none());
-        exec(&conn, &orm::run_insert(&new_run(uid(0xA2), issue, now))).await;
-        assert_eq!(
-            col::<i64>(
-                &one(&conn, &queued_cloud_count_select(uid(0x10)))
-                    .await
-                    .expect("count row"),
-                "n"
-            ),
-            1
-        );
         tx.rollback().await.expect("rollback");
     }
 
