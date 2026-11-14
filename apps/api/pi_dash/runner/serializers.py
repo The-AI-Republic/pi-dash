@@ -394,6 +394,11 @@ class AgentRunSerializer(serializers.ModelSerializer):
     # ``dispatch_wait`` computed only for QUEUED pinned runs.
     pinned_runner_name = serializers.SerializerMethodField()
     dispatch_wait = serializers.SerializerMethodField()
+    # Machine-capacity wait presentation (dev-machine run queue T7
+    # prerequisite): the stored ``capacity_wait`` object holds internal
+    # attempt data (token, session id, admission id, revision), of
+    # which only the presentation slice is workspace-visible.
+    capacity_wait = serializers.SerializerMethodField()
 
     def get_error_diagnostic(self, run: AgentRun):
         # Only the per-run detail drawer renders this block. Skip the
@@ -424,6 +429,27 @@ class AgentRunSerializer(serializers.ModelSerializer):
             request = ctx.get("request")
             viewer = getattr(request, "user", None) if request is not None else None
         return build_dispatch_wait(run, viewer=viewer)
+
+    def get_capacity_wait(self, run: AgentRun):
+        """Project the stored capacity_wait to its presentation slice.
+
+        Only phase/position/queued time/report time/active/limit are
+        exposed — never admission ids, session ids, tokens or other
+        runners' identities. ``None`` when the attempt has no
+        capacity state (the usual case); stale snapshots keep
+        rendering their last-known values.
+        """
+        stored = getattr(run, "capacity_wait", None)
+        if not isinstance(stored, dict):
+            return None
+        return {
+            "phase": stored.get("phase"),
+            "queue_position": stored.get("queue_position"),
+            "queued_at": stored.get("queued_at"),
+            "reported_at": stored.get("reported_at"),
+            "active": stored.get("active"),
+            "limit": stored.get("limit"),
+        }
 
     def get_scheduler_binding_detail(self, run: AgentRun):
         # "Fired by scheduler X" for scheduler-triggered runs, so run views
@@ -459,6 +485,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "pinned_runner_name",
             "pin_kind",
             "dispatch_wait",
+            "capacity_wait",
             "work_item",
             "scheduler_binding",
             "scheduler_binding_detail",
