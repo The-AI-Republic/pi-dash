@@ -428,14 +428,11 @@ pub fn reconcile_terminal_candidate_select() -> sea_orm::Selector<sea_orm::Selec
 
 /// The locked finalize row's decision columns (`agent_run` only).
 struct FinalizeLocked {
-    executor_kind: AgentExecutorKind,
     done_payload: Option<Value>,
 }
 
 fn map_finalize_locked(row: &orm::agent_run::Model) -> Result<FinalizeLocked, SweepError> {
     Ok(FinalizeLocked {
-        executor_kind: AgentExecutorKind::from_value(&row.executor_kind)
-            .ok_or(SweepError::BadRow("executor_kind"))?,
         done_payload: row.done_payload.clone(),
     })
 }
@@ -1040,16 +1037,6 @@ async fn run_finalize_transaction(
         );
         let now = Utc::now();
         finalization::finalize_update(&conn, values, *run_id, now).await?;
-        if facts.executor_kind == AgentExecutorKind::CloudAgent {
-            finalization::append_terminal_event_once(
-                &conn,
-                *run_id,
-                AgentRunStatus::Failed,
-                &finalization::finalize_error_code(values),
-                now,
-            )
-            .await?;
-        }
     }
     tx.commit().await?;
     Ok(())
@@ -1461,10 +1448,6 @@ async fn run_capacity_plan(
     plan: &finalization::CapacityPlan,
 ) -> Result<(), SweepError> {
     match plan {
-        finalization::CapacityPlan::Cloud { workspace_id } => seams
-            .dispatch_waiting(*workspace_id)
-            .await
-            .map_err(SweepError::Seam),
         finalization::CapacityPlan::Local { runner_id, pod_id } => {
             if let Some(runner_id) = runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): free a

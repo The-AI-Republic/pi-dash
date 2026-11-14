@@ -468,15 +468,9 @@ mod tests {
     /// half lives in
     /// `rust-api/contract-tests/prompting/test_data_plane_dual_engine.py`.
     /// Update both sides together when a section body changes.
+    // P3 step B: the cloud-* clean entries died with their sections.
     const EMPTY_CONTEXT_CLEAN: &[&str] = &[
         "autonomy",
-        "cloud-direct-task",
-        "cloud-ending",
-        "cloud-execution-loop",
-        "cloud-review-loop",
-        "cloud-scheduler-intro",
-        "cloud-scheduler-loop",
-        "cloud-test-loop",
         "default-posture",
         "guardrails",
         "review-cycle",
@@ -653,45 +647,10 @@ mod tests {
         );
     }
 
-    /// The whole cloud-capabilities section renders byte-identical to
-    /// Jinja2 with a realistic context (PIDASHCONV-1072). Same expected
-    /// text as the dual-engine contract test pins on the Python side.
-    #[test]
-    fn cloud_capabilities_section_renders_like_jinja2() {
-        let section =
-            crate::prompting::registry::get_section("cloud-capabilities").expect("section exists");
-        let text = render(
-            &section.default_body,
-            &json!({
-                "available_tools": ["pidash_get_current_issue"],
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-                "limits": django_default_limits(),
-            }),
-        )
-        .expect("renders");
-        assert_eq!(
-            text,
-            "## Capabilities\n\
-             \n\
-             Available tools:\n\
-             - `pidash_get_current_issue`\n\
-             \n\
-             Unavailable capabilities: filesystem, shell, worktree.\n\
-             Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}.\n\
-             \n\
-             You do not have a local filesystem, shell, worktree, repository \
-             checkout, or Pi Dash CLI. Do not invent or simulate them.\n"
-        );
-    }
-
     /// Numbers from a JSON context render as digits, not as the
     /// one-entry `$serde_json::private::Number` map the
     /// `arbitrary_precision` build converts them into (PIDASHCONV-1072).
-    /// Covers the `{{ limits.writes | default(0) }}` interpolation in
-    /// `cloud-write-policy.md` and the scalar legs (`tick.count`, …).
+    /// Covers the scalar legs (`tick.count`, …).
     #[test]
     fn scalar_numbers_render_as_digits() {
         let ctx = json!({ "limits": django_default_limits(), "x": 5 });

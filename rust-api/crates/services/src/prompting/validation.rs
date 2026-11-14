@@ -533,17 +533,8 @@ mod tests {
             .map(|k| k.as_str().expect("kind").to_owned())
             .collect();
         assert_eq!(kinds, expected);
-        let kinds: Vec<String> = kinds_for_section("cloud-intro")
-            .iter()
-            .map(|k| k.to_string())
-            .collect();
-        let expected: Vec<String> = data["kinds_for_cloud_intro"]
-            .as_array()
-            .expect("array")
-            .iter()
-            .map(|k| k.as_str().expect("kind").to_owned())
-            .collect();
-        assert_eq!(kinds, expected);
+        // P3 step B: the cloud intro check died with the cloud
+        // recipes (a deleted section key yields no kinds).
         assert!(kinds_for_section("definitely-not-a-registry-key").is_empty());
         assert_eq!(
             kinds_for_section("no-such-key").len(),

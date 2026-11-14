@@ -75,7 +75,6 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };
 use pidash_db::tasks_ticker::{pool_size_or_default, TickerDisarmReason};
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
     auto_pauses_on_cap, is_ticking_state, ticking_state_names_by_group, MACHINE_TRIGGERS,
     RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER, RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
@@ -1020,34 +1019,9 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
     let issue = CreationSeam::issue(seam, issue_id)
         .await
         .map_err(DispatchError::Store)?;
-    let effective = effective_executor(seam, &issue).await?;
-    if effective == AgentExecutorKind::CloudAgent.value() {
-        if let Some(creator) = run_creator {
-            let flags = CreationSeam::user_flags(seam, creator)
-                .await
-                .map_err(DispatchError::Store)?;
-            if user_has_llm_config(Some(&flags), || seam.has_usable_llm_config(creator)) {
-                return Ok(PreflightOutcome {
-                    proceed: true,
-                    logs: Vec::new(),
-                });
-            }
-        }
-        let bounced = bounce_issue_no_eligible_runner(
-            seam,
-            issue_id,
-            triggered_by,
-            REASON_NO_LLM_CONFIG,
-            "",
-            now,
-            jitter_secs,
-        )
-        .await?;
-        return Ok(PreflightOutcome {
-            proceed: false,
-            logs: bounced.logs,
-        });
-    }
+    // P3 step C: the cloud preflight arm died with the retired plane;
+    // every executor now proceeds to the runner-eligible path.
+    let _effective = effective_executor(seam, &issue).await?;
 
     // Every other executor is a runner (built_engine_as_runner §6; a
     // stale `managed_runner` value is the legacy spelling of one).
@@ -1218,8 +1192,9 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
 }
 
 /// The no-creator bounce shared by the continuation and Run AI paths
-/// (`:1173-1185`, `:1283-1290`): cloud bounces loudly, every runner
-/// value stays silent (the run waits in the pod).
+/// (`:1173-1185`, `:1283-1290`): every runner value stays silent (the
+/// run waits in the pod). P3 step C: cloud is gone, so the cloud
+/// loud bounce below it does nothing and stays as a stub.
 async fn bounce_no_creator<S: DispatchSeam>(
     seam: &mut S,
     issue: &IssueView,
@@ -1229,20 +1204,7 @@ async fn bounce_no_creator<S: DispatchSeam>(
     jitter_secs: f64,
     logs: &mut Vec<LogLine>,
 ) -> Result<(), DispatchError> {
-    let effective = effective_executor(seam, issue).await?;
-    if effective == AgentExecutorKind::CloudAgent.value() {
-        let bounced = bounce_issue_no_eligible_runner(
-            seam,
-            issue_id,
-            triggered_by,
-            REASON_NO_LLM_CONFIG,
-            "",
-            now,
-            jitter_secs,
-        )
-        .await?;
-        logs.extend(bounced.logs);
-    }
+    let _ = (seam, issue, issue_id, triggered_by, now, jitter_secs, logs);
     Ok(())
 }
 
@@ -2085,6 +2047,7 @@ pub async fn maybe_apply_deferred_pause<S: DispatchSeam>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_types::dispatch::AgentExecutorKind;
     use serde_json::{json, Value};
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -3096,58 +3059,6 @@ mod tests {
     // -- preflight (F) -------------------------------------------------------
 
     #[tokio::test]
-    async fn preflight_f1_cloud_llm_ok() {
-        let mut seam = stocked_as("8101");
-        as_executor(&mut seam, "cloud_agent");
-        let creator = uid(0x41);
-        seam.llm.insert(creator, true);
-        let matcher = FakeMatcher { answer: false };
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8101"),
-            Some(creator),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(out.proceed);
-        assert!(out.logs.is_empty());
-        assert!(seam.comments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn preflight_f2_cloud_no_llm() {
-        let mut seam = stocked_as("8102");
-        as_executor(&mut seam, "cloud_agent");
-        let creator = uid(0x41);
-        seam.llm.insert(creator, false);
-        seam.backlog_target = Some(backlog_hi());
-        seam.ticker = None;
-        let matcher = FakeMatcher { answer: false };
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8102"),
-            Some(creator),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F2_cloud_no_llm"));
-        assert_eq!(seam.issue_states.get(&fxid("8102")), Some(&uid(0x31)));
-        assert_eq!(seam.comments.len(), 1);
-        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_NO_LLM_CONFIG);
-    }
-
-    #[tokio::test]
     async fn preflight_f3_runner_chain() {
         // A stale `managed_runner` value is the legacy spelling of
         // the runner branch: the matcher alone decides, and no
@@ -3875,39 +3786,6 @@ mod tests {
         assert_eq!(out.run_id, None);
         assert_eq!(out.logs, fx_logs(CONTINUATION, "A6_local_no_creator"));
         assert_eq!(seam.comments.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn continuation_a7_cloud_no_creator_bounces() {
-        let mut seam = stocked_as("8133");
-        cloud_executor(&mut seam);
-        with_prior(&mut seam);
-        seam.project.as_mut().expect("project").id = fxid("0809");
-        seam.issue.as_mut().expect("issue").project_id = Some(fxid("0809"));
-        seam.backlog_target = None;
-        seam.default_state_id = None;
-        seam.ticker = None;
-        let matcher = FakeMatcher { answer: false };
-        let out = dispatch_continuation_run(
-            &mut seam,
-            fxid("8133"),
-            "tick",
-            None,
-            false,
-            false,
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("dispatch");
-        assert_eq!(out.run_id, None);
-        assert_eq!(
-            out.logs,
-            fx_logs(CONTINUATION, "A7_cloud_no_creator_bounce")
-        );
-        assert_eq!(seam.comments.len(), 1);
-        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_NO_LLM_CONFIG);
     }
 
     #[tokio::test]

@@ -15,9 +15,9 @@
 //!
 //! * Finalize: lock the non-terminal row (`FOR UPDATE` + expected
 //!   filters), merge `done_payload` over the locked row, write,
-//!   maybe append the cloud-only terminal event, register
-//!   `_publish_effects` on commit. First-writer-wins: a second
-//!   concurrent finalize finds no row and reports `false`.
+//!   register `_publish_effects` on commit. First-writer-wins: a
+//!   second concurrent finalize finds no row and reports `false`.
+//!   (P3 step C deleted the cloud-only terminal-event append.)
 //! * Terminal effects: lock issue-then-run (matching issue moves and
 //!   `complete_project_move_handoff` — the order that prevents a
 //!   Postgres deadlock), run hooks once behind the
@@ -39,7 +39,7 @@
 
 use chrono::{DateTime, Utc};
 use pidash_db::entity as orm;
-use pidash_db::runner_runs::{agent_run, event, pod};
+use pidash_db::runner_runs::{agent_run, pod};
 use pidash_db::tasks_ticker::models::scheduler_binding;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
@@ -377,88 +377,7 @@ pub fn error_details_merge_sql(param: &str) -> String {
     )
 }
 
-/// Terminal-event existence (`finalize_agent_run:74`): cloud-only
-/// guard. Params: `$1` run id, `$2` kind (`terminal`).
-pub fn terminal_event_exists_sql() -> &'static str {
-    "SELECT 1 AS \"a\" FROM \"agent_run_event\" WHERE \
-     (\"agent_run_event\".\"agent_run_id\" = $1 AND \"agent_run_event\".\"kind\" = $2) LIMIT 1"
-}
 
-/// Terminal-event sequence (`finalize_agent_run:77`): current max, or
-/// no row. Param: `$1` run id.
-pub fn terminal_event_max_seq_sql() -> &'static str {
-    "SELECT \"agent_run_event\".\"seq\" FROM \"agent_run_event\" WHERE \
-     \"agent_run_event\".\"agent_run_id\" = $1 ORDER BY \"agent_run_event\".\"seq\" DESC LIMIT 1"
-}
-
-/// Terminal-event `INSERT` (`finalize_agent_run:79-84`): the id is a
-/// `BigAutoField` (default + `RETURNING`); `created_at` binds `now()`.
-/// Params: `$1` run id, `$2` seq, `$3` kind, `$4` payload, `$5` now.
-pub fn terminal_event_insert_sql() -> String {
-    let columns: Vec<String> = event::COLUMNS
-        .iter()
-        .filter(|c| **c != "id")
-        .map(|c| format!("\"{c}\""))
-        .collect();
-    let params = (1..=columns.len())
-        .map(|n| format!("${n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING \"{}\".\"id\"",
-        event::TABLE,
-        columns.join(", "),
-        params,
-        event::TABLE
-    )
-}
-
-/// The terminal event row (`finalize_agent_run:76-84`): `seq` is max
-/// + 1 (or 1), `kind` is `terminal`, payload `{"status",
-/// "error_code"}`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TerminalEventPlan {
-    pub seq: i32,
-    pub payload: Value,
-}
-
-/// Plan the terminal event from the current max seq (or `None`).
-pub fn plan_terminal_event(
-    max_seq: Option<i32>,
-    new_status: AgentRunStatus,
-    error_code: &str,
-) -> TerminalEventPlan {
-    TerminalEventPlan {
-        seq: max_seq.unwrap_or(0) + 1,
-        payload: terminal_event_payload(new_status, error_code),
-    }
-}
-
-/// Terminal-event payload: `{"status": <value>, "error_code": <code>}`.
-pub fn terminal_event_payload(new_status: AgentRunStatus, error_code: &str) -> Value {
-    serde_json::json!({"status": new_status.value(), "error_code": error_code})
-}
-
-/// Terminal-event `INSERT` performer ([`terminal_event_insert_sql`]):
-/// append the planned cloud-only event for one finalized run.
-///
-/// `plan` is the [`plan_terminal_event`] row (`seq`, `{"status",
-/// "error_code"}` payload); `kind` binds `terminal`, `created_at`
-/// binds the caller's own `now` (each driver stamps its own clock,
-/// never hoisted across legs). The existence guard and max-seq read
-/// stay driver-side. Runs on a SeaORM connection via
-/// [`insert_terminal_event_orm`]; `sqlx::Error` is kept via
-/// `orm_tx::into_sqlx` so callers' classification is unchanged.
-pub async fn insert_terminal_event(
-    db: &impl sea_orm::ConnectionTrait,
-    run_id: Uuid,
-    plan: TerminalEventPlan,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    insert_terminal_event_orm(db, run_id, plan, now)
-        .await
-        .map_err(pidash_db::orm_tx::into_sqlx)
-}
 
 /// `_publish_effects` (`agent_run_finalization.py:89-103`): the Celery
 /// emit first, then the inline terminal-effects run — each isolated,
@@ -580,15 +499,12 @@ pub struct HooksPlan {
     pub scheduler: Option<SchedulerHookPlan>,
 }
 
-/// The capacity branch: cloud runs dispatch waiting work for the
-/// workspace; local runs drain runner and/or pod when set. Drains and
-/// dispatch run *before* the marker write, unisolated — a failure
-/// leaves the marker unset for the reconciler.
+/// The capacity branch: local runs drain runner and/or pod when set.
+/// Drains run *before* the marker write, unisolated — a failure
+/// leaves the marker unset for the reconciler. (P3 step C deleted
+/// the cloud dispatch arm.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapacityPlan {
-    Cloud {
-        workspace_id: Uuid,
-    },
     Local {
         runner_id: Option<Uuid>,
         pod_id: Option<Uuid>,
@@ -596,13 +512,10 @@ pub enum CapacityPlan {
 }
 
 impl CapacityPlan {
-    /// The capacity effects in order: dispatch, or runner drain then
-    /// pod drain (each when its id is set).
+    /// The capacity effects in order: runner drain then pod drain
+    /// (each when its id is set).
     pub fn effects(&self) -> Vec<LifecycleEffect> {
         match self {
-            CapacityPlan::Cloud { workspace_id } => vec![LifecycleEffect::DispatchWaiting {
-                workspace_id: *workspace_id,
-            }],
             CapacityPlan::Local { runner_id, pod_id } => {
                 let mut effects = Vec::new();
                 if let Some(runner_id) = runner_id {
@@ -734,15 +647,9 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         None
     } else {
         statements.push(EffectsSql::UpdateCapacityMarker);
-        Some(if inputs.executor_kind == AgentExecutorKind::CloudAgent {
-            CapacityPlan::Cloud {
-                workspace_id: inputs.workspace_id,
-            }
-        } else {
-            CapacityPlan::Local {
-                runner_id: inputs.runner_id,
-                pod_id: inputs.pod_id,
-            }
+        Some(CapacityPlan::Local {
+            runner_id: inputs.runner_id,
+            pod_id: inputs.pod_id,
         })
     };
 
@@ -876,86 +783,7 @@ pub async fn finalize_update(
         .rows_affected)
 }
 
-/// Terminal-event existence ([`terminal_event_exists_sql`]).
-pub async fn terminal_event_exists(
-    db: &impl sea_orm::ConnectionTrait,
-    run_id: Uuid,
-) -> Result<bool, sea_orm::DbErr> {
-    use orm::agent_run_event::{Column, Entity};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    Ok(Entity::find()
-        .select_only()
-        .column(Column::Id)
-        .filter(Column::AgentRunId.eq(run_id))
-        .filter(Column::Kind.eq(TERMINAL_EVENT_KIND))
-        .into_tuple::<i64>()
-        .one(db)
-        .await?
-        .is_some())
-}
 
-/// Terminal-event max sequence ([`terminal_event_max_seq_sql`]): the
-/// highest `seq` for the run, or `None` without events.
-pub async fn terminal_event_max_seq(
-    db: &impl sea_orm::ConnectionTrait,
-    run_id: Uuid,
-) -> Result<Option<i32>, sea_orm::DbErr> {
-    use orm::agent_run_event::{Column, Entity};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
-    Entity::find()
-        .select_only()
-        .column(Column::Seq)
-        .filter(Column::AgentRunId.eq(run_id))
-        .order_by_desc(Column::Seq)
-        .into_tuple::<i32>()
-        .one(db)
-        .await
-}
-
-/// Terminal-event `INSERT` ([`insert_terminal_event`]) on SeaORM: the
-/// planned row, `kind = terminal`, `created_at = now`; the id is the
-/// database default.
-pub async fn insert_terminal_event_orm(
-    db: &impl sea_orm::ConnectionTrait,
-    run_id: Uuid,
-    plan: TerminalEventPlan,
-    now: DateTime<Utc>,
-) -> Result<(), sea_orm::DbErr> {
-    use orm::agent_run_event::{ActiveModel, Entity};
-    use sea_orm::{EntityTrait, NotSet, Set};
-    Entity::insert(ActiveModel {
-        id: NotSet,
-        seq: Set(plan.seq),
-        kind: Set(TERMINAL_EVENT_KIND.to_owned()),
-        payload: Set(plan.payload),
-        created_at: Set(now.into()),
-        agent_run_id: Set(run_id),
-    })
-    .exec_without_returning(db)
-    .await
-    .map(drop)
-}
-
-/// `finalize_agent_run:73-84` for a cloud run: append the terminal event
-/// unless one exists (exists check, max-seq read, insert: the same three
-/// statements, in order).
-pub async fn append_terminal_event_once(
-    db: &impl sea_orm::ConnectionTrait,
-    run_id: Uuid,
-    new_status: AgentRunStatus,
-    error_code: &str,
-    now: DateTime<Utc>,
-) -> Result<(), sea_orm::DbErr> {
-    if terminal_event_exists(db, run_id).await? {
-        return Ok(());
-    }
-    let max_seq = terminal_event_max_seq(db, run_id).await?;
-    let plan = plan_terminal_event(max_seq, new_status, error_code);
-    insert_terminal_event_orm(db, run_id, plan, now).await
-}
-
-/// The terminal event's `kind`.
-pub const TERMINAL_EVENT_KIND: &str = "terminal";
 
 // ---------------------------------------------------------------------------
 // SeaORM terminal-effects kernel
@@ -1529,46 +1357,6 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
-    // terminal event + publish
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn terminal_event_seq_and_payload() {
-        let fx = fixture();
-        let cloud = fx["finalize_agent_run"]["cloud"].clone();
-        let event = plan_terminal_event(None, AgentRunStatus::Completed, "E1");
-        assert_eq!(event.seq, 1);
-        assert_eq!(
-            event.payload,
-            json!({"status": "completed", "error_code": "E1"})
-        );
-        assert_eq!(
-            cloud["events"][0].get("payload"),
-            Some(&json!({"status": "completed", "error_code": "E1"}))
-        );
-        assert_eq!(
-            cloud["events"][0].get("seq").and_then(Value::as_i64),
-            Some(1)
-        );
-        assert_eq!(
-            cloud["events"][0].get("kind").and_then(Value::as_str),
-            Some("terminal")
-        );
-        // max + 1 over a gap.
-        assert_eq!(
-            plan_terminal_event(Some(5), AgentRunStatus::Completed, "").seq,
-            6
-        );
-        assert_eq!(
-            fx["finalize_agent_run"]
-                .get("cloud_seq_after_gap")
-                .and_then(|v| v.as_array().and_then(|a| a.first()))
-                .and_then(Value::as_i64),
-            Some(6)
-        );
-    }
-
     #[test]
     fn publish_effects_emit_then_inline() {
         assert_eq!(
@@ -1647,7 +1435,6 @@ mod tests {
         }
         if let Some(capacity) = &plan.capacity {
             match capacity {
-                CapacityPlan::Cloud { .. } => names.push("dispatch_waiting"),
                 CapacityPlan::Local { runner_id, pod_id } => {
                     if runner_id.is_some() {
                         names.push("drain_runner");
@@ -1872,39 +1659,6 @@ mod tests {
     }
 
     #[test]
-    fn effects_cloud_dispatches_instead_of_draining() {
-        let fx = fixture();
-        let gold = effects_case(&fx, "cloud");
-        let mut inputs = effects_inputs(AgentRunStatus::Completed, &Value::Null);
-        inputs.executor_kind = AgentExecutorKind::CloudAgent;
-        inputs.runner_id = None;
-        inputs.pod_id = None;
-        let outcome = plan_terminal_effects(&inputs);
-        let TerminalEffectsOutcome::Applied(plan) = outcome else {
-            panic!("expected Applied");
-        };
-        assert!(matches!(plan.capacity, Some(CapacityPlan::Cloud { .. })));
-        assert_eq!(effect_names(&plan), ["orchestration", "dispatch_waiting"]);
-        assert_eq!(
-            gold.get("calls"),
-            Some(&json!(["orchestration", "dispatch_waiting"]))
-        );
-        let capacity = plan.capacity.expect("capacity");
-        assert_eq!(
-            capacity.effects(),
-            [LifecycleEffect::DispatchWaiting {
-                workspace_id: Uuid::nil()
-            }]
-        );
-        // Local drains degrade gracefully without ids.
-        let local = CapacityPlan::Local {
-            runner_id: None,
-            pod_id: None,
-        };
-        assert!(local.effects().is_empty());
-    }
-
-    #[test]
     fn effects_idempotency_markers_gate_branches() {
         let fx = fixture();
         // Hooks applied: capacity only.
@@ -2037,26 +1791,6 @@ mod tests {
                  \"error_details\" = {} WHERE \"agent_run\".\"id\" = $7",
                 error_details_merge_sql("$6")
             )
-        );
-    }
-
-    #[test]
-    fn terminal_event_sql_match_django() {
-        assert_eq!(
-            terminal_event_exists_sql(),
-            "SELECT 1 AS \"a\" FROM \"agent_run_event\" WHERE \
-             (\"agent_run_event\".\"agent_run_id\" = $1 AND \"agent_run_event\".\"kind\" = $2) LIMIT 1"
-        );
-        assert_eq!(
-            terminal_event_max_seq_sql(),
-            "SELECT \"agent_run_event\".\"seq\" FROM \"agent_run_event\" WHERE \
-             \"agent_run_event\".\"agent_run_id\" = $1 ORDER BY \"agent_run_event\".\"seq\" DESC LIMIT 1"
-        );
-        assert_eq!(
-            terminal_event_insert_sql(),
-            "INSERT INTO \"agent_run_event\" (\"agent_run_id\", \"seq\", \"kind\", \
-             \"payload\", \"created_at\") VALUES ($1, $2, $3, $4, $5) \
-             RETURNING \"agent_run_event\".\"id\""
         );
     }
 
@@ -2329,17 +2063,6 @@ mod tests {
             .await
             .expect("lock")
             .is_none());
-        append_terminal_event_once(&conn, run, AgentRunStatus::Failed, "boom", now)
-            .await
-            .expect("event");
-        append_terminal_event_once(&conn, run, AgentRunStatus::Failed, "boom", now)
-            .await
-            .expect("event again");
-        assert!(terminal_event_exists(&conn, run).await.expect("exists"));
-        assert_eq!(
-            terminal_event_max_seq(&conn, run).await.expect("max"),
-            Some(1)
-        );
         // The effects lock sees the written row and the joined binding.
         let effects = lock_run_for_effects(&conn, run)
             .await

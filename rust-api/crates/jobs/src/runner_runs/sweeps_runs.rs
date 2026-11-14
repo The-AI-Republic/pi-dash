@@ -102,10 +102,9 @@ use pidash_db::runner_enroll::columns::enums::{
     RUNNER_STATUS_BUSY, RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE,
 };
 use pidash_services::runner_runs::finalization::{
-    self, finalize_error_code, plan_finalize_values, TERMINAL_EFFECTS_TASK,
+    self, plan_finalize_values, TERMINAL_EFFECTS_TASK,
 };
 use pidash_services::runner_sessions::guards::BUSY_STATUSES;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus};
 
 use crate::queue::{self, JobRow, NewJob};
@@ -402,8 +401,6 @@ pub const REVOKED_REASON_IDLE: &str = "idle_timeout";
 pub const CANCEL_REASON_APPROVAL_TIMEOUT: &str = "approval_timeout";
 /// Expiry error detail (`tasks.py:78`).
 pub const APPROVAL_TIMEOUT_ERROR: &str = "approval request expired";
-/// Terminal-event kind (`finalize_agent_run:74`).
-pub const TERMINAL_EVENT_KIND: &str = "terminal";
 
 /// Consumer name for a session (`outbox.py:97-98`): `consumer-{sid}`.
 /// D-14 owns the canonical port; this pure helper is pinned here so the
@@ -1060,7 +1057,7 @@ async fn expire_approval_locked(
         ],
     )
     .map_err(|error| SweepsError::internal(error.to_string()))?;
-    let Some(finalized) =
+    let Some(_finalized) =
         finalization::lock_run_for_finalize(conn, row.run_id, row.run_runner_id, None).await?
     else {
         return Ok(Some(ExpireOutcome {
@@ -1070,18 +1067,6 @@ async fn expire_approval_locked(
         }));
     };
     finalization::finalize_update(conn, &values, row.run_id, now).await?;
-    if AgentExecutorKind::from_value(&finalized.executor_kind)
-        == Some(AgentExecutorKind::CloudAgent)
-    {
-        finalization::append_terminal_event_once(
-            conn,
-            row.run_id,
-            AgentRunStatus::Cancelled,
-            &finalize_error_code(&values),
-            now,
-        )
-        .await?;
-    }
     Ok(Some(ExpireOutcome {
         stamped: true,
         finalized_run: Some(row.run_id),

@@ -251,14 +251,13 @@ fn update_clause(
 /// recomposed from the public planners exactly like
 /// `run_finalize_transaction`: lock the non-terminal row (plus the
 /// expected-status guard when carried), merge `done_payload`,
-/// write the values, insert the cloud-only terminal event, commit,
-/// then publish effects. A lock miss commits empty and loses
-/// (`Ok(false)`), like the source. The inline effects leg is
-/// skipped (see the module docs); the queued leg matches
-/// `reap_stalled_row`'s enqueue, including its log line.
+/// write the values, commit, then publish effects. (P3 step C:
+/// the cloud-only terminal-event append is gone.) A lock miss
+/// commits empty and loses (`Ok(false)`), like the source. The
+/// inline effects leg is skipped (see the module docs); the queued
+/// leg matches `reap_stalled_row`'s enqueue, including its log line.
 async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, SeamError> {
     use pidash_services::runner_runs::finalization;
-    use pidash_types::dispatch::AgentExecutorKind;
     use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
 
     let new_status = AgentRunStatus::from_value(call.new_status)
@@ -276,8 +275,8 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
         .await
         .map_err(|error| SeamError(error.to_string()))?;
     let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
-    use pidash_db::entity::{agent_run as run_entity, agent_run_event as ev_entity};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    use pidash_db::entity::agent_run as run_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let seam_err = |error: sea_orm::DbErr| SeamError(error.to_string());
     let mut lock_query = run_entity::Entity::find_by_id(call.run_id)
         .filter(
@@ -419,49 +418,8 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
         .exec(&conn)
         .await
         .map_err(seam_err)?;
-    if AgentExecutorKind::from_value(&locked.executor_kind)
-        == Some(AgentExecutorKind::CloudAgent)
-    {
-        let exists = ev_entity::Entity::find()
-            .filter(ev_entity::Column::AgentRunId.eq(call.run_id))
-            .filter(ev_entity::Column::Kind.eq("terminal"))
-            .select_only()
-            .column(ev_entity::Column::Id)
-            .into_tuple::<i64>()
-            .one(&conn)
-            .await
-            .map_err(seam_err)?
-            .is_some();
-        if !exists {
-            let max: Option<i32> = ev_entity::Entity::find()
-                .filter(ev_entity::Column::AgentRunId.eq(call.run_id))
-                .select_only()
-                .column(ev_entity::Column::Seq)
-                .order_by_desc(ev_entity::Column::Seq)
-                .limit(1)
-                .into_tuple::<i32>()
-                .one(&conn)
-                .await
-                .map_err(seam_err)?;
-            let plan = finalization::plan_terminal_event(
-                max,
-                new_status,
-                &finalization::finalize_error_code(&values),
-            );
-            use sea_orm::ActiveModelTrait;
-            ev_entity::ActiveModel {
-                seq: sea_orm::Set(plan.seq),
-                kind: sea_orm::Set("terminal".to_owned()),
-                payload: sea_orm::Set(plan.payload),
-                created_at: sea_orm::Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
-                agent_run_id: sea_orm::Set(call.run_id),
-                ..Default::default()
-            }
-            .insert(&conn)
-            .await
-            .map_err(seam_err)?;
-        }
-    }
+    // P3 step C: the cloud-only terminal-event append died with the
+    // retired plane; this finalize writes values only.
     tx.commit()
         .await
         .map_err(|error| SeamError(error.to_string()))?;

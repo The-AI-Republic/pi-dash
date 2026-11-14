@@ -648,17 +648,6 @@ pub async fn execute_finalize_terminal(
     finalize_kernel::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
-        finalize_kernel::append_terminal_event_once(
-            &conn,
-            run_id,
-            status,
-            &finalize_kernel::finalize_error_code(&values),
-            now,
-        )
-        .await
-        .map_err(|_| server_error())?;
-    }
     Ok(finalize_kernel::plan_publish_effects(run_id).to_vec())
 }
 
@@ -1232,12 +1221,6 @@ pub async fn drain_lifecycle_effects(
             LifecycleEffect::DrainPod { pod_id } => {
                 ports
                     .drain_pod_by_id(pod_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
-            LifecycleEffect::DispatchWaiting { workspace_id } => {
-                ports
-                    .dispatch_waiting(workspace_id)
                     .await
                     .map_err(|_| server_error())?;
             }
