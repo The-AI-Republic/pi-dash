@@ -159,15 +159,14 @@ def test_patch_external_fields_trimmed(admin):
     assert r.json()["external_id"] == "abc"
 
 
-def test_post_timezone_trimmed_accepted(admin):
+def test_post_padded_timezone_rejected_not_trimmed(admin):
     urls = cycle_urls(admin)
-    # Timezone with surrounding whitespace must be accepted after trim
+    # Timezone is a ChoiceField (CharField with choices maps to
+    # ChoiceField in DRF), which does not trim: padded input is
+    # rejected with the raw padded value in the message.
     r = admin["client"].post(
         urls["cycles"],
-        json={"name": "TZTrim", "timezone": "  UTC  "},
+        json={"name": "TZPad", "timezone": "  UTC  "},
     )
-    assert r.status_code == 201, r.text[:500]
-    # The created row should have timezone UTC (trimmed)
-    with admin["seed"].conn.cursor() as cur:
-        cur.execute("SELECT timezone FROM cycles WHERE id=%s", (r.json()["id"],))
-        assert cur.fetchone()[0] == "UTC"
+    assert r.status_code == 400, r.text[:500]
+    assert r.json() == {"timezone": ['"  UTC  " is not a valid choice.']}, r.text[:500]

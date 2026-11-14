@@ -1841,18 +1841,18 @@ async fn validate_write(
             );
             None
         }
+        // `ChoiceField` does not trim: padded input is rejected with
+        // the raw padded value in the message.
+        Some(Value::String(text)) if MODULE_STATUS_CHOICES.contains(&text.as_str()) => {
+            Some(text.clone())
+        }
         Some(Value::String(text)) => {
-            let trimmed = text.trim();
-            if MODULE_STATUS_CHOICES.contains(&trimmed) {
-                Some(trimmed.to_owned())
-            } else {
-                push_error(
-                    &mut errors,
-                    "status",
-                    format!("\"{trimmed}\" is not a valid choice."),
-                );
-                None
-            }
+            push_error(
+                &mut errors,
+                "status",
+                format!("\"{text}\" is not a valid choice."),
+            );
+            None
         }
         Some(other) => {
             push_error(&mut errors, "status", invalid_choice_message(other));

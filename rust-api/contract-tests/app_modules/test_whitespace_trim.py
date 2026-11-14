@@ -2,7 +2,7 @@
 
 Same DRF ModelSerializer trim_whitespace=True pattern as cycles:
 "   " -> 400 blank for name, padded names stored trimmed, length after strip.
-Status choice field also trims (CharField choices).
+Status is a ChoiceField, which does not trim: padded input is 400.
 """
 
 import pytest
@@ -95,11 +95,13 @@ def test_post_external_fields_trimmed(api, tenant_a, project_a, auth_a):
     assert r.json()["external_id"] == "EXT-1"
 
 
-def test_post_status_trimmed(api, tenant_a, project_a, auth_a):
+def test_post_padded_status_rejected_not_trimmed(api, tenant_a, project_a, auth_a):
+    # Status is a ChoiceField, which does not trim: padded input is
+    # rejected with the raw padded value in the message.
     r = api.post(
         modules_url(tenant_a, project_a),
         headers=auth_a,
-        json={"name": "StatusTrim", "status": "  planned  "},
+        json={"name": "StatusPad", "status": "  planned  "},
     )
-    assert r.status_code == 201, r.text[:500]
-    assert r.json()["status"] == "planned"
+    assert r.status_code == 400, r.text[:500]
+    assert r.json() == {"status": ['"  planned  " is not a valid choice.']}, r.text[:500]
