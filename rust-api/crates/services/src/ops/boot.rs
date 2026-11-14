@@ -58,31 +58,21 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// runner 0038→0039 (PDASHOSS01-297 dedicated-runner assignment, `42f93b62b`),
 /// then db 0173→0174 (PR #3144, `ea5db8e3d`): `db/0174` depends on
 /// `runner/0039` across apps, but Django's `leaf_nodes()` only counts
-<<<<<<< HEAD
 /// same-app children, so `runner/0039` stays a leaf, then db 0174→0177
 /// (PDASHOSS01-356 github_* sunset 3/6 `45ab58e04`: `db/0177` on top of
 /// `db/0176` `e82eb916e` on top of `db/0175` `9361acbff` on top of
 /// `db/0174`): the linear db chain keeps one leaf, so Django (4.2 loader,
 /// verified live) still reports the same nine leaves with `db/0177`:
-/// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
+/// P6a's `0178_rename_comment_bot` (data-only) sits on top; no
+/// `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
 /// (the contract test asserts that independently).
-=======
-/// same-app children, so `runner/0039` stays a leaf. Then db
-/// 0174→0176 (`0175_webhook_deliveries_backfill`,
-/// `0176_update_timezone_choices_pytz_2025_2`) and P6a's
-/// `0177_rename_comment_bot` (data-only).
->>>>>>> 2ab4daadf (refactor(p6a): rename the comment bot to Pi Dash Bot)
 pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-<<<<<<< HEAD
-    ("db", "0177_git_provider_app_columns"),
-=======
-    ("db", "0177_rename_comment_bot"),
->>>>>>> 2ab4daadf (refactor(p6a): rename the comment bot to Pi Dash Bot)
+    ("db", "0178_rename_comment_bot"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
@@ -349,11 +339,7 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-<<<<<<< HEAD
-                ("db", "0177_git_provider_app_columns"),
-=======
-                ("db", "0177_rename_comment_bot"),
->>>>>>> 2ab4daadf (refactor(p6a): rename the comment bot to Pi Dash Bot)
+                ("db", "0178_rename_comment_bot"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),

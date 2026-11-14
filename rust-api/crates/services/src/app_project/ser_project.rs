@@ -46,9 +46,9 @@
 //! (+ [`UserFlags`](crate::run_creation::executor_policy::UserFlags),
 //! [`ManagedAvailability`](crate::run_creation::executor_policy::ManagedAvailability),
 //! [`ExecutorOption`](crate::run_creation::executor_policy::ExecutorOption)) and
-//! [`CloudAgentUnavailableBody`](crate::run_creation::pidash_agent_availability::CloudAgentUnavailableBody)
+//! [`CloudAgentUnavailableBody`](crate::run_creation::admission::CloudAgentUnavailableBody)
 //! (+
-//! [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`](crate::run_creation::pidash_agent_availability::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS)).
+//! [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`](crate::run_creation::admission::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS)).
 //!
 //! Wire rules (all verified against live DRF through the fixture or the
 //! repo Python: DRF 3.15.2 in the fixture env, 3.18.1 locally):
@@ -745,6 +745,7 @@ where
     F: FnOnce() -> bool,
 {
     crate::run_creation::executor_policy::agent_executor_options(
+
         resolve_options_user(user, is_authenticated),
         has_usable_llm_config,
         local_runner_available,
