@@ -559,6 +559,10 @@ test(
         await expect.poll(() => driver.paletteHasCommand("New cycle"), { timeout: 60_000 }).toBe(true);
         await driver.activatePaletteCommand("New cycle");
         await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(true);
+        // The palette's close-on-select re-render swaps the create
+        // dialog's title input; filling before the palette fully closes
+        // lands in the detached node (oracle: "Title is required").
+        await expect.poll(() => driver.isCommandPaletteOpen(), { timeout: 30_000 }).toBe(false);
         await driver.cyclesCreateFillTitle(name);
         await driver.cyclesCreateSubmit();
         expect(await toastText(driver)).toMatch(/creat/i);
