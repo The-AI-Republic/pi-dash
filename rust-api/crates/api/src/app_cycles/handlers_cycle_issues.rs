@@ -702,6 +702,49 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
+/// Rewrite every `alias.` reference in the filter SQL (both spellings,
+/// see [`alias_mentioned`]) to `replacement.`. Used to give the legacy
+/// stack its own copy of a relation join (NEWPIDASH-195).
+fn rename_alias_refs(sql: &str, alias: &str, replacement: &str) -> String {
+    let mut starts: Vec<usize> = Vec::new();
+    let quoted = format!("\"{alias}\".");
+    let mut base = 0;
+    while let Some(at) = sql[base..].find(&quoted) {
+        starts.push(base + at);
+        base += at + 1;
+    }
+    starts.extend(alias_unquoted_offsets(sql, alias));
+    if starts.is_empty() {
+        return sql.to_owned();
+    }
+    starts.sort_unstable();
+    let mut out = String::with_capacity(sql.len() + starts.len() * replacement.len());
+    let mut cursor = 0;
+    for start in starts {
+        if start < cursor {
+            continue;
+        }
+        let quoted_ref = sql[start..].starts_with('"');
+        let marker_len = if quoted_ref {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        out.push_str(&sql[cursor..start]);
+        if quoted_ref {
+            out.push('"');
+        }
+        out.push_str(replacement);
+        if quoted_ref {
+            out.push('"');
+        }
+        out.push('.');
+        cursor = start + marker_len;
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
+
 /// M2M group keys force a join on that relation (`GROUP_FILTER_MAPPER` in
 /// `utils/grouper.py:41-49` for the canonical keys; the annotation-context
 /// join for the short aliases `labels` / `assignees`, which Django resolves
@@ -815,9 +858,11 @@ fn cycle_filtered_set(
         let holder = binder.bind_uuid(issue_id);
         fragments.push(format!("issue.id = {holder}"));
     }
+    let mut complex_sql_text = String::new();
     if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
-        fragments.push(binder.splice(&fragment, values));
+        complex_sql_text = binder.splice(&fragment, values);
+        fragments.push(complex_sql_text.clone());
     }
     let flat: HashMap<String, String> = query
         .keys()
@@ -836,6 +881,32 @@ fn cycle_filtered_set(
         } else {
             legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
         }
+    }
+    // NEWPIDASH-195: Django applies the rich `filters` tree and the
+    // legacy predicates as two separate `.filter()` calls, so a
+    // relation filtered by BOTH stacks joins the link table twice
+    // and an issue linked to both rows matches. Give the legacy
+    // stack's copy of each shared relation its own alias
+    // (`<alias>_legacy`) — otherwise one link row must satisfy both
+    // predicates and the result is empty whenever the two sides
+    // name different rows. A `not`'d alias compiles to `NOT EXISTS`
+    // with no join (NEWPIDASH-194), so it never counts as shared;
+    // the `or` disjuncts take the LEFT join and do count. The
+    // primary join still covers the rich side; the legacy alias
+    // join is INNER when the legacy predicates are positive, LEFT
+    // when only `__isnull`.
+    let mut legacy_joins: Vec<(&str, String, bool)> = Vec::new();
+    if !complex_sql_text.is_empty() && !legacy_sql_text.is_empty() {
+        let mut renamed = legacy_sql_text.clone();
+        for (table, alias) in RELATION_JOINS {
+            if alias_mentioned(&complex_sql_text, alias) && alias_mentioned(&renamed, alias) {
+                let nullable_only = alias_nullable_only(&renamed, alias);
+                let legacy_alias = format!("{alias}_legacy");
+                renamed = rename_alias_refs(&renamed, alias, &legacy_alias);
+                legacy_joins.push((*table, legacy_alias, nullable_only));
+            }
+        }
+        legacy_sql_text = renamed;
     }
     if !legacy_sql_text.is_empty() {
         fragments.push(legacy_sql_text.clone());
@@ -880,6 +951,20 @@ fn cycle_filtered_set(
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+        ));
+    }
+    // The legacy stacks' own copy of each shared relation join
+    // (NEWPIDASH-195); the probe above only sees the primary
+    // aliases because the renamed fragment spells these
+    // `<alias>_legacy`.
+    for (table, legacy_alias, nullable_only) in &legacy_joins {
+        let kind = if *nullable_only {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} {table} AS {legacy_alias} ON {legacy_alias}.issue_id = issue.id"
         ));
     }
     // The intake join exists only when a filter references it (the grouped
@@ -2369,6 +2454,113 @@ mod tests {
                 plain.from_where
             );
         }
+    }
+
+    #[test]
+    fn shared_relation_gets_a_second_legacy_join() {
+        // NEWPIDASH-217 (195 twin): a rich assignee leaf AND a
+        // legacy `assignees=` key on the same relation must join
+        // the link table twice (Django applies two `.filter()`
+        // calls); the legacy predicates resolve over
+        // `issue_assignee_legacy`.
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned(),
+            ),
+        );
+        query.insert(
+            "assignees".to_owned(),
+            OneOrMany::One("00000000-0000-0000-0000-000000000002".to_owned()),
+        );
+        let filtered = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            filtered
+                .from_where
+                .contains("INNER JOIN issue_assignees AS issue_assignee ON"),
+            "primary join missing: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("INNER JOIN issue_assignees AS issue_assignee_legacy ON"),
+            "legacy join missing: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("issue_assignee_legacy.assignee_id IN"),
+            "legacy predicate must resolve over the legacy alias: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("\"issue_assignee\".\"assignee_id\" IN"),
+            "rich leaf must stay on the primary alias: {}",
+            filtered.from_where
+        );
+        assert!(
+            !filtered.from_where.contains("label_issue_legacy"),
+            "unrelated relations gain no legacy copy: {}",
+            filtered.from_where
+        );
+    }
+
+    #[test]
+    fn shared_nullable_only_legacy_takes_left_join() {
+        // NEWPIDASH-217: a legacy `__isnull`-only predicate on a
+        // relation the rich tree also filters must join the link
+        // table a second time with LEFT (Django's `__isnull`
+        // annotation join), not INNER: `assignees=None` means "no
+        // assignee" and must keep the linkless rows the rich `IN`
+        // on the primary alias already filters.
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned(),
+            ),
+        );
+        query.insert("assignees".to_owned(), OneOrMany::One("None".to_owned()));
+        let filtered = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            filtered
+                .from_where
+                .contains("LEFT JOIN issue_assignees AS issue_assignee_legacy ON"),
+            "nullable-only legacy join must be LEFT: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered.from_where.contains("issue_assignee_legacy."),
+            "legacy predicate must resolve over the legacy alias: {}",
+            filtered.from_where
+        );
     }
 
     #[test]
