@@ -108,7 +108,7 @@ use std::fmt::Write as _;
 /// generic resolve-miss detail (`"Project not found"`).
 pub use pidash_db::app_project::models::project::NOT_FOUND_DETAIL;
 use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
-use pidash_db::dispatch::AgentRunStatus;
+use pidash_db::agent_runs::AgentRunStatus;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use serde_json::{Map, Value};

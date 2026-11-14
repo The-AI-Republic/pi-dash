@@ -4,7 +4,11 @@
 //!
 //! What survives P3 step A (agent naming convention): the creation
 //! re-exports (`execution_fields` and friends, owned by
+<<<<<<<< HEAD:rust-api/crates/jobs/src/dispatch/dispatch.rs
 //! `pidash_services::dispatch::execution`), the runner-plane
+========
+//! `pidash_services::run_creation::execution_resolution`), the runner-plane
+>>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/jobs/src/run_dispatch.rs
 //! `dispatch_agent_run` (non-cloud kinds drain their pod), and the
 //! post-commit collector. The cloud lease/offer engine, the event
 //! append, and their tests died with the retired plane; P4 removed
@@ -25,9 +29,15 @@ use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
 
 /// The executor resolve (`execution_fields`) now lives in
+<<<<<<<< HEAD:rust-api/crates/jobs/src/dispatch/dispatch.rs
 /// `pidash_services::dispatch::execution`; this re-export keeps every
 /// `pidash_jobs::dispatch::…` path stable.
 pub use pidash_services::dispatch::execution::{
+========
+/// `pidash_services::run_creation::execution_resolution`; this re-export keeps every
+/// `pidash_jobs::run_dispatch::…` path stable.
+pub use pidash_services::run_creation::execution::{
+>>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/jobs/src/run_dispatch.rs
     execution_fields, lock_workspace, ActorScope, DeferredAdmissionError, ExecutionFields,
 };
 
@@ -126,13 +136,12 @@ pub fn dispatch_after_commit(on_commit: &mut dyn FnMut(Uuid), run_id: Uuid) {
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
-
-    use pidash_services::dispatch::WORKSPACE_LOCK_SQL;
+    use pidash_services::run_creation::WORKSPACE_LOCK_SQL;
 
     use super::*;
 
     static FIXTURE: &str =
-        include_str!("../../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");
+        include_str!("../../../fixtures/dispatch/fx-disp-06-dispatch.golden.json");
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("fixture parses")

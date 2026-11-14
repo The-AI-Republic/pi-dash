@@ -64,6 +64,7 @@ use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
 use pidash_services::runner_sessions::live_drains;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
 };
@@ -647,6 +648,17 @@ pub async fn execute_finalize_terminal(
     finalize_kernel::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
+    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
+        finalize_kernel::append_terminal_event_once(
+            &conn,
+            run_id,
+            status,
+            &finalize_kernel::finalize_error_code(&values),
+            now,
+        )
+        .await
+        .map_err(|_| server_error())?;
+    }
     Ok(finalize_kernel::plan_publish_effects(run_id).to_vec())
 }
 
@@ -1218,7 +1230,10 @@ pub async fn drain_lifecycle_effects(
                     .await
                     .map_err(|_| server_error())?;
             }
-
+            // `LifecycleEffect::DispatchWaiting` is unconstructable now
+            // (CapacityPlan::Cloud died in P3c); keep the arm for the
+            // enum's exhaustive match.
+            LifecycleEffect::DispatchWaiting { .. } => {}
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
                 if let Err(error) = ports
                     .complete_project_move_handoff(run_id, terminal_created_by)

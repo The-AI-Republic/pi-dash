@@ -42,7 +42,7 @@
 //! assistant `actual_relation` / `inverse_relation` helpers, plus
 //! `py_strip` for `strip()` parity; [`clock`] additionally reuses the L1
 //! event/decision/outcome/phase types, `prompting::recipes::kind_for`, the
-//! `db::tasks_ticker` row helpers and `db::dispatch::AgentRunStatus` (the
+//! `db::tasks_ticker` row helpers and `db::agent_runs::AgentRunStatus` (the
 //! only intra-crate calls here; no D-11 edge).
 //!
 //! Fixture ids replayed by the unit tests: FX-ORCH-03

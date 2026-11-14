@@ -31,7 +31,7 @@
 //!   kernels over caller-supplied rows / `Max` verdict.
 //! * `get_agent_executor_options` (`:35-40,:147-152,:181-186`) — the
 //!   request-user derivation (`None` when missing or unauthenticated) plus
-//!   delegation to D-11's [`policy::agent_executor_options`](crate::dispatch::policy::agent_executor_options).
+//!   delegation to D-11's [`policy::agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options).
 //! * `DynamicBaseSerializer` `fields=` / `expand=` (`base.py:12-201`) — the
 //!   fields-dead rule, the `__init__` addition kernel with its
 //!   KeyError/TypeError edges, and the `to_representation` overwrite rule.
@@ -41,14 +41,14 @@
 //!   nested objects as [`Value`]).
 //!
 //! D-11 calls, consumed verbatim (PIDASHCONV-484/485, both Done):
-//! [`cloud_agent_is_configured`](crate::dispatch::policy::cloud_agent_is_configured),
-//! [`agent_executor_options`](crate::dispatch::policy::agent_executor_options)
-//! (+ [`UserFlags`](crate::dispatch::policy::UserFlags),
-//! [`ManagedAvailability`](crate::dispatch::policy::ManagedAvailability),
-//! [`ExecutorOption`](crate::dispatch::policy::ExecutorOption)) and
-//! [`CloudAgentUnavailableBody`](crate::dispatch::admission::CloudAgentUnavailableBody)
+//! [`cloud_agent_is_configured`](crate::run_creation::executor_policy::cloud_agent_is_configured),
+//! [`agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options)
+//! (+ [`UserFlags`](crate::run_creation::executor_policy::UserFlags),
+//! [`ManagedAvailability`](crate::run_creation::executor_policy::ManagedAvailability),
+//! [`ExecutorOption`](crate::run_creation::executor_policy::ExecutorOption)) and
+//! [`CloudAgentUnavailableBody`](crate::run_creation::pidash_agent_availability::CloudAgentUnavailableBody)
 //! (+
-//! [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`](crate::dispatch::admission::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS)).
+//! [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`](crate::run_creation::pidash_agent_availability::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS)).
 //!
 //! Wire rules (all verified against live DRF through the fixture or the
 //! repo Python: DRF 3.15.2 in the fixture env, 3.18.1 locally):
@@ -136,7 +136,8 @@
 //! Fixture: `rust-api/fixtures/app_project/FX-APROJ-01.serializers_project.json`
 //! (FX-APROJ-01).
 
-use crate::dispatch::policy::{ExecutorOption, ManagedAvailability, UserFlags};
+use crate::run_creation::executor_policy::{ExecutorOption, ManagedAvailability, UserFlags};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -721,7 +722,7 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 }
 
 /// Ports `get_agent_executor_options(project)` end to end by delegating to
-/// D-11's [`agent_executor_options`](crate::dispatch::policy::agent_executor_options):
+/// D-11's [`agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options):
 /// the cloud verdict consults the `has_usable_llm_config` EE seam only for
 /// authenticated users on configured instances (see D-11 docs);
 /// `local_runner_available` / `local_runner_exists` are the SeaORM
@@ -743,7 +744,7 @@ pub fn project_executor_options<F>(
 where
     F: FnOnce() -> bool,
 {
-    crate::dispatch::policy::agent_executor_options(
+    crate::run_creation::executor_policy::agent_executor_options(
         resolve_options_user(user, is_authenticated),
         has_usable_llm_config,
         local_runner_available,
@@ -2242,12 +2243,12 @@ mod tests {
             ExecutorGate::Ok
         );
         assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("cloud_agent"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("cloud_agent"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
         assert_eq!(
-            pidash_types::dispatch::normalize_executor_write("managed_runner"),
-            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+            pidash_types::agent_runs::normalize_executor_write("managed_runner"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
     }
 

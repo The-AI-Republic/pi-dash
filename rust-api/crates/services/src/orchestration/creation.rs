@@ -94,15 +94,15 @@ use uuid::Uuid;
 
 use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::runner_runs::agent_run;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
-use crate::dispatch::UserFlags;
+use crate::run_creation::UserFlags;
 use crate::prompting::{composer, context, recipes};
 
 // ---------------------------------------------------------------------------
@@ -1722,7 +1722,7 @@ pub struct AdmissionError {
 }
 
 /// The executor-specific fields for one creation (`execution_fields`,
-/// `creation.py:11-89`): mirrors `jobs::dispatch::ExecutionFields`
+/// `creation.py:11-89`): mirrors `jobs::run_dispatch::ExecutionFields`
 /// without importing jobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionFields {

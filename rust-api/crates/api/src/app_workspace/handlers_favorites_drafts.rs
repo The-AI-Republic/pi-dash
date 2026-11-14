@@ -133,16 +133,16 @@ use pidash_services::app_issues::shape::envelope;
 use pidash_services::app_workspace::ser_account_token as fav;
 use pidash_services::app_workspace::tasks as wtask;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
+use pidash_services::run_creation::pidash_agent_availability::{
     self as admission_q, LlmProfile, ManagedRunnerProbe, HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::dispatch::policy::{managed_runner_is_enabled, UserFlags};
+use pidash_services::run_creation::executor_policy::{managed_runner_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
 use sea_orm::prelude::DateTimeWithTimeZone;
@@ -6749,8 +6749,9 @@ async fn run_issue_create_validate(
     let probes = ValidateProbes {
         // Unreached on create (`instance=None`): step 1 never runs, the
         // pod-reassign / mid-flight legs need an instance, the triage
-        // manager leg is off. Git-only after PDASHOSS01-354.
+        // manager leg is off.
         git_sync_exists: &|| false,
+        github_sync_exists: &|| false,
         has_active_run: &|| false,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),

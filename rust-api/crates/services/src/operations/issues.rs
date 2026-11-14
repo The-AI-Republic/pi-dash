@@ -2902,7 +2902,7 @@ async fn run_write_validate(
                 }
             }
             Some(value) => {
-                let Some(kind) = pidash_types::dispatch::normalize_executor_write(value) else {
+                let Some(kind) = pidash_types::agent_runs::normalize_executor_write(value) else {
                     return Err(fail(ValidateError::ExecutorUnknown));
                 };
                 let normalized = kind.value().to_owned();
