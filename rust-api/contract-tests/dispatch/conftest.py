@@ -92,6 +92,11 @@ def world(seeder):
     return _membership_world(seeder)
 
 
+def create_member_world(seeder, *, role=20):
+    """Public wrapper over the membership world (one tenant's base)."""
+    return _membership_world(seeder, role=role)
+
+
 def create_pod(seeder, workspace_id, project_id, owner_id, *, name="Contract pod"):
     pod_id = str(uuid.uuid4())
     seeder.db.execute(
