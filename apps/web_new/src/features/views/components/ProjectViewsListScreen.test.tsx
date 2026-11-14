@@ -42,7 +42,14 @@ vi.mock("../../issues/index.js", async (importOriginal) => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { jsonResponse, makeMember, makeView, VIEWS_OWNER_ID } from "../testing.js";
+import {
+  jsonResponse,
+  makeMember,
+  makeMemberWithName,
+  makeProjectMember,
+  makeView,
+  VIEWS_OWNER_ID,
+} from "../testing.js";
 import { ProjectViewsListScreen } from "./ProjectViewsListScreen.js";
 
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
@@ -92,6 +99,8 @@ interface Harness {
   projectDelayMs: number;
   viewsCalls: number;
   members: ReturnType<typeof makeMember>[];
+  projectMembers: ReturnType<typeof makeProjectMember>[];
+  projectMembersStatus: number;
   workspaces: ReturnType<typeof workspaceRow>[];
   me: Record<string, unknown>;
   meStatus: number;
@@ -111,6 +120,8 @@ function resetHarness(): Harness {
     projectDelayMs: 0,
     viewsCalls: 0,
     members: [makeMember(VIEWS_OWNER_ID)],
+    projectMembers: [makeProjectMember(VIEWS_OWNER_ID, PROJECT_ID)],
+    projectMembersStatus: 200,
     workspaces: [workspaceRow()],
     me: meRow(),
     meStatus: 200,
@@ -160,6 +171,8 @@ beforeEach(() => {
       if (harness.viewsDelayMs > 0) await sleep(harness.viewsDelayMs);
       return jsonResponse(url, harness.viewsStatus, harness.views);
     }
+    if (url.endsWith(`/api/workspaces/acme/projects/${PROJECT_ID}/members/`))
+      return jsonResponse(url, harness.projectMembersStatus, harness.projectMembers);
     if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, harness.members);
     if (url.endsWith("/api/users/me/"))
       return jsonResponse(url, harness.meStatus, harness.meStatus === 200 ? harness.me : { detail: "nope" });
@@ -439,6 +452,30 @@ describe("ProjectViewsListScreen", () => {
       fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
       await waitFor(() => expect(names()).toHaveLength(2));
       expect(screen.queryByTestId("project-views-applied-filters")).not.toBeInTheDocument();
+    });
+
+    it("offers only project members in Created by, hiding the outside workspace member", async () => {
+      const outsideId = "523e4567-e89b-12d3-a456-426614174199";
+      harness.views = [alpha];
+      harness.members = [
+        makeMemberWithName(VIEWS_OWNER_ID, "Owner Person"),
+        makeMemberWithName(outsideId, "Rita Outsider"),
+      ];
+      // The project lists only the owner; the outsider is a workspace member outside the project.
+      harness.projectMembers = [makeProjectMember(VIEWS_OWNER_ID, PROJECT_ID)];
+      sessionHarness.useMe.mockReturnValue({ data: { id: VIEWS_OWNER_ID } });
+      await openList();
+
+      fireEvent.click(screen.getByTestId("project-views-filter-trigger"));
+      // The signed-in owner renders as You; the outsider must not appear.
+      // Wait for the roster reads to settle before asserting.
+      const panel = screen.getByTestId("project-views-filter-panel");
+      await waitFor(() => expect(panel).toHaveTextContent("You"));
+      expect(panel).not.toHaveTextContent("Rita Outsider");
+      // Search narrowing still works, but cannot surface the outsider.
+      fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "Rita" } });
+      await waitFor(() => expect(panel).toHaveTextContent("No matches found"));
+      expect(panel).not.toHaveTextContent("Rita Outsider");
     });
   });
 

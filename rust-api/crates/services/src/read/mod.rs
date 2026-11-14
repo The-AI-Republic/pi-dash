@@ -150,7 +150,10 @@ pub use issues::{
     comment_url, fetch_blocker_summary, fetch_workpad, fetch_workpad_by_id, resolve_workpad_state,
     workpad_stripped, WorkpadDbRow,
 };
-pub use pr_links::{fetch_pr_detail_row, fetch_pr_link_by_id, fetch_pr_link_list, PrLinkDbRow};
+pub use pr_links::{
+    fetch_pr_detail_row, fetch_pr_link_by_id, fetch_pr_link_list, PrLinkDbRow, PR_DETAIL_SQL,
+    PR_LINK_BY_ID_SQL, PR_LINK_LIST_SQL, PR_LIST_SQL,
+};
 pub use projects::{fetch_project_rows, fetch_state_columns};
 pub use relations::fetch_live_relation_ids;
 pub use render::{render_state, state_row_from, StateRow, StateRowTuple};

@@ -304,11 +304,39 @@ SESSIONS = (
                 ("args/2", "labels"),
             ],
         },
+        # Sunset 2/6 (PDASHOSS01-355): Django dual-writes
+        # github_pull_request_links + git_code_review_links (metadata
+        # legacy_github_pull_request_link_id), Rust writes only generic
+        # with {} metadata. Legacy table diverges until Django 6/6
+        # PDASHOSS01-359 removes legacy. Skip legacy table; the
+        # metadata divergence is pinned via known_cell_diffs so the
+        # generic row still compares otherwise.
+        skip_tables={
+            "github_pull_request_links": "sunset 2/6 legacy: Django dual-writes, Rust generic-only (PDASHOSS01-355)",
+        },
         # PR-link create also writes the legacy link row and stashes its
         # id in the new row's metadata (github_pr_links.py:_ensure...).
+        # Rust after PDASHOSS01-355 writes only generic with {} — the
+        # blanked Django pointer vs {} is pinned below.
         db_cell_refs=[
             ("git_code_review_links", "metadata", "github_pull_request_links",
              "legacy_github_pull_request_link_id"),
+        ],
+        # Django metadata legacy pointer vs Rust {} on PR-link rows.
+        # After db_cell_refs blanking the Django pointer is the stub
+        # {row:github_pull_request_links}; Rust is {}. Pin the blanked
+        # stub so the generic row otherwise compares. The match is the
+        # captured PR id (normalised {pr}); other generic rows (code
+        # reviews) have no pointer and compare without this pin.
+        known_cell_diffs=[
+            (
+                "git_code_review_links",
+                "NEWPIDASH-207",
+                {"id": "{pr}"},
+                "metadata",
+                {"legacy_github_pull_request_link_id": "{row:github_pull_request_links}"},
+                {},
+            ),
         ],
         requests=(
             Request(
@@ -506,6 +534,13 @@ SESSIONS = (
                 ("args/2", "github_pull_request_links"),
                 ("args/2", "intake_issues"),
             ],
+        },
+        # Sunset 2/6 (PDASHOSS01-355): code-review attach for github
+        # dual-writes legacy via _ensure_github_legacy_link in Django
+        # (integrations/git/code_reviews.py), Rust writes only generic.
+        # Legacy table diverges until Django 6/6 PDASHOSS01-359.
+        skip_tables={
+            "github_pull_request_links": "sunset 2/6 legacy: Django dual-writes, Rust generic-only (PDASHOSS01-355)",
         },
         # process_logs now compares exactly (868/920/937 all landed); only the now() stamps above still blank.
         requests=(

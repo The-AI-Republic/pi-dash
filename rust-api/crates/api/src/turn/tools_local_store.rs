@@ -474,6 +474,11 @@ pub trait ToolStore {
     /// PDASHOSS01-350).
     async fn has_blocking_run(&self, issue_id: &Uuid) -> Result<bool, StoreError>;
 
+    /// Whether the issue has an active run (`Issue.has_active_run`):
+    /// any run in the full `NON_TERMINAL_STATUSES` set (queued and
+    /// paused included). Distinct from the E8 blocking set.
+    async fn has_active_run(&self, issue_id: &Uuid) -> Result<bool, StoreError>;
+
     /// The `get_issue` execution detail (PDASHOSS01-350): the dedicated
     /// runner detail and the latest run's waiting object.
     async fn execution_detail(
@@ -1804,6 +1809,13 @@ impl ToolStore for PgToolStore {
     async fn has_blocking_run(&self, issue_id: &Uuid) -> Result<bool, StoreError> {
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
         pidash_services::domain::issue_assignment::has_blocking_run(&db, *issue_id)
+            .await
+            .map_err(orm_err)
+    }
+
+    async fn has_active_run(&self, issue_id: &Uuid) -> Result<bool, StoreError> {
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        pidash_services::app_issues::serializers_create::has_active_run(&db, *issue_id)
             .await
             .map_err(orm_err)
     }

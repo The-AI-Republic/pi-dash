@@ -2,11 +2,15 @@
 //!
 //! Ports `apps/api/pi_dash/db/models/integration/github.py:15-262` as used
 //! by `github_sync_task` (`GithubRepository`, `GithubRepositorySync`,
-//! `GithubIssueSync`, `GithubCommentSync`, `GithubAppInstallation`,
-//! `GithubWebhookDelivery`, `GithubAppInstallSession`,
+//! `GithubIssueSync`, `GithubCommentSync`, `GithubWebhookDelivery`,
 //! `GithubPullRequestLink`, incl. `State.OPEN`/`CLOSED` and
 //! `pr_updated_at`), adopting the Django-owned schema column-for-column.
 //! Read models / row mappings only; no migrations.
+//!
+//! The GitHub App installation models (`GithubAppInstallation`,
+//! `GithubAppInstallSession`) moved to
+//! [`super::git_models::git_provider_account`] /
+//! [`super::git_models::git_provider_install_session`] in PDASHOSS01-356.
 //!
 //! # Ported quirks (translate, don't redesign)
 //!
@@ -41,9 +45,11 @@ use std::str::FromStr;
 
 use super::OnDelete;
 
-/// Account-type choices for
-/// [`github_app_installation::GithubAppInstallation`]
-/// (`github.py:123-126`, ported as-is; note the capitalized stored values).
+/// Account-type choices for the legacy `GithubAppInstallation`
+/// (`github.py:123-126`, ported as-is; note the capitalized stored
+/// values). Retained for the remaining legacy call sites; the app
+/// install flow reads `account_type` from
+/// `git_provider_accounts.metadata`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum GithubAccountType {
     User,
@@ -569,87 +575,6 @@ pub mod github_comment_sync {
     }
 }
 
-/// `github_app_installations` table (`github.py:121-162`).
-pub mod github_app_installation {
-    use super::OnDelete;
-    use serde::{Deserialize, Serialize};
-
-    /// Default `repository_count` (`github.py:139`).
-    pub const DEFAULT_REPOSITORY_COUNT: i32 = 0;
-
-    /// Django table name (`Meta.db_table`).
-    pub const TABLE: &str = "github_app_installations";
-
-    /// Default `ORDER BY` (`Meta.ordering = ("-created_at",)`).
-    pub const ORDERING: &str = "-created_at";
-
-    /// Columns in Django `_meta` field order.
-    pub const COLUMNS: &[&str] = &[
-        "id",
-        "created_at",
-        "updated_at",
-        "created_by_id",
-        "updated_by_id",
-        "deleted_at",
-        "workspace_integration_id",
-        "installation_id",
-        "account_login",
-        "account_type",
-        "repository_selection",
-        "repository_count",
-        "permissions",
-        "events",
-        "installed_at",
-        "suspended_at",
-        "verified_at",
-        "last_checked_at",
-        "last_check_error",
-    ];
-
-    /// `workspace_integration` OneToOne (`github.py:132-136`): `CASCADE`,
-    /// `related_name="github_app_installation"`; the OneToOne carries an
-    /// implicit column-level unique on `workspace_integration_id`.
-    pub const WORKSPACE_INTEGRATION_ON_DELETE: OnDelete = OnDelete::Cascade;
-    pub const WORKSPACE_INTEGRATION_RELATED_NAME: &str = "github_app_installation";
-
-    /// `installation_id` is column-level `unique=True` (`github.py:137`).
-    pub const UNIQUE_COLUMNS: &[&str] = &["installation_id"];
-
-    /// One `GithubAppInstallation` row. `account_type` and
-    /// `repository_selection` store the enum strings (see
-    /// [`super::GithubAccountType`] and
-    /// [`super::GithubRepositorySelection`]); `events` is `jsonb NOT NULL`
-    /// defaulting to `[]` — [`default_events`] mirrors the per-row fresh
-    /// array.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    pub struct GithubAppInstallation {
-        pub id: uuid::Uuid,
-        pub created_at: chrono::DateTime<chrono::Utc>,
-        pub updated_at: chrono::DateTime<chrono::Utc>,
-        pub created_by_id: Option<uuid::Uuid>,
-        pub updated_by_id: Option<uuid::Uuid>,
-        pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub workspace_integration_id: uuid::Uuid,
-        pub installation_id: i64,
-        pub account_login: String,
-        pub account_type: String,
-        pub repository_selection: String,
-        pub repository_count: i32,
-        pub permissions: serde_json::Value,
-        pub events: serde_json::Value,
-        pub installed_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub verified_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub last_check_error: String,
-    }
-
-    /// Fresh default for `events` (`JSONField(default=list)`).
-    pub fn default_events() -> serde_json::Value {
-        serde_json::Value::Array(Vec::new())
-    }
-}
-
 /// `github_webhook_deliveries` table (`github.py:163-189`).
 pub mod github_webhook_delivery {
     use serde::{Deserialize, Serialize};
@@ -704,75 +629,6 @@ pub mod github_webhook_delivery {
         pub status: String,
         pub received_at: chrono::DateTime<chrono::Utc>,
         pub processed_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub error: String,
-    }
-}
-
-/// `github_app_install_sessions` table (`github.py:190-216`).
-pub mod github_app_install_session {
-    use super::OnDelete;
-    use serde::{Deserialize, Serialize};
-
-    /// Default `status` (`github.py:203`, `Status.STARTED`).
-    pub const DEFAULT_STATUS: &str = "started";
-
-    /// Django table name (`Meta.db_table`).
-    pub const TABLE: &str = "github_app_install_sessions";
-
-    /// Default `ORDER BY` (`Meta.ordering = ("-created_at",)`).
-    pub const ORDERING: &str = "-created_at";
-
-    /// Columns in Django `_meta` field order.
-    pub const COLUMNS: &[&str] = &[
-        "id",
-        "created_at",
-        "updated_at",
-        "created_by_id",
-        "updated_by_id",
-        "deleted_at",
-        "state",
-        "workspace_id",
-        "actor_id",
-        "installation_id",
-        "account_login",
-        "status",
-        "expires_at",
-        "completed_at",
-        "error",
-    ];
-
-    /// `state` is column-level `unique=True` (`github.py:198`).
-    pub const UNIQUE_COLUMNS: &[&str] = &["state"];
-
-    /// `workspace` FK (`github.py:199`): `CASCADE`,
-    /// `related_name="github_app_install_sessions"`.
-    pub const WORKSPACE_ON_DELETE: OnDelete = OnDelete::Cascade;
-    pub const WORKSPACE_RELATED_NAME: &str = "github_app_install_sessions";
-
-    /// `actor` FK (`github.py:200`): `CASCADE`,
-    /// `related_name="github_app_install_sessions"`.
-    pub const ACTOR_ON_DELETE: OnDelete = OnDelete::Cascade;
-    pub const ACTOR_RELATED_NAME: &str = "github_app_install_sessions";
-
-    /// One `GithubAppInstallSession` row. `expires_at` is required and
-    /// indexed with no default (`github.py:204`); `installation_id` is
-    /// nullable (`github.py:201`).
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    pub struct GithubAppInstallSession {
-        pub id: uuid::Uuid,
-        pub created_at: chrono::DateTime<chrono::Utc>,
-        pub updated_at: chrono::DateTime<chrono::Utc>,
-        pub created_by_id: Option<uuid::Uuid>,
-        pub updated_by_id: Option<uuid::Uuid>,
-        pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub state: String,
-        pub workspace_id: uuid::Uuid,
-        pub actor_id: uuid::Uuid,
-        pub installation_id: Option<i64>,
-        pub account_login: String,
-        pub status: String,
-        pub expires_at: chrono::DateTime<chrono::Utc>,
-        pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
         pub error: String,
     }
 }
@@ -1008,29 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn app_installation_columns_match_fixture() {
-        assert_table(
-            "GithubAppInstallation",
-            github_app_installation::TABLE,
-            github_app_installation::ORDERING,
-        );
-        assert_columns(
-            "GithubAppInstallation",
-            "BaseModel",
-            github_app_installation::COLUMNS,
-        );
-        assert_eq!(
-            ts::owned_columns(github_app_installation::UNIQUE_COLUMNS),
-            vec!["installation_id"]
-        );
-        assert_eq!(github_app_installation::DEFAULT_REPOSITORY_COUNT, 0);
-        assert_eq!(
-            github_app_installation::default_events(),
-            serde_json::Value::Array(Vec::new())
-        );
-    }
-
-    #[test]
     fn webhook_delivery_columns_match_fixture() {
         assert_table(
             "GithubWebhookDelivery",
@@ -1049,25 +882,6 @@ mod tests {
             vec!["delivery_id"]
         );
         assert_eq!(github_webhook_delivery::DEFAULT_STATUS, "received");
-    }
-
-    #[test]
-    fn app_install_session_columns_match_fixture() {
-        assert_table(
-            "GithubAppInstallSession",
-            github_app_install_session::TABLE,
-            github_app_install_session::ORDERING,
-        );
-        assert_columns(
-            "GithubAppInstallSession",
-            "BaseModel",
-            github_app_install_session::COLUMNS,
-        );
-        assert_eq!(
-            ts::owned_columns(github_app_install_session::UNIQUE_COLUMNS),
-            vec!["state"]
-        );
-        assert_eq!(github_app_install_session::DEFAULT_STATUS, "started");
     }
 
     #[test]

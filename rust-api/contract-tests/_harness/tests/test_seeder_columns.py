@@ -24,6 +24,7 @@ def _texts():
 def test_insert_row_defaults_mirror_django_defaults():
     assert db._TABLE_DEFAULTS["projects"]["dedicated_runner_lost_action"] == "fail_to_backlog"
     assert db._TABLE_DEFAULTS["agent_run"]["pin_kind"] == "locality"
+    assert db._TABLE_DEFAULTS["agent_run"]["failure_reason"] == ""
 
 
 def test_projects_inserts_supply_dedicated_runner_lost_action():
@@ -107,3 +108,15 @@ def test_agent_run_inserts_supply_pin_kind():
         if "pin_kind" not in text:
             offenders.append(str(path.relative_to(_ROOT)))
     assert not offenders, f"agent_run INSERTs missing column: {offenders}"
+
+
+def test_agent_run_inserts_supply_failure_reason():
+    # PDASHOSS01-183: runner/0040 adds agent_run.failure_reason NOT NULL
+    # with a Python-only default (""), so raw-SQL seeders must supply it.
+    offenders = []
+    for path, text in _texts().items():
+        if "insert into agent_run" not in text.lower():
+            continue
+        if "failure_reason" not in text:
+            offenders.append(str(path.relative_to(_ROOT)))
+    assert not offenders, f"agent_run INSERTs missing failure_reason: {offenders}"
