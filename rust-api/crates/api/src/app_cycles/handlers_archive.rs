@@ -453,21 +453,21 @@ const FLOAT_KEYS: &[&str] = &[
 
 /// Render one float-typed value: integral JSON numbers gain the `.0`
 /// DRF emits; fractional numbers splice verbatim.
-fn render_float_value(value: &Value) -> String {
+fn render_float_value(value: &Value) -> Result<String, Denial> {
     match value {
         Value::Number(number) => {
             if let Some(int) = number.as_i64() {
-                format!("{int}.0")
+                Ok(format!("{int}.0"))
             } else if let Some(uint) = number.as_u64() {
-                format!("{uint}.0")
+                Ok(format!("{uint}.0"))
             } else if let Some(float) = number.as_f64() {
                 render_float(float)
             } else {
-                "null".to_owned()
+                Ok("null".to_owned())
             }
         }
-        Value::Null => "null".to_owned(),
-        _ => serde_json::to_string(value).expect("row value"),
+        Value::Null => Ok("null".to_owned()),
+        _ => Ok(serde_json::to_string(value).expect("row value")),
     }
 }
 
@@ -475,18 +475,18 @@ fn render_float_value(value: &Value) -> String {
 /// per [`render_stored_datetime`]) on the named keys and float columns
 /// (re-rendered per [`render_float_value`]). Strings, bools, nulls,
 /// arrays and objects pass through untouched.
-fn splice_value(key: &str, value: &Value, datetime_keys: &[&str]) -> String {
+fn splice_value(key: &str, value: &Value, datetime_keys: &[&str]) -> Result<String, Denial> {
     if datetime_keys.contains(&key) {
-        return render_stored_datetime(value);
+        return Ok(render_stored_datetime(value));
     }
     if FLOAT_KEYS.contains(&key) {
         return render_float_value(value);
     }
     match value {
-        Value::Null => "null".to_owned(),
-        Value::String(_) => json_string(value.as_str().expect("string")),
+        Value::Null => Ok("null".to_owned()),
+        Value::String(_) => Ok(json_string(value.as_str().expect("string"))),
         Value::Number(_) | Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
-            serde_json::to_string(value).expect("row value")
+            Ok(serde_json::to_string(value).expect("row value"))
         }
     }
 }
@@ -1064,14 +1064,20 @@ fn render_opt_uuid(value: Option<uuid::Uuid>) -> String {
     }
 }
 
-fn render_float(value: f64) -> String {
-    serde_json::to_string(&serde_json::Number::from_f64(value).expect("finite")).expect("float")
+/// Render one float. A non-finite value (NaN/inf from
+/// `SUM(CAST(value AS FLOAT))` over a `NaN`/`inf` estimate point) is the
+/// generic 500 — Django raises `ValueError` in DRF's JSON renderer and
+/// answers 500; this used to `expect("finite")` and panic the task,
+/// dropping the connection with no HTTP response (NEWPIDASH-216).
+fn render_float(value: f64) -> Result<String, Denial> {
+    let number = serde_json::Number::from_f64(value).ok_or(Denial::ServerError)?;
+    serde_json::to_string(&number).map_err(|_| Denial::ServerError)
 }
 
-fn render_opt_float(value: Option<f64>) -> String {
+fn render_opt_float(value: Option<f64>) -> Result<String, Denial> {
     match value {
         Some(number) => render_float(number),
-        None => "null".to_owned(),
+        None => Ok("null".to_owned()),
     }
 }
 
@@ -1145,31 +1151,31 @@ async fn fetch_estimate_rows(
 /// (`archive.py:367-454`): assignees are `display_name, assignee_id,
 /// avatar_url` (`:375`); labels are `label_name, color, label_id`
 /// (`:431`) — annotation-definition order in both cases.
-fn shape_estimate_row(row: &EstimateRows, assignee: bool) -> String {
+fn shape_estimate_row(row: &EstimateRows, assignee: bool) -> Result<String, Denial> {
     if assignee {
-        format!(
+        Ok(format!(
             "{{\"display_name\":{},\"assignee_id\":{},\"avatar_url\":{},\
               \"total_estimates\":{},\"completed_estimates\":{},\
               \"pending_estimates\":{}}}",
             render_opt_str(row.display.clone()),
             render_opt_uuid(row.ident),
             render_opt_str(row.avatar.clone()),
-            render_opt_float(row.total),
-            render_opt_float(row.completed),
-            render_opt_float(row.pending),
-        )
+            render_opt_float(row.total)?,
+            render_opt_float(row.completed)?,
+            render_opt_float(row.pending)?,
+        ))
     } else {
-        format!(
+        Ok(format!(
             "{{\"label_name\":{},\"color\":{},\"label_id\":{},\
               \"total_estimates\":{},\"completed_estimates\":{},\
               \"pending_estimates\":{}}}",
             render_opt_str(row.display.clone()),
             render_opt_str(row.avatar.clone()),
             render_opt_uuid(row.ident),
-            render_opt_float(row.total),
-            render_opt_float(row.completed),
-            render_opt_float(row.pending),
-        )
+            render_opt_float(row.total)?,
+            render_opt_float(row.completed)?,
+            render_opt_float(row.pending)?,
+        ))
     }
 }
 
@@ -1314,11 +1320,11 @@ enum ChartValue {
     Null,
 }
 
-fn render_chart_value(value: ChartValue) -> String {
+fn render_chart_value(value: ChartValue) -> Result<String, Denial> {
     match value {
-        ChartValue::Int(number) => number.to_string(),
+        ChartValue::Int(number) => Ok(number.to_string()),
         ChartValue::Float(number) => render_float(number),
-        ChartValue::Null => "null".to_owned(),
+        ChartValue::Null => Ok("null".to_owned()),
     }
 }
 
@@ -1354,7 +1360,7 @@ fn burndown_chart(
     start: NaiveDate,
     end: NaiveDate,
     today: NaiveDate,
-) -> String {
+) -> Result<String, Denial> {
     let mut out = String::from("{");
     let mut first = true;
     let mut date = start;
@@ -1380,11 +1386,11 @@ fn burndown_chart(
         } else {
             pending
         };
-        out.push_str(&format!("\"{}\":{}", date, render_chart_value(value)));
+        out.push_str(&format!("\"{}\":{}", date, render_chart_value(value)?));
         date = date.succ_opt().expect("date range");
     }
     out.push('}');
-    out
+    Ok(out)
 }
 
 fn parse_utc(value: &Value) -> Option<DateTime<Utc>> {
@@ -1466,7 +1472,7 @@ fn shape_object(
         out.push_str(&format!(
             "\"{}\":{}",
             key,
-            splice_value(key, value, datetime_keys)
+            splice_value(key, value, datetime_keys)?
         ));
     }
     out.push('}');
@@ -1581,14 +1587,14 @@ async fn archived_retrieve(
             let total = points
                 .iter()
                 .fold(ChartValue::Int(0), |acc, (_, value)| chart_add(acc, *value));
-            chart = burndown_chart(total, &points, start.date_naive(), end.date_naive(), today);
+            chart = burndown_chart(total, &points, start.date_naive(), end.date_naive(), today)?;
         }
         let mut assignees_out = String::from("[");
         for (index, row) in assignees.iter().enumerate() {
             if index > 0 {
                 assignees_out.push(',');
             }
-            assignees_out.push_str(&shape_estimate_row(row, true));
+            assignees_out.push_str(&shape_estimate_row(row, true)?);
         }
         assignees_out.push(']');
         let mut labels_out = String::from("[");
@@ -1596,7 +1602,7 @@ async fn archived_retrieve(
             if index > 0 {
                 labels_out.push(',');
             }
-            labels_out.push_str(&shape_estimate_row(row, false));
+            labels_out.push_str(&shape_estimate_row(row, false)?);
         }
         labels_out.push(']');
         estimate_distribution = format!(
@@ -1617,7 +1623,7 @@ async fn archived_retrieve(
             start.date_naive(),
             end.date_naive(),
             today,
-        );
+        )?;
     }
     let mut assignees_out = String::from("[");
     for (index, row) in assignees.iter().enumerate() {
@@ -1990,11 +1996,37 @@ mod tests {
     fn integral_floats_gain_dot_zero() {
         // Postgres `float8`/`numeric` text has no fraction on integral
         // values; DRF renders the Python float with one.
-        let int = |n: i64| render_float_value(&serde_json::json!(n));
+        let int = |n: i64| render_float_value(&serde_json::json!(n)).expect("finite");
         assert_eq!(int(65535), "65535.0");
         assert_eq!(int(0), "0.0");
-        assert_eq!(render_float_value(&serde_json::json!(21.5)), "21.5");
-        assert_eq!(render_float_value(&Value::Null), "null");
+        assert_eq!(
+            render_float_value(&serde_json::json!(21.5)).expect("finite"),
+            "21.5"
+        );
+        assert_eq!(render_float_value(&Value::Null).expect("finite"), "null");
+    }
+
+    #[test]
+    fn non_finite_floats_are_server_errors_not_panics() {
+        // NEWPIDASH-216: a `NaN`/`inf` estimate point value poisons every
+        // `SUM(CAST(...))`; Django 500s, Rust must not panic.
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(render_float(value), Err(Denial::ServerError)),
+                "render_float({value})"
+            );
+            assert!(
+                matches!(render_opt_float(Some(value)), Err(Denial::ServerError)),
+                "render_opt_float({value})"
+            );
+            assert!(
+                matches!(
+                    render_chart_value(ChartValue::Float(value)),
+                    Err(Denial::ServerError)
+                ),
+                "render_chart_value({value})"
+            );
+        }
     }
 
     #[test]
@@ -2048,7 +2080,8 @@ mod tests {
                 day(2026, 9, 2),
                 day(2026, 9, 1),
                 day(2026, 9, 30)
-            ),
+            )
+            .expect("finite chart"),
             "{}"
         );
         // Issues path: ints throughout; future dates null.
@@ -2060,7 +2093,8 @@ mod tests {
                 day(2026, 9, 1),
                 day(2026, 9, 3),
                 day(2026, 9, 2)
-            ),
+            )
+            .expect("finite chart"),
             "{\"2026-09-01\":5,\"2026-09-02\":5,\"2026-09-03\":null}"
         );
         // Points path with no estimates: int zeros, never 0.0.
@@ -2071,7 +2105,8 @@ mod tests {
                 day(2026, 9, 1),
                 day(2026, 9, 1),
                 day(2026, 9, 30)
-            ),
+            )
+            .expect("finite chart"),
             "{\"2026-09-01\":0}"
         );
         // Points path with estimates: floats; uncompleted (`None` date)
@@ -2087,9 +2122,21 @@ mod tests {
                 day(2026, 9, 1),
                 day(2026, 9, 2),
                 day(2026, 9, 30)
-            ),
+            )
+            .expect("finite chart"),
             "{\"2026-09-01\":3.0,\"2026-09-02\":3.0}"
         );
+        // NEWPIDASH-216: a non-finite burndown value is the generic 500.
+        assert!(matches!(
+            burndown_chart(
+                ChartValue::Float(f64::NAN),
+                &[],
+                day(2026, 9, 1),
+                day(2026, 9, 2),
+                day(2026, 9, 30)
+            ),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
