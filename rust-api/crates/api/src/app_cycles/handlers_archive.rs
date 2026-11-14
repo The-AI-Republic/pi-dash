@@ -896,13 +896,13 @@ fn estimate_left_join() -> String {
 
 /// Assignee estimate distribution (`archive.py:367-419`): one row per
 /// assignee (plus the NULL row for unassigned issues), ordered by
-/// display name. The joins are LEFT (annotation-side) with no
-/// soft-delete guards — ported as observed.
+/// display name. The joins are LEFT (annotation-side) with
+/// `ia.deleted_at IS NULL` (DIFF-21, NEWPIDASH-220).
 fn assignee_estimate_sql() -> String {
     format!(
         "SELECT u.display_name, u.id AS assignee_id, {avatar} AS avatar_url, {sums} \
          {from} \
-         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
+         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id AND ia.deleted_at IS NULL \
          LEFT JOIN users u ON u.id = ia.assignee_id \
          {est} \
          WHERE {scope} \
@@ -922,7 +922,7 @@ fn label_estimate_sql() -> String {
     format!(
         "SELECT l.name AS label_name, l.color, l.id AS label_id, {sums} \
          {from} \
-         LEFT JOIN issue_labels il ON il.issue_id = i.id \
+         LEFT JOIN issue_labels il ON il.issue_id = i.id AND il.deleted_at IS NULL \
          LEFT JOIN labels l ON l.id = il.label_id \
          {est} \
          WHERE {scope} \
@@ -942,7 +942,7 @@ fn assignee_count_sql() -> String {
         "SELECT u.first_name, u.last_name, u.id AS assignee_id, \
            {avatar} AS avatar_url, u.display_name, {counts} \
          {from} \
-         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
+         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id AND ia.deleted_at IS NULL \
          LEFT JOIN users u ON u.id = ia.assignee_id \
          WHERE {scope} \
          GROUP BY u.first_name, u.last_name, u.id, ({avatar}), u.display_name \
@@ -960,7 +960,7 @@ fn label_count_sql() -> String {
     format!(
         "SELECT l.name AS label_name, l.color, l.id AS label_id, {counts} \
          {from} \
-         LEFT JOIN issue_labels il ON il.issue_id = i.id \
+         LEFT JOIN issue_labels il ON il.issue_id = i.id AND il.deleted_at IS NULL \
          LEFT JOIN labels l ON l.id = il.label_id \
          WHERE {scope} \
          GROUP BY l.name, l.color, l.id \

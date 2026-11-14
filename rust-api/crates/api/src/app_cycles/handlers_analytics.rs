@@ -51,8 +51,9 @@
 //!
 //! Ported bugs (translation, don't redesign; also listed in the PR):
 //! - B1: unknown cycle 500s (`AttributeError`) instead of 404.
-//! - B2: M2M joins (`issue_assignees`, `issue_labels`) carry no
-//!   `deleted_at` guard — soft-deleted assignments still distribute.
+//! - B2 (fixed by NEWPIDASH-220, DIFF-21): M2M joins (`issue_assignees`,
+//!   `issue_labels`) carry `deleted_at IS NULL` — soft-deleted
+//!   assignments no longer distribute.
 //! - B3: `total_*` sums include archived/draft rows where the base
 //!   manager lets them through (no explicit filter, unlike the
 //!   completed/pending sums).
@@ -514,7 +515,7 @@ fn points_assignee_stmt(
     cycle_id: uuid::Uuid,
 ) -> sea_orm::sea_query::SelectStatement {
     use pidash_db::entity::{estimate_points, issue_assignees, issues, users};
-    use sea_orm::sea_query::{Alias, Expr, Func, JoinType, Order};
+    use sea_orm::sea_query::{Alias, Condition, Expr, Func, JoinType, Order};
     let a = Alias::new;
     let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
     stmt.join_as(
@@ -528,7 +529,12 @@ fn points_assignee_stmt(
         JoinType::LeftJoin,
         issue_assignees::Entity,
         a("ia"),
-        Expr::col((a("ia"), issue_assignees::Column::IssueId)).equals((a("i"), issues::Column::Id)),
+        Condition::all()
+            .add(
+                Expr::col((a("ia"), issue_assignees::Column::IssueId))
+                    .equals((a("i"), issues::Column::Id)),
+            )
+            .add(Expr::col((a("ia"), issue_assignees::Column::DeletedAt)).is_null()),
     )
     .join_as(
         JoinType::LeftJoin,
@@ -567,7 +573,7 @@ fn points_label_stmt(
     cycle_id: uuid::Uuid,
 ) -> sea_orm::sea_query::SelectStatement {
     use pidash_db::entity::{estimate_points, issue_labels, issues, labels};
-    use sea_orm::sea_query::{Alias, Expr, Func, JoinType, Order};
+    use sea_orm::sea_query::{Alias, Condition, Expr, Func, JoinType, Order};
     let a = Alias::new;
     let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
     stmt.join_as(
@@ -581,7 +587,12 @@ fn points_label_stmt(
         JoinType::LeftJoin,
         issue_labels::Entity,
         a("il"),
-        Expr::col((a("il"), issue_labels::Column::IssueId)).equals((a("i"), issues::Column::Id)),
+        Condition::all()
+            .add(
+                Expr::col((a("il"), issue_labels::Column::IssueId))
+                    .equals((a("i"), issues::Column::Id)),
+            )
+            .add(Expr::col((a("il"), issue_labels::Column::DeletedAt)).is_null()),
     )
     .join_as(
         JoinType::LeftJoin,
@@ -616,14 +627,19 @@ fn issues_assignee_stmt(
     cycle_id: uuid::Uuid,
 ) -> sea_orm::sea_query::SelectStatement {
     use pidash_db::entity::{issue_assignees, issues, users};
-    use sea_orm::sea_query::{Alias, Expr, JoinType, Order};
+    use sea_orm::sea_query::{Alias, Condition, Expr, JoinType, Order};
     let a = Alias::new;
     let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
     stmt.join_as(
         JoinType::LeftJoin,
         issue_assignees::Entity,
         a("ia"),
-        Expr::col((a("ia"), issue_assignees::Column::IssueId)).equals((a("i"), issues::Column::Id)),
+        Condition::all()
+            .add(
+                Expr::col((a("ia"), issue_assignees::Column::IssueId))
+                    .equals((a("i"), issues::Column::Id)),
+            )
+            .add(Expr::col((a("ia"), issue_assignees::Column::DeletedAt)).is_null()),
     )
     .join_as(
         JoinType::LeftJoin,
@@ -673,14 +689,19 @@ fn issues_label_stmt(
     cycle_id: uuid::Uuid,
 ) -> sea_orm::sea_query::SelectStatement {
     use pidash_db::entity::{issue_labels, issues, labels};
-    use sea_orm::sea_query::{Alias, Expr, JoinType, Order};
+    use sea_orm::sea_query::{Alias, Condition, Expr, JoinType, Order};
     let a = Alias::new;
     let mut stmt = dist_scope_stmt(slug, project_id, cycle_id);
     stmt.join_as(
         JoinType::LeftJoin,
         issue_labels::Entity,
         a("il"),
-        Expr::col((a("il"), issue_labels::Column::IssueId)).equals((a("i"), issues::Column::Id)),
+        Condition::all()
+            .add(
+                Expr::col((a("il"), issue_labels::Column::IssueId))
+                    .equals((a("i"), issues::Column::Id)),
+            )
+            .add(Expr::col((a("il"), issue_labels::Column::DeletedAt)).is_null()),
     )
     .join_as(
         JoinType::LeftJoin,
