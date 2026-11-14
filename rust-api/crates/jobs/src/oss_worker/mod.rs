@@ -43,7 +43,8 @@ use std::path::PathBuf;
 use pidash_db::config::Settings;
 use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
 use pidash_db::Pools;
-use pidash_services::extensions::{AssistantModelSeam, NoExtraToolsets};
+
+use pidash_services::extensions::AssistantModelSeam;
 
 use crate::worker::Registry;
 
@@ -184,7 +185,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.seed_dir.clone(),
         ctx.settings.cloud_agent.clone(),
         ctx.settings.managed_runner.clone(),
-        std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
@@ -290,7 +290,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.settings.managed_runner.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
-            std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         )),
     );
@@ -303,7 +302,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.settings.managed_runner.clone(),
             redis.clone(),
             ctx.settings.runner.clone(),
-            std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         ),
     );
@@ -322,7 +320,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.settings.managed_runner.clone(),
         redis.clone(),
         ctx.settings.runner.clone(),
-        std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
     ));
     crate::integrations::git_sync::register_git_sync_tasks(
@@ -398,7 +395,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         redis.clone(),
         &ctx.settings,
-        std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
     ));
     crate::runner_runs::register_runner_runs_tasks(

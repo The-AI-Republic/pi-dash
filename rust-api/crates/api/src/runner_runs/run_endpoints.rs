@@ -64,7 +64,6 @@ use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
 use pidash_services::runner_sessions::live_drains;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
 };

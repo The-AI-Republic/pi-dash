@@ -416,7 +416,6 @@ mod tests {
             std::env::temp_dir(),
             seed_settings.cloud_agent.clone(),
             seed_settings.managed_runner.clone(),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());

@@ -2433,9 +2433,6 @@ mod tests {
             todo!("builder-success paths replay live in jobs")
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
-        }
         async fn dedicated_pin(
             &mut self,
             args: &DedicatedPinArgs<'_>,

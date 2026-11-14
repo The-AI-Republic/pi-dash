@@ -30,20 +30,18 @@ use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
-    agent_run, assistant_user_llm_config, dev_machine, git_code_review_links,
+    agent_run, dev_machine, git_code_review_links,
     git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
     issue_labels, issue_relations, issues, labels, pod, projects, prompt_section_override, runner,
     states, users, workspaces,
 };
 use pidash_db::orm_tx::TxConn;
-use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::dispatch::admission::RedisAdmissionCache;
 use pidash_services::dispatch::{
-    consume_admission_token, DeferredConsume, UserFlags as SvcUserFlags,
+    ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
 };
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
 use pidash_services::orchestration::creation::{
     finalize_error_details_patch, AdmissionError as ServiceAdmissionError, CreationError,
@@ -60,7 +58,7 @@ use pidash_types::dispatch::AgentExecutorKind;
 use crate::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
-    DispatchDecision, ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
+    DispatchDecision,
 };
 
 /// `timezone.now()` truncated to microseconds (Django datetimes are
@@ -68,14 +66,6 @@ use crate::dispatch::{
 fn now_micros() -> DateTime<Utc> {
     let now = Utc::now();
     DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range")
-}
-
-/// `int(time.time())` for the admission bucket clock.
-fn unix_now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// The request-path handoff facts a [`HandoffStore`] is built from:
@@ -92,8 +82,6 @@ pub struct HandoffInlineDeps {
     pub redis: Option<redis::Client>,
     /// Runner-plane settings for pod drains.
     pub runner: RunnerSettings,
-    /// Installed toolsets seam.
-    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     /// Installed assistant-model seam.
     pub assistant_seam: Arc<dyn AssistantModelSeam>,
 }
@@ -137,40 +125,17 @@ where
 pub struct HandoffStore<'t, 'p> {
     tx: DbTransaction<'t>,
     pool: &'p PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
-    cache: RedisAdmissionCache,
-    now_unix_secs: i64,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    assistant_seam: Arc<dyn AssistantModelSeam>,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     terminal_effects: Vec<Uuid>,
 }
 
 impl<'t, 'p> HandoffStore<'t, 'p> {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tx: DbTransaction<'t>,
-        pool: &'p PgPool,
-        cloud: CloudAgentSettings,
-        managed: ManagedRunnerSettings,
-        cache: RedisAdmissionCache,
-        now_unix_secs: i64,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-        assistant_seam: Arc<dyn AssistantModelSeam>,
-    ) -> Self {
+    pub fn new(tx: DbTransaction<'t>, pool: &'p PgPool) -> Self {
         Self {
             tx,
             pool,
-            cloud,
-            managed,
-            cache,
-            now_unix_secs,
-            toolsets,
-            assistant_seam,
             dispatches: Vec::new(),
-            deferred: Vec::new(),
             terminal_effects: Vec::new(),
         }
     }
@@ -179,22 +144,8 @@ impl<'t, 'p> HandoffStore<'t, 'p> {
         CreationError::Db(error.to_string())
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        DbTransaction<'t>,
-        Vec<Uuid>,
-        Vec<DeferredConsume>,
-        Vec<Uuid>,
-        RedisAdmissionCache,
-    ) {
-        (
-            self.tx,
-            self.dispatches,
-            self.deferred,
-            self.terminal_effects,
-            self.cache,
-        )
+    pub fn into_parts(self) -> (DbTransaction<'t>, Vec<Uuid>, Vec<Uuid>) {
+        (self.tx, self.dispatches, self.terminal_effects)
     }
 }
 
@@ -909,37 +860,9 @@ impl CreationSeam for HandoffStore<'_, '_> {
             id: actor.id,
             flags: actor.flags,
         });
-        let actor_id = actor.as_ref().map(|actor| actor.id);
-        // The jobs store's H/E/P closures have no production factory, so
-        // the twin prefetches their facts asynchronously and moves the
-        // values into the `FnOnce` seams (identical verdicts).
-        let has_key = match actor_id {
-            Some(id) => twin_has_api_key(self.pool, id)
-                .await
-                .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
-            None => false,
-        };
-        // The driver short-circuits a missing actor before consulting
-        // the closure, so only a present actor consults the seam (and a
-        // missing one never pays for the overlay's reads). Clone the seam
-        // out: the store is `!Sync`, so the consult must not borrow
-        // `self` across the await.
-        let assistant_seam = self.assistant_seam.clone();
-        let has_llm = match actor_id {
-            Some(id) => twin_gate_allows(&assistant_seam, id, has_key).await,
-            None => false,
-        };
-        let Self {
-            pool,
-            cache,
-            cloud,
-            managed,
-            now_unix_secs,
-            toolsets,
-            deferred,
-            ..
-        } = self;
-        let mut short = DbTransaction::begin(pool)
+        // (P4: the key/gate prefetch died with the cache family; the
+        // resolve reads only the actor flags the request carries.)
+        let short = DbTransaction::begin(self.pool)
             .await
             .map_err(|error| ExecutionError::Store(CreationError::Db(error.to_string())))?;
         let inputs = ExecutionInputs {
@@ -950,22 +873,9 @@ impl CreationSeam for HandoffStore<'_, '_> {
             actor: actor.as_ref(),
             automatic: req.automatic,
             requested: req.requested.as_deref(),
-            now_unix_secs: *now_unix_secs,
+            now_unix_secs: 0,
         };
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let fields = resolve_execution_fields(
-            &mut short,
-            &inputs,
-            cloud,
-            managed,
-            cache,
-            &mut collect,
-            ExecutionSeams {
-                has_usable_llm_config: move || has_llm,
-                toolsets: toolsets.clone(),
-            },
-        )
-        .await;
+        let fields = resolve_execution_fields(&inputs).await;
         short
             .commit()
             .await
@@ -998,9 +908,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
         .await
     }
 
-    fn extra_toolsets_schema_tool(&self) -> String {
-        self.toolsets.schema_tool_name().to_owned()
-    }
 }
 
 fn twin_map_execution_fields(fields: crate::dispatch::ExecutionFields) -> ServiceExecutionFields {
@@ -1032,50 +939,6 @@ fn twin_map_admission_error(error: DeferredAdmissionError) -> ServiceAdmissionEr
         code: error.code,
         detail: error.detail,
     }
-}
-
-/// `get_config(user)` (`llm.py:67-68`):
-/// `UserLLMConfig.objects.filter(user).first()` — full row, unordered
-/// (`LIMIT 1`, no `ORDER BY`). SeaORM form: `user_id` filtered,
-/// `LIMIT 1`.
-/// `get_config(user)` + `has_api_key` (`models.py:260-262`): key present
-/// and non-empty.
-async fn twin_has_api_key(pool: &PgPool, user_id: Uuid) -> Result<bool, String> {
-    #[derive(Debug, FromQueryResult)]
-    struct KeyRow {
-        api_key_encrypted: Option<Vec<u8>>,
-    }
-    let db = sea_orm_connection(pool);
-    let row = assistant_user_llm_config::Entity::find()
-        .select_only()
-        .column(assistant_user_llm_config::Column::ApiKeyEncrypted)
-        .filter(assistant_user_llm_config::Column::UserId.eq(user_id))
-        .limit(1)
-        .into_model::<KeyRow>()
-        .one(&db)
-        .await
-        .map_err(|error| error.to_string())?;
-    let Some(row) = row else {
-        return Ok(false);
-    };
-    Ok(row.api_key_encrypted.is_some_and(|key| !key.is_empty()))
-}
-
-/// The handoff llm gate through the installed assistant seam
-/// (`user_has_llm_config`, `agent_execution.py:69-80`): the CE default
-/// answers the BYOK key bit; the overlay routes OpenHub/Codex/BYOK
-/// through the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
-/// A free function over the cloned seam: the store is `!Sync` (it owns
-/// the span transaction), so the consult must not borrow `self` across
-/// the await, or the handlers' futures stop being `Send`.
-async fn twin_gate_allows(
-    assistant_seam: &Arc<dyn AssistantModelSeam>,
-    actor_id: Uuid,
-    has_key: bool,
-) -> bool {
-    assistant_seam
-        .has_usable_llm_config(actor_id, has_key)
-        .await
 }
 
 fn twin_db(error: sea_orm::DbErr) -> CreationError {
@@ -2144,22 +2007,12 @@ where
     F: FnMut(LifecycleEffect) -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    let cache = RedisAdmissionCache::new(deps.redis.clone());
     let tx = DbTransaction::begin(pool).await.map_err(|_| ())?;
-    let mut store = HandoffStore::new(
-        tx,
-        pool,
-        deps.cloud.clone(),
-        deps.managed.clone(),
-        cache,
-        unix_now_secs(),
-        deps.toolsets.clone(),
-        deps.assistant_seam.clone(),
-    );
+    let mut store = HandoffStore::new(tx, pool);
     let outcome = creation_kernel::complete_project_move_handoff(&mut store, run_id, now_micros())
         .await
         .map_err(|_| ())?;
-    let (tx, dispatches, deferred, terminal_effects, cache) = store.into_parts();
+    let (tx, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await.map_err(|_| ())?;
     let mut pairs = Vec::with_capacity(terminal_effects.len() * 2);
     for id in terminal_effects {
@@ -2182,186 +2035,14 @@ where
                 .map_err(|_| ())?;
         }
     }
-    for consume in &deferred {
-        consume_admission_token(&cache, consume);
-    }
     Ok(outcome.map(|run| run.id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::config::settings::{CloudAgentSettings, ManagedRunnerSettings};
-    use std::sync::Arc;
-
-    fn django_cloud_settings() -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled: false,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
-            enabled: false,
-            queued_max_age_secs: 43200,
-            graceful_stop_secs: 30,
-            sweep_interval_secs: 300,
-            desktop_min_version: String::new(),
-        }
-    }
-
-    /// `int(time.time())` for the admission bucket clock.
-    fn unix_now_secs() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs() as i64)
-            .unwrap_or(0)
-    }
-
-    /// A replacement seam naming its schema tool: the store answers
-    /// the installed name, not the CE default.
-    #[derive(Debug)]
-    struct AcmeToolsets;
-
-    impl pidash_services::extensions::CloudAgentToolsetsSeam for AcmeToolsets {
-        fn schema_tool_name(&self) -> &'static str {
-            "acme_get_tool_schema"
-        }
-    }
-
-    /// The trait defaults with a canned title: the CE behaviour lives
-    /// in the defaults (the api crate's `CeAssistantSeam` only adds
-    /// the title transport).
-    #[derive(Debug)]
-    struct DefaultSeam;
-
-    impl pidash_services::extensions::AssistantModelSeam for DefaultSeam {
-        fn generate_title(
-            &self,
-            request: pidash_services::extensions::TitleRequest,
-        ) -> pidash_services::extensions::SeamFuture<
-            '_,
-            Result<String, pidash_services::extensions::TitleError>,
-        > {
-            let _ = request;
-            Box::pin(async move { Ok("canned".to_owned()) })
-        }
-    }
-
-    /// Overlay-shaped seam: a keyless user still counts as configured
-    /// (the gateway lane, not BYOK).
-    #[derive(Debug)]
-    struct GatewaySeam;
-
-    impl pidash_services::extensions::AssistantModelSeam for GatewaySeam {
-        fn has_usable_llm_config(
-            &self,
-            user_id: Uuid,
-            has_api_key: bool,
-        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
-            Box::pin(async move { true })
-        }
-
-        fn generate_title(
-            &self,
-            request: pidash_services::extensions::TitleRequest,
-        ) -> pidash_services::extensions::SeamFuture<
-            '_,
-            Result<String, pidash_services::extensions::TitleError>,
-        > {
-            let _ = request;
-            Box::pin(async move { Ok("seam title".to_owned()) })
-        }
-    }
-
-    #[tokio::test]
-    async fn live_twin_schema_tool_name_flows_from_installed_seam() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping live-db test: DATABASE_URL is not set");
-            return;
-        };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("connect to scratch DATABASE_URL");
-        let tx = DbTransaction::begin(&pool).await.expect("begin");
-        let store = HandoffStore::new(
-            tx,
-            &pool,
-            django_cloud_settings(),
-            django_managed_settings(),
-            RedisAdmissionCache { client: None },
-            unix_now_secs(),
-            Arc::new(AcmeToolsets),
-            Arc::new(DefaultSeam),
-        );
-        assert_eq!(
-            store.extra_toolsets_schema_tool(),
-            "acme_get_tool_schema".to_owned()
-        );
-        let (tx, _, _, _, _) = store.into_parts();
-        tx.rollback().await.expect("rollback");
-    }
-
-    /// The gate consults the installed seam, not the key bit: these two
-    /// never touched the database (the store construction was only a
-    /// way to reach the seam), so they run without a live pool.
-    #[tokio::test]
-    async fn live_twin_gate_uses_the_installed_seam() {
-        let seam: Arc<dyn pidash_services::extensions::AssistantModelSeam> = Arc::new(GatewaySeam);
-        assert!(
-            twin_gate_allows(&seam, Uuid::new_v4(), false).await,
-            "an installed seam that accepts the user must open the twin gate without a key"
-        );
-    }
-
-    #[tokio::test]
-    async fn live_twin_gate_keeps_the_ce_default() {
-        let seam: Arc<dyn pidash_services::extensions::AssistantModelSeam> = Arc::new(DefaultSeam);
-        assert!(
-            twin_gate_allows(&seam, Uuid::new_v4(), true).await,
-            "CE still admits a keyed handoff actor"
-        );
-        assert!(
-            !twin_gate_allows(&seam, Uuid::new_v4(), false).await,
-            "CE still refuses a keyless handoff actor"
-        );
-    }
+    
+    
 
     #[test]
     fn seaorm_statement_shapes_pin_joins_filters_and_locks() {
@@ -2538,16 +2219,7 @@ mod tests {
         .execute(&mut **tx.inner())
         .await
         .expect("ticker");
-        let mut store = HandoffStore::new(
-            tx,
-            &pool,
-            django_cloud_settings(),
-            django_managed_settings(),
-            RedisAdmissionCache { client: None },
-            unix_now_secs(),
-            Arc::new(AcmeToolsets),
-            Arc::new(DefaultSeam),
-        );
+        let mut store = HandoffStore::new(tx, &pool);
         let got_issue = store.issue(issue).await.expect("issue");
         assert_eq!(got_issue.id, issue);
         assert_eq!(got_issue.name.as_deref(), Some("Title"));
@@ -2659,7 +2331,7 @@ mod tests {
         assert_eq!(format!("{:?}", finalized.status), "Failed");
         assert!(finalized.ended_at.is_some());
         assert_eq!(finalized.error_code(), "boom");
-        let (tx, _, _, _, _) = store.into_parts();
+        let (tx, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
     }
 

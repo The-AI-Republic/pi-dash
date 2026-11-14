@@ -30,7 +30,6 @@ use crate::app_issues::issue_move::{
     StateRow, StoreError,
 };
 use crate::domain::issue_create_sql::{create_save_state_select, create_seq_scan_select};
-use crate::dispatch::DeferredConsume;
 use crate::orchestration::blockers::{has_open_blockers_statement, summary_statement, BlockerRow};
 use pidash_db::app_project::models::project::ProjectLookup;
 use pidash_db::entity::{
@@ -99,7 +98,6 @@ pub(crate) const REPOINT_DESCRIPTION_SQL: &str = "UPDATE \"descriptions\" SET \"
 #[derive(Debug, Clone, Default)]
 pub struct MoveCreationOutboxes {
     pub dispatches: Vec<Uuid>,
-    pub deferred: Vec<DeferredConsume>,
     pub terminal_effects: Vec<Uuid>,
 }
 
@@ -164,27 +162,13 @@ pub(crate) fn drain_hook(txn: &super::txn::WriteTxn) -> Arc<dyn MovePostCommitHo
         .expect("driver registered MovePostCommitHook")
 }
 
-/// The admission cache as an object-safe hook: the two
-/// [`AdmissionCache`](crate::dispatch::AdmissionCache) reads the
-/// execution resolve needs, with string errors. The binary implements
-/// this over its own cache and the creation seam adapts it back.
-pub trait MoveAdmissionCache: Send + Sync {
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, String>;
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), String>;
-}
-
-/// The handoff-creation runtime facts: executor settings, the pool for
-/// the resolve's short transaction plus the BYOK probe, the unix clock,
-/// and the toolset/assistant/admission seams. All types are
-/// services-reachable; the driver builds this from its request state.
+/// The handoff-creation runtime facts: the pool for the resolve's
+/// short transaction plus the BYOK probe.
+/// All types are services-reachable; the driver builds this from its
+/// request state. (P4: cloud/managed/toolsets/admission inputs died
+/// with the cache family.)
 pub struct CreationDeps {
     pub pool: sqlx::PgPool,
-    pub cloud: pidash_db::config::CloudAgentSettings,
-    pub managed: pidash_db::config::ManagedRunnerSettings,
-    pub now_unix_secs: i64,
-    pub toolsets: Arc<dyn crate::extensions::CloudAgentToolsetsSeam>,
-    pub assistant_seam: Arc<dyn crate::extensions::AssistantModelSeam>,
-    pub admission: Arc<dyn MoveAdmissionCache>,
 }
 
 /// The per-call inputs: the URL/body facts, the driver's resolved
@@ -1134,13 +1118,12 @@ impl MoveStore for SeaMoveStore<'_> {
         .await
         .map_err(|error| StoreError(error.to_string()))?;
         let _created = outcome;
-        let (dispatches, deferred, terminal_effects) = creation.outboxes();
+        let (dispatches, terminal_effects) = creation.outboxes();
         self.outboxes
             .lock()
             .expect("outbox slot")
             .replace(MoveCreationOutboxes {
                 dispatches,
-                deferred,
                 terminal_effects,
             });
         Ok(())
@@ -1305,7 +1288,7 @@ pub async fn move_to_project(
 mod tests {
     use super::*;
     use crate::app_issues::issue_move as move_kernel;
-    use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+    
     use std::sync::Mutex;
 
     use super::super::activity::TaskEnqueueHook;
@@ -1576,82 +1559,11 @@ mod tests {
         }
     }
 
-    struct FakeAdmission;
+    // (P4: FakeAdmission/MoveAdmissionCache died with the cache family.)
 
-    impl MoveAdmissionCache for FakeAdmission {
-        fn bucket_count(&self, _key: &str) -> Result<Option<i64>, String> {
-            Ok(None)
-        }
-
-        fn add_or_incr(&self, _key: &str, _timeout_secs: i64) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoAssistant;
-
-    impl crate::extensions::AssistantModelSeam for NoAssistant {
-        fn generate_title(
-            &self,
-            _request: crate::extensions::TitleRequest,
-        ) -> crate::extensions::SeamFuture<'_, Result<String, crate::extensions::TitleError>>
-        {
-            Box::pin(async move { unreachable!("move tests never generate titles") })
-        }
-    }
 
     fn test_creation_deps(pool: sqlx::PgPool) -> CreationDeps {
-        CreationDeps {
-            pool,
-            cloud: CloudAgentSettings {
-                enabled: false,
-                writes_enabled: false,
-                github_tools_enabled: false,
-                disabled_tools: Vec::new(),
-                job_queue: "celery".to_string(),
-                reconcile_interval_secs: 0,
-                model_request_timeout_secs: 0,
-                execution_timeout_secs: 0,
-                run_soft_limit_secs: 0,
-                run_hard_limit_secs: 0,
-                stale_grace_secs: 0,
-                dispatch_lease_secs: 0,
-                dispatch_backoff_secs: 0,
-                dispatch_scan_interval_secs: 0,
-                sweep_interval_secs: 0,
-                dispatch_scan_batch: 0,
-                max_queue_age_secs: 0,
-                model_request_limit: 0,
-                tool_call_limit: 0,
-                write_call_limit: 0,
-                input_token_limit: 0,
-                output_token_limit: 0,
-                total_token_limit: 0,
-                max_output_tokens_per_request: 0,
-                max_queued_per_workspace: 0,
-                max_running_per_workspace: 0,
-                user_creation_rate_per_minute: 0,
-                workspace_creation_rate_per_minute: 0,
-                tool_timeout_secs: 0,
-                max_tool_result_bytes: 0,
-                max_prompt_bytes: 0,
-                max_final_result_bytes: 0,
-                max_events: 0,
-                block_private_urls: false,
-            },
-            managed: ManagedRunnerSettings {
-                enabled: false,
-                queued_max_age_secs: 0,
-                graceful_stop_secs: 0,
-                sweep_interval_secs: 0,
-                desktop_min_version: String::new(),
-            },
-            now_unix_secs: 0,
-            toolsets: Arc::new(crate::extensions::NoExtraToolsets),
-            assistant_seam: Arc::new(NoAssistant),
-            admission: Arc::new(FakeAdmission),
-        }
+        CreationDeps { pool }
     }
 
     fn test_hooks() -> (

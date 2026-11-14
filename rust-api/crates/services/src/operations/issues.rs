@@ -4438,7 +4438,7 @@ mod move_tests {
     use crate::domain::issues_move::MoveCreationOutboxes;
     use crate::domain::WriteActor;
     use crate::orchestration::entries::{FireOutcome, FireRequest};
-    use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+    
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -4541,82 +4541,11 @@ mod move_tests {
         }
     }
 
-    struct FakeAdmission;
+    // (P4: FakeAdmission/MoveAdmissionCache died with the cache family.)
 
-    impl domain_issues::MoveAdmissionCache for FakeAdmission {
-        fn bucket_count(&self, _key: &str) -> Result<Option<i64>, String> {
-            Ok(None)
-        }
-
-        fn add_or_incr(&self, _key: &str, _timeout_secs: i64) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoAssistant;
-
-    impl crate::extensions::AssistantModelSeam for NoAssistant {
-        fn generate_title(
-            &self,
-            _request: crate::extensions::TitleRequest,
-        ) -> crate::extensions::SeamFuture<'_, Result<String, crate::extensions::TitleError>>
-        {
-            Box::pin(async move { unreachable!("move tests never generate titles") })
-        }
-    }
 
     fn test_creation_deps(pool: sqlx::PgPool) -> domain_issues::CreationDeps {
-        domain_issues::CreationDeps {
-            pool,
-            cloud: CloudAgentSettings {
-                enabled: false,
-                writes_enabled: false,
-                github_tools_enabled: false,
-                disabled_tools: Vec::new(),
-                job_queue: "celery".to_string(),
-                reconcile_interval_secs: 0,
-                model_request_timeout_secs: 0,
-                execution_timeout_secs: 0,
-                run_soft_limit_secs: 0,
-                run_hard_limit_secs: 0,
-                stale_grace_secs: 0,
-                dispatch_lease_secs: 0,
-                dispatch_backoff_secs: 0,
-                dispatch_scan_interval_secs: 0,
-                sweep_interval_secs: 0,
-                dispatch_scan_batch: 0,
-                max_queue_age_secs: 0,
-                model_request_limit: 0,
-                tool_call_limit: 0,
-                write_call_limit: 0,
-                input_token_limit: 0,
-                output_token_limit: 0,
-                total_token_limit: 0,
-                max_output_tokens_per_request: 0,
-                max_queued_per_workspace: 0,
-                max_running_per_workspace: 0,
-                user_creation_rate_per_minute: 0,
-                workspace_creation_rate_per_minute: 0,
-                tool_timeout_secs: 0,
-                max_tool_result_bytes: 0,
-                max_prompt_bytes: 0,
-                max_final_result_bytes: 0,
-                max_events: 0,
-                block_private_urls: false,
-            },
-            managed: ManagedRunnerSettings {
-                enabled: false,
-                queued_max_age_secs: 0,
-                graceful_stop_secs: 0,
-                sweep_interval_secs: 0,
-                desktop_min_version: String::new(),
-            },
-            now_unix_secs: 0,
-            toolsets: Arc::new(crate::extensions::NoExtraToolsets),
-            assistant_seam: Arc::new(NoAssistant),
-            admission: Arc::new(FakeAdmission),
-        }
+        domain_issues::CreationDeps { pool }
     }
 
     /// The MCP caller's options (`execute_cross_project_move`): dual

@@ -64,7 +64,6 @@
 //! Re-exported through `pidash-sdk::ops`.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pidash_db::orm_tx::{into_sqlx, TxConn};
@@ -339,8 +338,7 @@ where
 
 /// Build the minimal [`StoreDeps`](crate::orchestration::StoreDeps) for
 /// the revoke post-commit effects: the pool's cloud/managed settings and
-/// the carried toolsets seam, with a fail-closed admission cache and the
-/// no-LLM / unavailable-profile closures. No [`AppState`] needed — the
+/// the no-LLM / unavailable-profile closures. No [`AppState`] needed — the
 /// overlay platform consumer (`platform/access.rs`) has only
 /// [`EventContext`](crate::runner_enroll::RevokeCtx) fields and calls the
 /// helpers below with error-logged isolation, exactly Django's
@@ -349,10 +347,7 @@ where
 pub fn overlay_store_deps(
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
-    now: DateTime<Utc>,
 ) -> crate::orchestration::StoreDeps<
-    pidash_services::dispatch::admission::RedisAdmissionCache,
     fn(Uuid) -> bool,
     fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile,
 > {
@@ -368,11 +363,8 @@ pub fn overlay_store_deps(
     crate::orchestration::StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: pidash_services::dispatch::admission::RedisAdmissionCache::from_env(),
         has_usable_llm_config: no_llm,
-        toolsets,
         llm_profile: no_profile,
-        now_unix_secs: now.timestamp(),
     }
 }
 
@@ -386,7 +378,6 @@ pub async fn bounce_issue_for_revoke(
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     issue_id: Uuid,
@@ -397,7 +388,7 @@ pub async fn bounce_issue_for_revoke(
     crate::orchestration::DispatchOutcome<pidash_services::orchestration::dispatch::BounceOutcome>,
     crate::orchestration::DispatchJobsError,
 > {
-    let deps = overlay_store_deps(cloud, managed, toolsets, now);
+    let deps = overlay_store_deps(cloud, managed);
     crate::orchestration::bounce_issue_no_eligible_runner(
         pool,
         deps,
@@ -422,7 +413,6 @@ pub async fn recreate_issue_for_revoke(
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
     now: DateTime<Utc>,
     issue_id: Uuid,
     pod_id: Uuid,
@@ -434,7 +424,7 @@ pub async fn recreate_issue_for_revoke(
     >,
     crate::orchestration::creation_jobs::CreationJobsError,
 > {
-    let deps = overlay_store_deps(cloud, managed, toolsets, now);
+    let deps = overlay_store_deps(cloud, managed);
     let req = pidash_services::orchestration::creation::CreateDispatchRequest {
         issue_id,
         parent: None,
