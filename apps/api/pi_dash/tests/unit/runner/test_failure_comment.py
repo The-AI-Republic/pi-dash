@@ -73,6 +73,21 @@ def issue(workspace, project, state, create_user):
     )
 
 
+def _arm_clock(issue, project):
+    """Put the issue in the ticking bucket with an armed clock — the state
+    the failure policy acts on (a Todo issue has no running clock)."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    issue.state = State.objects.create(name="In Progress", project=project, group="started")
+    issue.save(update_fields=["state"])
+    # Entering the bucket may already have created (and armed) the ticker.
+    ticker, _ = IssueAgentTicker.objects.update_or_create(
+        issue=issue,
+        defaults={"enabled": True, "disarm_reason": "", "next_run_at": timezone.now(), "pending_entry": False},
+    )
+    return ticker
+
+
 def _make_runner(user, workspace, pod, name="r1"):
     return Runner.objects.create(
         owner=user,
@@ -436,3 +451,344 @@ def test_finalize_falls_back_to_matching_live_state_usage(
     assert run.input_tokens == 10
     assert run.output_tokens == 20
     assert run.total_tokens == 30
+
+
+# ---------------------------------------------------------------------------
+# Canonical failure_reason at write time (PDASHOSS01-183)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_failed_finalize_stores_canonical_failure_reason(
+    db, create_user, workspace, pod, issue
+):
+    """The runner's coarse reason + the error text classify into the
+    stored taxonomy at write time."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "agent_error.provider_auth_or_access"
+
+
+@pytest.mark.unit
+def test_failed_finalize_maps_platform_runner_reason_directly(
+    db, create_user, workspace, pod, issue
+):
+    """Old runners only send today's FailureReason values — they map
+    platform-side without consulting the text rules."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="could not push: authentication failed for origin",
+        runner_failure_reason="git_auth",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "git_auth"
+
+
+@pytest.mark.unit
+def test_failed_finalize_without_runner_reason_still_classifies(
+    db, create_user, workspace, pod, issue
+):
+    """The finalize safety net keeps the invariant for writers that have
+    no structured reason at all (legacy runners, cloud reapers)."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="agent stalled: no events for >360s",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "timeout"
+
+
+@pytest.mark.unit
+def test_completed_finalize_leaves_failure_reason_blank(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(runner, run.id, AgentRunStatus.COMPLETED, done_payload={"status": "done"})
+    run.refresh_from_db()
+    assert run.failure_reason == ""
+
+
+@pytest.mark.unit
+def test_needs_human_failure_comment_names_the_fix_and_the_stopped_clock(
+    db, create_user, workspace, project, pod, issue
+):
+    """An expired-login failure tells the user what to do — the reason
+    label and the re-authenticate action, not only the raw stderr — and
+    says the automatic clock is stopped until they act."""
+    _arm_clock(issue, project)
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    comments = list(IssueComment.objects.filter(issue=issue))
+    assert len(comments) == 1
+    body = comments[0].comment_html
+    assert "Provider authentication or access failed" in body
+    assert "Re-authenticate" in body
+    assert "Re-tick" in body
+    # The raw detail stays visible for debugging.
+    assert "authentication_failed" in body
+
+
+@pytest.mark.unit
+def test_transient_network_failure_posts_no_comment(
+    db, create_user, workspace, project, pod, issue
+):
+    """A free-retry failure is being retried silently on a short backoff;
+    posting it each attempt would be noise."""
+    _arm_clock(issue, project)
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="connection reset by peer",
+        runner_failure_reason="agent_crash",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "agent_error.provider_network"
+    assert IssueComment.objects.filter(issue=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_needs_human_failure_without_a_running_clock_claims_no_pause(
+    db, create_user, workspace, pod, issue
+):
+    """No armed clock (a Todo issue, a one-off Run AI): the policy stops
+    nothing, so the comment must not tell the user runs are paused or to
+    press a Re-tick button that is not offered."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    body = IssueComment.objects.get(issue=issue).comment_html
+    assert "Provider authentication or access failed" in body
+    assert "Re-authenticate" in body
+    assert "paused" not in body
+    assert "Re-tick" not in body
+
+
+@pytest.mark.unit
+def test_transient_failure_without_a_running_clock_is_reported(
+    db, create_user, workspace, pod, issue
+):
+    """Nothing will free-retry a run whose issue has no armed clock, so its
+    failure must reach the thread instead of vanishing silently."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="connection reset by peer",
+        runner_failure_reason="agent_crash",
+    )
+
+    assert IssueComment.objects.filter(issue=issue).count() == 1
+
+
+@pytest.mark.unit
+def test_infra_failure_that_hits_the_backstop_is_reported(
+    db, create_user, workspace, project, pod, issue
+):
+    """Daemon-restart failures stay off the thread while they are being
+    retried — but the one that trips the repeated-failure backstop stops
+    the clock, and the user must be told."""
+    _arm_clock(issue, project)
+    runner = _make_runner(create_user, workspace, pod)
+    for _ in range(3):
+        _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+    AgentRun.objects.filter(work_item=issue).update(failure_reason="daemon_restart")
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="daemon shutdown requested",
+        runner_failure_reason="daemon_restart",
+    )
+
+    body = IssueComment.objects.get(issue=issue).comment_html
+    assert "Runner daemon restarted" in body
+    assert "Re-tick" in body
+
+
+@pytest.mark.unit
+def test_cloud_writer_safety_net_uses_error_code(db, create_user, workspace, pod, issue):
+    """Cloud-side writers (Cloud Agent tasks, reapers) go through
+    ``finalize_agent_run`` with an error_code and no runner reason."""
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    assert finalize_agent_run(
+        run.id,
+        AgentRunStatus.FAILED,
+        updates={"error_code": "run_timeout", "error": "Cloud Agent worker was lost or exceeded its deadline"},
+    )
+    run.refresh_from_db()
+    assert run.failure_reason == "timeout"
+
+
+@pytest.mark.unit
+def test_backfill_migration_classifies_existing_failed_rows(
+    db, create_user, workspace, pod, issue
+):
+    """The 0041 data migration runs the write-path classifier over rows
+    that predate the failure_reason column."""
+    from importlib import import_module
+
+    from django.apps import apps as django_apps
+
+    runner = _make_runner(create_user, workspace, pod)
+    auth_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+    stall_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+    ok_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.COMPLETED)
+    AgentRun.objects.filter(pk=auth_run.pk).update(
+        error_details={"message": "401 authentication_failed: invalid authentication credentials"},
+        failure_reason="",
+    )
+    AgentRun.objects.filter(pk=stall_run.pk).update(
+        error_details={"message": "agent stalled: no events for >360s"}, failure_reason=""
+    )
+
+    migration = import_module("pi_dash.runner.migrations.0041_backfill_failure_reason")
+    migration.backfill_failure_reason(django_apps, None)
+
+    auth_run.refresh_from_db()
+    stall_run.refresh_from_db()
+    ok_run.refresh_from_db()
+    assert auth_run.failure_reason == "agent_error.provider_auth_or_access"
+    assert stall_run.failure_reason == "timeout"
+    assert ok_run.failure_reason == ""
+
+
+@pytest.mark.unit
+def test_clock_stop_notifies_issue_creator_and_runner_owner(
+    db, create_user, workspace, project, pod, issue
+):
+    """A needs-human failure raises an in-app notification to the people
+    who can act. Creator and runner owner are the same user here, so the
+    fan-out dedupes to one row."""
+    from pi_dash.db.models.notification import Notification
+
+    _arm_clock(issue, project)
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    notifications = list(Notification.objects.filter(entity_identifier=issue.id))
+    assert len(notifications) == 1
+    note = notifications[0]
+    assert note.receiver_id == create_user.id
+    assert note.sender == "in_app:agent_runs:clock_stopped"
+    assert note.data["agent_run"]["failure_reason"] == "agent_error.provider_auth_or_access"
+    assert "paused" in note.message_html
+
+
+@pytest.mark.unit
+def test_needs_human_failure_without_a_running_clock_does_not_notify(
+    db, create_user, workspace, pod, issue
+):
+    """No armed clock means nothing was paused — no "runs are paused"
+    notification (the failure comment still names the fix)."""
+    from pi_dash.db.models.notification import Notification
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+    assert Notification.objects.filter(entity_identifier=issue.id).count() == 0
+    assert IssueComment.objects.filter(issue=issue).count() == 1
+
+
+@pytest.mark.unit
+def test_normal_clock_failure_does_not_notify(db, create_user, workspace, pod, issue):
+    from pi_dash.db.models.notification import Notification
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="codex exited with status 101",
+        runner_failure_reason="agent_crash",
+    )
+    assert Notification.objects.filter(entity_identifier=issue.id).count() == 0
+
+
+@pytest.mark.unit
+def test_metrics_reports_failed_runs_by_reason(db, create_user, workspace, pod, issue):
+    from rest_framework.test import APIRequestFactory
+
+    from pi_dash.runner.views.metrics import MetricsEndpoint
+
+    runner = _make_runner(create_user, workspace, pod)
+    for reason in (
+        "agent_error.provider_auth_or_access",
+        "agent_error.provider_auth_or_access",
+        "timeout",
+    ):
+        run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+        AgentRun.objects.filter(pk=run.pk).update(failure_reason=reason)
+
+    response = MetricsEndpoint.as_view()(APIRequestFactory().get("/api/v1/runner/metrics/"))
+    body = response.content.decode()
+    assert 'pi_dash_runs_failed_by_reason{reason="agent_error.provider_auth_or_access"} 2' in body
+    assert 'pi_dash_runs_failed_by_reason{reason="timeout"} 1' in body

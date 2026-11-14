@@ -298,6 +298,9 @@ export interface IAgentRunErrorDiagnostic {
   kind: string;
   summary: string;
   action: string;
+  /** Canonical stored taxonomy value (e.g. "agent_error.provider_auth_or_access");
+   * present when the diagnostic was derived from AgentRun.failure_reason. */
+  failure_reason?: string;
 }
 
 /**
@@ -339,6 +342,8 @@ export interface IAgentRun {
   done_payload: Record<string, unknown> | null;
   error: string;
   error_code: string;
+  /** Canonical failure taxonomy value; empty for non-failed runs. */
+  failure_reason: string;
   error_diagnostic: IAgentRunErrorDiagnostic | null;
   llm_model: string;
   input_tokens: number | null;
