@@ -1,4 +1,4 @@
-//! Turning the built-in engine on for a project (design §5 "enrol on use",
+//! Turning the Pi Dash Agent on for a project (design §5 "enrol on use",
 //! §10 allocation). Shared by the daemon's `EngineRunnerAdd` and by
 //! `pidash runner add --agent engine` when no daemon runs.
 //!
@@ -28,7 +28,7 @@ use crate::util::paths::Paths;
 
 /// What to turn the engine on for.
 #[derive(Debug, Clone)]
-pub struct AddEngineRunner {
+pub struct AddPidashAgentRunner {
     pub workspace: String,
     pub project: String,
     pub working_dir: Option<PathBuf>,
@@ -40,7 +40,7 @@ pub fn ensure_engine_can_run(status: &EngineStatusInfo) -> Result<()> {
     match status.state {
         EngineState::Available | EngineState::Expiring => Ok(()),
         EngineState::SignedOut => anyhow::bail!(
-            "{reason}: the built-in engine is not signed in on this computer; run `pidash login --engine` first"
+            "{reason}: the Pi Dash Agent is not signed in on this computer; run `pidash login --engine` first"
         ),
         // A transient state (the profile not fetched yet, an empty wallet)
         // does not block turning the engine on: the server decides.
@@ -53,7 +53,7 @@ pub fn ensure_engine_can_run(status: &EngineStatusInfo) -> Result<()> {
             Ok(())
         }
         EngineState::Unavailable => anyhow::bail!(
-            "{reason}: the built-in engine is not available on this computer{}",
+            "{reason}: the Pi Dash Agent is not available on this computer{}",
             if reason == reason::ENGINE_NOT_INSTALLED {
                 " (run `pidash engine install`)"
             } else {
@@ -67,7 +67,7 @@ pub fn ensure_engine_can_run(status: &EngineStatusInfo) -> Result<()> {
 /// daemon hot-adds the returned block, the CLI starts the service.
 pub async fn add_engine_runner(
     paths: &Paths,
-    req: &AddEngineRunner,
+    req: &AddPidashAgentRunner,
     status: &EngineStatusInfo,
 ) -> Result<(RunnerConfig, EngineRunnerInfo)> {
     let workspace = req.workspace.trim();
@@ -91,14 +91,14 @@ pub async fn add_engine_runner(
     }
     // One engine runner per machine and project (design §5).
     if let Some(existing) = cfg.runners.iter().find(|r| {
-        r.agent.kind == AgentKind::Engine
+        r.agent.kind == AgentKind::PidashAgent
             && r.workspace_slug.as_deref() == Some(workspace)
             && r.project_slug
                 .as_deref()
                 .is_some_and(|p| p.eq_ignore_ascii_case(project))
     }) {
         anyhow::bail!(
-            "the built-in engine is already on for {project} in {workspace} (runner {})",
+            "the Pi Dash Agent is already on for {project} in {workspace} (runner {})",
             existing.name
         );
     }
@@ -174,7 +174,7 @@ pub async fn add_engine_runner(
             &cloud_url,
             ApplyEnrollOptions {
                 working_dir: Some(working_dir.clone()),
-                agent_kind: AgentKind::Engine,
+                agent_kind: AgentKind::PidashAgent,
                 model: None,
                 reasoning_effort: None,
             },
@@ -232,7 +232,7 @@ pub async fn status_without_daemon(paths: &Paths) -> Result<EngineStatusInfo> {
         .into_iter()
         .next()
         .map(|(_, t)| t);
-    let manager = super::manager::EngineManager::new(
+    let manager = super::manager::PidashAgentManager::new(
         Some(&cfg.daemon.cloud_url),
         paths.clone(),
         tokens,
@@ -251,8 +251,8 @@ pub async fn status_without_daemon(paths: &Paths) -> Result<EngineStatusInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{CliSection, Config, DaemonConfig, EngineCredential};
-    use crate::engine::test_server::{self, Handler};
+    use crate::config::schema::{CliSection, Config, DaemonConfig, PidashAgentCredential};
+    use crate::pidash_agent::test_server::{self, Handler};
     use crate::ipc::protocol::EngineSignInState;
     use std::sync::Arc;
 
@@ -292,7 +292,7 @@ mod tests {
             cli: Some(CliSection {
                 token: Some("mt_acme".into()),
                 workspace_slug: Some("acme".into()),
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_x".into(),
                     expires_at: None,
                 }),
@@ -340,13 +340,13 @@ mod tests {
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
 
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: None,
         };
         let (runner, info) = add_engine_runner(&paths, &req, &available()).await.unwrap();
-        assert_eq!(runner.agent.kind, AgentKind::Engine);
+        assert_eq!(runner.agent.kind, AgentKind::PidashAgent);
         assert_eq!(
             info.working_dir,
             paths.data_dir.join("engine/workdirs/acme/WEB")
@@ -382,7 +382,7 @@ mod tests {
         .unwrap();
         let (_, info) = add_engine_runner(
             &paths,
-            &AddEngineRunner {
+            &AddPidashAgentRunner {
                 workspace: "acme".into(),
                 project: "API".into(),
                 working_dir: None,
@@ -402,7 +402,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: None,
@@ -422,7 +422,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("engine_disabled"), "{err}");
         // An unsigned-in workspace.
-        let other = AddEngineRunner {
+        let other = AddPidashAgentRunner {
             workspace: "beta".into(),
             ..req.clone()
         };
@@ -439,7 +439,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: None,
@@ -459,7 +459,7 @@ mod tests {
         let engines: Vec<_> = cfg
             .runners
             .iter()
-            .filter(|r| r.agent.kind == AgentKind::Engine)
+            .filter(|r| r.agent.kind == AgentKind::PidashAgent)
             .collect();
         assert_eq!(engines.len(), 1);
         assert_eq!(engines[0].runner_id, a.0.runner_id);
@@ -503,7 +503,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: None,
@@ -588,7 +588,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: Some(uncreatable_dir(tmp.path())),
@@ -607,7 +607,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let paths = paths(tmp.path());
             seed(&paths, &server.url);
-            let req = AddEngineRunner {
+            let req = AddPidashAgentRunner {
                 workspace: "acme".into(),
                 project: "WEB".into(),
                 working_dir: Some(uncreatable_dir(tmp.path())),
@@ -631,7 +631,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
-        let ok = AddEngineRunner {
+        let ok = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: None,
@@ -644,7 +644,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let failing = AddEngineRunner {
+        let failing = AddPidashAgentRunner {
             working_dir: Some(uncreatable_dir(tmp.path())),
             ..ok
         };
@@ -662,7 +662,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         seed(&paths, &server.url);
-        let req = AddEngineRunner {
+        let req = AddPidashAgentRunner {
             workspace: "acme".into(),
             project: "WEB".into(),
             working_dir: None,

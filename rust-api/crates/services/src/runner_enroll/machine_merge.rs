@@ -38,10 +38,9 @@ use pidash_db::entity::{
 };
 use pidash_types::runner_runs::AgentRunStatus;
 
-use crate::domain::engine_credential;
 use crate::domain::issue_assignment;
 use crate::domain::tokens;
-use crate::runner_enroll::engine_naming;
+use crate::runner_enroll::pidash_agent_naming;
 use crate::runner_enroll::queries::enroll_reads;
 use crate::runner_enroll::revoke as revoke_kernels;
 use crate::runner_runs::finalization;
@@ -753,8 +752,8 @@ pub async fn merge_dev_machine(
             .await?
             .ok_or_else(|| MergeError::Db("merge pod vanished".to_owned()))?;
         let project_id = pod.project_id;
-        let is_engine = runner.provisioning == "desktop_bundled";
-        if let Some(survivor) = survivors.get(&project_id).filter(|_| is_engine) {
+        let is_pidash_agent = runner.provisioning == "desktop_bundled";
+        if let Some(survivor) = survivors.get(&project_id).filter(|_| is_pidash_agent) {
             let survivor = survivor.clone();
             // §23.4 first (Django order): the dedicated assignment move
             // and its per-issue run handling, then the bulk re-pin.
@@ -779,7 +778,7 @@ pub async fn merge_dev_machine(
             continue;
         }
         // Move: engine renamed to the target scheme, other uniquified.
-        let name = if is_engine {
+        let name = if is_pidash_agent {
             let workspace = workspace_entity::Entity::find_by_id(runner.workspace_id)
                 .one(db)
                 .await?
@@ -788,7 +787,7 @@ pub async fn merge_dev_machine(
                 .one(db)
                 .await?
                 .ok_or_else(|| MergeError::Db("merge project vanished".to_owned()))?;
-            let base = engine_naming::engine_runner_base_name(
+            let base = pidash_agent_naming::pidash_agent_runner_base_name(
                 target.id,
                 &target.host_label,
                 &target.label,
@@ -823,7 +822,7 @@ pub async fn merge_dev_machine(
             .exec(db)
             .await
             .map(drop)?;
-        if is_engine {
+        if is_pidash_agent {
             // The moved engine becomes the survivor for its project.
             let moved_row = runner_entity::Entity::find_by_id(runner.id)
                 .one(db)
@@ -874,7 +873,7 @@ pub async fn merge_dev_machine(
         .await
         .map(drop)?;
     let (_revoked, revoke_effects) =
-        engine_credential::revoke_engine_credential(db, source.id, "machine_merged", now)
+        crate::domain::pidash_agent_credential::revoke_pidash_agent_credential(db, source.id, "machine_merged", now)
             .await
             .map_err(|err| MergeError::Db(err.to_string()))?;
     for pod in revoke_effects.drain_pod_ids {

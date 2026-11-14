@@ -1823,7 +1823,7 @@ mod tests {
             &mut registry,
             pool.clone(),
             std::env::temp_dir(),
-            seed_settings.managed_runner.clone(),
+            seed_settings.pidash_agent.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
@@ -1878,7 +1878,7 @@ mod tests {
             pool.clone(),
             std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
                 pool.clone(),
-                dispatch_settings.managed_runner.clone(),
+                dispatch_settings.pidash_agent.clone(),
                 None,
                 dispatch_settings.runner.clone(),
                     dispatch_assistant_seam.clone(),
@@ -1889,7 +1889,7 @@ mod tests {
             pool.clone(),
             pidash_jobs::orchestration::live_scheduler_dispatch(
                 pool.clone(),
-                dispatch_settings.managed_runner,
+                dispatch_settings.pidash_agent,
                 None,
                 dispatch_settings.runner.clone(),
                     dispatch_assistant_seam,
@@ -1931,7 +1931,7 @@ mod tests {
             pool.clone(),
             runner_seams,
         );
-        pidash_jobs::runner_runs::register_engine_pause_tasks(&mut registry, pool.clone());
+        pidash_jobs::runner_runs::register_pidash_agent_pause_tasks(&mut registry, pool.clone());
         // Managed wait expiry (P3 step A): the only execute-plane
         // handler that survives; same call the worker builder makes —
         // real register over the lazy pool, no forward override
@@ -1941,7 +1941,7 @@ mod tests {
         pidash_jobs::runner_runs::waiting_expiry::register_waiting_expiry_tasks(
             &mut registry,
             pool.clone(),
-            execute_settings.managed_runner.clone(),
+            execute_settings.pidash_agent.clone(),
             std::sync::Arc::new(
                 pidash_jobs::runner_runs::waiting_expiry::LiveExecuteSeams::new(pool.clone()),
             ),

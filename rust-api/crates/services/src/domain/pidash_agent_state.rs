@@ -29,13 +29,13 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelec
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::runner_enroll::dispatch_rules::{on_engine_pause_changed, PauseEffects};
+use crate::runner_enroll::dispatch_rules::{on_pidash_agent_pause_changed, PauseEffects};
 
-use super::engine_credential::{
-    has_live_engine_credential, is_legacy_desktop, utc, SIGN_IN_STATE_EXPIRED,
+use super::pidash_agent_credential::{
+    has_live_pidash_agent_credential, is_legacy_desktop, utc, SIGN_IN_STATE_EXPIRED,
     SIGN_IN_STATE_REVOKED, SIGN_IN_STATE_SIGNED_OUT,
 };
-use super::engine_credential::{PAUSE_ENGINE_DISABLED, PAUSE_ENGINE_SIGN_IN_REQUIRED};
+use super::pidash_agent_credential::{PAUSE_ENGINE_DISABLED, PAUSE_ENGINE_SIGN_IN_REQUIRED};
 
 /// `DevMachine.engine_auto_pause_reason` value: not auto-paused.
 pub const PAUSE_NONE: &str = "";
@@ -151,7 +151,7 @@ fn stamp_now(now: DateTime<Utc>) -> sea_orm::prelude::DateTimeWithTimeZone {
 /// `set_engine_auto_pause_reason(machine, reason, keep=(), only_from=None)`:
 /// the seam for the heartbeat report and the model-token endpoint (§8).
 /// Pausing releases the engines' queued locality pins; clearing drains
-/// them (through [`on_engine_pause_changed`]). Returns whether the value
+/// them (through [`on_pidash_agent_pause_changed`]). Returns whether the value
 /// changed and the post-commit drains to fire.
 ///
 /// The conditions are checked on the row, so a caller that decided on an
@@ -213,9 +213,9 @@ pub async fn set_engine_auto_pause_reason(
     }
     // Mirror Django's `set_engine_auto_pause_reason` (`dispatch_rules.py:176-205`):
     // the pin release / drain decision runs in the same transaction as the write.
-    // `on_engine_pause_changed` (NEWPIDASH-48) releases locality pins on pause
+    // `on_pidash_agent_pause_changed` (NEWPIDASH-48) releases locality pins on pause
     // and queues engine drains on resume; the caller drains after commit.
-    let effects = on_engine_pause_changed(db, machine_id, owner_paused, reason, was_paused)
+    let effects = on_pidash_agent_pause_changed(db, machine_id, owner_paused, reason, was_paused)
         .await
         .map_err(|error| PauseError::Database(into_sqlx(error)))?;
     Ok((true, effects))
@@ -266,7 +266,7 @@ async fn clear_reason(
         else {
             return Ok((false, PauseEffects::default()));
         };
-        if !has_live_engine_credential(
+        if !has_live_pidash_agent_credential(
             &fresh.engine_sign_in_state,
             fresh.engine_credential_expires_at.map(utc),
             now,
@@ -299,14 +299,14 @@ fn clean(value: Option<&Value>) -> String {
     }
 }
 
-/// `record_engine_state_report(machine, report)`: store the heartbeat's
+/// `record_pidash_agent_state_report(machine, report)`: store the heartbeat's
 /// `engine_state` and derive the automatic pause. `report` is
 /// `{"state", "reason_code"?, "sign_in_state"?, "credential_expires_at"?}`;
 /// `state` is one of `available`, `signed_out`, `expiring`, `unavailable`.
 /// Returns the machine's pause reason after the write (Django refreshes
 /// `machine.engine_auto_pause_reason` on the caller's row) and the
 /// post-commit drains to fire for a pause flip, if one happened.
-pub async fn record_engine_state_report(
+pub async fn record_pidash_agent_state_report(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     report: &Map<String, Value>,
@@ -402,7 +402,7 @@ async fn fresh_after(
         .map_err(|error| PauseError::Database(into_sqlx(error)))
 }
 
-/// `pause_engines_with_expired_credentials()`: pause the engine of every
+/// `pause_pidash_agents_with_expired_credentials()`: pause the engine of every
 /// new-path machine whose engine credential ran out, with
 /// `engine_sign_in_required` (§4.3 "Expiry"), so pods route elsewhere
 /// even while the daemon is offline. Returns the number paused and the
@@ -411,7 +411,7 @@ async fn fresh_after(
 /// Candidates are `active`, expired, unpaused and not revoked, excluding
 /// legacy machines. Each is re-checked on the row just read: a renewal
 /// that committed after the query must not be paused.
-pub async fn pause_engines_with_expired_credentials(
+pub async fn pause_pidash_agents_with_expired_credentials(
     db: &impl ConnectionTrait,
     now: DateTime<Utc>,
 ) -> Result<(u64, PauseEffects), PauseError> {

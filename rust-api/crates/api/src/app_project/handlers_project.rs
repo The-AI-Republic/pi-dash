@@ -1751,7 +1751,7 @@ enum ManagedPaused {
 /// Managed-runner EXISTS (`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL` /
 /// `ONLINE_MANAGED_RUNNER_SQL` / `ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`):
 /// a desktop-bundled runner owned by the caller on the project's pod.
-async fn managed_runner_exists(
+async fn pidash_agent_exists(
     db: &sea_orm::DatabaseConnection,
     paused: ManagedPaused,
     online: bool,
@@ -1841,7 +1841,7 @@ async fn executor_user(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Exec
 /// L1 `project_executor_options`): the cloud leg consults the
 /// `has_usable_llm_config` EE seam only on configured instances; the local
 /// leg is the runners EXISTS; the managed leg is L4's
-/// `managed_runner_availability` with the EE profile seam.
+/// `pidash_agent_availability` with the EE profile seam.
 ///
 /// `viewer` is `None` for renders without request context (the PATCH
 /// `current_instance` dump: `ProjectSerializer(project)` at `base.py:342`
@@ -1857,7 +1857,7 @@ async fn executor_options(
     workspace_id: &uuid::Uuid,
     viewer: Option<(&uuid::Uuid, &ExecutorUser)>,
 ) -> Result<[pidash_services::run_creation::executor_policy::ExecutorOption; 3], Denial> {
-    use pidash_services::run_creation::pidash_agent_availability::{managed_runner_availability, HEARTBEAT_GRACE_SECS};
+    use pidash_services::run_creation::pidash_agent_availability::{pidash_agent_availability, HEARTBEAT_GRACE_SECS};
     use pidash_services::run_creation::executor_policy::{local_runner_available_exists, local_runner_exists};
     // `agent_execution.py:112-121`: the unpaused leg always runs; the
     // online-incl-paused leg runs only when nothing is available (the
@@ -1889,7 +1889,7 @@ async fn executor_options(
                 .await;
             let seam_profile = state
                 .assistant_seam()
-                .agent_model_profile(*user_id, user.llm_has_key)
+                .pidash_agent_profile(*user_id, user.llm_has_key)
                 .await;
             (
                 Some(&user.flags),
@@ -1911,11 +1911,11 @@ async fn executor_options(
     };
     let managed = match viewer {
         Some((user_id, _))
-            if pidash_services::run_creation::executor_policy::managed_runner_is_enabled(
-                &settings.managed_runner,
+            if pidash_services::run_creation::executor_policy::pidash_agent_is_enabled(
+                &settings.pidash_agent,
             ) =>
         {
-            let enrolled = managed_runner_exists(
+            let enrolled = pidash_agent_exists(
                 &sea_db,
                 ManagedPaused::Any,
                 false,
@@ -1928,7 +1928,7 @@ async fn executor_options(
             // `HEARTBEAT_GRACE` (`runner/services/matcher.py:44`): online
             // while the last heartbeat is within 90 seconds.
             let cutoff = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-            let online = managed_runner_exists(
+            let online = pidash_agent_exists(
                 &sea_db,
                 ManagedPaused::NotPaused,
                 true,
@@ -1942,7 +1942,7 @@ async fn executor_options(
             // only when a runner is enrolled but none is online.
             let mut paused = false;
             if enrolled && !online {
-                paused = managed_runner_exists(
+                paused = pidash_agent_exists(
                     &sea_db,
                     ManagedPaused::Paused,
                     false,
@@ -1953,8 +1953,8 @@ async fn executor_options(
                 )
                 .await?;
             }
-            managed_runner_availability(
-                &settings.managed_runner,
+            pidash_agent_availability(
+                &settings.pidash_agent,
                 flags,
                 || llm_profile,
                 enrolled,
@@ -1962,8 +1962,8 @@ async fn executor_options(
                 paused,
             )
         }
-        _ => managed_runner_availability(
-            &settings.managed_runner,
+        _ => pidash_agent_availability(
+            &settings.pidash_agent,
             flags,
             || llm_profile,
             false,
@@ -7676,7 +7676,7 @@ mod live_tests {
     use super::*;
     use pidash_services::run_creation::executor_policy::UserFlags;
     use pidash_services::extensions::{
-        AgentModelProfile, AssistantModelSeam, SeamFuture, TitleError, TitleRequest,
+        PidashAgentProfile, AssistantModelSeam, SeamFuture, TitleError, TitleRequest,
     };
 
     /// Overlay-shaped seam: a keyless viewer still counts as configured,
@@ -7694,14 +7694,14 @@ mod live_tests {
             Box::pin(async move { true })
         }
 
-        fn agent_model_profile(
+        fn pidash_agent_profile(
             &self,
             user_id: uuid::Uuid,
             has_api_key: bool,
-        ) -> SeamFuture<'_, AgentModelProfile> {
+        ) -> SeamFuture<'_, PidashAgentProfile> {
             let _ = (user_id, has_api_key);
             Box::pin(async move {
-                AgentModelProfile {
+                PidashAgentProfile {
                     available: true,
                     lane: "openhub".to_owned(),
                     base_url: "https://gateway.example.com".to_owned(),
@@ -7739,7 +7739,7 @@ mod live_tests {
 
     fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> AppState {
         let mut settings = pidash_db::config::Settings::test_defaults();
-        settings.managed_runner.enabled = true;
+        settings.pidash_agent.enabled = true;
         let mut state = AppState::with_settings("test", settings);
         if let Some(seam) = seam {
             state = state.with_assistant_seam(seam);

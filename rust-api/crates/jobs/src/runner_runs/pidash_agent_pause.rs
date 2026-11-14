@@ -1,12 +1,12 @@
 //! Engine-credential expiry sweep (#2910, NEWPIDASH-50).
 //!
-//! Port of `pause_engines_with_expired_credentials`
+//! Port of `pause_pidash_agents_with_expired_credentials`
 //! (`apps/api/pi_dash/runner/tasks.py`, beat schedule
 //! `runner-pause-engines-with-expired-credentials` at `crontab(-1)`
 //! every five minutes, `apps/api/pi_dash/celery.py`).
 //!
 //! The driver is the domain function
-//! ([`pidash_services::domain::engine_state::pause_engines_with_expired_credentials`]):
+//! ([`pidash_services::domain::pidash_agent_state::pause_pidash_agents_with_expired_credentials`]):
 //! every new-path, non-revoked machine still `active` whose engine
 //! credential ran out gets an `engine_sign_in_required` auto-pause.
 //! The beat entry lives in `schedule.rs`; the task and beat names are
@@ -25,10 +25,10 @@ use crate::queue::JobRow;
 use crate::worker::{Handler, HandlerError, Registry, Verdict};
 
 /// The beat task name (`runner/tasks.py`).
-pub const PAUSE_ENGINES_TASK: &str = "runner.pause_engines_with_expired_credentials";
+pub const PIDASH_AGENT_PAUSE_TASK: &str = "runner.pause_engines_with_expired_credentials";
 
 /// The `celery.py` beat entry name for this task.
-pub const PAUSE_ENGINES_BEAT_NAME: &str = "runner-pause-engines-with-expired-credentials";
+pub const PIDASH_AGENT_PAUSE_BEAT_NAME: &str = "runner-pause-engines-with-expired-credentials";
 
 fn pause_engines_handler(pool: PgPool) -> Handler {
     Arc::new(move |_job: JobRow| {
@@ -37,7 +37,7 @@ fn pause_engines_handler(pool: PgPool) -> Handler {
             Box::pin(async move {
                 let sea = pidash_db::pool::sea_orm_connection(&pool);
                 let (_paused, effects) =
-                    pidash_services::domain::engine_state::pause_engines_with_expired_credentials(
+                    pidash_services::domain::pidash_agent_state::pause_pidash_agents_with_expired_credentials(
                         &sea,
                         Utc::now(),
                     )
@@ -79,8 +79,8 @@ fn pause_engines_handler(pool: PgPool) -> Handler {
 
 /// Register the expiry-sweep task handler. Like every other port, this
 /// only builds the handler table.
-pub fn register_engine_pause_tasks(registry: &mut Registry, pool: PgPool) {
-    registry.register(PAUSE_ENGINES_TASK, pause_engines_handler(pool));
+pub fn register_pidash_agent_pause_tasks(registry: &mut Registry, pool: PgPool) {
+    registry.register(PIDASH_AGENT_PAUSE_TASK, pause_engines_handler(pool));
 }
 
 #[cfg(test)]
@@ -91,15 +91,15 @@ mod tests {
     #[test]
     fn task_and_beat_names_match_django() {
         assert_eq!(
-            PAUSE_ENGINES_TASK,
+            PIDASH_AGENT_PAUSE_TASK,
             "runner.pause_engines_with_expired_credentials"
         );
         assert_eq!(
-            PAUSE_ENGINES_BEAT_NAME,
+            PIDASH_AGENT_PAUSE_BEAT_NAME,
             "runner-pause-engines-with-expired-credentials"
         );
         assert_eq!(crate::runner_runs::TASK_NAMES.len(), 16);
-        assert!(crate::runner_runs::is_runner_runs_task(PAUSE_ENGINES_TASK));
+        assert!(crate::runner_runs::is_runner_runs_task(PIDASH_AGENT_PAUSE_TASK));
     }
 
     #[tokio::test]
@@ -107,9 +107,9 @@ mod tests {
         let pool =
             sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
         let mut registry = Registry::new();
-        assert!(!registry.owns(PAUSE_ENGINES_TASK));
-        register_engine_pause_tasks(&mut registry, pool);
-        assert!(registry.owns(PAUSE_ENGINES_TASK), "sweep registered");
+        assert!(!registry.owns(PIDASH_AGENT_PAUSE_TASK));
+        register_pidash_agent_pause_tasks(&mut registry, pool);
+        assert!(registry.owns(PIDASH_AGENT_PAUSE_TASK), "sweep registered");
     }
 
     #[tokio::test]
@@ -123,7 +123,7 @@ mod tests {
         let job = JobRow {
             id: 1,
             celery_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-            task: PAUSE_ENGINES_TASK.to_owned(),
+            task: PIDASH_AGENT_PAUSE_TASK.to_owned(),
             args: serde_json::Value::Array(vec![]),
             kwargs: serde_json::Value::Object(Default::default()),
             queue: "default".to_owned(),

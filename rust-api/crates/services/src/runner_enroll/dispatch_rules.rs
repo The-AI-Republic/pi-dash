@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Dispatch rules for built-in engine runners (#2903, `dispatch_rules.py`).
+//! Dispatch rules for Pi Dash Agent runners (#2903, `dispatch_rules.py`).
 //!
 //! Minimal port: releasing queued locality pins when an engine stops
 //! taking pod work, and the pause flip effects. Drains run after
@@ -105,17 +105,17 @@ pub fn engine_paused(engine_paused_by_owner: bool, engine_auto_pause_reason: &st
     engine_paused_by_owner || !engine_auto_pause_reason.is_empty()
 }
 
-/// Post-commit drains for a pause flip (`on_engine_pause_changed`).
+/// Post-commit drains for a pause flip (`on_pidash_agent_pause_changed`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PauseEffects {
     pub drain_pod_ids: Vec<Uuid>,
     pub drain_runner_ids: Vec<Uuid>,
 }
 
-/// `on_engine_pause_changed` (`dispatch_rules.py:207-216`): pausing
+/// `on_pidash_agent_pause_changed` (`dispatch_rules.py:207-216`): pausing
 /// releases the engines' pins in-transaction (drain pods after commit);
 /// resuming drains each engine after commit.
-pub async fn on_engine_pause_changed(
+pub async fn on_pidash_agent_pause_changed(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     engine_paused_by_owner: bool,

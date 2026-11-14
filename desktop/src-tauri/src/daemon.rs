@@ -89,7 +89,7 @@ impl DaemonPaths {
     /// The daemon's engine home for `account`:
     /// `<daemon data>/engine/<account>/codex-home` (design §5), keyed like
     /// the runner's `engine::codex_config::account_dir_name`.
-    pub fn engine_home(&self, account: Option<&str>) -> PathBuf {
+    pub fn pidash_agent_home(&self, account: Option<&str>) -> PathBuf {
         self.data_dir
             .join("engine")
             .join(account_dir_name(account))
@@ -521,7 +521,7 @@ pub async fn daemon_engine_status() -> Result<EngineStatusInfo, String> {
     }
 }
 
-/// The owner's "Pause the built-in engine" switch for this computer
+/// The owner's "Pause the Pi Dash Agent" switch for this computer
 /// (design §8). The daemon asks the server and answers with the engine
 /// status, pause state included.
 #[tauri::command]
@@ -556,7 +556,7 @@ pub async fn daemon_engine_settings_set(
     }
 }
 
-/// Turn the built-in engine on for a project (design §5).
+/// Turn the Pi Dash Agent on for a project (design §5).
 #[tauri::command]
 pub async fn daemon_engine_runner_add(
     workspace: String,
@@ -601,7 +601,7 @@ pub struct LocalRunner {
     pub workspace_slug: Option<String>,
     pub project_slug: Option<String>,
     pub working_dir: PathBuf,
-    /// `agent.kind`: `engine` for the built-in engine.
+    /// `agent.kind`: `engine` for the Pi Dash Agent.
     pub agent: String,
 }
 
@@ -988,7 +988,7 @@ mod tests {
             runtime_dir: "/r".into(),
         };
         assert_eq!(
-            paths.engine_home(Some("u-1")),
+            paths.pidash_agent_home(Some("u-1")),
             PathBuf::from("/d/engine/u-1/codex-home")
         );
         assert_eq!(paths.socket(), PathBuf::from("/r/pidash.sock"));

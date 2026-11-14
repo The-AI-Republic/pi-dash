@@ -136,7 +136,8 @@ impl AppTransitionHook {
         });
         let deps = HookDeps {
             pool: self.pool.clone(),
-            managed: settings.managed_runner.clone(),
+            managed: settings.pidash_agent.clone(),
+
             redis: client_from_settings(settings),
             runner: settings.runner.clone(),
             assistant_seam: self.state.assistant_seam().clone(),

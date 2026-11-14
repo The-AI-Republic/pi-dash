@@ -40,7 +40,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, assistant_user_llm_config, issue_agent_ticker, issues, projects, states,
@@ -50,7 +50,7 @@ use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
+use pidash_services::assistant::seams::{pidash_agent_profile_for_user, has_usable_llm_config};
 use pidash_services::run_creation::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::extensions::AssistantModelSeam;
@@ -148,7 +148,7 @@ fn profile_fn(
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = agent_model_profile_for_user(key);
+        let profile = pidash_agent_profile_for_user(key);
         LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
@@ -196,7 +196,7 @@ async fn drain_terminal_effects(
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     redis: Option<&redis::Client>,
     runner: &RunnerSettings,
     run_id: Uuid,
@@ -238,7 +238,7 @@ pub async fn complete_project_move_handoff_live(
 /// unread on this path (`left_bucket` never retimes) — `0.0`.
 pub async fn maybe_apply_deferred_pause_live(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
@@ -326,7 +326,7 @@ pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx:
 /// through `pidash-sdk::ops`.
 pub async fn post_run_orchestration(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
@@ -365,7 +365,7 @@ pub async fn post_run_orchestration(
 pub async fn post_run_orchestration_in_tx<'t>(
     tx: Transaction<'t>,
     pool: &'t PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) -> Transaction<'t> {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
@@ -803,8 +803,8 @@ mod tests {
             .expect("pool connects")
     }
 
-    fn settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

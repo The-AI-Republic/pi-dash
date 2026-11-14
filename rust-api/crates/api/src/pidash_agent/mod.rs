@@ -1,4 +1,4 @@
-//! The built-in engine's daemon HTTP surface (#2910, NEWPIDASH-50).
+//! The Pi Dash Agent's daemon HTTP surface (#2910, NEWPIDASH-50).
 //!
 //! Three endpoints, all Django `APIView`s on `runner/views/engine.py`:
 //!

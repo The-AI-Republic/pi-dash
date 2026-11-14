@@ -11,16 +11,8 @@
   },
   "settings": {
     "source": "apps/api/pi_dash/assistant/runtime/mcp.py:299-309",
-    "keys": [
-      "ASSISTANT_MCP_TIMEOUT_S",
-      "ASSISTANT_MCP_READ_TIMEOUT_S",
-      "ASSISTANT_MCP_MAX_SERVERS"
-    ],
-    "override_vectors": [
-      5.0,
-      60.0,
-      3
-    ]
+    "keys": ["ASSISTANT_MCP_TIMEOUT_S", "ASSISTANT_MCP_READ_TIMEOUT_S", "ASSISTANT_MCP_MAX_SERVERS"],
+    "override_vectors": [5.0, 60.0, 3]
   },
   "unique_prefixes": {
     "source": "apps/api/pi_dash/assistant/runtime/mcp.py:212-233",
@@ -30,11 +22,7 @@
       "00000000-0000-0000-0000-000000000002": "mcp_my_tools_2",
       "00000000-0000-0000-0000-000000000003": "mcp_other"
     },
-    "slug_vectors": [
-      "mcp_my_tools",
-      "mcp_my_tools",
-      "mcp_12345678"
-    ]
+    "slug_vectors": ["mcp_my_tools", "mcp_my_tools", "mcp_12345678"]
   },
   "auth_header_for": {
     "source": "apps/api/pi_dash/assistant/runtime/mcp.py:236-239",
@@ -78,7 +66,7 @@
       "source": "apps/api/pi_dash/ee/assistant/model_provider.py:56-63",
       "rule": "CE: resolve_byok_model directly"
     },
-    "agent_model_profile_for_user": {
+    "pidash_agent_profile_for_user": {
       "source": "apps/api/pi_dash/ee/assistant/model_provider.py:71-89",
       "ce_matrix": [
         "has key -> {available:false, lane:'byok', reason:'byok_unsupported'}",
@@ -86,7 +74,7 @@
       ],
       "shape": "AgentModelProfile(available, lane, base_url, model, reason_code, top_up_url) (model_provider.py:26-48)"
     },
-    "agent_model_credential_for_user": {
+    "pidash_agent_credential_for_user": {
       "source": "apps/api/pi_dash/ee/assistant/model_provider.py:92-108",
       "rule": "CE always raises ManagedRunnerUnavailable(BYOK_UNSUPPORTED); raising (not empty) keeps silent-401 callers loud"
     },
@@ -102,11 +90,7 @@
   "ee_stt_provider": {
     "shape": {
       "source": "apps/api/pi_dash/ee/assistant/stt_provider.py:28-40",
-      "fields": [
-        "base_url",
-        "api_key",
-        "model"
-      ],
+      "fields": ["base_url", "api_key", "model"],
       "note": "api_key is the decrypted Bearer [REDACTED]"
     },
     "has_usable_stt_config": {

@@ -236,11 +236,11 @@ async fn dispatch_facts_of(
     machine_id: Option<Uuid>,
 ) -> Result<DispatchFacts, DrainError> {
     let last_dedicated = last_dedicated_for(db, runner_id).await?;
-    let is_engine = provisioning == "desktop_bundled";
+    let is_pidash_agent = provisioning == "desktop_bundled";
     let pod_member = pod_dispatch == "pod_member";
-    if !is_engine {
+    if !is_pidash_agent {
         return Ok(DispatchFacts {
-            is_engine: false,
+            is_pidash_agent: false,
             pod_member,
             paused: false,
             team_runs: true,
@@ -261,7 +261,7 @@ async fn dispatch_facts_of(
         None => (false, false),
     };
     Ok(DispatchFacts {
-        is_engine: true,
+        is_pidash_agent: true,
         pod_member,
         paused,
         team_runs,

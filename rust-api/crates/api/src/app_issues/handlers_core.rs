@@ -129,10 +129,10 @@ use pidash_services::app_issues::serializers_detail::{
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::run_creation::pidash_agent_availability::{
-    managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
+    pidash_agent_availability, pidash_agent_probe, LlmProfile, PidashAgentProbe,
     HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::run_creation::executor_policy::{managed_runner_is_enabled, UserFlags};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -140,7 +140,7 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 
@@ -2412,9 +2412,9 @@ pub(crate) async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Enrolled,
+        PidashAgentProbe::Enrolled,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2430,9 +2430,9 @@ pub(crate) async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Online(bound),
+        PidashAgentProbe::Online(bound),
         *user_id,
         *project_id,
         *workspace_id,
@@ -2448,9 +2448,9 @@ pub(crate) async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Paused,
+        PidashAgentProbe::Paused,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2671,7 +2671,7 @@ async fn run_validate(
     let mut fetched_project: Option<ResolvedProject> = None;
     let mut llm_profile = LlmProfile {
         available: false,
-        reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+        reason_code: PidashAgentReason::LLM_CONFIG_MISSING.to_owned(),
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
@@ -2689,7 +2689,7 @@ async fn run_validate(
                     // P1 (agent naming convention): a `cloud_agent` write
                     // on this non-pod path is normalized, not gated on
                     // CLOUD_AGENT_ENABLED — it must not block the run.
-                    if kind == AgentExecutorKind::ManagedRunner {
+                    if kind == AgentExecutorKind::PidashAgent {
                         let project = match instance {
                             Some(row) => Some(row.resolved_project()),
                             None => match project_id {
@@ -2706,14 +2706,14 @@ async fn run_validate(
                         match project {
                             None => executor_returns = true,
                             Some(project) => {
-                                // `managed_runner_availability` gates in
+                                // `pidash_agent_availability` gates in
                                 // fixed order: the LLM seam runs only
                                 // past the instance switch + viewer
                                 // legs; enrolled/online only past a
                                 // usable profile (never in CE — the
                                 // profile is always unavailable — but
                                 // the structure mirrors the policy).
-                                if managed_runner_is_enabled(&state.settings().managed_runner)
+                                if pidash_agent_is_enabled(&state.settings().pidash_agent)
                                     && viewer.is_active
                                     && !viewer.is_bot
                                 {
@@ -2723,9 +2723,9 @@ async fn run_validate(
                                     llm_profile = LlmProfile {
                                         available: false,
                                         reason_code: if keyed {
-                                            ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                                            PidashAgentReason::BYOK_UNSUPPORTED.to_owned()
                                         } else {
-                                            ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                                            PidashAgentReason::LLM_CONFIG_MISSING.to_owned()
                                         },
                                     };
                                     if llm_profile.available {
@@ -2762,8 +2762,8 @@ async fn run_validate(
                                         }
                                     }
                                 }
-                                let verdict = managed_runner_availability(
-                                    &state.settings().managed_runner,
+                                let verdict = pidash_agent_availability(
+                                    &state.settings().pidash_agent,
                                     Some(&viewer),
                                     || llm_profile.clone(),
                                     enrolled_exists,
@@ -2772,7 +2772,7 @@ async fn run_validate(
                                 );
                                 if !verdict.available
                                     && verdict.reason_code
-                                        != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+                                        != PidashAgentReason::NO_RUNNER_FOR_PROJECT
                                 {
                                     executor_returns = true;
                                 }
@@ -2888,7 +2888,7 @@ async fn run_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: Some(&viewer),
     };
     let probes = ValidateProbes {

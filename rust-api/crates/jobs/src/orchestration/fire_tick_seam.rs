@@ -1233,7 +1233,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::config::{ManagedRunnerSettings};
+    use pidash_db::config::{PidashAgentSettings};
     use pidash_services::orchestration::dispatch::BOUNCE_BODY_DEFAULT;
     use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
@@ -1486,8 +1486,8 @@ mod tests {
     /// like R3b/R4/W5.
     const JITTER: f64 = 846.3222537664747;
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

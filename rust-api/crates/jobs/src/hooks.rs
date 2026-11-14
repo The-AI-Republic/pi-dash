@@ -71,7 +71,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues_move::{
     CreationDeps, MoveCreationOutboxes, MoveDrainError, MovePostCommitHook,
@@ -285,7 +285,7 @@ impl TerminalEffectsDrain for QueueTerminalEffectsDrain {
 #[derive(Clone)]
 pub struct HookDeps {
     pub pool: PgPool,
-    pub managed: ManagedRunnerSettings,
+    pub managed: PidashAgentSettings,
     pub redis: Option<redis::Client>,
     pub runner: RunnerSettings,
     pub assistant_seam: Arc<dyn AssistantModelSeam>,
@@ -600,6 +600,7 @@ impl MovePostCommitHook for MoveHook {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use pidash_services::extensions::{SeamFuture, TitleError, TitleRequest};
@@ -624,7 +625,7 @@ mod tests {
         let settings = pidash_db::config::Settings::test_defaults();
         HookDeps {
             pool: pool.clone(),
-            managed: settings.managed_runner.clone(),
+            managed: settings.pidash_agent.clone(),
             redis: None,
             runner: settings.runner.clone(),
             assistant_seam: Arc::new(StubAssistantSeam),

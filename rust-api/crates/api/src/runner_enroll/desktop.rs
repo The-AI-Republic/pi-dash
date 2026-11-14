@@ -88,7 +88,7 @@ use pidash_services::runner_enroll::queries::catalog_reads;
 use pidash_services::runner_enroll::tokens;
 
 use crate::desktop_gate::header_value;
-use crate::desktop_gate::DesktopCredential;
+use crate::desktop_gate::PidashAgentDesktopCredential;
 use crate::middleware::SessionHandle;
 use crate::runner_runs::json_response;
 use crate::runner_runs::pool_of;
@@ -129,7 +129,6 @@ pub const WORKSPACE_NOT_FOUND_BODY: &str = r#"{"error":"workspace_not_found"}"#;
 pub const DESKTOP_DENIED_BODY: &str = "{\"error\":\"desktop_session_required\",\"detail\":\"This endpoint is available to the Pi Dash desktop app.\"}";
 
 /// `RunnerProvisioning.DESKTOP_BUNDLED` value (`models.py:204-206`).
-pub const PROVISIONING_DESKTOP_BUNDLED: &str = "desktop_bundled";
 /// `RunnerStatus.OFFLINE` value (the sign-out sweep target).
 pub const STATUS_OFFLINE: &str = "offline";
 /// `RunnerStatus.REVOKED` value (excluded from the sweep).
@@ -323,7 +322,7 @@ async fn desktop_actor(
 
 /// Whether the request passes the installed desktop gate: the caller
 /// extracts the session dict plus the raw auth headers into a
-/// [`DesktopCredential`] and the state's gate decides
+/// [`PidashAgentDesktopCredential`] and the state's gate decides
 /// ([`AppState::is_desktop_request`]). The CE gate reads only the
 /// session marker (a missing snapshot, a missing key, or a non-string
 /// value is not a desktop — the broad `except` in `request_is_desktop`
@@ -335,7 +334,7 @@ fn is_desktop_from_extension(
     state: &AppState,
 ) -> bool {
     let session = extension.as_ref().map(|handle| handle.snapshot().to_json());
-    let credential = DesktopCredential {
+    let credential = PidashAgentDesktopCredential {
         session: session.as_ref(),
         authorization: header_value(headers, axum::http::header::AUTHORIZATION),
         cookie: header_value(headers, axum::http::header::COOKIE),
@@ -372,9 +371,9 @@ async fn post_desktop_enroll(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let floor = state.settings().managed_runner.desktop_min_version.clone();
-    let managed_enabled = state.settings().managed_runner.enabled;
-    let graceful_stop_secs = state.settings().managed_runner.graceful_stop_secs;
+    let floor = state.settings().pidash_agent.desktop_min_version.clone();
+    let managed_enabled = state.settings().pidash_agent.enabled;
+    let graceful_stop_secs = state.settings().pidash_agent.graceful_stop_secs;
     let secret_key = state.settings().secret_key.clone();
 
     let (pool, user_id, desktop) = match desktop_actor(&state, extension, req.headers()).await {
@@ -476,7 +475,7 @@ async fn post_desktop_enroll(
             &host_label,
             workspace_id,
             user_id,
-            PROVISIONING_DESKTOP_BUNDLED,
+            pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
         )
         .await
         {
@@ -502,7 +501,7 @@ async fn post_desktop_enroll(
                     id,
                     user_id,
                     &host_label,
-                    PROVISIONING_DESKTOP_BUNDLED,
+                    pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
                     now_micros(),
                 )
                 .await
@@ -621,7 +620,7 @@ async fn delete_desktop_enroll(
     // (`:179-180`).
     let db = pidash_db::pool::sea_orm_connection(&pool);
     let machine_ids: Vec<Uuid> = if host_label.is_empty() {
-        match catalog_reads::bundled_machine_ids(&db, user_id, PROVISIONING_DESKTOP_BUNDLED, None)
+        match catalog_reads::bundled_machine_ids(&db, user_id, pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED, None)
             .await
         {
             Ok(ids) => ids,
@@ -643,7 +642,7 @@ async fn delete_desktop_enroll(
         match catalog_reads::bundled_machine_ids(
             &db,
             user_id,
-            PROVISIONING_DESKTOP_BUNDLED,
+            pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
             Some(&host_label),
         )
         .await
@@ -674,7 +673,7 @@ async fn delete_desktop_enroll(
     if catalog_reads::signout_offline_runners(
         &pidash_db::orm_tx::TxConn::new(&mut tx),
         &machine_ids,
-        PROVISIONING_DESKTOP_BUNDLED,
+        pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
         STATUS_OFFLINE,
         STATUS_REVOKED,
     )
@@ -709,8 +708,8 @@ mod tests {
     /// dict — including with no session at all.
     struct TokenDesktopGate;
 
-    impl crate::desktop_gate::DesktopRequestGate for TokenDesktopGate {
-        fn is_desktop(&self, credential: &crate::desktop_gate::DesktopCredential) -> bool {
+    impl crate::desktop_gate::PidashAgentDesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &crate::desktop_gate::PidashAgentDesktopCredential) -> bool {
             matches!(
                 credential.authorization,
                 Some(header) if header == "Bearer desktop-token"

@@ -798,7 +798,7 @@ impl RunnerDetailOwned {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
-            is_engine: self.is_engine,
+            is_pidash_agent: self.is_engine,
             engine_paused: self.engine_paused,
             dispatch_paused: self.dispatch_paused,
             machine_display_name: &self.machine_display_name,
@@ -894,7 +894,7 @@ pub async fn fetch_runner_detail(
                     expires_at,
                 )) => {
                     let derived =
-                        pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                             &stored_state,
                             expires_at,
                             Utc::now(),

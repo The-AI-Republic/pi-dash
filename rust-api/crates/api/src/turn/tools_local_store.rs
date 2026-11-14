@@ -719,7 +719,7 @@ pub struct PgToolStore {
     redis: Option<RedisClient>,
     http: reqwest::Client,
     keyring: pidash_db::config::encryption::Keyring,
-    managed: pidash_db::config::ManagedRunnerSettings,
+    managed: pidash_db::config::PidashAgentSettings,
 }
 
 impl PgToolStore {
@@ -824,7 +824,7 @@ impl PgToolStore {
     pub fn new(
         pool: PgPool,
         redis: Option<RedisClient>,
-        managed: pidash_db::config::ManagedRunnerSettings,
+        managed: pidash_db::config::PidashAgentSettings,
     ) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
@@ -2461,7 +2461,7 @@ impl ToolStore for PgToolStore {
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
                 pidash_services::run_creation::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
@@ -2835,7 +2835,7 @@ impl ToolStore for PgToolStore {
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
                 pidash_services::run_creation::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
@@ -2941,7 +2941,7 @@ impl ToolStore for PgToolStore {
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
                 let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
                 pidash_services::run_creation::LlmProfile {
                     available: profile.available,
                     reason_code: profile.reason_code,
@@ -3552,6 +3552,7 @@ struct TurnPreflight<H, P> {
 
 impl<H, P> pidash_services::orchestration::entries::PreflightSeam for TurnPreflight<H, P>
 where
+
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
 {
@@ -3818,8 +3819,8 @@ mod tests {
     }
 
 
-    fn live_managed_settings() -> pidash_db::config::ManagedRunnerSettings {
-        pidash_db::config::ManagedRunnerSettings {
+    fn live_managed_settings() -> pidash_db::config::PidashAgentSettings {
+        pidash_db::config::PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

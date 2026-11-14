@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use crate::cli::runner_ops;
 use crate::config::file;
-use crate::engine::api::{EngineApi, EngineSignInState, IssuedEngineCredential};
+use crate::pidash_agent::api::{PidashAgentApi, EngineSignInState, IssuedPidashAgentCredential};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -74,7 +74,7 @@ pub struct Args {
     #[arg(long, hide = true)]
     pub device_code_stdin: bool,
 
-    /// Sign in only the built-in engine (design §4.3): renew its 14-day
+    /// Sign in only the Pi Dash Agent (design §4.3): renew its 14-day
     /// credential without touching the daemon's, or add the engine to an
     /// install that signed in before it existed. Needs this computer to be
     /// signed in already (the credential is bound to its machine token).
@@ -99,12 +99,12 @@ struct TokenSuccess {
     #[serde(default)]
     user_email: Option<String>,
     /// Issued with the daemon credential when the instance can serve the
-    /// built-in engine (design §4.3).
+    /// Pi Dash Agent (design §4.3).
     #[serde(default)]
-    engine_credential: Option<IssuedEngineCredential>,
+    engine_credential: Option<IssuedPidashAgentCredential>,
     #[serde(
         default,
-        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+        deserialize_with = "crate::pidash_agent::api::lenient_sign_in_state"
     )]
     engine_sign_in_state: Option<EngineSignInState>,
     // The server also returns `workspace_slug` here (the workspace the
@@ -121,10 +121,10 @@ struct MachineTokenResponse {
     /// The engine credential, when the server issues it with the machine
     /// token rather than with the device token.
     #[serde(default)]
-    engine_credential: Option<IssuedEngineCredential>,
+    engine_credential: Option<IssuedPidashAgentCredential>,
     #[serde(
         default,
-        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+        deserialize_with = "crate::pidash_agent::api::lenient_sign_in_state"
     )]
     engine_sign_in_state: Option<EngineSignInState>,
 }
@@ -397,7 +397,7 @@ async fn engine_login(args: &Args, paths: &Paths) -> Result<()> {
                 "this computer holds no daemon credential; run `pidash auth login` first (it signs in the engine too)"
             )
         })?;
-    let api = EngineApi::new(&cloud_url)?;
+    let api = PidashAgentApi::new(&cloud_url)?;
     let (device_code, interval, expires_in) = if args.device_code_stdin {
         (read_device_code(std::io::stdin().lock())?, 1, 300)
     } else {
@@ -444,13 +444,13 @@ async fn engine_login(args: &Args, paths: &Paths) -> Result<()> {
 /// Redeem an engine-only grant until the user approves it, with the
 /// machine token that binds the credential to this computer.
 pub(crate) async fn poll_engine_grant(
-    api: &EngineApi,
+    api: &PidashAgentApi,
     device_code: &str,
     machine_token: &str,
     interval: Duration,
     within: Duration,
-) -> Result<crate::engine::api::EngineGrantResponse> {
-    use crate::engine::api::GrantPoll;
+) -> Result<crate::pidash_agent::api::PidashAgentGrantResponse> {
+    use crate::pidash_agent::api::GrantPoll;
     let deadline = std::time::Instant::now() + within;
     let mut interval = interval;
     loop {
@@ -602,7 +602,7 @@ async fn poll_for_token(
             return serde_json::from_str::<TokenSuccess>(&body_text).map_err(|e| {
                 anyhow::anyhow!(
                     "parsing device-code token response: {}",
-                    crate::engine::api::unparsable(&e)
+                    crate::pidash_agent::api::unparsable(&e)
                 )
             });
         }
@@ -785,7 +785,7 @@ fn parse_machine_token_response(body: &str) -> Result<MachineTokenResponse> {
     serde_json::from_str::<MachineTokenResponse>(body).map_err(|e| {
         anyhow::anyhow!(
             "parsing machine-token exchange response: {}",
-            crate::engine::api::unparsable(&e)
+            crate::pidash_agent::api::unparsable(&e)
         )
     })
 }
@@ -929,13 +929,13 @@ mod tests {
 
     #[tokio::test]
     async fn engine_login_redeems_the_grant_with_the_machine_token() {
-        use crate::engine::test_server::{self, Handler};
+        use crate::pidash_agent::test_server::{self, Handler};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let polls = Arc::new(AtomicUsize::new(0));
         let p = polls.clone();
         let handler: Handler = Arc::new(move |req| {
-            assert_eq!(req.path, crate::engine::api::DEVICE_TOKEN_PATH);
+            assert_eq!(req.path, crate::pidash_agent::api::DEVICE_TOKEN_PATH);
             // The machine token binds the credential to this machine.
             if req.bearer() != Some("mt_acme") {
                 return (401, r#"{"error":"machine_token_required"}"#.into());
@@ -952,7 +952,7 @@ mod tests {
             )
         });
         let server = test_server::start(handler).await;
-        let api = EngineApi::new(&server.url).unwrap();
+        let api = PidashAgentApi::new(&server.url).unwrap();
         let granted = poll_engine_grant(
             &api,
             "DEV-1",
@@ -988,7 +988,7 @@ mod tests {
         // A denied grant is an error, not a credential.
         let denied: Handler = Arc::new(|_| (400, r#"{"error":"access_denied"}"#.into()));
         let server = test_server::start(denied).await;
-        let api = EngineApi::new(&server.url).unwrap();
+        let api = PidashAgentApi::new(&server.url).unwrap();
         let err = poll_engine_grant(
             &api,
             "DEV-1",

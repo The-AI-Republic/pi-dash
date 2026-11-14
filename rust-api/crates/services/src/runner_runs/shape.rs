@@ -1377,7 +1377,7 @@ mod tests {
             name: "r1",
             status: "online",
             host_label: "h",
-            is_engine: false,
+            is_pidash_agent: false,
             engine_paused: false,
             dispatch_paused: false,
             machine_display_name: "h",

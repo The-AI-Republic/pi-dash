@@ -386,7 +386,7 @@ pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> Simpl
 /// owner, involving their owner (issue created by, or assigned through a
 /// live `IssueAssignee` row), or scheduler work authored by their owner.
 ///
-/// Built-in engine runners without `engine_team_runs` use the narrower
+/// Pi Dash Agent runners without `engine_team_runs` use the narrower
 /// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
 /// (`trigger NOT IN HUMAN_TRIGGERS`) on owner issues or from
 /// owner-authored bindings — the `owner_id` arm is dropped.
@@ -401,7 +401,7 @@ pub fn runs_usable_by_runner_predicate(
     visibility: i32,
     owner_id: Uuid,
     run_alias: &str,
-    is_engine: bool,
+    is_pidash_agent: bool,
     team_runs: bool,
 ) -> Option<Condition> {
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
@@ -409,7 +409,7 @@ pub fn runs_usable_by_runner_predicate(
     }
     let issue = runner_visible_issue_exists(owner_id, run_alias);
     let sched = runner_visible_scheduler_exists(owner_id, run_alias);
-    if is_engine && !team_runs {
+    if is_pidash_agent && !team_runs {
         let triggers: Vec<SimpleExpr> = pidash_types::runner_runs::enums::HUMAN_TRIGGERS
             .iter()
             .map(|trigger| trigger.value().into())

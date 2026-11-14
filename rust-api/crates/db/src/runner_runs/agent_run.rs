@@ -286,7 +286,7 @@ pub fn cloud_assignment_valid(
     if executor_kind.is_machine_executor() {
         return true;
     }
-    executor_kind == AgentExecutorKind::CloudAgent
+    executor_kind == AgentExecutorKind::RetiredCloudRun
         && runner_id.is_none()
         && pinned_runner_id.is_none()
         && owner_id.is_none()
@@ -535,7 +535,7 @@ mod tests {
             MACHINE_EXECUTORS,
             [
                 AgentExecutorKind::LocalRunner,
-                AgentExecutorKind::ManagedRunner
+                AgentExecutorKind::PidashAgent
             ]
         );
         let some_id = Some(uuid::Uuid::nil());
@@ -549,7 +549,7 @@ mod tests {
         }
         // Cloud agent with no local assignment is valid.
         assert!(cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             None,
@@ -557,28 +557,28 @@ mod tests {
         ));
         // Each local-assignment column alone invalidates a cloud run.
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             some_id,
             None,
             None,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             some_id,
             None,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             some_id,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             None,

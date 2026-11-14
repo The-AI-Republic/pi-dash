@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::schema::{
-    AuthSection, Config, CredentialsStoreMode, EngineCredential, SECRETS_IN_KEYRING,
+    AuthSection, Config, CredentialsStoreMode, PidashAgentCredential, SECRETS_IN_KEYRING,
     WorkspaceCredential,
 };
 use crate::util::paths::Paths;
@@ -599,7 +599,7 @@ fn assign(cfg: &mut Config, item: &str, value: String) {
         cli.token = Some(value);
     } else if item == ITEM_ENGINE_CREDENTIAL {
         cli.engine_credential
-            .get_or_insert_with(EngineCredential::default)
+            .get_or_insert_with(PidashAgentCredential::default)
             .token = value;
     } else if let Some(slug) = item.strip_prefix(ITEM_WORKSPACE_PREFIX) {
         match cli.workspaces.iter_mut().find(|w| w.slug == slug) {
@@ -997,7 +997,7 @@ mod tests {
                     slug: "beta".into(),
                     token: "mt_beta".into(),
                 }],
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_secret".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(14)),
                 }),

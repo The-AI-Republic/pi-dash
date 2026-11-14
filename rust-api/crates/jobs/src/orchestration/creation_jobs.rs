@@ -24,6 +24,7 @@
 //! open the insertion transaction, run the services control flow,
 //! commit, then drain: dispatches via [`dispatch_agent_run`][crate::run_dispatch::dispatch_agent_run],
 //! deferred admission consumes via
+
 //! Terminal effects are returned pending for D-15 — never executed here.
 //!
 //! The render-bundle loader mirrors the api prompt-preview fetch side
@@ -45,7 +46,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{ManagedRunnerSettings};
+use pidash_db::config::{PidashAgentSettings};
 use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
@@ -84,7 +85,7 @@ use pidash_compat::datetime::render_isoformat;
 /// family; the `cloud` drain argument died with the cloud drain.)
 pub struct StoreDeps<H, P> {
     /// Managed settings (the `managed_runner_enabled` kill switch).
-    pub managed: ManagedRunnerSettings,
+    pub managed: PidashAgentSettings,
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
     pub has_usable_llm_config: H,
     /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`).
@@ -99,7 +100,7 @@ pub struct StoreDeps<H, P> {
 pub struct LiveCreationStore<'c, H, P> {
     tx: Transaction<'c>,
     pool: &'c PgPool,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     has_usable_llm_config: H,
     llm_profile: P,
     dispatches: Vec<Uuid>,
@@ -162,9 +163,9 @@ impl<'c, H, P> LiveCreationStore<'c, H, P> {
         (self.llm_profile)(Some(user_id))
     }
 
-    /// The operator kill switch (`managed_runner_is_enabled`, L3).
+    /// The operator kill switch (`pidash_agent_is_enabled`, L3).
     pub(crate) fn dispatch_managed_runner_enabled(&self) -> bool {
-        pidash_services::run_creation::managed_runner_is_enabled(&self.managed)
+        pidash_services::run_creation::pidash_agent_is_enabled(&self.managed)
     }
 
     /// Record an entries driver's rollback request
@@ -978,8 +979,8 @@ where
 /// key.
 fn map_execution_fields(fields: crate::run_dispatch::ExecutionFields) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -2016,7 +2017,7 @@ where
                 .await
                 .map_err(sea_db)?;
         }
-        if locked.executor_kind == AgentExecutorKind::CloudAgent {
+        if locked.executor_kind == AgentExecutorKind::RetiredCloudRun {
             let exists = {
                 let conn = TxConn::new(self.tx.inner());
                 agent_run_event::Entity::find()
@@ -2249,14 +2250,14 @@ mod tests {
         assert_eq!(map_execution_fields(base.clone()).pinned_runner_entry, None);
         // Cloud always carries `None`: the computed pin is clobbered.
         let cloud = crate::run_dispatch::ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             ..base.clone()
         };
         assert_eq!(map_execution_fields(cloud).pinned_runner_entry, Some(None));
         // Managed carries the pick.
         let pin = Uuid::new_v4();
         let managed = crate::run_dispatch::ExecutionFields {
-            executor_kind: AgentExecutorKind::ManagedRunner,
+            executor_kind: AgentExecutorKind::PidashAgent,
             pinned_runner_id: Some(pin),
             ..base
         };
@@ -2323,8 +2324,8 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,

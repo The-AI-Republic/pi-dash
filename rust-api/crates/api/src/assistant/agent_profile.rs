@@ -1,7 +1,7 @@
 //! Desktop agent model profile + token handlers (D-06, stage 5).
 //!
 //! Ports `apps/api/pi_dash/assistant/views/agent_profile.py:1-126`
-//! (`AgentModelProfileEndpoint`, `AgentModelTokenEndpoint`, routes
+//! (`PidashAgentProfileEndpoint`, `AgentModelTokenEndpoint`, routes
 //! `users/me/ai-assistant/agent-profile/` and
 //! `users/me/ai-assistant/agent-token/` from `assistant/urls.py:90-98`).
 //!
@@ -34,7 +34,7 @@ use pidash_db::redis::client_from_settings;
 use pidash_services::extensions::CredentialError;
 
 use crate::desktop_gate::header_value;
-use crate::desktop_gate::DesktopCredential;
+use crate::desktop_gate::PidashAgentDesktopCredential;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -131,7 +131,7 @@ fn desktop_denied() -> Response {
 /// expires). Anything unrecognised is treated as transient rather than
 /// signing the user out on a bug. `name` is the Python exception class
 /// name; only the cloud overlay ever raises the session trio — CE only
-/// ever reaches the `ManagedRunnerUnavailable` branch in the handler.
+/// ever reaches the `PidashAgentUnavailable` branch in the handler.
 /// The cloud seam classifies with its own copy and returns the outcome
 /// through `CredentialError::Classified`; this port pins the shared
 /// mapping.
@@ -145,7 +145,7 @@ pub fn classify_credential_error(name: &str) -> (&'static str, StatusCode) {
 }
 
 /// `GET` the endpoint the bundled engine should call, and whether it
-/// may (`AgentModelProfileEndpoint.get`, `:44-64`). Never returns a
+/// may (`PidashAgentProfileEndpoint.get`, `:44-64`). Never returns a
 /// credential. `managed_runner_enabled` travels here rather than being
 /// baked into the desktop bundle so the operator kill switch takes
 /// effect without shipping a new app build.
@@ -174,9 +174,9 @@ async fn get_profile(
     };
     let profile = state
         .assistant_seam()
-        .agent_model_profile(actor.id, has_key)
+        .pidash_agent_profile(actor.id, has_key)
         .await;
-    let enabled = state.settings().managed_runner.enabled;
+    let enabled = state.settings().pidash_agent.enabled;
     // The instance switch is part of "can I run here", so it folds in
     // here rather than making the client combine two flags and risk
     // showing an available engine on a disabled instance.
@@ -186,7 +186,7 @@ async fn get_profile(
     {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
         let effects =
-            pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+            pidash_services::domain::pidash_agent_state::apply_profile_outcome_to_legacy_machines(
                 &sea,
                 actor.id,
                 if available {
@@ -221,7 +221,7 @@ async fn get_profile(
             "top_up_url": profile.top_up_url,
             "available": available,
             "reason_code": reason_code,
-            "graceful_stop_seconds": state.settings().managed_runner.graceful_stop_secs,
+            "graceful_stop_seconds": state.settings().pidash_agent.graceful_stop_secs,
         }),
     )
 }
@@ -257,7 +257,7 @@ async fn post_token(
     }
     let result = state
         .assistant_seam()
-        .agent_model_credential(actor.id)
+        .pidash_agent_credential(actor.id)
         .await;
     // Legacy desktop machines take the token outcome (§9, #2910): a
     // profile refusal pauses `profile_unavailable`, a wallet failure
@@ -272,7 +272,7 @@ async fn post_token(
     } {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
         let effects =
-            pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+            pidash_services::domain::pidash_agent_state::apply_profile_outcome_to_legacy_machines(
                 &sea,
                 actor.id,
                 legacy_reason,
@@ -299,7 +299,7 @@ async fn post_token(
             // The client should have consulted the profile first; answer
             // with the same reason code it would have seen there.
             // `str(exc)`: the detail, or the code when empty (the
-            // `ManagedRunnerUnavailable` Display the ported seam renders).
+            // `PidashAgentUnavailable` Display the ported seam renders).
             let reason = unavailable.reason;
             let detail = if unavailable.message.is_empty() {
                 reason.clone()
@@ -328,7 +328,7 @@ async fn post_token(
             error_response(status, serde_json::json!({ "error": code }))
         }
         Err(CredentialError::WalletEmpty { detail }) => {
-            // The built-in engine's wallet classification maps onto this
+            // The Pi Dash Agent's wallet classification maps onto this
             // endpoint's transient arm, exactly as Django's
             // `_classify_credential_error` mapped a wallet failure onto
             // `gateway_unavailable` (503): the app keeps the current
@@ -348,7 +348,7 @@ async fn post_token(
 
 /// Whether the request passes the installed desktop gate: the caller
 /// extracts the session dict plus the raw auth headers into a
-/// [`DesktopCredential`] and the state's gate decides
+/// [`PidashAgentDesktopCredential`] and the state's gate decides
 /// ([`AppState::is_desktop_request`]). The CE gate reads only the
 /// session marker (a missing snapshot is not a desktop); the overlay's
 /// gate reads only the headers, so it answers even without a session —
@@ -359,7 +359,7 @@ pub fn is_desktop_from_extension(
     state: &AppState,
 ) -> bool {
     let session = extension.as_ref().map(|handle| handle.snapshot().to_json());
-    let credential = DesktopCredential {
+    let credential = PidashAgentDesktopCredential {
         session: session.as_ref(),
         authorization: header_value(headers, axum::http::header::AUTHORIZATION),
         cookie: header_value(headers, axum::http::header::COOKIE),
@@ -406,7 +406,7 @@ impl IfEmpty for String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop_gate::DesktopRequestGate;
+    use crate::desktop_gate::PidashAgentDesktopRequestGate;
     use serde_json::Value;
 
     /// An overlay-shaped gate: answers from the presented credential
@@ -414,8 +414,8 @@ mod tests {
     /// dict — including with no session at all.
     struct TokenDesktopGate;
 
-    impl DesktopRequestGate for TokenDesktopGate {
-        fn is_desktop(&self, credential: &DesktopCredential) -> bool {
+    impl PidashAgentDesktopRequestGate for TokenDesktopGate {
+        fn is_desktop(&self, credential: &PidashAgentDesktopCredential) -> bool {
             matches!(
                 credential.authorization,
                 Some(header) if header == "Bearer desktop-token"
@@ -554,7 +554,7 @@ mod live_tests {
 
     use super::*;
     use pidash_services::extensions::{
-        AgentModelProfile, AssistantModelSeam, CredentialError, SeamFuture, TitleError,
+        PidashAgentProfile, AssistantModelSeam, CredentialError, SeamFuture, TitleError,
         TitleRequest,
     };
     use serde_json::Value;
@@ -564,14 +564,14 @@ mod live_tests {
     struct GatewaySeam;
 
     impl AssistantModelSeam for GatewaySeam {
-        fn agent_model_profile(
+        fn pidash_agent_profile(
             &self,
             user_id: uuid::Uuid,
             has_api_key: bool,
-        ) -> SeamFuture<'_, AgentModelProfile> {
+        ) -> SeamFuture<'_, PidashAgentProfile> {
             let _ = (user_id, has_api_key);
             Box::pin(async move {
-                AgentModelProfile {
+                PidashAgentProfile {
                     available: true,
                     lane: "openhub".to_owned(),
                     base_url: "https://gateway.example.com".to_owned(),
@@ -582,7 +582,7 @@ mod live_tests {
             })
         }
 
-        fn agent_model_credential(
+        fn pidash_agent_credential(
             &self,
             user_id: uuid::Uuid,
         ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
@@ -614,7 +614,7 @@ mod live_tests {
     }
 
     impl AssistantModelSeam for ClassifiedSeam {
-        fn agent_model_credential(
+        fn pidash_agent_credential(
             &self,
             user_id: uuid::Uuid,
         ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
@@ -646,7 +646,7 @@ mod live_tests {
         let mut settings = pidash_db::config::Settings::test_defaults();
         // The operator switch stays in the profile verdict, so the tests
         // run with it on and read the seam's own values through.
-        settings.managed_runner.enabled = true;
+        settings.pidash_agent.enabled = true;
         let mut state = AppState::with_settings("test", settings).with_pools(pools);
         if let Some(seam) = seam {
             state = state.with_assistant_seam(seam);
@@ -770,7 +770,7 @@ mod live_tests {
     #[tokio::test]
     async fn profile_serves_the_ce_default() {
         // No `with_assistant_seam`: the default CE seam answers a keyless
-        // user exactly like the ported `agent_model_profile_for_user`.
+        // user exactly like the ported `pidash_agent_profile_for_user`.
         let Some((state, secret)) = live_state(None).await else {
             eprintln!("skipping live-db test: DATABASE_URL is not set");
             return;

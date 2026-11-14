@@ -33,7 +33,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, issue_agent_ticker, issues, pod, scheduler_bindings, schedulers, workspaces,
@@ -723,7 +723,7 @@ fn to_dispatch_result(
 /// outside the `(run, fail_reason)` contract is `Err` (task failure).
 pub fn live_scheduler_dispatch(
     pool: PgPool,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
     assistant_seam: Arc<dyn AssistantModelSeam>,
@@ -901,7 +901,7 @@ mod tests {
     fn test_deps() -> StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {
         let settings = pidash_db::config::Settings::test_defaults();
         StoreDeps {
-            managed: settings.managed_runner,
+            managed: settings.pidash_agent,
             has_usable_llm_config: |_| false,
             llm_profile: |_| LlmProfile {
                 available: false,
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(follow_up.id, run_id);
         assert_eq!(follow_up.status, AgentRunStatus::Queued);
         assert_eq!(follow_up.trigger, "scheduler");
-        assert_eq!(follow_up.executor_kind, AgentExecutorKind::CloudAgent);
+        assert_eq!(follow_up.executor_kind, AgentExecutorKind::RetiredCloudRun);
 
         let ticker = store
             .lock_ticker(issue_id)
@@ -1125,7 +1125,7 @@ mod tests {
             pod_id,
             pinned_runner_id: None,
             binding_id,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: serde_json::json!({}),
             tool_plan: serde_json::json!([]),
             now,

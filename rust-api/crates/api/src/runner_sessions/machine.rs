@@ -19,7 +19,7 @@
 //!   touches, XACK, plan), the sliced eviction-aware wait, PEL-marker
 //!   discipline, 200 envelope.
 //!
-//! # Built-in engine additions (#2910, NEWPIDASH-50)
+//! # Pi Dash Agent additions (#2910, NEWPIDASH-50)
 //!
 //! * Open stores the authenticating token id (`machine_token_id`). The
 //!   one session serves every workspace on the machine (§4.9): any
@@ -855,7 +855,7 @@ pub async fn machine_session_poll(
     // poll that delivers the machine's control messages.
     if let Some(Value::Object(report)) = body.get("engine_state") {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        match pidash_services::domain::engine_state::record_engine_state_report(
+        match pidash_services::domain::pidash_agent_state::record_pidash_agent_state_report(
             &sea,
             dev_machine_id,
             report,

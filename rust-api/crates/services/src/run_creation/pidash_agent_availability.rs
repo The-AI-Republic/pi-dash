@@ -19,12 +19,12 @@
 //! * `cloud_agent_configuration_check` (`checks.py:8-74`) →
 //!   [`cloud_agent_configuration_check`] (E001/E002/E005/E007/E008).
 //! * `managed_llm_profile` / `enrolled_managed_runners` /
-//!   `online_managed_runner` / `managed_runner_availability`
+//!   `online_managed_runner` / `pidash_agent_availability`
 //!   (`managed_runner/policy.py:27-96`) → the [`LlmProfile`] seam verdict +
 //!   [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] / [`ONLINE_MANAGED_RUNNER_SQL`] +
-//!   [`managed_runner_availability`].
-//! * `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`)
-//!   → [`managed_runner_configuration_check`] (E001/E004 + the data-driven
+//!   [`pidash_agent_availability`].
+//! * `pidash_agent_configuration_check` (`managed_runner/checks.py:20-50`)
+//!   → [`pidash_agent_configuration_check`] (E001/E004 + the data-driven
 //!   E002 recipe cross-check over [`PhaseTemplate`] rows).
 //! * `IsDesktopSession` (`permissions.py:12-28`) → [`is_desktop_session`] +
 //!   [`DesktopSessionRequiredBody`].
@@ -32,10 +32,10 @@
 //! Translation notes:
 //!
 //! * Settings arrive as the central structs
-//!   (`pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings}`); no
+//!   (`pidash_db::config::{CloudAgentSettings, PidashAgentSettings}`); no
 //!   parallel settings struct is defined. `AgentExecutorKind` membership and
-//!   `ManagedRunnerReason` codes reuse L1; `ManagedAvailability`, `UserFlags`,
-//!   `READ_TOOLS` / `WRITE_TOOLS`, and the `managed_runner_is_enabled` switch
+//!   `PidashAgentReason` codes reuse L1; `PidashAgentAvailability`, `UserFlags`,
+//!   `READ_TOOLS` / `WRITE_TOOLS`, and the `pidash_agent_is_enabled` switch
 //!   reuse L3 (`super::policy`).
 //! * `transaction.on_commit` has no ambient equivalent in services (Porting
 //!   guide: transactions are a wrapper collecting post-commit actions), so the
@@ -63,9 +63,9 @@
 //! overshoot (`admission.py:40-42`) and the +5s consume overhang (`:24`) are
 //! documented-by-design and translated as-is.
 
-use super::executor_policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
-use pidash_db::config::ManagedRunnerSettings;
-use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
+use super::executor_policy::{pidash_agent_is_enabled, PidashAgentAvailability, UserFlags};
+use pidash_db::config::PidashAgentSettings;
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -81,11 +81,11 @@ use serde::{Deserialize, Serialize};
 // Managed runner availability (`managed_runner/policy.py:27-96`)
 // ---------------------------------------------------------------------------
 
-/// The `(available, reason_code)` projection of `AgentModelProfile`
-/// (`ee/assistant/model_provider.py:25-42`) that `managed_runner_availability`
+/// The `(available, reason_code)` projection of `PidashAgentProfile`
+/// (`ee/assistant/model_provider.py:25-42`) that `pidash_agent_availability`
 /// reads (`policy.py:88-90`). Produced by the `managed_llm_profile` seam
 /// (`managed_runner/policy.py:27-36`, itself a delegate of
-/// `agent_model_profile_for_user`), never constructed in production code.
+/// `pidash_agent_profile_for_user`), never constructed in production code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmProfile {
     /// `profile.available`.
@@ -94,36 +94,36 @@ pub struct LlmProfile {
     pub reason_code: String,
 }
 
-/// `(available, reason_code)` for the managed runner on one project
-/// (`managed_runner_availability`, `managed_runner/policy.py:76-96`).
+/// `(available, reason_code)` for the Pi Dash Agent on one project
+/// (`pidash_agent_availability`, `managed_runner/policy.py:76-96`).
 ///
 /// Gates in fixed order, first failure wins (`:79-81`): instance switch →
 /// viewer present/active/non-bot → LLM profile seam → enrolled → online.
 /// `user` reuses L3's [`UserFlags`]; the verdict reuses L3's
-/// [`ManagedAvailability`]. `llm_profile` is consulted only when reached;
+/// [`PidashAgentAvailability`]. `llm_profile` is consulted only when reached;
 /// `enrolled_exists` / `online_exists` are the [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`]
 /// / [`ONLINE_MANAGED_RUNNER_SQL`] verdicts. `paused_exists` is the
 /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`] verdict — evaluated only
 /// when a runner is enrolled but none is online, exactly as Python's
 /// `if` runs the paused probe last (`09738d222`).
-pub fn managed_runner_availability<F>(
-    managed: &ManagedRunnerSettings,
+pub fn pidash_agent_availability<F>(
+    managed: &PidashAgentSettings,
     user: Option<&UserFlags>,
     llm_profile: F,
     enrolled_exists: bool,
     online_exists: bool,
     paused_exists: bool,
-) -> ManagedAvailability
+) -> PidashAgentAvailability
 where
     F: FnOnce() -> LlmProfile,
 {
-    if !managed_runner_is_enabled(managed) {
-        return unavailable(ManagedRunnerReason::DISABLED);
+    if !pidash_agent_is_enabled(managed) {
+        return unavailable(PidashAgentReason::DISABLED);
     }
     match user {
-        None => return unavailable(ManagedRunnerReason::NOT_CONNECTED),
+        None => return unavailable(PidashAgentReason::NOT_CONNECTED),
         Some(flags) if !flags.is_active || flags.is_bot => {
-            return unavailable(ManagedRunnerReason::NOT_CONNECTED)
+            return unavailable(PidashAgentReason::NOT_CONNECTED)
         }
         Some(_) => {}
     }
@@ -132,24 +132,24 @@ where
         // `profile.reason_code or LLM_CONFIG_MISSING` (`policy.py:90`): an
         // empty reason falls back, mirroring Python's `or` on strings.
         let reason = if profile.reason_code.is_empty() {
-            ManagedRunnerReason::LLM_CONFIG_MISSING
+            PidashAgentReason::LLM_CONFIG_MISSING
         } else {
             profile.reason_code.as_str()
         };
         return unavailable(reason);
     }
     if !enrolled_exists {
-        return unavailable(ManagedRunnerReason::NO_RUNNER_FOR_PROJECT);
+        return unavailable(PidashAgentReason::NO_RUNNER_FOR_PROJECT);
     }
     if !online_exists {
         // `09738d222`: enrolled-but-unreachable splits into "paused"
         // (resume it) and "not connected" (open the desktop app).
         if paused_exists {
-            return unavailable(ManagedRunnerReason::RUNNER_PAUSED);
+            return unavailable(PidashAgentReason::RUNNER_PAUSED);
         }
-        return unavailable(ManagedRunnerReason::NOT_CONNECTED);
+        return unavailable(PidashAgentReason::NOT_CONNECTED);
     }
-    ManagedAvailability {
+    PidashAgentAvailability {
         available: true,
         reason_code: String::new(),
     }
@@ -157,8 +157,8 @@ where
 
 /// `(False, reason)` (`policy.py:84-95`): every refusal carries a code, and
 /// the success reason is always `""` (`:96`).
-fn unavailable(reason: &str) -> ManagedAvailability {
-    ManagedAvailability {
+fn unavailable(reason: &str) -> PidashAgentAvailability {
+    PidashAgentAvailability {
         available: false,
         reason_code: reason.to_string(),
     }
@@ -205,9 +205,9 @@ pub const ONLINE_MANAGED_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER 
 /// `$2` project id (uuid), `$3` workspace id (uuid).
 pub const ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.paused_at IS NOT NULL LIMIT 1";
 
-/// Which managed-runner probe [`managed_runner_probe`] runs.
+/// Which managed-runner probe [`pidash_agent_probe`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedRunnerProbe {
+pub enum PidashAgentProbe {
     /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`].
     Enrolled,
     /// [`ONLINE_MANAGED_RUNNER_SQL`], heartbeat at or after the bound.
@@ -217,12 +217,12 @@ pub enum ManagedRunnerProbe {
 }
 
 /// The SeaORM form of the three managed-runner probes: the matching
-/// runner's id (the newest heartbeat first for [`ManagedRunnerProbe::Online`]),
+/// runner's id (the newest heartbeat first for [`PidashAgentProbe::Online`]),
 /// or `None`. Non-revoked desktop-bundled runners the owner holds on the
 /// project's pod (`runner INNER JOIN pod`), in this workspace.
-pub async fn managed_runner_probe(
+pub async fn pidash_agent_probe(
     db: &impl sea_orm::ConnectionTrait,
-    probe: ManagedRunnerProbe,
+    probe: PidashAgentProbe,
     owner_id: uuid::Uuid,
     project_id: uuid::Uuid,
     workspace_id: uuid::Uuid,
@@ -243,15 +243,15 @@ pub async fn managed_runner_probe(
         .filter(runner::Column::WorkspaceId.eq(workspace_id))
         .filter(runner::Column::RevokedAt.is_null());
     match probe {
-        ManagedRunnerProbe::Enrolled => {}
-        ManagedRunnerProbe::Online(bound) => {
+        PidashAgentProbe::Enrolled => {}
+        PidashAgentProbe::Online(bound) => {
             query = query
                 .filter(runner::Column::Status.eq("online"))
                 .filter(runner::Column::LastHeartbeatAt.gte(bound))
                 .filter(runner::Column::PausedAt.is_null())
                 .order_by_desc(runner::Column::LastHeartbeatAt);
         }
-        ManagedRunnerProbe::Paused => {
+        PidashAgentProbe::Paused => {
             query = query.filter(runner::Column::PausedAt.is_not_null());
         }
     }
@@ -328,7 +328,7 @@ pub struct PhaseTemplate<'a> {
     pub template_name: &'a str,
 }
 
-/// `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`, #2903).
+/// `pidash_agent_configuration_check` (`managed_runner/checks.py:20-50`, #2903).
 ///
 /// W001 (any non-local default is ignored with a warning, never refused),
 /// E003/E004, plus the orchestration-`PHASES` × `MANAGED_RECIPES`
@@ -337,8 +337,8 @@ pub struct PhaseTemplate<'a> {
 /// tables arrive as data — `managed_recipes` is shaped like
 /// `crate::prompting::recipes::MANAGED_RECIPES` so the live table plugs in
 /// directly.
-pub fn managed_runner_configuration_check(
-    managed: &ManagedRunnerSettings,
+pub fn pidash_agent_configuration_check(
+    managed: &PidashAgentSettings,
     default_agent_executor: &str,
     phases: &[PhaseTemplate<'_>],
     managed_recipes: &[(&str, &[&str])],
@@ -391,8 +391,8 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -476,11 +476,11 @@ mod tests {
             .collect()
     }
 
-    // -- managed_runner_configuration_check (`checks.py:20-50`) ----------------
+    // -- pidash_agent_configuration_check (`checks.py:20-50`) ----------------
 
     #[test]
     fn managed_check_vectors_match_fixture() {
-        let golden = &fixture()["managed_runner_configuration_check"];
+        let golden = &fixture()["pidash_agent_configuration_check"];
         let phases = django_phases();
         let recipes: &[(&str, &[&str])] = &[
             ("coding-task", &[]),
@@ -491,7 +491,7 @@ mod tests {
         ];
         // #2903: W001 — a non-local default warns (never refuses). The
         // Django repr of a string is single-quoted.
-        let errors = managed_runner_configuration_check(
+        let errors = pidash_agent_configuration_check(
             &django_managed_settings(),
             "managed_runner",
             &phases,
@@ -505,7 +505,7 @@ mod tests {
             )]
         );
         // A local default is silent.
-        let errors = managed_runner_configuration_check(
+        let errors = pidash_agent_configuration_check(
             &django_managed_settings(),
             "local_runner",
             &phases,
@@ -522,7 +522,7 @@ mod tests {
         );
         let mut managed = django_managed_settings();
         managed.queued_max_age_secs = 0;
-        let errors = managed_runner_configuration_check(&managed, "local_runner", &phases, recipes);
+        let errors = pidash_agent_configuration_check(&managed, "local_runner", &phases, recipes);
         assert_eq!(
             check_pairs(&errors),
             vec![(
@@ -553,7 +553,7 @@ mod tests {
             },
         ];
         let recipes: &[(&str, &[&str])] = &[("review", &["review-intro"])];
-        let errors = managed_runner_configuration_check(
+        let errors = pidash_agent_configuration_check(
             &django_managed_settings(),
             "local_runner",
             &phases,
@@ -580,7 +580,7 @@ mod tests {
         // E002; only the W001 default-executor warning remains (#2903).
         let mut managed = django_managed_settings();
         managed.enabled = true;
-        let errors = managed_runner_configuration_check(
+        let errors = pidash_agent_configuration_check(
             &managed,
             "managed_runner",
             &django_phases(),
@@ -597,7 +597,7 @@ mod tests {
         );
     }
 
-    // -- managed_runner_availability (`policy.py:76-96`) -----------------------
+    // -- pidash_agent_availability (`policy.py:76-96`) -----------------------
 
     fn profile(available: bool, reason: &str) -> LlmProfile {
         LlmProfile {
@@ -611,7 +611,7 @@ mod tests {
         let user = active_user();
         // Gate 1: instance switch off (seam never consulted).
         let consulted = Cell::new(false);
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &django_managed_settings(),
             Some(&user),
             || {
@@ -623,7 +623,7 @@ mod tests {
             false,
         );
         assert!(!verdict.available);
-        assert_eq!(verdict.reason_code, ManagedRunnerReason::DISABLED);
+        assert_eq!(verdict.reason_code, PidashAgentReason::DISABLED);
         assert!(!consulted.get());
 
         let mut managed = django_managed_settings();
@@ -640,7 +640,7 @@ mod tests {
                 is_bot: true,
             }),
         ] {
-            let verdict = managed_runner_availability(
+            let verdict = pidash_agent_availability(
                 &managed,
                 viewer,
                 || profile(true, ""),
@@ -649,21 +649,21 @@ mod tests {
                 false,
             );
             assert!(!verdict.available);
-            assert_eq!(verdict.reason_code, ManagedRunnerReason::NOT_CONNECTED);
+            assert_eq!(verdict.reason_code, PidashAgentReason::NOT_CONNECTED);
         }
         // Gate 3: profile refusal wins over offline-ness (first failure wins).
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &managed,
             Some(&user),
-            || profile(false, ManagedRunnerReason::BYOK_UNSUPPORTED),
+            || profile(false, PidashAgentReason::BYOK_UNSUPPORTED),
             false,
             false,
             false,
         );
         assert!(!verdict.available);
-        assert_eq!(verdict.reason_code, ManagedRunnerReason::BYOK_UNSUPPORTED);
+        assert_eq!(verdict.reason_code, PidashAgentReason::BYOK_UNSUPPORTED);
         // Gate 3b: empty profile reason falls back to llm_config_missing.
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &managed,
             Some(&user),
             || profile(false, ""),
@@ -672,9 +672,9 @@ mod tests {
             false,
         );
         assert!(!verdict.available);
-        assert_eq!(verdict.reason_code, ManagedRunnerReason::LLM_CONFIG_MISSING);
+        assert_eq!(verdict.reason_code, PidashAgentReason::LLM_CONFIG_MISSING);
         // Gate 4: enrolled but offline.
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &managed,
             Some(&user),
             || profile(true, ""),
@@ -685,10 +685,10 @@ mod tests {
         assert!(!verdict.available);
         assert_eq!(
             verdict.reason_code,
-            ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+            PidashAgentReason::NO_RUNNER_FOR_PROJECT
         );
         // Gate 5: enrolled, none online.
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &managed,
             Some(&user),
             || profile(true, ""),
@@ -697,10 +697,10 @@ mod tests {
             false,
         );
         assert!(!verdict.available);
-        assert_eq!(verdict.reason_code, ManagedRunnerReason::NOT_CONNECTED);
+        assert_eq!(verdict.reason_code, PidashAgentReason::NOT_CONNECTED);
         // Gate 5b: enrolled, none online, but at least one paused —
         // resume it instead of opening the desktop app (`09738d222`).
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &managed,
             Some(&user),
             || profile(true, ""),
@@ -709,9 +709,9 @@ mod tests {
             true,
         );
         assert!(!verdict.available);
-        assert_eq!(verdict.reason_code, ManagedRunnerReason::RUNNER_PAUSED);
+        assert_eq!(verdict.reason_code, PidashAgentReason::RUNNER_PAUSED);
         // Pass: (True, "").
-        let verdict = managed_runner_availability(
+        let verdict = pidash_agent_availability(
             &managed,
             Some(&user),
             || profile(true, ""),
@@ -721,7 +721,7 @@ mod tests {
         );
         assert_eq!(
             verdict,
-            ManagedAvailability {
+            PidashAgentAvailability {
                 available: true,
                 reason_code: String::new(),
             }

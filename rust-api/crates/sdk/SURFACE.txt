@@ -109,7 +109,6 @@ pidash_sdk::assistant::TurnUsage
 pidash_sdk::assistant::UserLLMConfig
 pidash_sdk::assistant::ValidatedPut
 pidash_sdk::assistant::actor
-pidash_sdk::assistant::agent_model_credential_for_user
 pidash_sdk::assistant::append_event
 pidash_sdk::assistant::assistant_mcp_server
 pidash_sdk::assistant::base_url_blocked
@@ -169,6 +168,7 @@ pidash_sdk::assistant::ok_true
 pidash_sdk::assistant::parse_blob
 pidash_sdk::assistant::parse_body
 pidash_sdk::assistant::parse_retry_details
+pidash_sdk::assistant::pidash_agent_credential_for_user
 pidash_sdk::assistant::pool_of
 pidash_sdk::assistant::probe_provider
 pidash_sdk::assistant::prune_turn_deltas
@@ -353,9 +353,9 @@ pidash_sdk::db::GITHUB_API_BASE
 pidash_sdk::db::GITHUB_API_VERSION_HEADER
 pidash_sdk::db::INSTANCE_FIRST_SQL
 pidash_sdk::db::IssueAgentTicker
-pidash_sdk::db::ManagedRunnerSettings
 pidash_sdk::db::MongoSink
 pidash_sdk::db::NoOverlay
+pidash_sdk::db::PidashAgentSettings
 pidash_sdk::db::Pools
 pidash_sdk::db::Profile
 pidash_sdk::db::RedisHandle
@@ -827,13 +827,13 @@ pidash_sdk::startup::build_router_with_overlay
 pidash_sdk::startup::owned
 pidash_sdk::startup::proxy
 pidash_sdk::startup::stack
-pidash_sdk::state::AgentModelProfile
 pidash_sdk::state::AppState
 pidash_sdk::state::AssistantModelSeam
 pidash_sdk::state::CredentialError
 pidash_sdk::state::CredentialUnavailable
-pidash_sdk::state::DesktopCredential
-pidash_sdk::state::DesktopRequestGate
+pidash_sdk::state::PidashAgentDesktopCredential
+pidash_sdk::state::PidashAgentDesktopRequestGate
+pidash_sdk::state::PidashAgentProfile
 pidash_sdk::state::SeamFuture
 pidash_sdk::state::TitleError
 pidash_sdk::state::TitleRequest

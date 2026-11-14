@@ -104,9 +104,9 @@ impl AgentPackage {
             AgentKind::OpenClaw => runner.openclaw.binary = executable,
             AgentKind::Grok => runner.grok.binary = executable,
             AgentKind::MuseCode => runner.muse_code.binary = executable,
-            AgentKind::Engine => {
+            AgentKind::PidashAgent => {
                 anyhow::bail!(
-                    "the built-in engine ships with pidash; it cannot be an agent package"
+                    "the Pi Dash Agent ships with pidash; it cannot be an agent package"
                 )
             }
         }

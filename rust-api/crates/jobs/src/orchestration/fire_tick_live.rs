@@ -23,7 +23,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::agent_run;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::into_sqlx;
@@ -50,7 +50,7 @@ use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 /// is passed in from the claim read (live, never cached).
 pub struct LiveFireTickSeam {
     pool: PgPool,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
     assistant_seam: Arc<dyn AssistantModelSeam>,
@@ -59,7 +59,7 @@ pub struct LiveFireTickSeam {
 impl LiveFireTickSeam {
     pub fn new(
         pool: PgPool,
-        managed: ManagedRunnerSettings,
+        managed: PidashAgentSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
         assistant_seam: Arc<dyn AssistantModelSeam>,
@@ -226,7 +226,7 @@ mod tests {
         let settings = pidash_db::config::Settings::test_defaults();
         LiveFireTickSeam::new(
             pool,
-            settings.managed_runner,
+            settings.pidash_agent,
             None,
             settings.runner,
             Arc::new(DefaultSeam),

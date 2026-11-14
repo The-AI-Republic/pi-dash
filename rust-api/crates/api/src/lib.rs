@@ -54,7 +54,7 @@ pub mod project_move_handoff;
 pub mod prompting;
 pub mod response_headers;
 pub mod routes;
-pub mod runner_engine;
+pub mod pidash_agent;
 pub mod runner_enroll;
 pub mod runner_models;
 pub mod runner_runs;

@@ -134,15 +134,15 @@ use pidash_services::app_workspace::ser_account_token as fav;
 use pidash_services::app_workspace::tasks as wtask;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::run_creation::pidash_agent_availability::{
-    self as admission_q, LlmProfile, ManagedRunnerProbe, HEARTBEAT_GRACE_SECS,
+    self as admission_q, LlmProfile, PidashAgentProbe, HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::run_creation::executor_policy::{managed_runner_is_enabled, UserFlags};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
-use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
 use sea_orm::prelude::DateTimeWithTimeZone;
@@ -6446,9 +6446,9 @@ async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let hit = admission_q::managed_runner_probe(
+    let hit = admission_q::pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Enrolled,
+        PidashAgentProbe::Enrolled,
         *user_id,
         *project_id,
         *workspace_id,
@@ -6465,9 +6465,9 @@ async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let hit = admission_q::managed_runner_probe(
+    let hit = admission_q::pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Online(bound),
+        PidashAgentProbe::Online(bound),
         *user_id,
         *project_id,
         *workspace_id,
@@ -6484,9 +6484,9 @@ async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let hit = admission_q::managed_runner_probe(
+    let hit = admission_q::pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Paused,
+        PidashAgentProbe::Paused,
         *user_id,
         *project_id,
         *workspace_id,
@@ -6624,7 +6624,7 @@ async fn run_issue_create_validate(
     let mut fetched_project: Option<ResolvedProject> = None;
     let mut llm_profile = LlmProfile {
         available: false,
-        reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+        reason_code: PidashAgentReason::LLM_CONFIG_MISSING.to_owned(),
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
@@ -6636,7 +6636,7 @@ async fn run_issue_create_validate(
                 // P1 (agent naming convention): a `cloud_agent` write
                 // on this non-pod path is normalized, not gated on
                 // CLOUD_AGENT_ENABLED.
-                if kind == AgentExecutorKind::ManagedRunner {
+                if kind == AgentExecutorKind::PidashAgent {
                     fetched_project = fetch_issue_project(pool, project_id)
                         .await
                         .map_err(|_| db_error())?;
@@ -6644,7 +6644,7 @@ async fn run_issue_create_validate(
                         let flags = viewer_user_flags(pool, actor)
                             .await
                             .map_err(|_| db_error())?;
-                        if managed_runner_is_enabled(&state.settings().managed_runner)
+                        if pidash_agent_is_enabled(&state.settings().pidash_agent)
                             && flags.is_active
                             && !flags.is_bot
                         {
@@ -6654,9 +6654,9 @@ async fn run_issue_create_validate(
                             llm_profile = LlmProfile {
                                 available: false,
                                 reason_code: if keyed {
-                                    ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                                    PidashAgentReason::BYOK_UNSUPPORTED.to_owned()
                                 } else {
-                                    ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                                    PidashAgentReason::LLM_CONFIG_MISSING.to_owned()
                                 },
                             };
                             if llm_profile.available {
@@ -6743,7 +6743,7 @@ async fn run_issue_create_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: viewer.as_ref(),
     };
     let probes = ValidateProbes {

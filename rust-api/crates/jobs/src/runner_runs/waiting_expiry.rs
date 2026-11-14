@@ -21,11 +21,11 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::ManagedRunnerSettings;
+use pidash_db::config::PidashAgentSettings;
 use pidash_db::entity::agent_run;
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
-use pidash_types::agent_runs::ManagedRunnerReason;
+use pidash_types::agent_runs::PidashAgentReason;
 
 use crate::queue::{JobRow, NewJob};
 use crate::task_message::TaskMessage;
@@ -92,7 +92,7 @@ pub fn expire_updates() -> Map<String, Value> {
     Map::from_iter([
         (
             "error_code".to_owned(),
-            Value::String(ManagedRunnerReason::NOT_CONNECTED.to_owned()),
+            Value::String(PidashAgentReason::NOT_CONNECTED.to_owned()),
         ),
         (
             "error".to_owned(),
@@ -459,7 +459,7 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
 pub async fn drive_expire_waiting_runs<S: ExecuteSeams>(
     seams: &S,
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
 ) -> Result<usize, RunError> {
     let cutoff = expire_cutoff(now, managed.queued_max_age_secs);
@@ -492,7 +492,7 @@ pub async fn drive_expire_waiting_runs<S: ExecuteSeams>(
 pub fn register_waiting_expiry_tasks<S: ExecuteSeams + 'static>(
     registry: &mut Registry,
     pool: PgPool,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     seams: Arc<S>,
 ) {
     registry.register(
@@ -573,7 +573,7 @@ mod tests {
         let updates = expire_updates();
         assert_eq!(
             updates["error_code"],
-            json!(ManagedRunnerReason::NOT_CONNECTED)
+            json!(PidashAgentReason::NOT_CONNECTED)
         );
         assert_eq!(updates["error"], json!(DETAIL_NEVER_CAME_ONLINE));
     }

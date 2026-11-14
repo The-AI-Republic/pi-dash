@@ -6,7 +6,7 @@
 //! and all of `apps/api/pi_dash/cloud_agent/policy.py:11-196`:
 //!
 //! * `cloud_agent_is_configured` (`agent_execution.py:34-43`) → [`cloud_agent_is_configured`].
-//! * `managed_runner_is_enabled` (`agent_execution.py:46-54`) → [`managed_runner_is_enabled`].
+//! * `pidash_agent_is_enabled` (`agent_execution.py:46-54`) → [`pidash_agent_is_enabled`].
 //! * `effective_executor_for_issue` (`agent_execution.py:57-66`) → [`effective_executor_for_issue`].
 //! * `user_has_llm_config` (`agent_execution.py:69-80`) → [`user_has_llm_config`].
 //! * `agent_executor_options` (`agent_execution.py:83-128`) → [`agent_executor_options`]
@@ -20,17 +20,17 @@
 //! with the retired execute plane.
 //!
 //! Out of scope here (owned by siblings): `AgentExecutorKind` / `MACHINE_EXECUTORS` /
-//! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `ManagedRunnerReason` /
-//! `ManagedRunnerUnavailable` (L1, reused, not redefined);
+//! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `PidashAgentReason` /
+//! `PidashAgentUnavailable` (L1, reused, not redefined);
 //! `CloudAgentUnavailableAPI` (`cloud_agent/api.py`, L4 PIDASHCONV-485);
-//! `managed_runner_availability` (`managed_runner/policy.py`, L4 — arrives here as a
-//! precomputed [`ManagedAvailability`]); the `extra_toolsets_enabled_for` CE default
+//! `pidash_agent_availability` (`managed_runner/policy.py`, L4 — arrives here as a
+//! precomputed [`PidashAgentAvailability`]); the `extra_toolsets_enabled_for` CE default
 //! (`ee/cloud_agent/toolsets.py`, L5 PIDASHCONV-486 — arrives as a seam verdict).
 //!
 //! Translation notes:
 //!
 //! * Django settings arrive as the already-ported central structs
-//!   (`pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings}`); no
+//!   (`pidash_db::config::{CloudAgentSettings, PidashAgentSettings}`); no
 //!   parallel settings struct is defined. The kill-switch getters stay as named
 //!   functions so call sites keep one switch point instead of reaching into fields.
 //! * Limits are `i64`, the central-`Settings` precedent for env-parsed ints.
@@ -58,7 +58,7 @@
 //! over the edge semantics: duplicate required capabilities, `""` overrides, catalog
 //! contents, plan key order).
 
-use pidash_db::config::ManagedRunnerSettings;
+use pidash_db::config::PidashAgentSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
 use pidash_types::agent_runs::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ use uuid::Uuid;
 
 /// Operator kill switch for the desktop-bundled managed runner
 /// (`agent_execution.py:46-54`).
-pub fn managed_runner_is_enabled(managed: &ManagedRunnerSettings) -> bool {
+pub fn pidash_agent_is_enabled(managed: &PidashAgentSettings) -> bool {
     managed.enabled
 }
 
@@ -159,7 +159,7 @@ pub fn resolve_executor_kind(
         .filter(|r| !r.is_empty())
         .unwrap_or(project_default);
     let kind = AgentExecutorKind::from_value(value).ok_or(ResolveExecutorError::UnknownExecutor)?;
-    if kind == AgentExecutorKind::ManagedRunner || kind == AgentExecutorKind::CloudAgent {
+    if kind == AgentExecutorKind::PidashAgent || kind == AgentExecutorKind::RetiredCloudRun {
         return Ok(AgentExecutorKind::LocalRunner);
     }
     Ok(kind)
@@ -235,11 +235,11 @@ pub struct ExecutorOption {
     pub deprecated: bool,
 }
 
-/// The `(available, reason_code)` verdict of L4's `managed_runner_availability`
+/// The `(available, reason_code)` verdict of L4's `pidash_agent_availability`
 /// (`managed_runner/policy.py:76-96`), passed through verbatim
 /// (`agent_execution.py:111`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedAvailability {
+pub struct PidashAgentAvailability {
     pub available: bool,
     pub reason_code: String,
 }
@@ -255,7 +255,7 @@ pub struct ManagedAvailability {
 /// [`LOCAL_RUNNER_EXISTS_SQL`] verdict (online pod member, paused or
 /// not) — consulted only when the runner is unavailable, exactly as
 /// Python's `elif` runs the second `exists()` only then. `managed` is L4's
-/// `managed_runner_availability` verdict, passed through verbatim.
+/// `pidash_agent_availability` verdict, passed through verbatim.
 /// `deprecated` marks the two legacy executors: only `local_runner` is
 /// selectable (design §6); availability is still computed for older
 /// clients (NEWPIDASH-58).
@@ -264,7 +264,7 @@ pub fn agent_executor_options<F>(
     has_usable_llm_config: F,
     local_runner_available: bool,
     local_runner_exists: bool,
-    managed: ManagedAvailability,
+    managed: PidashAgentAvailability,
 ) -> [ExecutorOption; 3]
 where
     F: FnOnce() -> bool,
@@ -281,7 +281,7 @@ where
     };
     [
         ExecutorOption {
-            kind: AgentExecutorKind::CloudAgent,
+            kind: AgentExecutorKind::RetiredCloudRun,
             available: cloud_available,
             reason_code: cloud_reason,
             deprecated: true,
@@ -293,7 +293,7 @@ where
             deprecated: false,
         },
         ExecutorOption {
-            kind: AgentExecutorKind::ManagedRunner,
+            kind: AgentExecutorKind::PidashAgent,
             available: managed.available,
             reason_code: managed.reason_code,
             deprecated: true,
@@ -401,8 +401,8 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-    fn django_managed_settings() -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn django_managed_settings() -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled: false,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -411,8 +411,8 @@ mod tests {
         }
     }
 
-    fn managed(available: bool, reason: &str) -> ManagedAvailability {
-        ManagedAvailability {
+    fn managed(available: bool, reason: &str) -> PidashAgentAvailability {
+        PidashAgentAvailability {
             available,
             reason_code: reason.to_string(),
         }
@@ -434,12 +434,12 @@ mod tests {
         // `cloud_agent_is_configured` died in P4: the retired row is
         // static (decision 4); only the managed switch reads settings.
         let managed = django_managed_settings();
-        assert!(!managed_runner_is_enabled(&managed));
-        let managed = ManagedRunnerSettings {
+        assert!(!pidash_agent_is_enabled(&managed));
+        let managed = PidashAgentSettings {
             enabled: true,
             ..django_managed_settings()
         };
-        assert!(managed_runner_is_enabled(&managed));
+        assert!(pidash_agent_is_enabled(&managed));
     }
 
     #[test]
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(rows[2].reason_code, "desktop_not_connected");
         assert_eq!(
             shape["managed_reason_passthrough"],
-            "managed_runner_availability(project, user) reason verbatim"
+            "pidash_agent_availability(project, user) reason verbatim"
         );
     }
 

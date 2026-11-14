@@ -62,9 +62,9 @@ use sqlx::{Connection as _, Transaction};
 use uuid::Uuid;
 
 use pidash_db::runner_enroll::columns::enums;
-use pidash_services::domain::engine_credential as engine_cred;
+use pidash_services::domain::pidash_agent_credential as engine_cred;
 use pidash_services::domain::tokens::cli_token::deactivate_api_token;
-use pidash_services::runner_enroll::engine_naming;
+use pidash_services::runner_enroll::pidash_agent_naming;
 use pidash_services::runner_enroll::queries::enroll_reads as enroll_sql;
 use pidash_services::runner_enroll::serializers::shapes as enroll_shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
@@ -1055,7 +1055,7 @@ pub async fn count_pod_runners(pool: &sqlx::PgPool, pod_id: Uuid) -> Result<i64,
 
 #[allow(dead_code)]
 /// E7 reuse probe (`:709-720`): kept for back-compat; create now uses
-/// `live_engine_runner_for` (#2910).
+/// `live_pidash_agent_runner_for` (#2910).
 pub async fn desktop_reuse_probe(
     tx: &mut Transaction<'_, Postgres>,
     dev_machine_id: Uuid,
@@ -1538,12 +1538,12 @@ async fn engine_refusal(
     _dev_machine: &pidash_db::entity::dev_machine::Model,
     settings: &pidash_db::config::Settings,
 ) -> Option<Response> {
-    let (_available, pause_reason) = engine_cred::engine_profile_for_user_available(settings);
+    let (_available, pause_reason) = engine_cred::pidash_agent_profile_for_user_available(settings);
     // `profile.reason_code` follows the caller's BYOK key
-    // (`agent_model_profile_for_user`, `model_provider.py:110-113`).
+    // (`pidash_agent_profile_for_user`, `model_provider.py:110-113`).
     let conn = TxConn::new(&mut *tx);
     let profile_reason_code =
-        match engine_cred::engine_profile_reason_code_for_user(&conn, user_id).await {
+        match engine_cred::pidash_agent_profile_reason_code_for_user(&conn, user_id).await {
             Ok(code) => code,
             Err(err) => {
                 tracing::warn!("engine_refusal byok lookup failed: {err}");
@@ -1586,9 +1586,9 @@ async fn create_attempt(
     let legacy_machine = dev_machine
         .as_ref()
         .is_some_and(|dev| dev.provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED);
-    let wants_engine =
+    let wants_pidash_agent =
         params.agent_kind == "engine" || (params.agent_kind.is_empty() && legacy_machine);
-    let (provisioning, name, engine_named) = if !wants_engine {
+    let (provisioning, name, pidash_agent_named) = if !wants_pidash_agent {
         (
             enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
             None::<String>,
@@ -1615,7 +1615,7 @@ async fn create_attempt(
                 let Some(stored) = fetch_dev_machine_full(tx, machine_id).await else {
                     return Attempt::Server;
                 };
-                let state = engine_cred::current_engine_sign_in_state(
+                let state = engine_cred::current_pidash_agent_sign_in_state(
                     &stored.engine_sign_in_state,
                     stored
                         .engine_credential_expires_at
@@ -1635,7 +1635,7 @@ async fn create_attempt(
             }
         }
         // At most one live engine runner per (machine, project).
-        match enroll_sql::live_engine_runner_for(
+        match enroll_sql::live_pidash_agent_runner_for(
             &pidash_db::orm_tx::TxConn::new(&mut *tx),
             machine_id,
             params.project_id,
@@ -1660,7 +1660,7 @@ async fn create_attempt(
                         Ok(taken) => taken,
                         Err(_) => return Attempt::Server,
                     };
-                    let base = engine_naming::engine_runner_base_name(
+                    let base = pidash_agent_naming::pidash_agent_runner_base_name(
                         machine_id,
                         &machine.host_label,
                         &machine.label,
@@ -1716,7 +1716,7 @@ async fn create_attempt(
             let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
                 return Attempt::Server;
             };
-            let base = engine_naming::engine_runner_base_name(
+            let base = pidash_agent_naming::pidash_agent_runner_base_name(
                 machine_id,
                 &machine.host_label,
                 &machine.label,
@@ -1770,7 +1770,7 @@ async fn create_attempt(
     .await
     {
         Ok(id) => id,
-        Err(RunnerInsertOutcome::Collision) => return Attempt::Collision(engine_named),
+        Err(RunnerInsertOutcome::Collision) => return Attempt::Collision(pidash_agent_named),
         Err(RunnerInsertOutcome::Server) => return Attempt::Server,
     };
     let pod_dispatch = if provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED {
@@ -1791,7 +1791,7 @@ async fn create_attempt(
         .await
         {
             Ok(rotated) => minted = Some(rotated),
-            Err(RotateOutcome::Collision) => return Attempt::Collision(engine_named),
+            Err(RotateOutcome::Collision) => return Attempt::Collision(pidash_agent_named),
             Err(RotateOutcome::Server) => return Attempt::Server,
         }
         if deactivate_api_token(
@@ -1852,7 +1852,7 @@ async fn has_live_credential(
     let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
         return false;
     };
-    engine_cred::has_live_engine_credential(
+    engine_cred::has_live_pidash_agent_credential(
         &machine.engine_sign_in_state,
         machine
             .engine_credential_expires_at
@@ -1925,7 +1925,7 @@ async fn create_runner_inner(
         Err(response) => return response,
     };
     // `agent_kind` (CLI field; `agent` alias): `engine` asks for the
-    // built-in engine runner. Never read from the body as provisioning.
+    // Pi Dash Agent runner. Never read from the body as provisioning.
     // Python `or` chain: the first *truthy* leg wins, then `str()`
     // coercion (`enrollment.py:575`): `agent_kind=""` falls through to
     // `agent`, while a truthy non-string renders via `py_str`.
@@ -2093,9 +2093,9 @@ async fn create_runner_inner(
                 finished = Some(done);
                 break;
             }
-            Attempt::Collision(engine_named) => {
+            Attempt::Collision(pidash_agent_named) => {
                 let _ = tx.rollback().await;
-                if !body_name.is_empty() && !engine_named {
+                if !body_name.is_empty() && !pidash_agent_named {
                     return json_response(StatusCode::CONFLICT, error_body("runner_name_taken"));
                 }
             }

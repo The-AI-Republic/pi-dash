@@ -32,6 +32,7 @@ use crate::run_creation::execution::{
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
     ExecutionFieldsError, ExecutionInputs, ProjectScope,
 };
+
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
     CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
@@ -597,7 +598,7 @@ impl FinalizeAgentRunSeam for SeaHandoffStore<'_> {
         )
         .await?;
         let locked = locked.map(|row| twin_map_run_view(&row)).transpose()?;
-        if locked.is_some_and(|run| run.executor_kind == AgentExecutorKind::CloudAgent) {
+        if locked.is_some_and(|run| run.executor_kind == AgentExecutorKind::RetiredCloudRun) {
             let row = query_one(&self.conn, &orm::terminal_event_exists_select(run_id))
                 .await?
                 .ok_or_else(|| expected_row("terminal event probe"))?;
@@ -737,8 +738,8 @@ fn twin_map_execution_fields(
     fields: crate::run_creation::execution::ExecutionFields,
 ) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -1290,6 +1291,7 @@ async fn twin_load_render_bundle(
 }
 
 
+
 #[cfg(test)]
 mod tests {
     //! Live coverage of the [`orm`] statements this seam runs: each
@@ -1374,7 +1376,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: json!({"other": 1, "code": "old"}),
             tool_plan: json!({"tools": ["a"]}),
             trigger: "state_transition".to_owned(),
@@ -1413,7 +1415,7 @@ mod tests {
         let view = twin_map_run_view(&inserted).expect("map run view");
         assert_eq!(view.id, run_id);
         assert_eq!(view.status, DbAgentRunStatus::Queued);
-        assert_eq!(view.executor_kind, AgentExecutorKind::CloudAgent);
+        assert_eq!(view.executor_kind, AgentExecutorKind::RetiredCloudRun);
         assert_eq!(view.work_item_id, Some(issue));
         assert_eq!(view.phase_kind, "implement");
         assert_eq!(view.trigger, "state_transition");

@@ -313,12 +313,16 @@ pub mod project {
     pub const DEFAULT_AGENT_TICKING_ENABLED: bool = true;
 
     /// `AgentExecutorKind` values
-    /// (`core/agent_execution.py:7-16`, ported as-is).
+    /// (`core/agent_execution.py:7-16`, ported as-is). P6: the
+    /// `ManagedRunner` variant is `PidashAgent` (stored value stays
+    /// `managed_runner` per section 8).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum AgentExecutorKind {
         LocalRunner,
-        CloudAgent,
-        ManagedRunner,
+        /// The retired cloud executor (§5.4): stored value stays
+        /// `cloud_agent`.
+        RetiredCloudRun,
+        PidashAgent,
     }
 
     impl AgentExecutorKind {
@@ -326,8 +330,8 @@ pub mod project {
         pub fn as_str(self) -> &'static str {
             match self {
                 AgentExecutorKind::LocalRunner => "local_runner",
-                AgentExecutorKind::CloudAgent => "cloud_agent",
-                AgentExecutorKind::ManagedRunner => "managed_runner",
+                AgentExecutorKind::RetiredCloudRun => "cloud_agent",
+                AgentExecutorKind::PidashAgent => "managed_runner",
             }
         }
 

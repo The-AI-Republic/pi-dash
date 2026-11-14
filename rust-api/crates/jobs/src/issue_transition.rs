@@ -34,7 +34,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::run_creation::executor_policy::UserFlags;
@@ -196,6 +196,7 @@ where
             }
         }
     }
+
     Ok(outcome)
 }
 
@@ -790,7 +791,7 @@ impl WorkerTransitionHook {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
-        managed: ManagedRunnerSettings,
+        managed: PidashAgentSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
         assistant_seam: Arc<dyn AssistantModelSeam>,

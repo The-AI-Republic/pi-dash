@@ -71,7 +71,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
 use pidash_db::runner_sessions::outbox as runner_outbox;
@@ -345,7 +345,7 @@ where
 /// `on_commit` sweep.
 #[allow(clippy::type_complexity)]
 pub fn overlay_store_deps(
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
 ) -> crate::orchestration::StoreDeps<
     fn(Uuid) -> bool,
     fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile,
@@ -374,7 +374,7 @@ pub fn overlay_store_deps(
 #[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_for_revoke(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
     jitter_secs: f64,
     issue_id: Uuid,
@@ -408,7 +408,7 @@ pub async fn bounce_issue_for_revoke(
 #[allow(clippy::too_many_arguments)]
 pub async fn recreate_issue_for_revoke(
     pool: &PgPool,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     now: DateTime<Utc>,
     issue_id: Uuid,
     pod_id: Uuid,
@@ -843,7 +843,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
         let (_revoked, _effects) =
-            pidash_services::domain::engine_credential::revoke_engine_credential(
+            pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
                 &pidash_db::orm_tx::TxConn::new(self.tx),
                 machine_id,
                 "machine_removed",
@@ -1002,11 +1002,11 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
             .map_err(store_err)
     }
 
-    async fn delete_machine_engine_credentials(
+    async fn delete_machine_pidash_agent_credentials(
         &mut self,
         machine_id: Uuid,
     ) -> Result<(), RevokeError> {
-        delete_svc::delete_machine_engine_credentials(&TxConn::new(self.tx), machine_id)
+        delete_svc::delete_machine_pidash_agent_credentials(&TxConn::new(self.tx), machine_id)
             .await
             .map_err(store_err)
     }

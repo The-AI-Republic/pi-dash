@@ -13,7 +13,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::api::EngineProfile;
+use super::api::PidashAgentProfile;
 use crate::util::paths::Paths;
 
 /// Directory holding everything the engine keeps per account.
@@ -81,7 +81,7 @@ impl AuthHelper {
 }
 
 /// Render the engine's `CODEX_HOME/config.toml` from the profile.
-pub fn render_engine_config(profile: &EngineProfile, helper: &AuthHelper) -> String {
+pub fn render_engine_config(profile: &PidashAgentProfile, helper: &AuthHelper) -> String {
     // Command-backed auth refreshes during a running turn and after a 401.
     // No env_key or OpenAI login: both conflict with command-backed auth.
     // JSON string/array encoding is also valid TOML here, including Windows
@@ -134,7 +134,7 @@ fn toml_value(raw: &str) -> String {
 /// unavailable one rather than writing a config that cannot run.
 pub fn write_engine_config(
     codex_home: &Path,
-    profile: &EngineProfile,
+    profile: &PidashAgentProfile,
     helper: &AuthHelper,
 ) -> anyhow::Result<PathBuf> {
     if !profile.available {
@@ -174,8 +174,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn profile() -> EngineProfile {
-        EngineProfile {
+    fn profile() -> PidashAgentProfile {
+        PidashAgentProfile {
             available: true,
             lane: "openhub".into(),
             base_url: "https://gateway.example/v1".into(),
