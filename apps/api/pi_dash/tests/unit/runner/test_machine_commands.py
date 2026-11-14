@@ -256,13 +256,15 @@ def test_valid_agents_matches_runner_schema():
     variants = re.findall(r"^\s{4}([A-Z][A-Za-z0-9]*),", body.group(1), re.M)
     assert variants, "no AgentKind variants parsed"
     kebab = {re.sub(r"(?<!^)(?=[A-Z])", "-", v).lower() for v in variants}
-    # ``Engine`` is the built-in engine shipped with the CLI. It is turned on
-    # from its own computer (`pidash runner add --agent engine`, the app),
-    # never through a remote machine command, so the allowlist leaves it out
+    # ``PidashAgent`` (was ``Engine``, wire value still "engine") is the
+    # built-in agent shipped with the CLI. It is turned on from its own
+    # computer (`pidash runner add --agent engine`, the app), never
+    # through a remote machine command, so the allowlist leaves it out
     # (.ai_design/built_engine_as_runner/design.md §7, "Pods": turning it
     # on remotely is not in the first version).
-    assert kebab - {"engine"} == set(_VALID_AGENTS)
+    assert kebab - {"pidash-agent"} == set(_VALID_AGENTS)
     assert "engine" not in _VALID_AGENTS
+    assert "pidash-agent" not in _VALID_AGENTS
 
 
 @pytest.mark.unit

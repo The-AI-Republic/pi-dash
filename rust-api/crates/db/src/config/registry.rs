@@ -487,8 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_agent_has_no_platform_model_key() {
-    }
+    fn cloud_agent_has_no_platform_model_key() {}
 
     #[test]
     fn spot_check_defaults_match_python() {

@@ -1288,7 +1288,7 @@ pub async fn move_to_project(
 mod tests {
     use super::*;
     use crate::app_issues::issue_move as move_kernel;
-    
+
     use std::sync::Mutex;
 
     use super::super::activity::TaskEnqueueHook;
@@ -1560,7 +1560,6 @@ mod tests {
     }
 
     // (P4: FakeAdmission/MoveAdmissionCache died with the cache family.)
-
 
     fn test_creation_deps(pool: sqlx::PgPool) -> CreationDeps {
         CreationDeps { pool }

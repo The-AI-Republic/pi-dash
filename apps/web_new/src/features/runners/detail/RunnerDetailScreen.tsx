@@ -12,7 +12,7 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
-import { BUILT_IN_BADGE, isEngineRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
+import { PIDASH_AGENT_BADGE, isPidashAgentRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { RUNNER_STATUS_LABELS, RUNNER_STATUS_TONES, runnerDisplayStatus } from "../status.js";
 import { ActivityPanel } from "./ActivityPanel.js";
@@ -29,7 +29,7 @@ export const POD_DISPATCH_LABELS = {
   pinned_only: "Off",
 } as const;
 /** Engines are renamed through their machine, never one by one (design §11). */
-export const ENGINE_RENAME_HINT = "Rename the computer to rename its built-in engine.";
+export const ENGINE_RENAME_HINT = "Rename the computer to rename its Pi Dash Agent.";
 
 /**
  * The work dir the runner reported at session attach (design §10), or
@@ -141,13 +141,13 @@ export function RunnerDetailScreen({
           <section className="rounded-(--radius-control) border border-(--border) p-(--space-4)">
             <div className="flex items-center gap-(--space-3)">
               <h1
-                className={`text-emphasis font-semibold break-all text-(--text) ${isEngineRunner(runner) ? "" : "font-mono"}`}
+                className={`text-emphasis font-semibold break-all text-(--text) ${isPidashAgentRunner(runner) ? "" : "font-mono"}`}
               >
                 {displayName}
               </h1>
-              {isEngineRunner(runner) ? (
+              {isPidashAgentRunner(runner) ? (
                 <span data-testid="runner-built-in-badge" className="inline-flex">
-                  <Badge tone="accent">{BUILT_IN_BADGE}</Badge>
+                  <Badge tone="accent">{PIDASH_AGENT_BADGE}</Badge>
                 </span>
               ) : null}
               <span data-testid="runner-status-badge" className="inline-flex">
@@ -156,7 +156,7 @@ export function RunnerDetailScreen({
                 </Badge>
               </span>
             </div>
-            {isEngineRunner(runner) ? (
+            {isPidashAgentRunner(runner) ? (
               <p className="text-meta mt-(--space-2) text-(--text-muted)">{ENGINE_RENAME_HINT}</p>
             ) : null}
           </section>

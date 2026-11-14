@@ -10,7 +10,7 @@ import type { BadgeTone } from "@pidash/kit";
 export { parseRunsPage, runsHref, runsPageSearch } from "./runsPage.js";
 import type { AgentRun, RunErrorDiagnostic, RunEvent, Runner } from "@pidash/api-client";
 
-import { BUILT_IN_ENGINE, isEngineRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
+import { PIDASH_AGENT_NAME, isPidashAgentRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
 
 /** Footer text; only shown while the scope has runs. */
 export function pageLabel(page: number, totalPages: number): string {
@@ -19,18 +19,20 @@ export function pageLabel(page: number, totalPages: number): string {
 
 /**
  * Executor badge copy by kind alone. Legacy `managed_runner` rows ran on
- * the built-in engine; every other non-cloud run is the local runner.
+ * the Pi Dash Agent; every other non-cloud run is the local runner.
+ * The retired cloud kind reads with the frontend-owned retired label
+ * (section 7.3): historical rows only.
  */
 export function executorLabel(kind: AgentRun["executor_kind"]): string {
-  if (kind === "cloud_agent") return "Cloud executor";
-  if (kind === "managed_runner") return BUILT_IN_ENGINE;
+  if (kind === "cloud_agent") return "Cloud agent run (retired)";
+  if (kind === "managed_runner") return PIDASH_AGENT_NAME;
   return "Local runner";
 }
 
 /**
- * Executor badge copy for one run (built-in engine design §11): the
+ * Executor badge copy for one run (Pi Dash Agent design §11): the
  * label comes from the run's runner, so a run on an engine reads
- * "Built-in engine · <machine>". Falls back to the kind label while the
+ * "Pi Dash Agent · <machine>". Falls back to the kind label while the
  * runner is unknown (not loaded, deleted, or never assigned).
  */
 export function runExecutorLabel(
@@ -38,14 +40,16 @@ export function runExecutorLabel(
   runners: readonly Runner[] | undefined
 ): string {
   const runner = run.runner === null ? undefined : runners?.find((entry) => entry.id === run.runner);
-  if (runner !== undefined && run.executor_kind !== "cloud_agent" && isEngineRunner(runner)) {
+  if (runner !== undefined && run.executor_kind !== "cloud_agent" && isPidashAgentRunner(runner)) {
     return runnerDisplayName(runner);
   }
   return executorLabel(run.executor_kind);
 }
 
 export function executorTone(kind: AgentRun["executor_kind"]): BadgeTone {
-  return kind === "cloud_agent" ? "accent" : "neutral";
+  // Retired cloud rows read neutral (the retired label owns no accent).
+  void kind;
+  return "neutral";
 }
 
 /** The raw error text of a run, kept for the failure block. */

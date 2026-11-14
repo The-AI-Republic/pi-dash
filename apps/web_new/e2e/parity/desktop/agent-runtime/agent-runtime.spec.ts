@@ -344,7 +344,7 @@ test(
         expect(await driver.desktopRuntimeRailSectionHeaders()).not.toContain("Built-in");
       });
 
-      await test.step("the built-in chat address renders no local-mode UI", async () => {
+      await test.step("the Pi Dash Agent chat address renders no local-mode UI", async () => {
         await driver.desktopRuntimeOpenChat(seed.workspaceSlug, BUILTIN_CHAT_ID);
         expect(await driver.desktopRuntimeIsTauriPresent()).toBe(false);
         expect(await driver.desktopRuntimeApprovalModeVisible()).toBe(false);

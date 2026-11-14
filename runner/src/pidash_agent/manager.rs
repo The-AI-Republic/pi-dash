@@ -26,7 +26,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 
-use super::api::{PidashAgentApi, PidashAgentApiError, PidashAgentPause, PidashAgentProfile, MachinePayload, reason};
+use super::api::{
+    MachinePayload, PidashAgentApi, PidashAgentApiError, PidashAgentPause, PidashAgentProfile,
+    reason,
+};
 use super::codex_config::{AuthHelper, codex_home, write_engine_config};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::ipc::protocol::{EngineSignInState, EngineState, EngineStatusInfo};
@@ -330,7 +333,9 @@ impl PidashAgentManager {
         if profile.available {
             let helper = AuthHelper::for_paths(self.helper_program.clone(), &self.paths);
             match write_engine_config(&codex_home, &profile, &helper) {
-                Ok(_) => super::agent::set_launch(Some(super::agent::PidashAgentLaunch { codex_home })),
+                Ok(_) => {
+                    super::agent::set_launch(Some(super::agent::PidashAgentLaunch { codex_home }))
+                }
                 Err(e) => tracing::error!("writing the engine config failed: {e:#}"),
             }
         } else {

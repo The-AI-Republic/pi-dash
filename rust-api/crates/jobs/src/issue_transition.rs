@@ -37,8 +37,6 @@ use std::sync::Arc;
 use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::run_creation::executor_policy::UserFlags;
-use pidash_services::run_creation::LlmProfile;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
@@ -56,14 +54,16 @@ use pidash_services::orchestration::entries::{
     PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView,
 };
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
+use pidash_services::run_creation::executor_policy::UserFlags;
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_runs::LifecycleEffect;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::run_dispatch::{dispatch_agent_run, DispatchDecision};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
+use crate::run_dispatch::{dispatch_agent_run, DispatchDecision};
 
 /// Drain finalized runs' publish pairs in order. The api binary implements
 /// this over its `project_move_handoff` drain; a jobs-context caller passes
@@ -613,7 +613,6 @@ where
             .render_bundle(issue_id, run_id, parent_run_id, trigger, created_by_id)
             .await
     }
-
 }
 
 impl<H, P> FinalizeAgentRunSeam for LiveTransitionSeam<'_, H, P>

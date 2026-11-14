@@ -4438,7 +4438,7 @@ mod move_tests {
     use crate::domain::issues_move::MoveCreationOutboxes;
     use crate::domain::WriteActor;
     use crate::orchestration::entries::{FireOutcome, FireRequest};
-    
+
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -4542,7 +4542,6 @@ mod move_tests {
     }
 
     // (P4: FakeAdmission/MoveAdmissionCache died with the cache family.)
-
 
     fn test_creation_deps(pool: sqlx::PgPool) -> domain_issues::CreationDeps {
         domain_issues::CreationDeps { pool }

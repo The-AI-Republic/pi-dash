@@ -46,8 +46,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{PidashAgentSettings};
 use pidash_db::agent_runs::status::AgentRunStatus;
+use pidash_db::config::PidashAgentSettings;
 use pidash_db::entity::{
     agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
     git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
@@ -58,9 +58,6 @@ use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
 use pidash_db::runner_runs::agent_run as run_bag;
 use pidash_db::tx::Transaction;
-use pidash_services::run_creation::{
-    ExecutionFieldsError, ExecutionInputs, LlmProfile, ProjectScope, UserFlags,
-};
 use pidash_services::orchestration::creation::{
     state_name_group, user_id_for_run, AdmissionError as ServiceAdmissionError, CreationError,
     CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
@@ -68,6 +65,9 @@ use pidash_services::orchestration::creation::{
     PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
+use pidash_services::run_creation::{
+    ExecutionFieldsError, ExecutionInputs, LlmProfile, ProjectScope, UserFlags,
+};
 use pidash_types::agent_runs::AgentExecutorKind;
 
 use crate::run_dispatch::{
@@ -125,12 +125,7 @@ impl<'c, H, P> LiveCreationStore<'c, H, P> {
     /// Recover the transaction (to commit) plus the outboxes (to drain
     /// after commit).
     pub fn into_parts(self) -> (Transaction<'c>, &'c PgPool, Vec<Uuid>, Vec<Uuid>) {
-        (
-            self.tx,
-            self.pool,
-            self.dispatches,
-            self.terminal_effects,
-        )
+        (self.tx, self.pool, self.dispatches, self.terminal_effects)
     }
 
     // -- L8 dispatch sharing -------------------------------------------------
@@ -2219,8 +2214,6 @@ mod tests {
     use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
-    
-    
 
     static CREATE_DISPATCH: &str = include_str!(
         "../../../../fixtures/orchestration/fx06_creation/create_dispatch.before_after.json"
@@ -2984,7 +2977,6 @@ mod tests {
         .await;
     }
 
-
     #[tokio::test]
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_c5_render_failed() {
@@ -3129,7 +3121,6 @@ mod tests {
         tx.rollback().await.expect("rollback");
         view
     }
-
 
     #[tokio::test]
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]

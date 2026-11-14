@@ -16,7 +16,7 @@ const { contractMocks } = vi.hoisted(() => ({
     revokeDevMachine: vi.fn(),
     deleteDevMachine: vi.fn(),
     updateDevMachine: vi.fn(),
-    signOutDevMachineEngine: vi.fn(),
+    signOutDevMachinePidashAgent: vi.fn(),
     mergeDevMachineInto: vi.fn(),
     listRunners: vi.fn(),
   },
@@ -38,7 +38,7 @@ const {
   useMergeDevMachine,
   useRevokeDevMachine,
   useRotateDevMachine,
-  useSignOutDevMachineEngine,
+  useSignOutDevMachinePidashAgent,
   useUpdateDevMachine,
 } = await import("./devMachines.js");
 const { runnersKeys } = await import("./keys.js");
@@ -133,14 +133,14 @@ describe("dev machine writers", () => {
 
   it("writes settings, engine sign-out and merges, invalidating the subtree", async () => {
     contractMocks.updateDevMachine.mockResolvedValue({ id: "m-1" });
-    contractMocks.signOutDevMachineEngine.mockResolvedValue({ id: "m-1" });
+    contractMocks.signOutDevMachinePidashAgent.mockResolvedValue({ id: "m-1" });
     contractMocks.mergeDevMachineInto.mockResolvedValue({ id: "m-2" });
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(
       () => ({
         update: useUpdateDevMachine("acme", "ws-id"),
-        signOut: useSignOutDevMachineEngine("acme", "ws-id"),
+        signOut: useSignOutDevMachinePidashAgent("acme", "ws-id"),
         merge: useMergeDevMachine("acme"),
       }),
       { wrapper: wrapper(queryClient) }
@@ -151,7 +151,7 @@ describe("dev machine writers", () => {
     expect(contractMocks.updateDevMachine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id", {
       label: "Studio",
     });
-    expect(contractMocks.signOutDevMachineEngine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id");
+    expect(contractMocks.signOutDevMachinePidashAgent).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id");
     expect(contractMocks.mergeDevMachineInto).toHaveBeenCalledWith(expect.anything(), "m-1", "m-2");
     expect(invalidate).toHaveBeenCalledTimes(3);
   });

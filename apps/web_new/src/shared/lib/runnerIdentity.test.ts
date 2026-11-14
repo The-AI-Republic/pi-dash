@@ -4,8 +4,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  engineLabel,
-  isEngineRunner,
+  pidashAgentLabel,
+  isPidashAgentRunner,
   machineDisplayName,
   runnerDisplayName,
   runnerMachineName,
@@ -23,14 +23,14 @@ describe("runnerIdentity", () => {
 
   it("names engine runners by machine and own-agent runners by their own name", () => {
     const engine = { name: "builtin-x-ws-PROJ", provisioning: "desktop_bundled", dev_machine_detail: machine };
-    expect(isEngineRunner(engine)).toBe(true);
-    expect(runnerDisplayName(engine)).toBe("Built-in engine · Work laptop");
+    expect(isPidashAgentRunner(engine)).toBe(true);
+    expect(runnerDisplayName(engine)).toBe("Pi Dash Agent · Work laptop");
     expect(runnerDisplayName({ ...engine, provisioning: "manual" })).toBe("builtin-x-ws-PROJ");
   });
 
   it("falls back to the runner hostname, then the bare product name", () => {
     expect(runnerMachineName({ name: "r", dev_machine_detail: null, host_label: "box" })).toBe("box");
     expect(runnerMachineName({ name: "r", dev_machine_detail: null, host_label: "" })).toBeNull();
-    expect(engineLabel(null)).toBe("Built-in engine");
+    expect(pidashAgentLabel(null)).toBe("Pi Dash Agent");
   });
 });

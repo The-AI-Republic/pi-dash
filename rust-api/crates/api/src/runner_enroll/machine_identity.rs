@@ -50,13 +50,14 @@ async fn daemon_payload(
 ) -> Result<String, Response> {
     let db = pidash_db::pool::sea_orm_connection(pool);
     let now = Utc::now();
-    let sign_in_state = pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
-        &machine.engine_sign_in_state,
-        machine
-            .engine_credential_expires_at
-            .map(|at| at.with_timezone(&Utc)),
-        now,
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &machine.engine_sign_in_state,
+            machine
+                .engine_credential_expires_at
+                .map(|at| at.with_timezone(&Utc)),
+            now,
+        );
     let engine_state = machine.engine_state.clone();
     let id_owned = machine.id.to_string();
     let expires_rendered = machine

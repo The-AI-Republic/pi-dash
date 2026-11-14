@@ -918,11 +918,12 @@ async fn post_approve(
                         ),
                         now,
                     );
-                let allowed = pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
-                    &db, machine.id, now,
-                )
-                .await
-                .unwrap_or(false);
+                let allowed =
+                    pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
+                        &db, machine.id, now,
+                    )
+                    .await
+                    .unwrap_or(false);
                 if !allowed {
                     let desc = silent_refusal_description(&state);
                     return Denial::Error(
@@ -1277,18 +1278,21 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         }
         // Issue engine credential (silent = !interactive).
         let secret = state.settings().secret_key.clone();
-        let issued = pidash_services::domain::pidash_agent_credential::issue_pidash_agent_credential(
-            &db_conn,
-            secret.as_bytes(),
-            user_id,
-            machine_id,
-            !row_interactive,
-            now,
-        )
-        .await;
+        let issued =
+            pidash_services::domain::pidash_agent_credential::issue_pidash_agent_credential(
+                &db_conn,
+                secret.as_bytes(),
+                user_id,
+                machine_id,
+                !row_interactive,
+                now,
+            )
+            .await;
         let issued = match issued {
             Ok(i) => i,
-            Err(pidash_services::domain::pidash_agent_credential::IssueError::SilentRenewalRefused) => {
+            Err(
+                pidash_services::domain::pidash_agent_credential::IssueError::SilentRenewalRefused,
+            ) => {
                 // Lost race: reuse silent-refused body with fresh state.
                 let fresh = {
                     use sea_orm::EntityTrait;

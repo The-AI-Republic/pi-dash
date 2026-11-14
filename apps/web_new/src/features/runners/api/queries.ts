@@ -30,7 +30,7 @@ export function runnersQueryOptions(
 ) {
   return queryOptions({
     queryKey: runnersKeys.list(workspaceSlug, projectId),
-    // Engines are listed beside own-agent runners (built-in engine design
+    // Engines are listed beside own-agent runners (Pi Dash Agent design
     // §11); older servers hide them unless asked.
     queryFn: () =>
       listRunners(

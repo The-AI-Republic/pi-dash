@@ -33,8 +33,8 @@ pub const PIDASH_AGENT_PAUSE_BEAT_NAME: &str = "runner-pause-engines-with-expire
 fn pause_engines_handler(pool: PgPool) -> Handler {
     Arc::new(move |_job: JobRow| {
         let pool = pool.clone();
-        let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
-            Box::pin(async move {
+        let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> = Box::pin(
+            async move {
                 let sea = pidash_db::pool::sea_orm_connection(&pool);
                 let (_paused, effects) =
                     pidash_services::domain::pidash_agent_state::pause_pidash_agents_with_expired_credentials(
@@ -72,7 +72,8 @@ fn pause_engines_handler(pool: PgPool) -> Handler {
                     }
                 }
                 Ok(Verdict::Ack)
-            });
+            },
+        );
         fut
     })
 }
@@ -99,7 +100,9 @@ mod tests {
             "runner-pause-engines-with-expired-credentials"
         );
         assert_eq!(crate::runner_runs::TASK_NAMES.len(), 16);
-        assert!(crate::runner_runs::is_runner_runs_task(PIDASH_AGENT_PAUSE_TASK));
+        assert!(crate::runner_runs::is_runner_runs_task(
+            PIDASH_AGENT_PAUSE_TASK
+        ));
     }
 
     #[tokio::test]

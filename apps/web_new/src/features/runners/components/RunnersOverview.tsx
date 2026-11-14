@@ -13,8 +13,8 @@ import * as React from "react";
 
 import type { Pod, Runner, RunnerPatch } from "@pidash/api-client";
 import {
-  BUILT_IN_BADGE,
-  isEngineRunner,
+  PIDASH_AGENT_BADGE,
+  isPidashAgentRunner,
   runnerDisplayName,
   runnerMachineName,
 } from "../../../shared/lib/runnerIdentity.js";
@@ -35,7 +35,7 @@ export const RUNNERS_EMPTY_TEXT = "No runners yet. Add a runner to give this sco
 export const RUNNER_ACTION_FAILED_TITLE = "Error!";
 export const DELETE_RUNNER_FAILED = "Failed to delete runner";
 export const REVOKE_RUNNER_FAILED = "Failed to revoke runner";
-export const REMOVE_ENGINE_FAILED = "Failed to remove the built-in engine from the project";
+export const REMOVE_ENGINE_FAILED = "Failed to remove the Pi Dash Agent from the project";
 
 /** Revoke only makes sense while credentials exist to invalidate. */
 export function canRevokeRunner(runner: Pick<Runner, "status" | "enrolled_at">): boolean {
@@ -65,12 +65,12 @@ export function runnerHeartbeat(
 }
 
 /**
- * Name cell (built-in engine design §11): engines read "Built-in engine ·
- * <machine>" with a Built-in badge; every row names the machine it runs
+ * Name cell (Pi Dash Agent design §11): engines read "Pi Dash Agent ·
+ * <machine>" with a Pi Dash Agent badge; every row names the machine it runs
  * on underneath when one is known.
  */
 export function RunnerNameCell({ runner }: { runner: Runner }): React.ReactElement {
-  const engine = isEngineRunner(runner);
+  const engine = isPidashAgentRunner(runner);
   const machine = runnerMachineName(runner);
   return (
     <div className="flex flex-col gap-(--space-1)">
@@ -80,7 +80,7 @@ export function RunnerNameCell({ runner }: { runner: Runner }): React.ReactEleme
         </span>
         {engine ? (
           <span data-testid="runner-built-in-badge" className="inline-flex">
-            <Badge tone="accent">{BUILT_IN_BADGE}</Badge>
+            <Badge tone="accent">{PIDASH_AGENT_BADGE}</Badge>
           </span>
         ) : null}
       </span>
@@ -101,9 +101,9 @@ export interface RunnersOverviewProps {
   pods: Pod[] | undefined;
   podsLoading: boolean;
   podsFailed: boolean;
-  /** Delete a runner row; built-in engines pass `purgeLocal: false` to keep their folder. */
+  /** Delete a runner row; Pi Dash Agents pass `purgeLocal: false` to keep their folder. */
   onDelete: (runnerId: string, options?: { purgeLocal?: boolean }) => Promise<void>;
-  /** Revoke a runner; also backs a built-in engine's "Remove from project". */
+  /** Revoke a runner; also backs a Pi Dash Agent's "Remove from project". */
   onRevoke: (runnerId: string) => Promise<void>;
   /** Header action slot (the add-runner entry mounts here). */
   action?: React.ReactNode;
@@ -121,13 +121,13 @@ type PendingAction = { action: RunnerConfirmAction; runner: Runner };
 /** Which row actions a runner offers (design §11). */
 export interface RunnerRowActions {
   revoke: boolean;
-  /** A built-in engine's "Remove from project": revoke, folder kept. */
+  /** A Pi Dash Agent's "Remove from project": revoke, folder kept. */
   remove: boolean;
   delete: boolean;
 }
 
 /**
- * Own-agent runners keep Revoke and Delete. A built-in engine is the
+ * Own-agent runners keep Revoke and Delete. A Pi Dash Agent is the
  * app's own runner: while live it offers only "Remove from project",
  * which revokes the row and keeps its folder; once removed, Delete
  * clears the row, still without touching the folder.
@@ -135,7 +135,7 @@ export interface RunnerRowActions {
 export function runnerRowActions(
   runner: Pick<Runner, "status" | "enrolled_at" | "revoked_at" | "provisioning">
 ): RunnerRowActions {
-  if (isEngineRunner(runner)) {
+  if (isPidashAgentRunner(runner)) {
     const removed = runner.revoked_at !== null || runner.status === "revoked";
     return { revoke: false, remove: !removed, delete: removed };
   }
@@ -177,8 +177,8 @@ export function RunnersOverview({
     setWorking(true);
     try {
       if (action.action === "delete") {
-        // A built-in engine's folder is kept (design §11): never purge it.
-        await (isEngineRunner(action.runner)
+        // A Pi Dash Agent's folder is kept (design §11): never purge it.
+        await (isPidashAgentRunner(action.runner)
           ? onDelete(action.runner.id, { purgeLocal: false })
           : onDelete(action.runner.id));
       } else {
@@ -328,7 +328,7 @@ export function RunnersOverview({
           open
           action={pending.action}
           runnerName={runnerDisplayName(pending.runner)}
-          engine={isEngineRunner(pending.runner)}
+          engine={isPidashAgentRunner(pending.runner)}
           pending={working}
           onCancel={() => setPending(null)}
           onConfirm={() => void confirm(pending)}

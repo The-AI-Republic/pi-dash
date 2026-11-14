@@ -1881,7 +1881,7 @@ mod tests {
                 dispatch_settings.pidash_agent.clone(),
                 None,
                 dispatch_settings.runner.clone(),
-                    dispatch_assistant_seam.clone(),
+                dispatch_assistant_seam.clone(),
             )),
         );
         pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
@@ -1892,7 +1892,7 @@ mod tests {
                 dispatch_settings.pidash_agent,
                 None,
                 dispatch_settings.runner.clone(),
-                    dispatch_assistant_seam,
+                dispatch_assistant_seam,
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());

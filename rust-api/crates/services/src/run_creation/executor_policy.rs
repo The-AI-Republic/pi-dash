@@ -633,38 +633,23 @@ mod tests {
         );
 
         // Local leg: reason iff unavailable (the query itself is SQL, below).
-        let rows = agent_executor_options(
-            None,
-            || panic!("no user"),
-            false,
-            false,
-            managed(true, ""),
-        );
+        let rows =
+            agent_executor_options(None, || panic!("no user"), false, false, managed(true, ""));
         assert!(!rows[1].available);
         assert_eq!(rows[1].reason_code, NO_LOCAL_RUNNER_REASON);
         assert_eq!(
             rows[1].reason_code,
             shape["local_reason"].as_str().expect("golden")
         );
-        let rows = agent_executor_options(
-            None,
-            || panic!("no user"),
-            true,
-            true,
-            managed(true, ""),
-        );
+        let rows =
+            agent_executor_options(None, || panic!("no user"), true, true, managed(true, ""));
         assert!(rows[1].available);
         assert_eq!(rows[1].reason_code, "");
 
         // Local leg, paused: online runners exist but all are paused —
         // unavailable with the resume-the-runner reason (`09738d222`).
-        let rows = agent_executor_options(
-            None,
-            || panic!("no user"),
-            false,
-            true,
-            managed(true, ""),
-        );
+        let rows =
+            agent_executor_options(None, || panic!("no user"), false, true, managed(true, ""));
         assert!(!rows[1].available);
         assert_eq!(rows[1].reason_code, LOCAL_RUNNER_PAUSED_REASON);
 
@@ -695,5 +680,4 @@ mod tests {
             .expect("golden")
             .contains("PINNED_ONLY"));
     }
-
 }

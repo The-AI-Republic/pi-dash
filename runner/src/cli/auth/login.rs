@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use crate::cli::runner_ops;
 use crate::config::file;
-use crate::pidash_agent::api::{PidashAgentApi, EngineSignInState, IssuedPidashAgentCredential};
+use crate::pidash_agent::api::{EngineSignInState, IssuedPidashAgentCredential, PidashAgentApi};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]

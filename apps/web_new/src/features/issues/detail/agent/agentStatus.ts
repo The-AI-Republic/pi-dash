@@ -214,10 +214,7 @@ export function runStatusView(
     case "queued":
       return {
         title: "Agent run queued",
-        detail:
-          run.executor_kind === "cloud_agent"
-            ? "Waiting for cloud agent capacity."
-            : (runner ?? "Waiting for a free runner."),
+        detail: runner ?? "Waiting for a free runner.",
         badge: "Queued",
         tone: "neutral",
         icon: "clock",
@@ -233,10 +230,7 @@ export function runStatusView(
     case "running":
       return {
         title: "Agent at work",
-        detail:
-          run.executor_kind === "cloud_agent"
-            ? "The cloud agent is working with the project's tools."
-            : (live ?? runner),
+        detail: live ?? runner,
         badge: "Working",
         tone: "accent",
         icon: "spinner",
@@ -404,9 +398,12 @@ export function agentStatusView(
   return null;
 }
 
-/** Executor tile: the cloud agent, or the project's own runner. */
+/** Executor tile: Pi Dash Agent, a (possibly third-party) local runner,
+ * or a retired cloud run (spec §7.1 three-way mapping). */
 export function executorLabel(executorKind: string): string {
-  return executorKind === "cloud_agent" ? "Cloud agent" : "Local runner";
+  if (executorKind === "managed_runner") return "Pi Dash Agent";
+  if (executorKind === "cloud_agent") return "Cloud agent run (retired)";
+  return "Local runner";
 }
 
 /**

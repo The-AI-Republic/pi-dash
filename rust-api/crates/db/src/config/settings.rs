@@ -1369,7 +1369,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn csrf_trusted_origins_default_to_the_empty_cors_list() {
         // common.py:150-155,617: an unset CORS env leaves the allow-all

@@ -267,7 +267,7 @@ describe("RunnersOverview row actions", () => {
     expect(notifyError).not.toHaveBeenCalled();
   });
 
-  it("offers a built-in engine only Remove from project, then Delete once removed (design §11)", () => {
+  it("offers a Pi Dash Agent only Remove from project, then Delete once removed (design §11)", () => {
     const engine = { status: "online", enrolled_at: "2024-01-01T00:00:00Z", provisioning: "desktop_bundled" } as const;
     expect(runnerRowActions({ ...engine, revoked_at: null })).toEqual({ revoke: false, remove: true, delete: false });
     expect(runnerRowActions({ ...engine, revoked_at: "2024-02-01T00:00:00Z" })).toEqual({
@@ -282,7 +282,7 @@ describe("RunnersOverview row actions", () => {
     });
   });
 
-  it("removes a built-in engine from the project by revoking it, never deleting its folder", async () => {
+  it("removes a Pi Dash Agent from the project by revoking it, never deleting its folder", async () => {
     const { onRevoke, onDelete } = renderTable([runner({ provisioning: "desktop_bundled", revoked_at: null })]);
     expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
@@ -487,13 +487,13 @@ describe("RunnersOverview pods wiring", () => {
 });
 
 describe("engine runners in the table", () => {
-  it("names engines by machine with a Built-in badge, and shows each own-agent runner's machine", () => {
+  it("names engines by machine with a Pi Dash Agent badge, and shows each own-agent runner's machine", () => {
     const machine = { id: "m-1", label: "Work laptop", host_label: "rich-mbp" };
     renderTable([
       runner({ id: "r-engine", name: "builtin-x", provisioning: "desktop_bundled", dev_machine_detail: machine }),
       runner({ id: "r-own", name: "codex-1", provisioning: "manual", dev_machine_detail: machine }),
     ]);
-    expect(screen.getByText("Built-in engine · Work laptop")).toBeInTheDocument();
+    expect(screen.getByText("Pi Dash Agent · Work laptop")).toBeInTheDocument();
     expect(screen.getAllByTestId("runner-built-in-badge")).toHaveLength(1);
     expect(screen.getByText("codex-1")).toBeInTheDocument();
     expect(screen.getByTestId("runner-machine")).toHaveTextContent("Work laptop");

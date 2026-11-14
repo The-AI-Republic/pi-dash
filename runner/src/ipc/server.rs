@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use pidash_ipc::windows_pipe::create_owner_only_pipe;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
-#[cfg(windows)]
-use pidash_ipc::windows_pipe::create_owner_only_pipe;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
 #[cfg(unix)]
@@ -992,7 +992,10 @@ sleep 1
             &paths,
             &insts.iter().collect::<Vec<_>>(),
         );
-        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(engine, codex_home.clone()));
+        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(
+            engine,
+            codex_home.clone(),
+        ));
         let server = IpcServer {
             path: paths.ipc_socket_path(),
             primary_state: crate::daemon::state::StateHandle::new(Config {

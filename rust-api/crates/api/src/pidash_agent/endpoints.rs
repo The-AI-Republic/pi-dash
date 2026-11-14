@@ -33,9 +33,12 @@ use uuid::Uuid;
 use pidash_db::entity::dev_machine;
 use pidash_db::redis::client_from_settings;
 use pidash_services::domain::pidash_agent_credential::{
-    authenticate_pidash_agent_credential, pidash_agent_profile_for_user, is_legacy_desktop, AuthError,
+    authenticate_pidash_agent_credential, is_legacy_desktop, pidash_agent_profile_for_user,
+    AuthError,
 };
-use pidash_services::domain::pidash_agent_state::{apply_model_token_outcome, apply_profile_outcome};
+use pidash_services::domain::pidash_agent_state::{
+    apply_model_token_outcome, apply_profile_outcome,
+};
 use pidash_services::extensions::CredentialError;
 use pidash_services::runner_enroll::dispatch_rules::PauseEffects;
 
@@ -321,52 +324,53 @@ pub async fn engine_model_token(
     let secret = state.settings().secret_key.clone();
     let sea = pidash_db::pool::sea_orm_connection(pool);
     let raw = bearer.unwrap_or_default();
-    let credential = match authenticate_pidash_agent_credential(&sea, secret.as_bytes(), raw, now).await {
-        Ok(credential) => credential,
-        Err(AuthError::Database(_)) => return server_error(),
-        Err(AuthError::Credential(error)) => {
-            let code = error.code.clone();
-            if code == CODE_ENGINE_SIGN_IN_REQUIRED {
-                if let Some(carried) = error.credential {
-                    // `apply … engine_sign_in_required` only when no live
-                    // credential remains for the machine: a credential
-                    // renewed since the daemon's last report must not get
-                    // its engine paused. Failure logs, never fails the 401.
-                    if !has_live_credential_for(&sea, carried.dev_machine_id, now).await {
-                        match apply_model_token_outcome(
-                            &sea,
-                            carried.dev_machine_id,
-                            CODE_ENGINE_SIGN_IN_REQUIRED,
-                            now,
-                        )
-                        .await
-                        {
-                            Ok((_changed, effects)) => {
-                                drain_pause_effects(pool, &state, &effects).await;
-                            }
-                            Err(inner) => {
-                                tracing::error!(
-                                    dev_machine_id = %carried.dev_machine_id,
-                                    error = %inner,
-                                    "model token pause update failed"
-                                );
+    let credential =
+        match authenticate_pidash_agent_credential(&sea, secret.as_bytes(), raw, now).await {
+            Ok(credential) => credential,
+            Err(AuthError::Database(_)) => return server_error(),
+            Err(AuthError::Credential(error)) => {
+                let code = error.code.clone();
+                if code == CODE_ENGINE_SIGN_IN_REQUIRED {
+                    if let Some(carried) = error.credential {
+                        // `apply … engine_sign_in_required` only when no live
+                        // credential remains for the machine: a credential
+                        // renewed since the daemon's last report must not get
+                        // its engine paused. Failure logs, never fails the 401.
+                        if !has_live_credential_for(&sea, carried.dev_machine_id, now).await {
+                            match apply_model_token_outcome(
+                                &sea,
+                                carried.dev_machine_id,
+                                CODE_ENGINE_SIGN_IN_REQUIRED,
+                                now,
+                            )
+                            .await
+                            {
+                                Ok((_changed, effects)) => {
+                                    drain_pause_effects(pool, &state, &effects).await;
+                                }
+                                Err(inner) => {
+                                    tracing::error!(
+                                        dev_machine_id = %carried.dev_machine_id,
+                                        error = %inner,
+                                        "model token pause update failed"
+                                    );
+                                }
                             }
                         }
                     }
                 }
+                tracing::warn!(code = %code, "engine.model_token_error");
+                return json_response(
+                    StatusCode::UNAUTHORIZED,
+                    serde_json::to_string(&serde_json::json!({
+                        "reason_code": CODE_ENGINE_SIGN_IN_REQUIRED,
+                        "error": code,
+                        "detail": SIGN_IN_AGAIN_DETAIL,
+                    }))
+                    .expect("static engine body"),
+                );
             }
-            tracing::warn!(code = %code, "engine.model_token_error");
-            return json_response(
-                StatusCode::UNAUTHORIZED,
-                serde_json::to_string(&serde_json::json!({
-                    "reason_code": CODE_ENGINE_SIGN_IN_REQUIRED,
-                    "error": code,
-                    "detail": SIGN_IN_AGAIN_DETAIL,
-                }))
-                .expect("static engine body"),
-            );
-        }
-    };
+        };
 
     let managed_enabled = state.settings().pidash_agent.enabled;
     let has_key = match llm_has_key(&sea, credential.user_id).await {

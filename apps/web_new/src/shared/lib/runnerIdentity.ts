@@ -1,9 +1,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// How a runner is named to people (built-in engine design §5, §11).
-// A built-in engine runner has a server-assigned name nobody should
-// read; it is shown as "Built-in engine · <machine>", so renaming the
+// How a runner is named to people (Pi Dash Agent design §5, §11).
+// A Pi Dash Agent runner has a server-assigned name nobody should
+// read; it is shown as "Pi Dash Agent · <machine>", so renaming the
 // machine renames its engine everywhere. Own-agent runners keep their
 // own name. Every surface that names a runner — lists, pickers, the
 // runs page, the issue panel — reads these helpers so one runner never
@@ -24,18 +24,19 @@ export interface RunnerIdentity {
   dev_machine_detail?: MachineIdentity | null | undefined;
 }
 
-/** Stored provisioning value that marks a built-in engine runner. */
-export const ENGINE_PROVISIONING = "desktop_bundled";
+/** Stored provisioning value that marks a Pi Dash Agent runner. */
+export const PIDASH_AGENT_PROVISIONING = "desktop_bundled";
 
-/** The product name of the bundled agent. */
-export const BUILT_IN_ENGINE = "Built-in engine";
+/** The product name of the bundled agent (section 6/7). */
+export const PIDASH_AGENT_NAME = "Pi Dash Agent";
 
-/** Short badge text shown beside engine runners. */
-export const BUILT_IN_BADGE = "Built-in";
+/** Short badge text shown beside Pi Dash Agent runners. The badge is a
+ * descriptor, not a name, so it stays "Built-in" (spec §7.1). */
+export const PIDASH_AGENT_BADGE = "Built-in";
 
-/** True for a built-in engine runner. */
-export function isEngineRunner(runner: Pick<RunnerIdentity, "provisioning">): boolean {
-  return runner.provisioning === ENGINE_PROVISIONING;
+/** True for a Pi Dash Agent runner. */
+export function isPidashAgentRunner(runner: Pick<RunnerIdentity, "provisioning">): boolean {
+  return runner.provisioning === PIDASH_AGENT_PROVISIONING;
 }
 
 /**
@@ -60,18 +61,18 @@ export function runnerMachineName(runner: RunnerIdentity): string | null {
   return host.trim() === "" ? null : host;
 }
 
-/** "Built-in engine · <machine>", or the bare product name without one. */
-export function engineLabel(machineName: string | null): string {
-  return machineName === null ? BUILT_IN_ENGINE : `${BUILT_IN_ENGINE} · ${machineName}`;
+/** "Pi Dash Agent · <machine>", or the bare product name without one. */
+export function pidashAgentLabel(machineName: string | null): string {
+  return machineName === null ? PIDASH_AGENT_NAME : `${PIDASH_AGENT_NAME} · ${machineName}`;
 }
 
 /** The name a person sees for a runner. */
 export function runnerDisplayName(runner: RunnerIdentity): string {
-  return isEngineRunner(runner) ? engineLabel(runnerMachineName(runner)) : runner.name;
+  return isPidashAgentRunner(runner) ? pidashAgentLabel(runnerMachineName(runner)) : runner.name;
 }
 
 /** Plain wording for the server's automatic engine pause reasons (design §8). */
-export const ENGINE_AUTO_PAUSE_TEXT: Readonly<Record<string, string>> = {
+export const PIDASH_AGENT_AUTO_PAUSE_TEXT: Readonly<Record<string, string>> = {
   engine_sign_in_required: "sign-in required",
   gateway_session_revoked: "model gateway access was revoked",
   wallet_empty: "wallet is empty",

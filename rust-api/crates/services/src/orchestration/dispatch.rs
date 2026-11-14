@@ -88,7 +88,9 @@ use super::creation::{
     self, ContinuationRequest, CreateDispatchRequest, CreationError, CreationSeam,
     DedicatedPinArgs, FinalizeAgentRunSeam, IssueView, StateView,
 };
-use crate::run_creation::{effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags};
+use crate::run_creation::{
+    effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags,
+};
 
 // ---------------------------------------------------------------------------
 // Reasons + bodies

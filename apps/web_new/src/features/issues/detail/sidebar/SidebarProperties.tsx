@@ -50,7 +50,7 @@ const ROW_VARIANT: ButtonVariant = "ghost";
 
 /**
  * The issue's current execution target. Runner is the only executor
- * (built-in engine design §6), so a legacy executor value on the issue
+ * (Pi Dash Agent design §6), so a legacy executor value on the issue
  * or the project never renders as an agent: the row shows the pinned
  * runner, else the pinned pod, and no pin means the project's default
  * pod.

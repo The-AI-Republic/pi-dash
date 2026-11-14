@@ -12,17 +12,17 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
     approveDeviceCode: vi.fn(),
     getProject: vi.fn(),
     getIssue: vi.fn(),
-    getAgentProfile: vi.fn(),
+    getPidashAgentProfile: vi.fn(),
   };
 });
 
 import {
   approveDeviceCode,
-  getAgentProfile,
+  getPidashAgentProfile,
   getIssue,
   getProject,
   startDeviceGrant,
-  type AgentProfile,
+  type PidashAgentProfile,
   type ApiClient,
   type DeviceStartResponse,
   type Issue,
@@ -44,24 +44,24 @@ import {
   discoverDaemon,
   discoveryProblem,
   disposeRuntimeForSignOut,
-  ENGINE_SIGNED_OUT_TEXT,
+  PIDASH_AGENT_SIGNED_OUT_TEXT,
   ENGINE_STILL_CONNECTING_TEXT,
-  ENGINE_TURN_ON_TEXT,
-  EngineUnavailableError,
-  engineActionFor,
+  PIDASH_AGENT_TURN_ON_TEXT,
+  PidashAgentUnavailableError,
+  pidashAgentActionFor,
   ensureChatRuntime,
   getModelTopUpUrl,
   getRuntimeAccount,
   prepareAgentRun,
   refreshModelCredential,
   refreshRuntime,
-  renewEngineIfAllowed,
+  renewPidashAgentIfAllowed,
   resetRuntimeServiceForTests,
   resumeRuntime,
   setUpDaemon,
   signInWorkspace,
   SILENT_RENEW_RETRY_MS,
-  turnOnEngineForProject,
+  turnOnPidashAgentForProject,
   type DaemonSetUpStep,
 } from "./service.js";
 import { registerSetUpPrompt } from "./setupPrompt.js";
@@ -154,7 +154,7 @@ function issue(executor: string | null): Issue {
   return { agent_executor: executor } as unknown as Issue;
 }
 
-function agentProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
+function agentProfile(overrides: Partial<PidashAgentProfile> = {}): PidashAgentProfile {
   return {
     managed_runner_enabled: true,
     lane: "test",
@@ -165,7 +165,7 @@ function agentProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
     graceful_stop_seconds: 5,
     top_up_url: "",
     ...overrides,
-  } as AgentProfile;
+  } as PidashAgentProfile;
 }
 
 beforeEach(() => {
@@ -175,25 +175,25 @@ beforeEach(() => {
   vi.mocked(approveDeviceCode).mockReset();
   vi.mocked(getProject).mockReset();
   vi.mocked(getIssue).mockReset();
-  vi.mocked(getAgentProfile).mockReset();
+  vi.mocked(getPidashAgentProfile).mockReset();
   vi.mocked(startDeviceGrant).mockResolvedValue(grant("1"));
   vi.mocked(approveDeviceCode).mockResolvedValue({ ok: true, user_email: "u1@test.dev", workspace_slug: "ws" });
-  vi.mocked(getAgentProfile).mockResolvedValue(agentProfile());
+  vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile());
 });
 
 afterEach(() => {
   registerSetUpPrompt(null);
 });
 
-describe("engineActionFor", () => {
+describe("pidashAgentActionFor", () => {
   it("maps each engine sign-in state to what the app may do", () => {
-    expect(engineActionFor("expiring")).toBe("renew_silently");
-    expect(engineActionFor("expired")).toBe("renew_silently");
-    expect(engineActionFor("never")).toBe("turn_on");
-    expect(engineActionFor("signed_out")).toBe("sign_in");
-    expect(engineActionFor("revoked")).toBe("sign_in");
-    expect(engineActionFor("active")).toBe("none");
-    expect(engineActionFor(undefined)).toBe("none");
+    expect(pidashAgentActionFor("expiring")).toBe("renew_silently");
+    expect(pidashAgentActionFor("expired")).toBe("renew_silently");
+    expect(pidashAgentActionFor("never")).toBe("turn_on");
+    expect(pidashAgentActionFor("signed_out")).toBe("sign_in");
+    expect(pidashAgentActionFor("revoked")).toBe("sign_in");
+    expect(pidashAgentActionFor("active")).toBe("none");
+    expect(pidashAgentActionFor(undefined)).toBe("none");
   });
 });
 
@@ -302,10 +302,10 @@ describe("silent engine renewal", () => {
     resume(runtime);
     await discoverDaemon(runtime);
     const start = Date.now();
-    await expect(renewEngineIfAllowed({ client, runtime }, start)).resolves.toBe(false);
-    await expect(renewEngineIfAllowed({ client, runtime }, start + 1_000)).resolves.toBe(false);
+    await expect(renewPidashAgentIfAllowed({ client, runtime }, start)).resolves.toBe(false);
+    await expect(renewPidashAgentIfAllowed({ client, runtime }, start + 1_000)).resolves.toBe(false);
     expect(runtime.engineLogin).toHaveBeenCalledTimes(1);
-    await renewEngineIfAllowed({ client, runtime }, start + SILENT_RENEW_RETRY_MS);
+    await renewPidashAgentIfAllowed({ client, runtime }, start + SILENT_RENEW_RETRY_MS);
     expect(runtime.engineLogin).toHaveBeenCalledTimes(2);
   });
 
@@ -332,13 +332,13 @@ describe("ensureChatRuntime", () => {
     const turnOn = fakeRuntime(compatible("never"));
     resume(turnOn);
     await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: turnOn })).rejects.toThrow(
-      ENGINE_TURN_ON_TEXT
+      PIDASH_AGENT_TURN_ON_TEXT
     );
     resetRuntimeServiceForTests();
     const signedOut = fakeRuntime(compatible("signed_out"));
     resume(signedOut);
     await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: signedOut })).rejects.toThrow(
-      ENGINE_SIGNED_OUT_TEXT
+      PIDASH_AGENT_SIGNED_OUT_TEXT
     );
     expect(signedOut.engineLogin).not.toHaveBeenCalled();
   });
@@ -352,7 +352,7 @@ describe("ensureChatRuntime", () => {
     );
     resume(runtime);
     await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toBeInstanceOf(
-      EngineUnavailableError
+      PidashAgentUnavailableError
     );
   });
 
@@ -451,7 +451,7 @@ describe("turning the engine on for a project", () => {
     ]);
     resume(runtime);
     await expect(
-      turnOnEngineForProject({ client, runtime, workspaceSlug: "ws", project: "PROJ" })
+      turnOnPidashAgentForProject({ client, runtime, workspaceSlug: "ws", project: "PROJ" })
     ).resolves.toMatchObject({
       runner_id: "b",
     });
@@ -461,7 +461,7 @@ describe("turning the engine on for a project", () => {
   it("adds an engine runner when the project has none", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
-    await turnOnEngineForProject({ client, runtime, workspaceSlug: "ws", project: "PROJ" });
+    await turnOnPidashAgentForProject({ client, runtime, workspaceSlug: "ws", project: "PROJ" });
     expect(runtime.addEngineRunner).toHaveBeenCalledWith({ workspace: "ws", project: "PROJ", workingDir: undefined });
   });
 });
@@ -489,7 +489,7 @@ describe("refreshModelCredential", () => {
       const runtime = fakeRuntime(compatible(signIn));
       resume(runtime);
       await expect(refreshModelCredential({ client, runtime })).rejects.toThrow(
-        "The built-in engine needs a new sign-in."
+        "The Pi Dash Agent needs a new sign-in."
       );
       expect(runtime.engineLogin).not.toHaveBeenCalled();
     }
@@ -499,16 +499,14 @@ describe("refreshModelCredential", () => {
     const runtime = fakeRuntime(compatible("expired"));
     runtime.engineLogin.mockRejectedValue(new Error("cli failed"));
     resume(runtime);
-    await expect(refreshModelCredential({ client, runtime })).rejects.toThrow(
-      "The built-in engine needs a new sign-in."
-    );
+    await expect(refreshModelCredential({ client, runtime })).rejects.toThrow("The Pi Dash Agent needs a new sign-in.");
   });
 });
 
 describe("model top-up page", () => {
   it("reads the top-up page off the agent profile on refresh", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
+    vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
     resume(runtime);
     expect(getModelTopUpUrl()).toBe("");
     await refreshRuntime({ client, runtime });
@@ -517,22 +515,22 @@ describe("model top-up page", () => {
 
   it("keeps the previous page when the profile read fails", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
+    vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
     resume(runtime);
     await refreshRuntime({ client, runtime });
-    vi.mocked(getAgentProfile).mockRejectedValue(new Error("offline"));
+    vi.mocked(getPidashAgentProfile).mockRejectedValue(new Error("offline"));
     await refreshRuntime({ client, runtime });
     expect(getModelTopUpUrl()).toBe("https://hub.test/credits");
   });
 
   it("forgets the page on an account switch and on sign-out", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
+    vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
     resume(runtime);
     await refreshRuntime({ client, runtime });
     resume(runtime, "u2");
     expect(getModelTopUpUrl()).toBe("");
-    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/other" }));
+    vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/other" }));
     await refreshRuntime({ client, runtime });
     await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
     expect(getModelTopUpUrl()).toBe("");

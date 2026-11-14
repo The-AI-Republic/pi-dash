@@ -805,19 +805,34 @@ mod tests {
             "revoked"
         );
         // Active with no expiry is active.
-        assert_eq!(current_pidash_agent_sign_in_state("active", None, now), "active");
+        assert_eq!(
+            current_pidash_agent_sign_in_state("active", None, now),
+            "active"
+        );
         // Active far from expiry is active.
         assert_eq!(
-            current_pidash_agent_sign_in_state("active", Some(now + chrono::Duration::days(10)), now),
+            current_pidash_agent_sign_in_state(
+                "active",
+                Some(now + chrono::Duration::days(10)),
+                now
+            ),
             "active"
         );
         // Inside the 3-day window is expiring (boundary: exactly 3d).
         assert_eq!(
-            current_pidash_agent_sign_in_state("active", Some(now + chrono::Duration::days(3)), now),
+            current_pidash_agent_sign_in_state(
+                "active",
+                Some(now + chrono::Duration::days(3)),
+                now
+            ),
             "expiring"
         );
         assert_eq!(
-            current_pidash_agent_sign_in_state("active", Some(now + chrono::Duration::days(2)), now),
+            current_pidash_agent_sign_in_state(
+                "active",
+                Some(now + chrono::Duration::days(2)),
+                now
+            ),
             "expiring"
         );
         // At or past expiry is expired.
@@ -826,7 +841,11 @@ mod tests {
             "expired"
         );
         assert_eq!(
-            current_pidash_agent_sign_in_state("active", Some(now - chrono::Duration::seconds(1)), now),
+            current_pidash_agent_sign_in_state(
+                "active",
+                Some(now - chrono::Duration::seconds(1)),
+                now
+            ),
             "expired"
         );
         // Empty stored state reads as never.

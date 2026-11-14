@@ -430,10 +430,7 @@ pub fn wire_tool_for(lane: &Lane, name: &str, description: &str, parameters: &Va
 
 /// Convert a batch of `(name, description, parameters)` schemas for
 /// the lane, in order (agent naming convention P2, section 4.3).
-pub fn wire_tools_for(
-    lane: &Lane,
-    schemas: &[(String, String, Value)],
-) -> Vec<WireTool> {
+pub fn wire_tools_for(lane: &Lane, schemas: &[(String, String, Value)]) -> Vec<WireTool> {
     schemas
         .iter()
         .map(|(name, description, parameters)| wire_tool_for(lane, name, description, parameters))
@@ -2042,16 +2039,14 @@ mod tests {
         // Output-validation retry drops top-level `input`
         // (`loopprobe.json` `output_retry_then_ok`).
         let text = retry_message(
-            &RetryContent::Errors(vec![
-                crate::cloud_agent::validation::ValidationDetail {
-                    error_type: "missing",
-                    loc: vec![crate::cloud_agent::validation::LocSeg::Field(
-                        "sum".to_owned(),
-                    )],
-                    msg: "Field required".to_owned(),
-                    input: serde_json::from_str::<Value>(r#"{"nope":1}"#).unwrap(),
-                },
-            ]),
+            &RetryContent::Errors(vec![crate::cloud_agent::validation::ValidationDetail {
+                error_type: "missing",
+                loc: vec![crate::cloud_agent::validation::LocSeg::Field(
+                    "sum".to_owned(),
+                )],
+                msg: "Field required".to_owned(),
+                input: serde_json::from_str::<Value>(r#"{"nope":1}"#).unwrap(),
+            }]),
             None,
         );
         assert_eq!(

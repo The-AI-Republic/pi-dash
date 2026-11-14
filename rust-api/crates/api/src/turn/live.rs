@@ -52,9 +52,7 @@ use pidash_jobs::assistant::run_turn::{
     ModelError, SeamError, SkippedServer, ToolsetHandle, TurnContext, TurnSeam, TurnUsage,
 };
 use pidash_jobs::cloud_agent::provider::{self, Lane, WireTool};
-use pidash_jobs::cloud_agent::usage::{
-    ProviderTable, RunUsage, UsageLimits, UsageNumber,
-};
+use pidash_jobs::cloud_agent::usage::{ProviderTable, RunUsage, UsageLimits, UsageNumber};
 use pidash_jobs::cloud_agent::{usage_table, AgentError, StreamItem};
 use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::assistant::crypto::CryptoError;
@@ -71,16 +69,16 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_jobs::cloud_agent::agent::{
-    ensure_ascii, run_agent, ToolCallOutcome, ToolKind, Toolset as AgentToolset, TurnAgentConfig,
-    TurnAgentOutcome, DEFAULT_TIMEOUT_SECS,
-};
-use pidash_jobs::cloud_agent::history::{self, TurnMessage};
 use super::instructions::{self, InstructionsContext};
 use super::mcp_client::{CallResult, McpContent, McpToolDef, McpValue, ResilientSession};
 use super::tool_schemas;
 use super::tools_local::{self, ToolFailure};
 use super::tools_local_store::{PgToolStore, RedisClient, ToolEnv};
+use pidash_jobs::cloud_agent::agent::{
+    ensure_ascii, run_agent, ToolCallOutcome, ToolKind, Toolset as AgentToolset, TurnAgentConfig,
+    TurnAgentOutcome, DEFAULT_TIMEOUT_SECS,
+};
+use pidash_jobs::cloud_agent::history::{self, TurnMessage};
 
 /// The assistant's usage limits (`UsageLimits(request_limit=25,
 /// tool_calls_limit=20)`, `assistant/tasks.py:342`).
@@ -870,19 +868,15 @@ impl LiveTurnSeam {
         redis: Option<RedisClient>,
     ) -> Result<Self, SeamError> {
         let usage_document = usage_table::load().map_err(|error| SeamError(error.to_string()))?;
-        let extract = ProviderTable::load(&usage_document)
-            .map_err(|error| SeamError(error.to_string()))?;
+        let extract =
+            ProviderTable::load(&usage_document).map_err(|error| SeamError(error.to_string()))?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
             .map_err(|error| SeamError(error.to_string()))?;
         let tool_store = Arc::new(
-            PgToolStore::new(
-                pool.clone(),
-                redis.clone(),
-                settings.pidash_agent.clone(),
-            )
-            .map_err(|error| SeamError(error.message()))?,
+            PgToolStore::new(pool.clone(), redis.clone(), settings.pidash_agent.clone())
+                .map_err(|error| SeamError(error.message()))?,
         );
         let key_cache = KeyCache::new(
             settings.assistant.key_cache_ttl_secs,

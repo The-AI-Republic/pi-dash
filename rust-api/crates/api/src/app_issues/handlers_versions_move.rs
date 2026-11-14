@@ -1072,10 +1072,7 @@ async fn move_issue(
     });
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
-    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
-        &pool,
-        &state,
-    ));
+    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(&pool, &state));
     let creation = CreationDeps { pool: pool.clone() };
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();

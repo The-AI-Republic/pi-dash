@@ -2131,8 +2131,7 @@ mod tests {
             .map(String::as_str)
             .collect();
         keys.sort_unstable();
-        let mut golden_keys: Vec<&str> = golden["data"]["turns"]
-            ["first_turn_manifest_keys"]
+        let mut golden_keys: Vec<&str> = golden["data"]["turns"]["first_turn_manifest_keys"]
             .as_array()
             .expect("array")
             .iter()

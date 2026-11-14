@@ -445,8 +445,8 @@ describe("PodPicker", () => {
     renderPicker({}, queryClient);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     const ownRow = await screen.findByRole("option", { name: /gpu-box/ });
-    const engineRow = await screen.findByRole("option", { name: /Built-in engine/ });
-    expect(engineRow.textContent).toContain("Built-in engine · Work laptop");
+    const engineRow = await screen.findByRole("option", { name: /Pi Dash Agent/ });
+    expect(engineRow.textContent).toContain("Pi Dash Agent · Work laptop");
     expect(engineRow.textContent).toContain("offline");
     expect(ownRow.textContent).toContain("gpu-host");
     expect(ownRow.textContent).toContain("online · idle");

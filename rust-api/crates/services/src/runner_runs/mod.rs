@@ -107,8 +107,7 @@ pub use finalization::{
     lock_run_for_finalize_sql, merge_done_payload, plan_finalize_values, plan_publish_effects,
     plan_terminal_effects, select_run_for_capacity_sql, select_run_work_item_id_sql,
     update_capacity_marker_sql, update_hooks_marker_sql, CapacityPlan, EffectsSql, FinalizeError,
-    FinalizeValues, HooksPlan, TerminalEffectsInputs, TerminalEffectsOutcome,
-    TerminalEffectsPlan,
+    FinalizeValues, HooksPlan, TerminalEffectsInputs, TerminalEffectsOutcome, TerminalEffectsPlan,
 };
 pub use lifecycle::{
     comment_dedupe_exists_sql, failure_reread_sql, has_project_move_handoff,
