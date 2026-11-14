@@ -191,6 +191,241 @@ fn client_for_run(fake: &Fake, run_id: &str) -> ApiClient {
     ApiClient::new(env).unwrap()
 }
 
+// Exercise the real login flow through browser approval, workspace selection,
+// and the failing machine-token response, using only temporary local settings.
+async fn login_with_machine_token_error(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> (String, std::path::PathBuf, tempfile::TempDir) {
+    use pidash::cli::{auth::login, runner_ops};
+    use pidash::util::paths::Paths;
+
+    let response_body = body.to_string();
+    let fake = start_fake(Box::new(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("POST", "/api/v1/auth/device/start/") => CannedResponse::ok(
+            r#"{"device_code":"test-code","user_code":"TEST","verification_uri":"http://127.0.0.1/auth/device/","expires_in":60,"interval":1}"#,
+        ),
+        ("POST", "/api/v1/auth/device/token/") => CannedResponse::ok(
+            r#"{"access_token":"test-bridge-token","user_email":"test@example.com"}"#,
+        ),
+        ("GET", "/api/v1/auth/workspaces/") => CannedResponse::ok(
+            r#"{"workspaces":[{"slug":"test","name":"Test"}]}"#,
+        ),
+        ("POST", "/api/v1/auth/machine-token/") => CannedResponse {
+            status: status.as_u16(),
+            status_text: status.canonical_reason().unwrap(),
+            body: response_body.clone(),
+        },
+        _ => panic!("unexpected login request: {} {}", req.method, req.path),
+    })).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("custom settings");
+    let paths = Paths {
+        config_dir: config_dir.clone(),
+        data_dir: tmp.path().join("data"),
+        runtime_dir: tmp.path().join("runtime"),
+        machine_context_dir: config_dir,
+    };
+    let cloud_url = format!("http://{}", fake.addr);
+    runner_ops::write_cli_token(&paths, &cloud_url, "previous-token", false).unwrap();
+    let machine_id = runner_ops::ensure_dev_machine_id(&paths).unwrap();
+    let args = login::Args {
+        url: Some(cloud_url),
+        no_browser: true,
+        force: false,
+        workspace: Some("test".into()),
+        device_code_stdin: false,
+    };
+    let error = tokio::time::timeout(Duration::from_secs(10), login::run_auth_only(args, &paths))
+        .await
+        .expect("login should finish without interactive input")
+        .expect_err("machine-token failure must not be reported as successful login");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 4);
+    let exchange = recorded.last().unwrap();
+    assert_eq!(exchange.path, "/api/v1/auth/machine-token/");
+    assert_eq!(exchange.api_key.as_deref(), Some("test-bridge-token"));
+    let request_body: serde_json::Value = serde_json::from_str(&exchange.body).unwrap();
+    assert_eq!(request_body["dev_machine_id"], machine_id.to_string());
+    assert_eq!(
+        pidash::config::file::load_config(&paths)
+            .unwrap()
+            .daemon
+            .dev_machine_id,
+        Some(machine_id),
+        "a failed login must not silently reset the existing machine identity"
+    );
+    (error.to_string(), paths.config_path(), tmp)
+}
+
+#[tokio::test]
+async fn auth_machine_id_conflict_explains_recovery_with_the_actual_settings_path() {
+    let (message, config_path, _tmp) = login_with_machine_token_error(
+        reqwest::StatusCode::NOT_FOUND,
+        r#"{ "error": "dev_machine_not_found", "request_id": "test" }"#,
+    )
+    .await;
+
+    assert!(message.contains("Browser approval succeeded"));
+    assert!(message.contains("could not finish setting up this computer"));
+    assert!(message.contains("may already belong to a different Pi Dash account"));
+    assert!(message.contains("stop Pi Dash and back up"));
+    assert!(message.contains(&config_path.display().to_string()));
+    assert!(message.contains("remove only `dev_machine_id` from its [daemon] section"));
+    assert!(message.contains("`pidash auth login`"));
+    assert!(message.contains("Existing runners may need to be registered again"));
+    assert!(message.contains("HTTP 404 Not Found"));
+    assert!(message.contains("dev_machine_not_found"));
+}
+
+#[tokio::test]
+async fn auth_machine_token_other_errors_keep_their_diagnostic_details() {
+    for (status, body) in [
+        (
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"workspace_not_found"}"#,
+        ),
+        (
+            reqwest::StatusCode::NOT_FOUND,
+            "<html>Not Found: dev_machine_not_found</html>",
+        ),
+        (
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"dev_machine_not_found"}"#,
+        ),
+        (reqwest::StatusCode::NOT_FOUND, r#"{"error":null}"#),
+    ] {
+        let (message, _, _tmp) = login_with_machine_token_error(status, body).await;
+        assert_eq!(
+            message,
+            format!("machine-token exchange failed: HTTP {status}: {body}")
+        );
+    }
+}
+
+async fn runner_add_with_server_error(
+    status: u16,
+    body: &str,
+    workspace: Option<&str>,
+) -> anyhow::Error {
+    use pidash::cli::{runner, runner_ops};
+    use pidash::config::schema::AgentKind;
+    use pidash::util::paths::Paths;
+
+    let response_body = body.to_string();
+    let fake = start_fake(Box::new(move |req| {
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, "/api/v1/runner/runners/");
+        CannedResponse {
+            status,
+            status_text: reqwest::StatusCode::from_u16(status)
+                .unwrap()
+                .canonical_reason()
+                .unwrap(),
+            body: response_body.clone(),
+        }
+    }))
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        runtime_dir: tmp.path().join("runtime"),
+        machine_context_dir: tmp.path().join("config"),
+    };
+    runner_ops::write_cli_token(&paths, &format!("http://{}", fake.addr), "mt_test", false)
+        .unwrap();
+    runner_ops::write_cli_workspace(&paths, "saved-workspace").unwrap();
+    let args = runner::AddArgs {
+        url: None,
+        name: None,
+        project: "Project Display Name".into(),
+        workspace: workspace.map(str::to_string),
+        pod: None,
+        working_dir: None,
+        agent: AgentKind::Codex,
+        model: None,
+        reasoning_effort: None,
+        skip_agent_install: true,
+    };
+    let error = tokio::time::timeout(Duration::from_secs(10), runner::add(args, &paths))
+        .await
+        .expect("runner creation should fail without interactive input")
+        .expect_err("the fake server rejects runner creation");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "failure must not trigger extra requests");
+    assert_eq!(recorded[0].api_key.as_deref(), Some("mt_test"));
+    let request: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(request["project"], "Project Display Name");
+    assert_eq!(
+        request["workspace_slug"],
+        workspace.unwrap_or("saved-workspace")
+    );
+    assert!(
+        pidash::config::file::load_config(&paths)
+            .unwrap()
+            .runners
+            .is_empty()
+    );
+    error
+}
+
+#[tokio::test]
+async fn runner_project_not_found_explains_identifier_and_workspace() {
+    for workspace in [None, Some("explicit-workspace")] {
+        let error = runner_add_with_server_error(
+            404,
+            r#"{ "error": "project_not_found", "request_id": "test" }"#,
+            workspace,
+        )
+        .await;
+        let message = error.to_string();
+        assert!(message.contains("Project identifier \"Project Display Name\" was not found"));
+        assert!(message.contains(workspace.unwrap_or("saved-workspace")));
+        assert!(message.contains("identifier (short code), not its display name"));
+        assert!(message.contains("`pidash project list`"));
+        assert!(message.contains("`pidash runner add --project <IDENTIFIER>`"));
+        assert!(message.contains("--workspace <WORKSPACE_SLUG>"));
+        let detail = format!("{error:#}");
+        assert!(detail.contains("server: HTTP 404"));
+        assert!(detail.contains("project_not_found"));
+    }
+}
+
+#[tokio::test]
+async fn runner_other_server_errors_do_not_suggest_changing_project_identifiers() {
+    for (status, body) in [
+        (404, r#"{"error":"workspace_not_found"}"#),
+        (404, "<html>Not Found: project_not_found</html>"),
+        (500, r#"{"error":"project_not_found"}"#),
+        (404, r#"{"error":null}"#),
+    ] {
+        let error = runner_add_with_server_error(status, body, None).await;
+        assert!(
+            error
+                .to_string()
+                .starts_with("cloud rejected runner creation against http://")
+        );
+        assert!(!error.to_string().contains("pidash project list"));
+        let detail = format!("{error:#}");
+        assert!(detail.contains(&format!("server: HTTP {status}")));
+        assert!(detail.contains(body));
+    }
+}
+
+#[tokio::test]
+async fn runner_add_help_explains_the_project_identifier() {
+    let fake = start_fake(Box::new(|_| panic!("help must not contact the server"))).await;
+    let output = run_pidash(&fake, &["runner", "add", "--help"], "").await;
+    assert_eq!(output.code, Some(0));
+    assert!(output.stdout.contains("not its display name"));
+    assert!(output.stdout.contains("pidash project list"));
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn workspace_me_hits_users_me_with_api_key() {
     let fake = start_fake(Box::new(|_req| {
