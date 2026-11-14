@@ -92,10 +92,14 @@ use crate::state::AppState;
 use super::list_engine::{self, fetch_rows};
 use super::queries_core;
 use super::queries_engage;
-use super::{query_last, shape_row, Denial, QueryMap, NOT_FOUND_BODY};
+use super::{page_denial, query_last, shape_row, Denial, QueryMap, NOT_FOUND_BODY};
+use crate::paginator::{
+    apply_offset_window, max_hits, next_cursor, offset_window, parse_per_page, prev_cursor, Cursor,
+};
 use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
+use pidash_services::app_issues::envelope_head;
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
 };
@@ -1584,7 +1588,6 @@ fn render_lite(row: &Map<String, Value>) -> Response {
         get_str(row, "external_source"),
         get_bool(row, "is_synced"),
         || false,
-        || false,
     );
     let null = Value::Null;
     let mut body = String::from("{");
@@ -1695,24 +1698,17 @@ fn str_refs(ids: &[String]) -> Vec<&str> {
     ids.iter().map(String::as_str).collect()
 }
 
-/// One sync-table `.exists()` probe (`issue.py:76`).
-async fn sync_probe(
-    pool: &sqlx::PgPool,
-    github: bool,
-    issue_id: &uuid::Uuid,
-) -> Result<bool, Denial> {
+/// One git sync-table `.exists()` probe (`issue.py:76`, git-only after
+/// PDASHOSS01-354).
+async fn sync_probe(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let hit = if github {
-        serializers_engage::github_issue_synced(&db, *issue_id).await
-    } else {
-        serializers_engage::git_issue_synced(&db, *issue_id).await
-    };
-    hit.map_err(|_| Denial::ServerError)
+    serializers_engage::git_issue_synced(&db, *issue_id)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// The full path carries no `is_synced` annotation, so a set
-/// `external_source` runs the probes — git first, github only on a miss
-/// (the predicate's short-circuit, hence the probe counts).
+/// `external_source` runs the git probe (PDASHOSS01-354).
 async fn full_is_synced(
     pool: &sqlx::PgPool,
     row: &Map<String, Value>,
@@ -1721,21 +1717,11 @@ async fn full_is_synced(
     let source = get_str(row, "i_external_source");
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, false, issue_id).await?
+        sync_probe(pool, issue_id).await?
     } else {
         false
     };
-    let github_hit = if has_source && !git_hit {
-        sync_probe(pool, true, issue_id).await?
-    } else {
-        false
-    };
-    Ok(issue_is_actively_synced(
-        source,
-        None,
-        || git_hit,
-        || github_hit,
-    ))
+    Ok(issue_is_actively_synced(source, None, || git_hit))
 }
 
 /// The per-instance `_blocker_summary_cache` (`:1250-1258`): one
@@ -1936,7 +1922,7 @@ async fn probe_is_epic(pool: &sqlx::PgPool, type_id: Option<&str>) -> Result<boo
 }
 
 /// Shared sync-probe evaluation: `external_source` short-circuits false;
-/// otherwise git first, github only on a miss.
+/// otherwise git-only (PDASHOSS01-354).
 async fn probe_synced(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
@@ -1944,21 +1930,11 @@ async fn probe_synced(
 ) -> Result<bool, Denial> {
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, false, issue_id).await?
+        sync_probe(pool, issue_id).await?
     } else {
         false
     };
-    let github_hit = if has_source && !git_hit {
-        sync_probe(pool, true, issue_id).await?
-    } else {
-        false
-    };
-    Ok(issue_is_actively_synced(
-        source,
-        None,
-        || git_hit,
-        || github_hit,
-    ))
+    Ok(issue_is_actively_synced(source, None, || git_hit))
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,18 +1971,19 @@ async fn sub_issues_get_inner(
     query: &QueryMap,
 ) -> Result<Response, Response> {
     let order_param = query_last(query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let mut stmt = queries_core::sub_issues_select(slug, parent_id);
-    // The cycle-name traversal joins ride on the row query, so a
-    // multi-linked child fans out into one row per link like Django (the
-    // distribution below counts the fanned rows too).
-    sub_issues_order(&mut stmt, &order_param).map_err(IntoResponse::into_response)?;
-    let rows = fetch_rows(pool, stmt)
+    // Distribution over the full set in default ordering, so paging never
+    // changes its buckets.
+    let mut dist_stmt = queries_core::sub_issues_select(slug, parent_id);
+    use sea_orm::sea_query::Order;
+    dist_stmt.order_by(
+        (list_engine::a("issue"), issues::Column::CreatedAt),
+        Order::Desc,
+    );
+    let dist_rows = fetch_rows(pool, dist_stmt)
         .await
         .map_err(IntoResponse::into_response)?;
-    // The distribution reads the RAW rows (`:171-174`), before the timezone
-    // conversion; a stateless child keys as JSON `null` → `"null"`.
     let mut distribution: Buckets = Vec::new();
-    for row in &rows {
+    for row in &dist_rows {
         let key = match row.get("state_group") {
             Some(Value::String(group)) => group.clone(),
             Some(Value::Null) | None => "null".to_owned(),
@@ -2015,6 +1992,32 @@ async fn sub_issues_get_inner(
         let id = get_str(row, "id").unwrap_or_default().to_owned();
         bucket_push(&mut distribution, key, id);
     }
+    let total_count = dist_rows.len() as i64;
+    // Paginated page.
+    let per_page = parse_per_page(query_last(query, "per_page").as_deref(), 50, 100)
+        .map_err(|error| page_denial(error).into_response())?;
+    let cursor = match query_last(query, "cursor") {
+        Some(raw) => {
+            Cursor::from_string(&raw).map_err(|error| page_denial(error).into_response())?
+        }
+        None => Cursor::default_for(per_page),
+    };
+    let limit = per_page.min(1000);
+    let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
+        .map_err(|error| page_denial(error).into_response())?;
+    let mut stmt = queries_core::sub_issues_select(slug, parent_id);
+    sub_issues_order(&mut stmt, &order_param).map_err(IntoResponse::into_response)?;
+    let offset = window.offset;
+    let limit_val = window.stop - window.offset;
+    if limit_val > 0 {
+        stmt.limit(limit_val as u64).offset(offset as u64);
+    }
+    let fetched = fetch_rows(pool, stmt)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let has_more = fetched.len() as i64 > limit;
+    let rows =
+        apply_offset_window(&fetched, limit).map_err(|error| page_denial(error).into_response())?;
     let fields: Vec<String> = queries_core::SUB_ISSUES_KEYS
         .iter()
         .map(|key| (*key).to_owned())
@@ -2023,34 +2026,50 @@ async fn sub_issues_get_inner(
         .iter()
         .map(|row| shape_row(row, &fields, &gate.timezone, true))
         .collect();
-    match query_last(query, "group_by") {
-        None => Ok(render_sub_list(&shaped, &distribution)),
-        Some(param) if param.is_empty() => Ok(render_sub_list(&shaped, &distribution)),
+    let sub_issues = match query_last(query, "group_by") {
+        None => render_sub_list_str(&shaped),
+        Some(param) if param.is_empty() => render_sub_list_str(&shaped),
         Some(param) if param == "assignees__ids" => {
-            Ok(render_sub_grouped_assignees(&rows, &shaped, &distribution))
+            render_sub_grouped_assignees_str(&rows, &shaped)
         }
         Some(param) => {
-            if !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
+            // Django only raises KeyError when indexing a row; an empty
+            // page (cursor past the end) yields an empty grouped payload.
+            if !rows.is_empty() && !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
                 return Err(
                     Denial::BadError("The required key does not exist.".to_owned()).into_response(),
                 );
             }
-            Ok(render_sub_grouped(
-                &rows,
-                &shaped,
-                &param,
-                &gate.timezone,
-                &distribution,
-            ))
+            render_sub_grouped_str(&rows, &shaped, &param, &gate.timezone)
         }
-    }
+    };
+    let next = next_cursor(limit, window.page, has_more);
+    let prev = prev_cursor(limit, window.page);
+    let head = envelope_head(
+        None,
+        None,
+        total_count,
+        &next.to_string(),
+        &prev.to_string(),
+        next.has_results_or_false(),
+        prev.has_results_or_false(),
+        rows.len(),
+        max_hits(total_count, limit).map_err(|error| page_denial(error).into_response())?,
+        total_count,
+    );
+    Ok(json_response(
+        StatusCode::OK,
+        format!(
+            "{head},\"sub_issues\":{sub_issues},\"state_distribution\":{}}}",
+            render_string_list_map(&distribution)
+        ),
+    ))
 }
 
 /// `ORDER BY` for the sub-issue list: `order_issue_queryset` through the
 /// merged `order_sql`, resolved like pilot-2's flat path. An empty param
-/// skips the port explicitly and falls back to the model ordering
-/// (`-created_at` — the same statement); an unknown field is Django's
-/// `FieldError` → generic 500. The priority/state `CASE`s sort ascending
+/// reaches the paginator as `F("")` → Django's `FieldError` → generic 500;
+/// an unknown field is the same. The priority/state `CASE`s sort ascending
 /// then `issue.created_at DESC`; the list annotates `Coalesce(..., 0)`
 /// counts, so count keys order `0`-style; the cycle-name key joins a fresh
 /// cycle bridge (adding its fan-out joins to the statement).
@@ -2066,8 +2085,7 @@ pub(super) fn sub_issues_order(
         );
     };
     if order_by_param.is_empty() {
-        created_desc(stmt);
-        return Ok(());
+        return Err(Denial::ServerError);
     }
     let spec = order_sql(order_by_param, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -2116,25 +2134,14 @@ fn render_string_list_map(map: &Buckets) -> String {
     format!("{{{}}}", pairs.join(","))
 }
 
-fn render_sub_list(shaped: &[String], distribution: &Buckets) -> Response {
-    json_response(
-        StatusCode::OK,
-        format!(
-            "{{\"sub_issues\":[{}],\"state_distribution\":{}}}",
-            shaped.join(","),
-            render_string_list_map(distribution)
-        ),
-    )
+fn render_sub_list_str(shaped: &[String]) -> String {
+    format!("[{}]", shaped.join(","))
 }
 
 /// `group_by=assignees__ids` (`:183-189`): one bucket per assignee id,
 /// `None` for the unassigned. A null list falls through both branches, so
 /// the row is dropped (unreachable — the column is `COALESCE`d).
-fn render_sub_grouped_assignees(
-    rows: &[Map<String, Value>],
-    shaped: &[String],
-    distribution: &Buckets,
-) -> Response {
+fn render_sub_grouped_assignees_str(rows: &[Map<String, Value>], shaped: &[String]) -> String {
     let mut groups: Buckets = Vec::new();
     for (row, rendered) in rows.iter().zip(shaped.iter()) {
         match row.get("assignee_ids").and_then(Value::as_array) {
@@ -2150,33 +2157,24 @@ fn render_sub_grouped_assignees(
             None => {}
         }
     }
-    render_sub_buckets(&groups, distribution)
-}
-
-fn render_sub_buckets(groups: &Buckets, distribution: &Buckets) -> Response {
-    let buckets: Vec<String> = groups
-        .iter()
-        .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
-        .collect();
-    json_response(
-        StatusCode::OK,
-        format!(
-            "{{\"sub_issues\":{{{}}},\"state_distribution\":{}}}",
-            buckets.join(","),
-            render_string_list_map(distribution)
-        ),
+    format!(
+        "{{{}}}",
+        groups
+            .iter()
+            .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
 /// Generic `group_by=<values key>` (`:191-192`): `str()` of the CONVERTED
 /// row value (datetimes render in the actor zone, space-separated).
-fn render_sub_grouped(
+fn render_sub_grouped_str(
     rows: &[Map<String, Value>],
     shaped: &[String],
     key: &str,
     timezone: &Tz,
-    distribution: &Buckets,
-) -> Response {
+) -> String {
     let mut groups: Buckets = Vec::new();
     for (row, rendered) in rows.iter().zip(shaped.iter()) {
         let bucket = match key {
@@ -2187,7 +2185,14 @@ fn render_sub_grouped(
         };
         bucket_push(&mut groups, bucket, rendered.clone());
     }
-    render_sub_buckets(&groups, distribution)
+    format!(
+        "{{{}}}",
+        groups
+            .iter()
+            .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 /// Python `str()` for JSON scalars (the `group_by` / assignee-bucket keys).
@@ -2839,9 +2844,7 @@ mod tests {
                 .map(|()| stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder))
         };
         let _ = DbBackend::Postgres;
-        assert!(built("")
-            .unwrap()
-            .ends_with(r#"ORDER BY "issue"."created_at" DESC"#));
+        assert!(built("").is_err());
         assert!(built("-created_at")
             .unwrap()
             .ends_with(r#"ORDER BY "issue"."created_at" DESC"#));

@@ -19,6 +19,7 @@ import { Eye, Layers, Users } from "lucide-react";
 import * as React from "react";
 
 import { groupOfCycle, lifecycleLabel, lifecycleTone } from "../lib/cycleGroups.js";
+import { isCycleArchived } from "../lib/cycleMenu.js";
 import { UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "../lib/cycleMembers.js";
 import { cycleDetailPath } from "../lib/cycleScreen.js";
 import { cycleProgressPercent } from "../lib/cycleProgress.js";
@@ -72,11 +73,47 @@ export function CycleRow({
 }: CycleRowProps): React.ReactElement {
   const group = groupOfCycle(cycle.status);
   const isCurrent = group === null;
+  const isArchived = isCycleArchived(cycle);
   const assigneeIds = cycle.assignee_ids ?? [];
   const creator =
     cycle.created_by === null || cycle.created_by === undefined
       ? null
       : (directory.get(cycle.created_by) ?? UNKNOWN_CYCLE_MEMBER);
+  const bodyContent = (
+    <>
+      <span className="text-body min-w-0 flex-1 truncate font-medium text-(--text)">{cycle.name}</span>
+      <CycleProgressRing percent={cycleProgressPercent(cycle)} />
+      <Badge tone={lifecycleTone(cycle.status)} dot>
+        {lifecycleLabel(cycle.status)}
+      </Badge>
+      <CycleDateSpan startDate={cycle.start_date} endDate={cycle.end_date} projectTimeZone={projectTimeZone} />
+      {group === "upcoming" ? (
+        <span className="text-caption inline-flex shrink-0 items-center gap-(--space-1) text-(--text-muted)">
+          <Layers size={14} strokeWidth={1.5} aria-hidden="true" />
+          <span>{cycle.total_issues ?? 0}</span>
+          <span className="sr-only">work items</span>
+        </span>
+      ) : null}
+      {isCurrent ? (
+        creator === null ? null : (
+          memberAvatar(creator, creator.displayName)
+        )
+      ) : (
+        <span className="flex shrink-0 -space-x-1">
+          {creator === null ? null : memberAvatar(creator, creator.displayName)}
+          {assigneeIds.map((id) => memberAvatar(directory.get(id) ?? UNKNOWN_CYCLE_MEMBER, id))}
+          {assigneeIds.length === 0 ? (
+            <span
+              aria-label="No assignees"
+              className="text-caption inline-flex size-6 items-center justify-center rounded-(--radius-full) bg-(--subtle) text-(--text-muted)"
+            >
+              <Users size={14} strokeWidth={1.5} aria-hidden="true" />
+            </span>
+          ) : null}
+        </span>
+      )}
+    </>
+  );
   return (
     <div
       data-testid="cycle-row"
@@ -87,42 +124,22 @@ export function CycleRow({
           : "group flex items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3)"
       }
     >
-      <Link
-        to={cycleDetailPath(workspaceSlug, projectId, cycle.id)}
-        className="flex min-w-0 flex-1 items-center gap-(--space-3)"
-      >
-        <span className="text-body min-w-0 flex-1 truncate font-medium text-(--text)">{cycle.name}</span>
-        <CycleProgressRing percent={cycleProgressPercent(cycle)} />
-        <Badge tone={lifecycleTone(cycle.status)} dot>
-          {lifecycleLabel(cycle.status)}
-        </Badge>
-        <CycleDateSpan startDate={cycle.start_date} endDate={cycle.end_date} projectTimeZone={projectTimeZone} />
-        {group === "upcoming" ? (
-          <span className="text-caption inline-flex shrink-0 items-center gap-(--space-1) text-(--text-muted)">
-            <Layers size={14} strokeWidth={1.5} aria-hidden="true" />
-            <span>{cycle.total_issues ?? 0}</span>
-            <span className="sr-only">work items</span>
-          </span>
-        ) : null}
-        {isCurrent ? (
-          creator === null ? null : (
-            memberAvatar(creator, creator.displayName)
-          )
-        ) : (
-          <span className="flex shrink-0 -space-x-1">
-            {creator === null ? null : memberAvatar(creator, creator.displayName)}
-            {assigneeIds.map((id) => memberAvatar(directory.get(id) ?? UNKNOWN_CYCLE_MEMBER, id))}
-            {assigneeIds.length === 0 ? (
-              <span
-                aria-label="No assignees"
-                className="text-caption inline-flex size-6 items-center justify-center rounded-(--radius-full) bg-(--subtle) text-(--text-muted)"
-              >
-                <Users size={14} strokeWidth={1.5} aria-hidden="true" />
-              </span>
-            ) : null}
-          </span>
-        )}
-      </Link>
+      {isArchived ? (
+        <button
+          type="button"
+          onClick={() => onPeek(cycle.id)}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-(--space-3) text-left"
+        >
+          {bodyContent}
+        </button>
+      ) : (
+        <Link
+          to={cycleDetailPath(workspaceSlug, projectId, cycle.id)}
+          className="flex min-w-0 flex-1 items-center gap-(--space-3)"
+        >
+          {bodyContent}
+        </Link>
+      )}
       {showFavoriteMarker ? (
         <CycleFavoriteStar workspaceSlug={workspaceSlug} projectId={projectId} cycle={cycle} />
       ) : null}

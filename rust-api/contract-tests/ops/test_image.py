@@ -80,7 +80,7 @@ EXPECTED_COMMANDS = {
     "worker": [
         WAIT,
         WAIT_MIG,
-        'exec pidash-api worker --concurrency "$concurrency"',
+        'exec pidash-api worker "${worker_args[@]}"',
     ],
     "worker-local": [WAIT, WAIT_MIG, "exec pidash-api worker"],
     "beat": [WAIT, WAIT_MIG, "pidash-api worker"],
@@ -104,8 +104,9 @@ HELP_PREFIXES = [
 
 # Script-local variables (assigned by the scripts themselves, not read
 # from the environment): the signature collectors (api :11-21),
-# MACHINE_SIGNATURE (api export :21, read back at :24), and the worker
-# concurrency math (:19-28). Everything else $-referenced is an env dep.
+# MACHINE_SIGNATURE (api export :21, read back at :24), the worker
+# concurrency math (:19-28), and the Phase 2 worker queue/args locals
+# (queue, worker_args). Everything else $-referenced is an env dep.
 LOCAL_VARS = {
     "HOSTNAME",
     "MAC_ADDRESS",
@@ -115,6 +116,8 @@ LOCAL_VARS = {
     "SIGNATURE",
     "MACHINE_SIGNATURE",
     "concurrency",
+    "queue",
+    "worker_args",
 }
 
 # Runbook-table variables consumed by the Rust binary rather than the
@@ -366,6 +369,12 @@ def test_replay_worker():
             ("exec celery", [("cmd", EXPECTED_COMMANDS["worker"][-1])]),
         ],
     )
+    # Phase 2: worker_args carries --concurrency/--queue and optional --no-scheduler
+    text = read_script("worker")
+    assert 'worker_args=(--concurrency "$concurrency" --queue "$queue")' in text
+    assert "worker_args+=(--no-scheduler)" in text
+    assert "WORKER_QUEUE" in text
+    assert "WORKER_NO_SCHEDULER" in text
 
 
 def test_replay_worker_local():

@@ -60,6 +60,7 @@ function renderCard(
     estimateType?: string | null;
     startDate?: string | null;
     endDate?: string | null;
+    projectTimeZone?: string;
     onMeasureChange?: (measure: HeroMeasure) => void;
   } = {}
 ): void {
@@ -71,6 +72,7 @@ function renderCard(
         cycleId={CYCLES_CYCLE_ID}
         startDate={props.startDate ?? "2026-10-01T00:00:00Z"}
         endDate={props.endDate ?? "2026-10-31T00:00:00Z"}
+        projectTimeZone={props.projectTimeZone ?? "UTC"}
         measure={props.measure ?? "issues"}
         estimatesEnabled={props.estimatesEnabled ?? true}
         estimateType={props.estimateType ?? "points"}
@@ -135,6 +137,7 @@ describe("HeroBurndownCard", () => {
           cycleId={CYCLES_CYCLE_ID}
           startDate={null}
           endDate={null}
+          projectTimeZone="UTC"
           measure="issues"
           estimatesEnabled={true}
           estimateType="points"
@@ -166,6 +169,7 @@ describe("HeroBurndownCard", () => {
           cycleId={CYCLES_CYCLE_ID}
           startDate="2026-10-01T00:00:00Z"
           endDate="2026-10-31T00:00:00Z"
+          projectTimeZone="UTC"
           measure="issues"
           estimatesEnabled={true}
           estimateType="points"
@@ -185,6 +189,7 @@ describe("HeroBurndownCard", () => {
           cycleId={CYCLES_CYCLE_ID}
           startDate="2026-10-01T00:00:00Z"
           endDate="2026-10-31T00:00:00Z"
+          projectTimeZone="UTC"
           measure="issues"
           estimatesEnabled={true}
           estimateType="points"

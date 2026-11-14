@@ -139,11 +139,18 @@ def test_install_start_admin_creates_session(admin, world, db, susers):
     assert f"state={body['state']}" in body["install_url"]
     # NOTE (ported behavior, PIDASHCONV-932): the model create stamps
     # created_by with the request actor and leaves updated_by NULL
-    # (BaseModel.save on the adding path).
+    # (BaseModel.save on the adding path). During the 3/6 migration the
+    # backends write different tables (Django: legacy, Rust: generic),
+    # so the stamp check accepts the row in either.
     row = db.fetchone(
-        "SELECT created_by_id, updated_by_id FROM github_app_install_sessions WHERE state = %s",
+        "SELECT created_by_id, updated_by_id FROM git_provider_install_sessions WHERE state = %s",
         (body["state"],),
     )
+    if row is None:
+        row = db.fetchone(
+            "SELECT created_by_id, updated_by_id FROM github_app_install_sessions WHERE state = %s",
+            (body["state"],),
+        )
     assert str(row["created_by_id"]) == susers["tadmin"]["id"]
     assert row["updated_by_id"] is None
 

@@ -6,7 +6,13 @@
 // applied-filter chips. Rows: VIEW-004, VIEW-005, VIEW-006, VIEW-007.
 // Green on apps/web first.
 import { test, expect } from "../fixtures";
-import { createProjectViewFull, patchProjectView, serverSavedViews } from "../helpers/api";
+import {
+  createProjectViewFull,
+  patchProjectView,
+  seatFreshMember,
+  serverSavedViews,
+  serverWorkspaceMembers,
+} from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { viewsHarness, viewsOpenListAs } from "./support";
 
@@ -214,6 +220,35 @@ test(
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual(expect.arrayContaining([starred, plain]));
       const server = await serverSavedViews(workspaceSlug, projectId, owner.cookie);
       expect(server).toHaveLength(2);
+    });
+  }
+);
+
+test(
+  specTitle(["VIEW-006"], "creator offers project members only, not other workspace members"),
+  { tag: specTags(["VIEW-006"]) },
+  async ({ driver }) => {
+    const harness = await viewsHarness("parity-v6-outsider");
+    const { owner, workspaceSlug } = harness;
+    // A workspace member outside the project: invited to the workspace only.
+    const outsider = await seatFreshMember(owner, workspaceSlug, 15, "parity-outside-v6");
+
+    await test.step("the outsider workspace member is not offered in Created by", async () => {
+      await viewsOpenListAs(driver, harness);
+      await expect.poll(() => driver.viewsListNames(), POLL).toHaveLength(0);
+      const all = await serverWorkspaceMembers(workspaceSlug, owner.cookie);
+      const outsiderRow = all.find((row) => row.userId === outsider.userId);
+      expect(outsiderRow).toBeDefined();
+      const outsiderName = outsiderRow?.displayName ?? outsider.userId;
+
+      await driver.viewsFiltersOpen();
+      const options = await driver.viewsFiltersCreatorOptions();
+      expect(options.join(" ")).toContain("You");
+      expect(options).not.toContain(outsiderName);
+      // The search cannot surface the outsider either.
+      await driver.viewsFiltersSearchType(outsiderName);
+      await expect.poll(() => driver.viewsFiltersPanelText(), POLL).toContain("No matches found");
+      await driver.viewsFiltersClose();
     });
   }
 );
