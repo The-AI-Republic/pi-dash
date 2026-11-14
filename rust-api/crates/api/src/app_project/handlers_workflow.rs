@@ -25,7 +25,9 @@
 //! * Bulk create persists the `Estimate` row *before* points validation
 //!   (`estimate/base.py:69` vs `:78-80`), so a 400 on bad points still
 //!   creates a point-less estimate (fixture `bulk_create_long_value_400`
-//!   + the `Bad` row in `bulk_list`).
+//!   + the `Bad` row in `bulk_list`). Fixed by NEWPIDASH-274, DIFF-23:
+//!     Rust validates points first and inserts estimate + points in one
+//!     transaction, so a refusal stores nothing.
 //! * Bulk `partial_update` looks the estimate up unscoped
 //!   (`Estimate.objects.get(pk=estimate_id)`, `:116`) — a UUID from any
 //!   project renames it — while the points filter stays scoped.
@@ -2257,11 +2259,12 @@ fn bulk_create_points_shape(points: Option<&Value>) -> CreatePoints<'_> {
 }
 
 /// `BulkEstimatePointEndpoint.create` (`estimate/base.py:63-101`):
-/// persist the `Estimate` row *first* (unvalidated header fields, random
-/// name default), *then* validate the points — a 400 still creates a
-/// point-less estimate (the pinned bug). Answers 200 with the read
-/// shape. Missing/non-dict `estimate`, or a non-dict body, raises
-/// `AttributeError` → 500.
+/// unvalidated header fields (random name default), then validate the
+/// points, then insert estimate + points in one transaction — a 400
+/// stores nothing (DIFF-23, old bug fix for PB-0590; Django persists
+/// the estimate row first and leaves a point-less estimate behind).
+/// Answers 200 with the read shape. Missing/non-dict `estimate`, or a
+/// non-dict body, raises `AttributeError` → 500.
 async fn bulk_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -2329,30 +2332,11 @@ async fn bulk_create(
         .await
         .map_err(orm_denial)?;
     let workspace_id = workspace.ok_or(Denial::ObjectNotFound)?;
-    let estimate_id = uuid::Uuid::new_v4();
-    let now = utc_now_micros();
-    // The row persists BEFORE points validation (pinned bug).
-    use sea_orm::ActiveValue::Set;
-    est_entity::ActiveModel {
-        id: Set(estimate_id),
-        project_id: Set(project_id),
-        workspace_id: Set(workspace_id),
-        name: Set(name),
-        description: Set(String::new()),
-        r#type: Set(estimate_type),
-        last_used: Set(last_used),
-        created_at: Set(now.into()),
-        updated_at: Set(now.into()),
-        created_by_id: Set(Some(actor.id)),
-        updated_by_id: Set(None),
-        deleted_at: Set(None),
-    }
-    .insert(&db)
-    .await
-    .map_err(orm_denial)?;
     // Points validation (`many=True`): `:78` passes
-    // `request.data.get("estimate_points")` (no default) — the estimate
-    // row above already persists whatever the gate below answers.
+    // `request.data.get("estimate_points")` (no default). DIFF-23
+    // (NEWPIDASH-274, old bug fix for PB-0590): validation runs before
+    // any insert, so a refusal stores nothing (Django inserts the
+    // estimate row first and leaves a point-less estimate behind).
     let items: Vec<&Value> = match bulk_create_points_shape(data.get("estimate_points")) {
         CreatePoints::Missing => {
             return Ok(json_response(
@@ -2386,8 +2370,9 @@ async fn bulk_create(
                 validated.push(input);
             }
             Err(Value::String(marker)) if marker == "too-big" => {
-                // Unbounded-int key: Python dies at the column (500) —
-                // the estimate row above already persists, as in Python.
+                // Unbounded-int key: Python dies at the column (500).
+                // DIFF-23: validation runs before any insert, so no
+                // estimate row persists (Django leaves one behind).
                 return Err(Denial::ServerError);
             }
             Err(errors) => {
@@ -2402,6 +2387,36 @@ async fn bulk_create(
             Value::Array(item_errors).to_string(),
         ));
     }
+    // `key` is validated to `i64`; pre-check the `int4` range so an
+    // out-of-range tail answers the 500 before any insert (DIFF-23:
+    // Django answers 500 after the estimate row already persists).
+    for input in &validated {
+        i32::try_from(input.key).map_err(|_| Denial::ServerError)?;
+    }
+    let estimate_id = uuid::Uuid::new_v4();
+    let now = utc_now_micros();
+    use sea_orm::ActiveValue::Set;
+    // One transaction for estimate + points (DIFF-23): any insert
+    // failure rolls the estimate back too, so a refusal stores nothing.
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+    est_entity::ActiveModel {
+        id: Set(estimate_id),
+        project_id: Set(project_id),
+        workspace_id: Set(workspace_id),
+        name: Set(name),
+        description: Set(String::new()),
+        r#type: Set(estimate_type),
+        last_used: Set(last_used),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+    }
+    .insert(&conn)
+    .await
+    .map_err(orm_denial)?;
     // `bulk_create(ignore_conflicts=True)` — no unique constraints exist
     // on the table, so this is a plain multi-row insert (audit columns
     // explicit, since `bulk_create` bypasses `save()`).
@@ -2427,10 +2442,11 @@ async fn bulk_create(
             });
         }
         ep_entity::Entity::insert_many(models)
-            .exec(&db)
+            .exec(&conn)
             .await
             .map_err(orm_denial)?;
     }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(json_ok(
         render_created_estimate(&pool, estimate_id, actor.timezone).await?,
     ))

@@ -2,6 +2,8 @@
 
 from psycopg.rows import dict_row
 
+from _harness.diffs import expect
+
 from .conftest import assert_keys
 
 ESTIMATE_KEYS = [
@@ -62,13 +64,56 @@ def test_bulk_create_empty_points_200(world):
     assert resp.json()["points"] == []
 
 
-def test_bulk_create_long_value_400(world):
+def test_bulk_create_long_value_400(world, db):
+    # DIFF-23 (NEWPIDASH-274, old bug fix for PB-0590): Django inserts the
+    # Estimate row before points validation, so a 400 still leaves a
+    # point-less estimate behind; Rust validates first and stores nothing.
+    # Both answer the same 400 — only persistence differs.
     client, _, ws, project = world.full_stack()
     resp = client.post(
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/",
         json={"estimate": {"name": "Bad", "type": "points"},
               "estimate_points": [{"key": 1, "value": "x" * 21, "description": ""}]})
     assert resp.status_code == 400
+    assert resp.json() == [
+        {"non_field_errors": ["Value can't be more than 20 characters"]}]
+    listed = client.get(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/")
+    assert listed.status_code == 200
+    assert len([r for r in listed.json() if r["name"] == "Bad"]) == expect(
+        "DIFF-23", django=1, rust=0)
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM estimates WHERE name=%s AND project_id=%s",
+            ("Bad", str(project["id"])))
+        assert cur.fetchone()["n"] == expect("DIFF-23", django=1, rust=0)
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM estimate_points ep "
+            "JOIN estimates e ON e.id=ep.estimate_id "
+            "WHERE e.name=%s AND e.project_id=%s",
+            ("Bad", str(project["id"])))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_bulk_create_missing_points_400(world, db):
+    # DIFF-23 sibling: a missing `estimate_points` key takes the same
+    # insert-before-validate path as the overlong value on Django.
+    client, _, ws, project = world.full_stack()
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/",
+        json={"estimate": {"name": "Missing", "type": "points"}})
+    assert resp.status_code == 400
+    assert resp.json() == {"non_field_errors": ["No data provided"]}
+    listed = client.get(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/")
+    assert listed.status_code == 200
+    assert len([r for r in listed.json() if r["name"] == "Missing"]) == expect(
+        "DIFF-23", django=1, rust=0)
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM estimates WHERE name=%s AND project_id=%s",
+            ("Missing", str(project["id"])))
+        assert cur.fetchone()["n"] == expect("DIFF-23", django=1, rust=0)
 
 
 def test_bulk_list_shape(world):
