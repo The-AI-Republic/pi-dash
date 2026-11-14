@@ -1268,7 +1268,6 @@ fn jsonschema_check_type(subschema: &Value, value: &Value) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oss_worker::model_runtime::schemas::Golden;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -1530,7 +1529,8 @@ mod tests {
         mcp: Vec<ToolSchema>,
     ) -> Harness {
         let (base_url, state) = mock_server(replies).await;
-        let golden = Golden::load().expect("golden parses");
+        // P2: follows the new UsageDocument loader; retired file, P3.
+        let golden = crate::cloud_agent::usage_table::load().expect("fixture parses");
         let function_schemas: HashMap<String, ToolSchema> = functions
             .into_iter()
             .map(|schema| (schema.name.clone(), schema))

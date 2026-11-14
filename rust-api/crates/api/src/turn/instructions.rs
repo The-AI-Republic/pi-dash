@@ -13,8 +13,8 @@
 //! (`agent/__init__.py:1477-1485,2588`). The `turn-runtime` captures
 //! show exactly two leading system messages on every request, and the
 //! provider request builders
-//! ([`openai_request_body`][super::streaming::openai_request_body] /
-//! [`anthropic_request_body`][super::streaming::anthropic_request_body])
+//! (`pidash_jobs::cloud_agent::provider::openai_request_body` /
+//! `pidash_jobs::cloud_agent::provider::anthropic_request_body`)
 //! turn each into its own system message (OpenAI) or `system` block
 //! run (Anthropic).
 //!

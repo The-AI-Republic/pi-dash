@@ -93,15 +93,15 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
-use pidash_jobs::assistant::run_turn::{AgentError, StreamItem};
-use pidash_jobs::dispatch_execute::UsageLimits;
-use pidash_jobs::oss_worker::model_runtime::provider::{
+use crate::cloud_agent::provider::{
     generate_tool_call_id, Finish, Lane, ProviderError, ToolArgs, WireTool,
 };
-use pidash_jobs::oss_worker::model_runtime::usage::{
+use crate::cloud_agent::usage::{
     check_before_request, check_before_tool_call, check_tokens, ProviderTable, RunUsage,
+    UsageLimits,
 };
-use pidash_jobs::oss_worker::model_runtime::validation::unknown_tool_content;
+use crate::cloud_agent::validation::unknown_tool_content;
+use crate::cloud_agent::{AgentError, StreamItem};
 
 use super::history::{
     now_stamp, parse_retry_details, RetryErrorDetail, RunIds, TurnFinish, TurnMessage, TurnOutcome,
@@ -111,22 +111,6 @@ use super::streaming::{
     anthropic_request_body, encode_body, openai_request_body, stream_endpoint, stream_turn,
     StreamEvent, StreamPart, StreamRequest,
 };
-
-/// `UsageLimits(request_limit=25, tool_calls_limit=20)` (`tasks.py:342`).
-///
-/// Built from the constants in `pidash_jobs::assistant::run_turn` so the
-/// drive and the live run cannot drift apart.
-pub fn turn_usage_limits() -> UsageLimits {
-    UsageLimits {
-        request_limit: Some(i64::from(pidash_jobs::assistant::run_turn::REQUEST_LIMIT)),
-        tool_calls_limit: Some(i64::from(
-            pidash_jobs::assistant::run_turn::TOOL_CALLS_LIMIT,
-        )),
-        input_tokens_limit: None,
-        output_tokens_limit: None,
-        total_tokens_limit: None,
-    }
-}
 
 /// `Agent(retries=2)` (`runtime/agent.py:30`): the same budget for tool
 /// retries (`Agent._max_tool_retries`) and output retries
@@ -870,7 +854,7 @@ fn provider_error(lane: &Lane, error: &ProviderError) -> TurnLoopError {
             status, body_json, ..
         } => (
             Some(*status),
-            pidash_jobs::assistant::provider_detail(body_json.as_ref()),
+            crate::cloud_agent::errors::provider_detail(body_json.as_ref()),
         ),
         ProviderError::Timeout | ProviderError::Connection | ProviderError::InvalidResponse(_) => {
             (None, String::new())
@@ -921,7 +905,7 @@ fn content_filter_message(state: &RunState) -> String {
     } else if let Some(refusal) = present("refusal") {
         format!(
             "Content filter triggered. Refusal: {}",
-            pidash_jobs::oss_worker::model_runtime::provider::py_repr(&Value::String(refusal))
+            crate::cloud_agent::provider::py_repr(&Value::String(refusal))
         )
     } else {
         "Content filter triggered.".to_owned()
@@ -945,13 +929,13 @@ fn content_filter_message(state: &RunState) -> String {
 }
 
 /// CPython `json.dumps(..., ensure_ascii=True)` escaping for the
-/// content-filter body. Reimplemented here because the D-11 copy is
-/// `pub(crate)` in `pidash_jobs` (foundation crates are read-only):
-/// non-ASCII becomes `\uXXXX` (surrogate pairs above the BMP), and the
-/// control characters use CPython's short escapes. Shared with the MCP
-/// result wrapper ([`super::live`] frames dict results through it), so
-/// there is one escaper for the turn path.
-pub(crate) fn ensure_ascii(text: &str) -> String {
+/// content-filter body: non-ASCII becomes `\uXXXX` (surrogate pairs
+/// above the BMP), and the control characters use CPython's short
+/// escapes. Distinct from the document re-escaper in `validation`
+/// (which tracks JSON string boundaries). Shared with the MCP result
+/// wrapper in the api crate's live seam, so there is one text escaper
+/// for the turn path.
+pub fn ensure_ascii(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
@@ -988,15 +972,15 @@ mod tests {
         reply_for, request_body_of, request_bytes_of, stub_server, wire_tools_from_body,
     };
     use super::*;
-    use pidash_jobs::assistant::run_turn::CODE_ITERATION_LIMIT;
-    use pidash_jobs::assistant::{classify_provider_error, BYOK};
-    use pidash_jobs::oss_worker::model_runtime::schemas::Golden;
+    // P2: CODE_ITERATION_LIMIT inlined as the literal below — no
+    // run_turn import on the engine.
+    use crate::cloud_agent::errors::{classify_provider_error, BYOK};
     use std::collections::BTreeMap;
 
     /// The D-11 usage-extractor table (embedded golden).
     fn provider_table() -> ProviderTable {
-        let golden = Golden::load().expect("golden parses");
-        ProviderTable::load(&golden).expect("provider table loads")
+        let document = crate::cloud_agent::usage_table::load().expect("fixture parses");
+        ProviderTable::load(&document).expect("provider table loads")
     }
 
     /// A toolset replaying one capture's tools: wire tools from the
@@ -1252,7 +1236,15 @@ mod tests {
         for blob in history {
             replayed.extend(parse_blob(blob).expect("history blob parses"));
         }
-        let limits = turn_usage_limits();
+        // Inlined (P2): the assistant owns turn_usage_limits; the
+        // engine must not import it.
+        let limits = UsageLimits {
+            request_limit: Some(25),
+            tool_calls_limit: Some(20),
+            input_tokens_limit: None,
+            output_tokens_limit: None,
+            total_tokens_limit: None,
+        };
         let config = TurnAgentConfig {
             lane: &lane,
             client: &reqwest::Client::new(),
@@ -1413,7 +1405,7 @@ mod tests {
                     AgentError::from(TurnLoopError::UsageLimit(message.clone())),
                     AgentError::UsageLimit(_)
                 ));
-                assert_eq!(fixture["turn"]["error_code"], CODE_ITERATION_LIMIT);
+                assert_eq!(fixture["turn"]["error_code"], "iteration_limit");
             }
             other => panic!("expected a usage limit, got {other:?}"),
         }
@@ -1489,9 +1481,19 @@ mod tests {
 
     #[tokio::test]
     async fn limits_match_the_agent_construction() {
-        let limits = turn_usage_limits();
-        assert_eq!(limits.request_limit, Some(25));
-        assert_eq!(limits.tool_calls_limit, Some(20));
+        // Mirrors live::turn_usage_limits (engine imports nothing from
+        // the assistant in production; this pin swaps via the same
+        // constants so any drift fails the suites on both sides).
+        use crate::assistant::run_turn::{REQUEST_LIMIT, TOOL_CALLS_LIMIT};
+        let limits = UsageLimits {
+            request_limit: Some(i64::from(REQUEST_LIMIT)),
+            tool_calls_limit: Some(i64::from(TOOL_CALLS_LIMIT)),
+            input_tokens_limit: None,
+            output_tokens_limit: None,
+            total_tokens_limit: None,
+        };
+        assert_eq!(limits.request_limit, Some(i64::from(REQUEST_LIMIT)));
+        assert_eq!(limits.tool_calls_limit, Some(i64::from(TOOL_CALLS_LIMIT)));
         assert_eq!(limits.input_tokens_limit, None);
         assert_eq!(MAX_RETRIES, 2);
     }

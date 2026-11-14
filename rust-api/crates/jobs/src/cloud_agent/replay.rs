@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
-use pidash_jobs::oss_worker::model_runtime::provider::WireTool;
+use crate::cloud_agent::provider::WireTool;
 
 /// The fixtures directory of the crate (`rust-api/fixtures`).
 pub fn fixture_dir() -> PathBuf {

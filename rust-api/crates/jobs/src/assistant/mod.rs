@@ -12,11 +12,13 @@
 //! Both names are registered in `worker()` (the standalone rule): an
 //! unregistered name parks as failed, never forwarded to Python.
 
-pub mod provider_errors;
 pub mod run_turn;
 pub mod sweep;
 
-pub use provider_errors::{classify_provider_error, provider_detail, BYOK, GATEWAY};
+/// Provider error classification moved to `cloud_agent::errors` in P2;
+/// re-exported here so `assistant::{classify_provider_error, BYOK}`
+/// (and the SDK paths built on them) keep compiling.
+pub use crate::cloud_agent::errors::{classify_provider_error, provider_detail, BYOK, GATEWAY};
 pub use run_turn::{
     cancel_key, context_eligible, register_turn_handler, DriveResult, SeamError, SkippedServer,
     StreamItem, StreamSink, TurnContext, TurnSeam, TurnUsage, RUN_TURN_TASK,
@@ -175,7 +177,7 @@ mod tests {
             body_detail: &str,
             model_name: &str,
         ) -> Result<Option<(String, String)>, SeamError> {
-            use super::provider_errors::{classify_provider_error, BYOK};
+            use crate::cloud_agent::errors::{classify_provider_error, BYOK};
             Ok(classify_provider_error(
                 status_code,
                 message,
