@@ -157,12 +157,12 @@ def _queued_run(seeder, workspace_id, owner_id, pod_id, issue_id, *,
             executor_kind, run_config, required_capabilities, thread_id,
             llm_model, usage, dispatch_attempts, cancel_reason,
             error_details, tool_plan, phase_kind, agent_metadata, pin_kind,
-            created_at)
+            created_at, failure_reason)
            VALUES (%s,%s,%s,%s,%s,%s,
                    NULL,%s,'queued','',%s,
                    %s,'{}','[]','','','{}',0,'',
                    '{}','{}','','{}','locality',
-                   now())""",
+                   now(),'')""",
         (
             run_id, workspace_id, owner_id, created_by, pod_id, issue_id,
             pinned_runner_id, trigger, executor_kind,

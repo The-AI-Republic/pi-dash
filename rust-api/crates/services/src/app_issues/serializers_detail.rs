@@ -86,9 +86,11 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use pidash_db::tasks_ticker::IssueAgentTicker;
+use pidash_db::tasks_ticker::{IssueAgentTicker, TickerDisarmReason};
 use pidash_types::orchestration::{is_ticking_state, StateRef};
-use pidash_types::runner_runs::{classify_run_error, flat_token_fields, RunErrorDiagnostic};
+use pidash_types::runner_runs::{
+    classify_run_error_for_reason, flat_token_fields, RunErrorDiagnostic,
+};
 
 use super::serializers_links::{user_lite_to_representation, UserLiteRow, UserLiteView};
 use super::serializers_refs::{
@@ -350,8 +352,9 @@ pub struct AgentTickerView<'a> {
 /// `ticker` is the issue's `agent_ticker` row (`None` at the call boundary
 /// renders `None`, `:1275-1281`); `policy` carries the project pool +
 /// cadence columns; `state` is the issue's current state for
-/// `can_re_tick` (`(is_ticking_state or is_paused_state) and cap_reached`,
-/// `:1296`) and the stage interval. Pool math, predicates and interval all
+/// `can_re_tick` (`(is_ticking_state or is_paused_state) and
+/// (cap_reached or failure_stopped)`, `:1296`, PDASHOSS01-183) and the
+/// stage interval. Pool math, predicates and interval all
 /// run through the merged D-10/D-12 ports.
 pub fn agent_ticker_to_representation<'a>(
     ticker: &'a IssueAgentTicker,
@@ -359,8 +362,16 @@ pub fn agent_ticker_to_representation<'a>(
     state: Option<&StateRef<'_>>,
 ) -> AgentTickerView<'a> {
     let pool = pool_size(policy);
-    let can_re_tick =
-        (is_ticking_state(state) || is_paused_state(state)) && ticker.cap_reached(pool);
+    // Besides a spent pool, the failure policy's stops (needs-human /
+    // repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+    // the clock without granting, mirroring `_on_retick`.
+    let failure_stopped = !ticker.enabled
+        && ticker
+            .disarm_reason
+            .parse::<TickerDisarmReason>()
+            .is_ok_and(TickerDisarmReason::is_failure_stop);
+    let can_re_tick = (is_ticking_state(state) || is_paused_state(state))
+        && (ticker.cap_reached(pool) || failure_stopped);
     AgentTickerView {
         enabled: ticker.enabled,
         user_disabled: ticker.user_disabled,
@@ -468,9 +479,10 @@ pub fn agent_live_state_to_representation<'a>(
 }
 
 /// `_serialize_agent_run` wire keys (`issue.py:1352-1371`), in dict order:
-/// 20 (PDASHOSS01-351 adds `cancel_requested_at` / `cancel_reason` so the
-/// issue card can show Stopping for cloud RUNNING).
-pub const AGENT_RUN_FIELDS: [&str; 20] = [
+/// 21 (`failure_reason` since PDASHOSS01-183; PDASHOSS01-351 adds
+/// `cancel_requested_at` / `cancel_reason` so the issue card can show
+/// Stopping for cloud RUNNING).
+pub const AGENT_RUN_FIELDS: [&str; 21] = [
     "id",
     "status",
     "executor_kind",
@@ -485,6 +497,7 @@ pub const AGENT_RUN_FIELDS: [&str; 20] = [
     "done_payload",
     "error",
     "error_code",
+    "failure_reason",
     "error_diagnostic",
     "llm_model",
     "input_tokens",
@@ -519,6 +532,7 @@ pub struct AgentRunDetailRow<'a> {
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -527,7 +541,8 @@ pub struct AgentRunDetailRow<'a> {
 }
 
 /// `_serialize_agent_run` output (`issue.py:1339-1371`), in dict order.
-/// `error_diagnostic` is the merged `classify_run_error` verdict.
+/// `error_diagnostic` is the merged `classify_run_error(error,
+/// failure_reason=…)` verdict (PDASHOSS01-183).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentRunView<'a> {
     pub id: &'a str,
@@ -544,6 +559,7 @@ pub struct AgentRunView<'a> {
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub error_diagnostic: Option<RunErrorDiagnostic>,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
@@ -591,7 +607,8 @@ pub fn agent_run_to_representation<'a>(
         done_payload: run.done_payload,
         error: run.error,
         error_code: run.error_code,
-        error_diagnostic: classify_run_error(Some(run.error)),
+        failure_reason: run.failure_reason,
+        error_diagnostic: classify_run_error_for_reason(Some(run.error), Some(run.failure_reason)),
         llm_model: run.llm_model,
         input_tokens: run.input_tokens,
         output_tokens: run.output_tokens,
@@ -1150,6 +1167,7 @@ mod tests {
     use super::*;
     use pidash_db::dispatch::AgentRunStatus;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker as TickerRowCheck;
+    use pidash_types::runner_runs::classify_run_error;
 
     fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
         let rendered = serde_json::to_string(value).expect("serializes");
@@ -1310,6 +1328,7 @@ mod tests {
             done_payload: None,
             error: "",
             error_code: "",
+            failure_reason: "",
             llm_model: "m",
             input_tokens: Some(100),
             output_tokens: Some(20),
@@ -1549,7 +1568,7 @@ mod tests {
              \"started_at\":\"2026-10-03T10:00:02+00:00\",\"ended_at\":null,\
              \"cancel_requested_at\":null,\"cancel_reason\":\"\",\
              \"done_payload\":{\"signal\":\"done\"},\"error\":\"boom\\nsecond line\",\
-             \"error_code\":\"E1\",\"error_diagnostic\":{\"source\":\"unknown\",\
+             \"error_code\":\"E1\",\"failure_reason\":\"\",\"error_diagnostic\":{\"source\":\"unknown\",\
              \"source_label\":\"Unknown\",\"kind\":\"unknown\",\"summary\":\"boom\",\
              \"action\":\"\"},\"llm_model\":\"m\",\"input_tokens\":100,\
              \"output_tokens\":20,\"total_tokens\":120,\

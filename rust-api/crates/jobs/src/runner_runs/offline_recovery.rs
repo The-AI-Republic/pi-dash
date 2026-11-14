@@ -681,7 +681,7 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             _run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
             panic!("disabled sweep must not disarm")
         }
         fn apply_deferred_pause(

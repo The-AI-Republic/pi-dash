@@ -226,6 +226,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "run_config",
     "tool_plan",
     "error_details",
+    "failure_reason",
     "prompt",
     "prompt_manifest",
     "ended_at",
@@ -340,10 +341,10 @@ pub const RUN_INSERT_SQL: &str =
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
+    lease_expires_at, done_payload, error_details, failure_reason, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
+    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '', '{}', $14, \
     NULL, NULL, NULL, $15)";
 
 /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
@@ -385,15 +386,27 @@ pub fn finalize_lock_sql() -> String {
 }
 
 /// The finalize write (`agent_run_finalization.py:52-71`):
+/// `finalize_agent_run`'s `failure_reason` safety net for these FAILED
+/// writes (PDASHOSS01-183): `classify(error, error_code=error_code)` —
+/// no runner reason on the orchestration paths.
+pub fn finalize_failure_reason(error_code: &str, error: &str) -> String {
+    pidash_types::runner_runs::classify_failure(error, "", error_code)
+        .value()
+        .to_owned()
+}
+
 /// status/ended_at/terminal NULLs + the updates
 /// (`error_code`, `error`), folded into `error_details` under the
-/// finalize lock (PDASHOSS01-187). `$1` ended_at, `$2` the
-/// [`finalize_error_details_patch`], `$3` the run id.
+/// finalize lock (PDASHOSS01-187), plus the `failure_reason` safety
+/// net (PDASHOSS01-183, see [`finalize_failure_reason`]). `$1`
+/// ended_at, `$2` the [`finalize_error_details_patch`], `$3`
+/// failure_reason, `$4` the run id.
 pub fn finalize_update_sql() -> String {
     format!(
         "UPDATE agent_run SET status = 'failed', ended_at = $1, \
          terminal_hooks_applied_at = NULL, \
-         terminal_capacity_released_at = NULL, error_details = {} WHERE id = $3",
+         terminal_capacity_released_at = NULL, error_details = {}, \
+         failure_reason = $3 WHERE id = $4",
         crate::runner_runs::finalization::error_details_merge_sql("$2")
     )
 }
@@ -612,7 +625,7 @@ pub mod orm {
     }
 
     /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
-    pub const RUN_VIEW: [run::Column; 19] = [
+    pub const RUN_VIEW: [run::Column; 20] = [
         run::Column::Id,
         run::Column::WorkspaceId,
         run::Column::CreatedById,
@@ -629,6 +642,7 @@ pub mod orm {
         run::Column::RunConfig,
         run::Column::ToolPlan,
         run::Column::ErrorDetails,
+        run::Column::FailureReason,
         run::Column::Prompt,
         run::Column::PromptManifest,
         run::Column::EndedAt,
@@ -775,12 +789,22 @@ pub mod orm {
     /// terminal NULLs, and the `error_details` merge: drop the patch's
     /// keys from the stored object (a non-object counts as `{}`), then
     /// add its non-null values (`jsonb_strip_nulls`, applied here to the
-    /// flat patch).
+    /// flat patch). The `failure_reason` safety net (PDASHOSS01-183)
+    /// classifies from the patch's code/message.
     pub fn finalize_update(
         run_id: Uuid,
         ended_at: DateTime<Utc>,
         patch: &Value,
     ) -> UpdateStatement {
+        let failure_reason = {
+            let get = |key: &str| {
+                patch
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+            };
+            super::finalize_failure_reason(get("code"), get("message"))
+        };
         let stored = Expr::case(
             Expr::expr(Func::cust(alias("jsonb_typeof")).arg(run_col(run::Column::ErrorDetails)))
                 .eq("object"),
@@ -809,6 +833,7 @@ pub mod orm {
                 None::<DateTime<Utc>>,
             )
             .value(run::Column::ErrorDetails, merged)
+            .value(run::Column::FailureReason, failure_reason)
             .and_where(run_col(run::Column::Id).eq(run_id))
             .to_owned()
     }
@@ -944,6 +969,7 @@ pub mod orm {
                 C::LeaseExpiresAt,
                 C::DonePayload,
                 C::ErrorDetails,
+                C::FailureReason,
                 C::LlmModel,
                 C::Usage,
                 C::CreatedAt,
@@ -982,6 +1008,7 @@ pub mod orm {
                 none_at(),
                 none_json(),
                 Expr::value(row.error_details.clone()),
+                Expr::value(""),
                 Expr::value(""),
                 Expr::value(serde_json::json!({})),
                 Expr::value(row.now),

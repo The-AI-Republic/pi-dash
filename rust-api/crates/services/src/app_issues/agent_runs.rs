@@ -44,6 +44,7 @@ struct RunRow {
     done_payload: Option<Value>,
     error_message: Option<Value>,
     error_code: Option<Value>,
+    failure_reason: String,
     llm_model: String,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -84,6 +85,7 @@ pub struct RenderedAgentRun {
     pub done_payload: Option<Value>,
     pub error: String,
     pub error_code: String,
+    pub failure_reason: String,
     pub llm_model: String,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -127,6 +129,7 @@ impl RenderedAgentRun {
             done_payload: self.done_payload.as_ref(),
             error: &self.error,
             error_code: &self.error_code,
+            failure_reason: &self.failure_reason,
             llm_model: &self.llm_model,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
@@ -274,6 +277,7 @@ fn run_query(issue_id: Uuid, active_only: bool) -> Select<agent_run::Entity> {
             agent_run::Column::CancelRequestedAt,
             agent_run::Column::CancelReason,
             agent_run::Column::DonePayload,
+            agent_run::Column::FailureReason,
             agent_run::Column::LlmModel,
             agent_run::Column::InputTokens,
             agent_run::Column::OutputTokens,
@@ -363,6 +367,7 @@ fn render(row: RunRow) -> RenderedAgentRun {
         done_payload: row.done_payload,
         error: details_text(row.error_message.as_ref()),
         error_code: details_text(row.error_code.as_ref()),
+        failure_reason: row.failure_reason,
         llm_model: row.llm_model,
         input_tokens: row.input_tokens,
         output_tokens: row.output_tokens,
@@ -447,7 +452,7 @@ mod tests {
     fn run_query_has_one_name_per_output_column() {
         for active_only in [false, true] {
             let mut names = unique_output_names(&built(active_only));
-            assert_eq!(names.len(), 32, "{names:?}");
+            assert_eq!(names.len(), 33, "{names:?}");
             names.sort();
             let total = names.len();
             names.dedup();

@@ -26,7 +26,7 @@ RUN_COLUMNS = (
     " error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,"
     " trigger, executor_kind, dispatch_attempts,"
     " cancel_reason, tool_plan, phase_kind, agent_metadata,"
-    " usage, pin_kind, created_at, ended_at"
+    " usage, pin_kind, created_at, ended_at, failure_reason"
 )
 
 # (issue sequence, [usage per run]) — both issues live on project IS.
@@ -63,11 +63,11 @@ def _seed(cur, seed, world):
         for usage in usages:
             cur.execute(
                 "INSERT INTO agent_run (%s) VALUES (%s)" % (
-                    RUN_COLUMNS, ",".join(["%s"] * 23)),
+                    RUN_COLUMNS, ",".join(["%s"] * 24)),
                 (str(uuid.uuid4()), "completed", "contract prompt", "{}",
                  "{}", "contract-thread", "{}", ws, issue, world["pod"], admin,
                  "contract-model", "direct", "local_runner", 0, "",
-                 "{}", "work", "{}", usage, "locality", NOW, NOW),
+                 "{}", "work", "{}", usage, "locality", NOW, NOW, ""),
             )
 
 

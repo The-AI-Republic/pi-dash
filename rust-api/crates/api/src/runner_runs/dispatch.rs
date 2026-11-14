@@ -404,6 +404,7 @@ impl DirectRunInsert<'_> {
             agent_metadata: Set(Value::Object(Default::default())),
             usage: Set(Value::Object(Default::default())),
             error_details: Set(self.error_details.clone()),
+            failure_reason: Set(String::new()),
             // Generated columns take their defaults.
             input_tokens: sea_orm::NotSet,
             output_tokens: sea_orm::NotSet,

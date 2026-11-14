@@ -37,12 +37,12 @@ def _seed_parent_run(seed, workspace_id, project_id, issue_id, user_id,
         cur.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities,
-                thread_id, error_details, workspace_id, pod_id,
+                thread_id, error_details, failure_reason, workspace_id, pod_id,
                 created_by_id, work_item_id, llm_model, trigger,
                 executor_kind, dispatch_attempts, cancel_reason,
                 tool_plan, phase_kind, agent_metadata, usage,
                 done_payload, pin_kind, created_at)
-               VALUES (%s, 'completed', '', '{}', '{}', '', '{}', %s, %s,
+               VALUES (%s, 'completed', '', '{}', '{}', '', '{}', '', %s, %s,
                        %s, %s, '', 'tick', 'local_runner', 0, '',
                        '{}', '', '{}', '{}', %s, 'locality', %s)""",
             (run_id, workspace_id, pod_id, user_id, issue_id,

@@ -101,13 +101,13 @@ def create_agent_run(
     now = now_iso()
     conn.execute(
         """INSERT INTO agent_run (id, status, prompt, run_config,
-            required_capabilities, thread_id, error_details, created_at,
+            required_capabilities, thread_id, error_details, failure_reason, created_at,
             workspace_id, pod_id, created_by_id, llm_model,
             trigger, executor_kind, dispatch_attempts,
             cancel_reason, tool_plan, phase_kind,
             agent_metadata, usage, started_at, scheduler_binding_id,
             runner_id, pin_kind)
-        VALUES (%s,%s,'Seeded run','{}','{}','seed-thread','{}',%s,%s,%s,%s,
+        VALUES (%s,%s,'Seeded run','{}','{}','seed-thread','{}','',%s,%s,%s,%s,
             'seed-model','scheduler','local_runner',0,'','{}','',
             '{}','{"input":1,"output":1,"total":2}',%s,%s,%s,'locality')""",
         (

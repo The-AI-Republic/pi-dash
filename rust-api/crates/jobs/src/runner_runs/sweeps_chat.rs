@@ -84,6 +84,7 @@ use pidash_db::runner_runs::{AgentChatMessage, AgentChatSession};
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::integrations::serializers::isoformat;
 use pidash_services::runner_runs::chat::{self, ChatEffect, NewEventInputs};
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
 use pidash_services::runner_runs::lifecycle::{self, LifecycleError};
 use pidash_services::runner_runs::scheduler_hook::{self, SchedulerHookPlan};
@@ -271,11 +272,14 @@ pub trait RunnerRunsSeams: Send + Sync {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.scheduling.maybe_disarm_on_terminal_signal`
-    /// (D-12), isolated.
+    /// (D-12), isolated. `Ok(true)` asks the caller to clear the run's
+    /// `thread_id` (the fresh-session lever) on its hooks transaction,
+    /// which holds the run row lock — the seam's own connection must not
+    /// write that row.
     fn disarm_on_terminal_signal(
         &self,
         run_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>>;
     /// `orchestration.scheduling.maybe_apply_deferred_pause` (D-12),
     /// isolated.
     fn apply_deferred_pause(
@@ -965,6 +969,9 @@ async fn reap_stalled_row(
         status: AgentRunStatus::Failed,
         done_payload: &null,
         error_detail: &error_detail,
+        // The stall reaper carries no runner reason (`tasks.py`'s
+        // `finalize_run_terminal` call passes none).
+        runner_failure_reason: &null,
         refusal_category: &null,
         tokens: &null,
         model: &null,
@@ -1232,8 +1239,18 @@ async fn run_hooks_phase(
         run_failure_comment_in_savepoint(tx, seams, run_id, hooks).await?;
     }
     if hooks.orchestration {
-        if let Err(error) = seams.disarm_on_terminal_signal(*run_id).await {
-            tracing::error!(%error, "orchestration.error: run-ended reconcile failed for run {run_id}");
+        match seams.disarm_on_terminal_signal(*run_id).await {
+            Ok(true) => {
+                let conn = TxConn::new(&mut *tx);
+                if let Err(error) = crate::orchestration::clear_run_thread_id(&conn, *run_id).await
+                {
+                    tracing::error!(%error, "orchestration.error: fresh-session thread clear failed for run {run_id}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(%error, "orchestration.error: run-ended reconcile failed for run {run_id}");
+            }
         }
         if let Err(error) = seams.apply_deferred_pause(*run_id).await {
             tracing::error!(%error, "orchestration.error: deferred-pause failed for run {run_id}");
@@ -1281,16 +1298,18 @@ async fn run_failure_comment_in_savepoint(
 }
 
 /// Post the failure comment: re-read the run (a missing row or work
-/// item means silence), the speaker dedupe check (a hit means
-/// silence), then the comment + description inserts plus the
-/// link-back.
+/// item means silence), the per-reason gate (a free-retry failure below
+/// the backstop means silence, PDASHOSS01-183), the speaker dedupe check
+/// (a hit means silence), then the comment + description inserts plus
+/// the link-back, and — when the clock stopped — the clock-stopped
+/// notifications behind their own savepoint.
 async fn post_failure_comment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     seams: &dyn RunnerRunsSeams,
     run_id: &Uuid,
     hooks: &finalization::HooksPlan,
 ) -> Result<(), SweepError> {
-    let Some(comment) = hooks.failure_comment.as_ref() else {
+    let Some(plan) = hooks.failure_comment.as_ref() else {
         return Ok(());
     };
     let conn = TxConn::new(&mut *tx);
@@ -1300,7 +1319,15 @@ async fn post_failure_comment(
     if reread.work_item_id.is_none() {
         return Ok(());
     }
+    let failure_reason = reread.failure_reason.clone();
     let ids = map_failure_comment_ids(&reread)?;
+    // Route on the stored canonical reason (PDASHOSS01-183), predicting the
+    // `RUN_ENDED` failure policy that follows on this transaction.
+    let effect = failure_effects::failure_clock_effect(&conn, &reread).await?;
+    let clock_stopped = match lifecycle::failure_comment_gate(plan, effect) {
+        lifecycle::FailureCommentGate::Suppress => return Ok(()),
+        lifecycle::FailureCommentGate::Post { clock_stopped } => clock_stopped,
+    };
     let duplicate = lifecycle::comment_dedupe_exists(
         &conn,
         ids.issue_id,
@@ -1311,6 +1338,8 @@ async fn post_failure_comment(
     if duplicate {
         return Ok(());
     }
+    let rendered = plan.render(&failure_reason, clock_stopped);
+    let comment = &rendered.comment;
     let actor_id = seams.agent_system_user().await.map_err(SweepError::Seam)?;
     // Domain executor twins, in Django order. Ambient user nulls:
     // workers carry no `crum` user. Four `now()` reads keep their
@@ -1350,6 +1379,29 @@ async fn post_failure_comment(
     comment_domain::insert_comment_row(&conn, &rows).await?;
     comment_domain::insert_description_row(&conn, &rows).await?;
     comment_domain::link_comment_description(&conn, rows.id, rows.description_id).await?;
+    if rendered.clock_stopped {
+        // Isolated like the source's `try/except`: a notification failure
+        // is logged and never drops the comment.
+        let mut savepoint = tx.begin().await?;
+        let notified = failure_effects::notify_clock_stopped(
+            &TxConn::new(&mut savepoint),
+            *run_id,
+            ids.issue_id,
+            &failure_reason,
+            &rendered.label,
+            &rendered.action,
+        )
+        .await;
+        match notified {
+            Ok(_) => {
+                savepoint.commit().await?;
+            }
+            Err(error) => {
+                tracing::error!(%error, "run_lifecycle: clock-stop notification failed for run {run_id}");
+                savepoint.rollback().await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1885,7 +1937,7 @@ mod tests {
             .filter(|e| e.starts_with("\"runner\""))
             .copied()
             .collect();
-        assert_eq!(agent_entries.len(), 40, "agent_run columns");
+        assert_eq!(agent_entries.len(), 41, "agent_run columns");
         assert_eq!(
             runner_entries.len(),
             32,
@@ -1963,6 +2015,9 @@ mod tests {
             issue_id: Some(Uuid::nil()),
             issue_project_id: Some(Uuid::nil()),
             issue_workspace_id: Some(Uuid::nil()),
+            failure_reason: String::new(),
+            phase_kind: String::new(),
+            issue_state_id: None,
         };
         assert!(map_failure_comment_ids(&full).is_ok());
         let dangling = lifecycle::FailureRereadRow {
@@ -2057,8 +2112,8 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             _run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
+            Box::pin(async move { Ok(false) })
         }
         fn apply_deferred_pause(
             &self,
@@ -2213,9 +2268,9 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
             self.record(json!({"fn": "disarm", "args": [run_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
+            Box::pin(async move { Ok(false) })
         }
         fn apply_deferred_pause(
             &self,

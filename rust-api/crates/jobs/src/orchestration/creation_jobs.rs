@@ -66,10 +66,11 @@ use pidash_services::extensions::CloudAgentToolsetsSeam;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::creation::{
-    state_name_group, user_id_for_run, AdmissionError as ServiceAdmissionError, CreationError,
-    CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
-    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
-    PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
+    finalize_failure_reason, state_name_group, user_id_for_run,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, DedicatedPinArgs,
+    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment, PinOutcome,
+    PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -857,6 +858,7 @@ where
             output_tokens: ActiveValue::NotSet,
             total_tokens: ActiveValue::NotSet,
             error_details: Set(row.error_details.clone()),
+            failure_reason: Set(String::new()),
             refusal_category: ActiveValue::NotSet,
         };
         let inserted = {
@@ -2108,6 +2110,10 @@ where
                     Expr::value(Option::<sea_orm::prelude::DateTimeWithTimeZone>::None),
                 )
                 .col_expr(agent_run::Column::ErrorDetails, Expr::value(merged))
+                .col_expr(
+                    agent_run::Column::FailureReason,
+                    Expr::value(finalize_failure_reason(error_code, error)),
+                )
                 .filter(agent_run::Column::Id.eq(run_id))
                 .exec(&conn)
                 .await
@@ -2758,9 +2764,9 @@ mod tests {
              pinned_runner_id, parent_run_id, work_item_id, status, executor_kind, \
              dispatch_attempts, cancel_reason, tool_plan, prompt, trigger, \
              phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-             error_details, llm_model, usage, created_at) \
+             error_details, failure_reason, llm_model, usage, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, '', '{}', '', $11, \
-             $12, $13, '[]', '', '{}', '{}', '', '{}', $14)",
+             $12, $13, '[]', '', '{}', '{}', '', '', '{}', $14)",
         )
         .bind(id)
         .bind(graph.ws)

@@ -242,11 +242,11 @@ def _seed_followup(conn) -> None:
             """
             INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, pin_kind, created_at)
-            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}',
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}','',
                     %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
                     '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())
             """,
@@ -259,11 +259,11 @@ def _seed_followup(conn) -> None:
             """
             INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, pin_kind, created_at)
-            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}',
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}','',
                     %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
                     '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())
             """,

@@ -2415,6 +2415,14 @@ async fn fail_queued_run(
         status: sea_orm::Set(AgentRunStatus::Failed.value().to_owned()),
         error_details: sea_orm::Set(details),
         ended_at: sea_orm::Set(Some(now.into())),
+        // `finalize_agent_run`'s safety net (PDASHOSS01-183): every FAILED
+        // row carries a canonical `failure_reason`, classified from the
+        // cloud-side error + code like the Django writers these mirror.
+        failure_reason: sea_orm::Set(
+            pidash_types::runner_runs::classify_failure(error, "", error_code)
+                .value()
+                .to_owned(),
+        ),
         ..Default::default()
     };
     if let Some(payload) = done_payload {

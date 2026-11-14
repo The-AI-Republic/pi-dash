@@ -48,8 +48,9 @@ pub use handoff::{
     complete_project_move_handoff_inline, drain_publish_effects, HandoffInlineDeps, HandoffStore,
 };
 pub use runner_seams::{
-    complete_project_move_handoff_live, disarm_on_terminal_signal, fire_pending_entry,
-    maybe_apply_deferred_pause_live, pending_entry_ticker_for, post_run_orchestration,
-    post_run_orchestration_in_tx, run_work_item_id, DisarmError,
+    clear_run_thread_id, complete_project_move_handoff_live, disarm_on_terminal_signal,
+    disarm_on_terminal_signal_deferred, fire_pending_entry, maybe_apply_deferred_pause_live,
+    pending_entry_ticker_for, post_run_orchestration, post_run_orchestration_in_tx,
+    run_work_item_id, DisarmError, DisarmOutcome,
 };
 pub use scheduler_dispatch::{dispatch_scheduler_run, live_scheduler_dispatch};
