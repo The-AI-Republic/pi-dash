@@ -755,11 +755,9 @@ pub fn issue_create_validate(
 ) -> Result<ValidatedAttrs, CreateValidateError> {
     // Step 1. Sync lock (:216-229).
     if let Some(current) = instance {
-        if issue_is_actively_synced(
-            current.external_source,
-            current.annotated_is_synced,
-            || (probes.git_sync_exists)(),
-        ) {
+        if issue_is_actively_synced(current.external_source, current.annotated_is_synced, || {
+            (probes.git_sync_exists)()
+        }) {
             let blocked = sync_locked_blocked(&attrs.locked, &current.locked);
             if !blocked.is_empty() {
                 return Err(CreateValidateError::Fields(
@@ -1552,7 +1550,6 @@ mod tests {
             }
         }
     }
-
 
     fn managed_settings(enabled: bool) -> PidashAgentSettings {
         PidashAgentSettings {

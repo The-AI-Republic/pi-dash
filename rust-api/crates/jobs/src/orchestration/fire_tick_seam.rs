@@ -60,7 +60,6 @@ use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::run_creation::{ExecutionFieldsError, LlmProfile};
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::{
@@ -76,6 +75,7 @@ use pidash_services::orchestration::dispatch::{
     PreflightOutcome, RetickOutcome, RunAiOutcome, ThinRunAiOutcome, WaitOutcome,
 };
 use pidash_services::orchestration::entries::clock_policy;
+use pidash_services::run_creation::{ExecutionFieldsError, LlmProfile};
 use pidash_types::orchestration::{
     cadence_fields_for, is_ticking_state, StateRef, PAUSED_STATE_NAME,
 };
@@ -895,8 +895,7 @@ where
     .await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions =
-        drain_dispatch(pool, dispatches, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -971,8 +970,7 @@ where
         });
     }
     tx.commit().await?;
-    let dispatch_decisions =
-        drain_dispatch(pool, dispatches, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -1018,8 +1016,7 @@ where
     .await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions =
-        drain_dispatch(pool, dispatches, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     let outcome = DispatchOutcome {
         outcome,
@@ -1056,8 +1053,7 @@ where
     .await?;
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions =
-        drain_dispatch(pool, dispatches, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -1233,12 +1229,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::config::{PidashAgentSettings};
+    use pidash_db::config::PidashAgentSettings;
     use pidash_services::orchestration::dispatch::BOUNCE_BODY_DEFAULT;
     use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
-    
 
     // -- offline -----------------------------------------------------------
 

@@ -620,8 +620,13 @@ async fn delete_desktop_enroll(
     // (`:179-180`).
     let db = pidash_db::pool::sea_orm_connection(&pool);
     let machine_ids: Vec<Uuid> = if host_label.is_empty() {
-        match catalog_reads::bundled_machine_ids(&db, user_id, pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED, None)
-            .await
+        match catalog_reads::bundled_machine_ids(
+            &db,
+            user_id,
+            pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
+            None,
+        )
+        .await
         {
             Ok(ids) => ids,
             Err(_) => return server_error(),
@@ -709,7 +714,10 @@ mod tests {
     struct TokenDesktopGate;
 
     impl crate::desktop_gate::PidashAgentDesktopRequestGate for TokenDesktopGate {
-        fn is_desktop(&self, credential: &crate::desktop_gate::PidashAgentDesktopCredential) -> bool {
+        fn is_desktop(
+            &self,
+            credential: &crate::desktop_gate::PidashAgentDesktopCredential,
+        ) -> bool {
             matches!(
                 credential.authorization,
                 Some(header) if header == "Bearer desktop-token"

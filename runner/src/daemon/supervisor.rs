@@ -1024,7 +1024,9 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
         crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
-        crate::config::schema::AgentKind::PidashAgent => crate::pidash_agent::agent::binary_display(),
+        crate::config::schema::AgentKind::PidashAgent => {
+            crate::pidash_agent::agent::binary_display()
+        }
     }
 }
 
@@ -4517,7 +4519,11 @@ impl AssignWorker {
                     crate::codex::gateway::gateway_will_retry_notice(&method, &params)
                 {
                     let mut base: Option<String> = None;
-                    match crate::pidash_agent::free_quota::classify(&self.engine_lane(), status, &text) {
+                    match crate::pidash_agent::free_quota::classify(
+                        &self.engine_lane(),
+                        status,
+                        &text,
+                    ) {
                         // OpenHub free-lane stop codes: the run fails with
                         // the code's clear reason, keeping resets_at.
                         Some(crate::pidash_agent::free_quota::Disposition::Stop(reason)) => {
@@ -4762,7 +4768,11 @@ impl AssignWorker {
                 // existing cleaning.
                 let disposition = crate::codex::gateway::gateway_status_text(&raw_base).and_then(
                     |(status, text)| {
-                        crate::pidash_agent::free_quota::classify(&self.engine_lane(), status, &text)
+                        crate::pidash_agent::free_quota::classify(
+                            &self.engine_lane(),
+                            status,
+                            &text,
+                        )
                     },
                 );
                 let base = match disposition {

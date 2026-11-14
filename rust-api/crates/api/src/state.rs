@@ -16,7 +16,8 @@ use crate::edge_shadow::{ShadowConfig, ShadowGate};
 
 /// The CE desktop-session gate: the `pidash_client == "desktop"`
 /// session-key check. Served when the overlay installed no gate.
-static CE_DESKTOP_GATE: CePidashAgentPidashAgentDesktopRequestGate = CePidashAgentPidashAgentDesktopRequestGate;
+static CE_DESKTOP_GATE: CePidashAgentPidashAgentDesktopRequestGate =
+    CePidashAgentPidashAgentDesktopRequestGate;
 
 /// An installed desktop-session gate (PIDASHCONV-917). The overlay binary
 /// installs its OIDC-`client`-claim gate; OSS serves with the CE default

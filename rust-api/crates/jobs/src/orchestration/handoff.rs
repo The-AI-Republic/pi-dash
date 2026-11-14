@@ -27,20 +27,17 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
-use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::{
-    agent_run, agent_run_event, dev_machine, git_code_review_links,
-    git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
-    issue_labels, issue_relations, issues, labels, pod, projects, prompt_section_override, runner,
-    states, users, workspaces,
+    agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
+    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
+    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
+    workspaces,
 };
 use pidash_db::orm_tx::TxConn;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::run_creation::{
-    ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
-};
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
 use pidash_services::orchestration::creation::{
@@ -50,6 +47,9 @@ use pidash_services::orchestration::creation::{
     PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
+use pidash_services::run_creation::{
+    ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
+};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
@@ -905,10 +905,11 @@ impl CreationSeam for HandoffStore<'_, '_> {
         )
         .await
     }
-
 }
 
-fn twin_map_execution_fields(fields: crate::run_dispatch::ExecutionFields) -> ServiceExecutionFields {
+fn twin_map_execution_fields(
+    fields: crate::run_dispatch::ExecutionFields,
+) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
         AgentExecutorKind::RetiredCloudRun => Some(None),
         AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
@@ -2076,9 +2077,7 @@ where
         // with the same recipe the revoke path uses so the replacement run
         // is matched to the target pod's idle runner.
         if let DispatchDecision::PodDrain { pod_id } =
-            dispatch_agent_run(pool, id, now)
-                .await
-                .map_err(|_| ())?
+            dispatch_agent_run(pool, id, now).await.map_err(|_| ())?
         {
             drain_pod_by_id(pool, deps.redis.as_ref(), &deps.runner, pod_id)
                 .await
@@ -2091,8 +2090,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     #[test]
     fn seaorm_statement_shapes_pin_joins_filters_and_locks() {

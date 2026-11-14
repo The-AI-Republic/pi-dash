@@ -9,10 +9,9 @@
 //! counts) died with the retired plane. `lock_workspace` stays —
 //! shared with the dispatch engine.
 
-use serde_json::{Map, Value};
 use pidash_types::agent_runs::AgentExecutorKind;
+use serde_json::{Map, Value};
 use uuid::Uuid;
-
 
 use super::executor_policy::resolve_executor_kind;
 use super::executor_policy::ResolveExecutorError;
@@ -100,8 +99,6 @@ pub struct ExecutionInputs<'a> {
     pub now_unix_secs: i64,
 }
 
-
-
 /// The executor-specific `AgentRun` fields for one run creation
 /// (`execution_fields`, `creation.py:11-89`, #2903).
 ///
@@ -168,10 +165,7 @@ pub async fn lock_workspace(
 pub async fn execution_fields(
     inputs: &ExecutionInputs<'_>,
 ) -> Result<ExecutionFields, ExecutionFieldsError> {
-    let executor = resolve_executor_kind(
-        inputs.requested,
-        &inputs.project.default_agent_executor,
-    )?;
+    let executor = resolve_executor_kind(inputs.requested, &inputs.project.default_agent_executor)?;
     Ok(ExecutionFields {
         executor_kind: executor,
         tool_plan: Value::Object(Map::new()),

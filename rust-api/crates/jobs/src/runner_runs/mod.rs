@@ -16,17 +16,17 @@
 //! ownership after the proxy pass, so until then every name here still
 //! routes to `PythonOwned` (see [`crate::worker::route_for`]).
 
-pub mod pidash_agent_pause;
 pub mod offline_recovery;
+pub mod pidash_agent_pause;
 pub mod sweeps_chat;
 pub mod sweeps_runs;
 pub mod waiting_expiry;
 
-pub use pidash_agent_pause::{register_pidash_agent_pause_tasks, PIDASH_AGENT_PAUSE_TASK};
 pub use offline_recovery::{
     register_offline_recovery_tasks, FAIL_DEDICATED_TASK, FAIL_RUNS_TASK, RELEASE_PINS_TASK,
     SWEEP_STRANDED_TASK,
 };
+pub use pidash_agent_pause::{register_pidash_agent_pause_tasks, PIDASH_AGENT_PAUSE_TASK};
 pub use sweeps_chat::{
     emit_terminal_effects, register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK,
     RECONCILE_TERMINAL_EFFECTS_TASK, SWEEP_AGENT_CHAT_STATE_TASK, SWEEP_CHAT_MESSAGE_DEDUPE_TASK,

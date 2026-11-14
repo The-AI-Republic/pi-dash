@@ -169,14 +169,10 @@ impl RunnerRunsSeams for RunnerSeams {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
         Box::pin(async move {
-            maybe_apply_deferred_pause_live(
-                &self.pool,
-                &self.managed,
-                run_id,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+            maybe_apply_deferred_pause_live(&self.pool, &self.managed, run_id)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         })
     }
 

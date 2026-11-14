@@ -14,9 +14,7 @@
 //! (FX-DISP-06), replayed by the suite below (trimmed in P3 step B).
 
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Select,
-};
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Select};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -138,11 +136,9 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-
     // -- event shaping --------------------------------------------------------
 
     // -- Celery wire ----------------------------------------------------------
-
 
     // -- post-commit dispatch --------------------------------------------------
 
@@ -186,6 +182,4 @@ mod tests {
     }
 
     // -- live Postgres (ignored; needs a migrated scratch DB) ------------------
-
-
 }

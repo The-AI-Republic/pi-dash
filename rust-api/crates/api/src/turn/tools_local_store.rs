@@ -2674,8 +2674,7 @@ impl ToolStore for PgToolStore {
             };
             let outcome =
                 handle_issue_state_transition(&mut drive_store, &mut stub, &request).await;
-            let (tx, _, mut dispatches, mut terminal_effects) =
-                drive_store.into_parts();
+            let (tx, _, mut dispatches, mut terminal_effects) = drive_store.into_parts();
             let outcome = outcome.map_err(|error| match error {
                 pidash_services::orchestration::entries::EntriesError::Store(store) => {
                     StoreError::Transition(store.to_string())
@@ -3031,8 +3030,7 @@ impl ToolStore for PgToolStore {
             consulted: false,
         };
         let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
-        let (tx, pool, mut dispatches, mut terminal_effects) =
-            drive_store.into_parts();
+        let (tx, pool, mut dispatches, mut terminal_effects) = drive_store.into_parts();
         // Only a state-*lookup* storage failure propagates (Python's
         // `try` wraps the handler call alone, `signals.py:89-98`); a
         // handler failure arrives as `Failed` and is swallowed below.
@@ -3552,7 +3550,6 @@ struct TurnPreflight<H, P> {
 
 impl<H, P> pidash_services::orchestration::entries::PreflightSeam for TurnPreflight<H, P>
 where
-
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
 {
@@ -3818,7 +3815,6 @@ mod tests {
         pool
     }
 
-
     fn live_managed_settings() -> pidash_db::config::PidashAgentSettings {
         pidash_db::config::PidashAgentSettings {
             enabled: false,
@@ -4031,12 +4027,8 @@ mod tests {
     async fn live_fused_update_rolls_back_save_on_middrive_error() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store = PgToolStore::new(
-            pool.clone(),
-            None,
-            live_managed_settings(),
-        )
-        .expect("build store");
+        let store =
+            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);
@@ -4092,12 +4084,8 @@ mod tests {
     async fn live_create_comment_row_stores_empty_varchar_attachments() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store = PgToolStore::new(
-            pool.clone(),
-            None,
-            live_managed_settings(),
-        )
-        .expect("build store");
+        let store =
+            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);
@@ -4162,12 +4150,8 @@ mod tests {
     async fn live_fused_runner_apply_and_list() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store = PgToolStore::new(
-            pool.clone(),
-            None,
-            live_managed_settings(),
-        )
-        .expect("build store");
+        let store =
+            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);

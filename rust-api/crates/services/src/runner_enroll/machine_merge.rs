@@ -33,8 +33,8 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    agent_run, dev_machine, issues, machine_session, pod as pod_entity,
-    projects as project_entity, runner as runner_entity, workspaces as workspace_entity,
+    agent_run, dev_machine, issues, machine_session, pod as pod_entity, projects as project_entity,
+    runner as runner_entity, workspaces as workspace_entity,
 };
 use pidash_types::runner_runs::AgentRunStatus;
 
@@ -873,9 +873,14 @@ pub async fn merge_dev_machine(
         .await
         .map(drop)?;
     let (_revoked, revoke_effects) =
-        crate::domain::pidash_agent_credential::revoke_pidash_agent_credential(db, source.id, "machine_merged", now)
-            .await
-            .map_err(|err| MergeError::Db(err.to_string()))?;
+        crate::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            db,
+            source.id,
+            "machine_merged",
+            now,
+        )
+        .await
+        .map_err(|err| MergeError::Db(err.to_string()))?;
     for pod in revoke_effects.drain_pod_ids {
         drain_pods.insert(pod);
     }

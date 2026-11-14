@@ -324,8 +324,7 @@ impl CreationSeam for SeaHandoffStore<'_> {
             requested: req.requested.as_deref(),
             now_unix_secs: 0,
         };
-        let fields = resolve_execution_fields(&inputs)
-        .await;
+        let fields = resolve_execution_fields(&inputs).await;
         short
             .commit()
             .await
@@ -1289,8 +1288,6 @@ async fn twin_load_render_bundle(
         override_rows,
     })
 }
-
-
 
 #[cfg(test)]
 mod tests {

@@ -323,7 +323,10 @@ impl PidashAgentApi {
     }
 
     /// The model profile, with the daemon (machine) credential.
-    pub async fn profile(&self, machine_token: &str) -> Result<PidashAgentProfile, PidashAgentApiError> {
+    pub async fn profile(
+        &self,
+        machine_token: &str,
+    ) -> Result<PidashAgentProfile, PidashAgentApiError> {
         let resp = self
             .http
             .get(self.url(PROFILE_PATH))
@@ -471,8 +474,9 @@ mod tests {
         .unwrap_err();
         let msg = unparsable(&e);
         assert!(!msg.contains("ec_do_not_print"), "{msg}");
-        let e = serde_json::from_str::<PidashAgentGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
-            .unwrap_err();
+        let e =
+            serde_json::from_str::<PidashAgentGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
+                .unwrap_err();
         assert!(!unparsable(&e).contains("ec_x"));
 
         let p: PidashAgentProfile =

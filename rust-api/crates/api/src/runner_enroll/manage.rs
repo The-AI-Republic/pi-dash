@@ -972,11 +972,12 @@ impl DevMachineRender {
 
 fn render_machine(machine: &DevMachineOwned) -> Result<String, Response> {
     let now = Utc::now();
-    let sign_in_state = pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
-        &machine.engine_sign_in_state,
-        machine.engine_credential_expires_at,
-        now,
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &machine.engine_sign_in_state,
+            machine.engine_credential_expires_at,
+            now,
+        );
     DevMachineRender {
         id: machine.id.to_string(),
         host_label: machine.host_label.clone(),

@@ -820,8 +820,8 @@ mod tests {
     use super::issue_version;
     use super::module_issue;
     use super::OnDelete;
-    use crate::app_intake::models::{intake_issue, IntakeIssueStatus};
     use crate::agent_runs::{agent_run, status::AgentRunStatus};
+    use crate::app_intake::models::{intake_issue, IntakeIssueStatus};
     use crate::soft_delete::active_condition;
     use crate::tasks_ticker::models::issue_agent_ticker;
     use crate::v1_cycles_modules::{cycle as d27_cycle, module as d27_module};

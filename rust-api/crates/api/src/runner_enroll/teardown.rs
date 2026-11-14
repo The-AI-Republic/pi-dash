@@ -881,17 +881,18 @@ pub async fn dev_machine_revoke(
     }
     // The engine credential goes with the machine (`:207`, #2910):
     // revoking the machine signs the engine out with it.
-    let revoke_effects = match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
-        &pidash_db::orm_tx::TxConn::new(&mut tx),
-        machine_id,
-        "machine_removed",
-        now,
-    )
-    .await
-    {
-        Ok((_revoked, effects)) => effects,
-        Err(_) => return server_error(),
-    };
+    let revoke_effects =
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            machine_id,
+            "machine_removed",
+            now,
+        )
+        .await
+        {
+            Ok((_revoked, effects)) => effects,
+            Err(_) => return server_error(),
+        };
     // Locked active-runner list (`:199`).
     let runner_rows =
         match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
@@ -1046,17 +1047,18 @@ pub async fn dev_machine_engine_sign_out(
             Err(response) => return response,
         }
     };
-    let revoke_effects = match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
-        &TxConn::new(&mut tx),
-        machine_id,
-        "signed_out",
-        now_micros(),
-    )
-    .await
-    {
-        Ok((_revoked, effects)) => effects,
-        Err(_) => return server_error(),
-    };
+    let revoke_effects =
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            &TxConn::new(&mut tx),
+            machine_id,
+            "signed_out",
+            now_micros(),
+        )
+        .await
+        {
+            Ok((_revoked, effects)) => effects,
+            Err(_) => return server_error(),
+        };
     // `refresh_from_db`: re-read the row so the render sees the
     // sign-in state's new value.
     let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
@@ -1546,11 +1548,12 @@ async fn serialize_machine(
         }
         .to_json();
     };
-    let sign_in_state = pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
-        &row.engine_sign_in_state,
-        row.engine_credential_expires_at,
-        Utc::now(),
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &row.engine_sign_in_state,
+            row.engine_credential_expires_at,
+            Utc::now(),
+        );
     MachineRender {
         id: machine.id.to_string(),
         host_label: row.host_label,

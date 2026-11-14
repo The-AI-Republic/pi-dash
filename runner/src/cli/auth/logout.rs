@@ -259,7 +259,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        CliSection, Config, DaemonConfig, PidashAgentCredential, EngineSignInState,
+        CliSection, Config, DaemonConfig, EngineSignInState, PidashAgentCredential,
     };
 
     fn paths(root: &std::path::Path) -> Paths {

@@ -1232,10 +1232,8 @@ async fn move_inner(
         transition,
         enqueue,
     };
-    let drain: Arc<dyn domain_issues::MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
-        &pre.pool,
-        state,
-    ));
+    let drain: Arc<dyn domain_issues::MovePostCommitHook> =
+        Arc::new(AppMovePostCommitHook::new(&pre.pool, state));
     let creation = domain_issues::CreationDeps {
         pool: pre.pool.clone(),
     };

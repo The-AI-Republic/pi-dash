@@ -9,10 +9,10 @@ pub mod config_cmd;
 pub mod connect;
 pub mod context;
 pub mod doctor;
-pub mod pidash_agent_cmd;
 mod install;
 pub mod issue;
 pub mod managed;
+pub mod pidash_agent_cmd;
 // `pub` so the CLI contract tests can drive the label subcommands directly.
 pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
