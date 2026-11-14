@@ -59,9 +59,8 @@
 //!   `fields=("id","member","role")` but `DynamicBaseSerializer` overwrites
 //!   it with `expand`, so the full 6-key role shape renders (via
 //!   [`member_role_fields_alias`]).
-//! * BUG-self-patch (`member.py:216`): the "cannot update your own role"
-//!   400 fires for ANY field, and the `is_workspace_admin` bypass reads the
-//!   *target's* workspace role, not the requester's.
+//! * BUG-self-patch (`member.py:222`): the "cannot update your own role"
+//!   400 fires for ANY field, not just `role`.
 //! * QUIRK-destroy-400 (`member.py:290-294`): the in-view higher-role check
 //!   answers 400, not 403 (reachable via the ws-admin gate override).
 //! * QUIRK-no-txn: `bulk_update` and the two `bulk_create`s are three
@@ -2962,9 +2961,9 @@ async fn member_partial_update_inner(
     let pk = pk_raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
-    // Target, then the target's workspace role, then the self-role 400
-    // (any field — BUG-self-patch), then the requesting membership
-    // (`member.py:211-227`) — all before the body parses.
+    // Target, then the target's and the requester's workspace roles, then the
+    // self-role 400 (any field — BUG-self-patch), then the requesting
+    // membership (`member.py:211-233`) — all before the body parses.
     let rows = full_select()
         .filter(pm_entity::Column::Id.eq(pk))
         .filter(pm_entity::Column::ProjectId.eq(project_id))
@@ -2986,15 +2985,19 @@ async fn member_partial_update_inner(
     let ws_rows = workspace_role_row(&pool, &target_member_id, slug).await?;
     let ws_role = one(ws_rows)?;
     let ws_role = i32::from(ws_role);
-    let is_workspace_admin = ws_role == pidash_auth::permissions::ROLE_ADMIN;
-    if target_member_id == user_id && !is_workspace_admin {
+    let is_target_workspace_admin = ws_role == pidash_auth::permissions::ROLE_ADMIN;
+    // Only the requester's workspace role can bypass the guards below.
+    let requester_ws_rows = workspace_role_row(&pool, &user_id, slug).await?;
+    let requester_ws_role = i32::from(one(requester_ws_rows)?);
+    let is_requester_workspace_admin = requester_ws_role == pidash_auth::permissions::ROLE_ADMIN;
+    if target_member_id == user_id && !is_requester_workspace_admin {
         return Err(body_error("You cannot update your own role"));
     }
     let requester = requester_row(&pool, &user_id, &project_id, slug).await?;
     let (_, requester_role) = one(requester)?;
     let requester_role = i32::from(requester_role);
     // First `request.data` touch: parse (and 415/400) errors land here,
-    // after the lookups (`member.py:229`).
+    // after the lookups (`member.py:235`).
     let data = negotiate_data(headers, body)?;
     // `"role" in request.data` on non-dict bodies: `in` over lists and
     // strings, `TypeError` (500) everywhere else.
@@ -3020,7 +3023,7 @@ async fn member_partial_update_inner(
                 return Err(non_dict_body("list"));
             }
             // `"role" in [...]` is true: the 403 matrix runs before the
-            // `.get` AttributeError 500 (`member.py:230-245`), so fall
+            // `.get` AttributeError 500 (`member.py:235-257`), so fall
             // through with a missing value.
             role_present = true;
             role_value = None;
@@ -3036,14 +3039,19 @@ async fn member_partial_update_inner(
         JVal::Num(_) | JVal::Bool(_) | JVal::Null => return Err(Denial::ServerError),
     }
     if role_present {
-        // The 403 matrix (`member.py:230-250`): inline 403s with the
+        // The 403 matrix (`member.py:236-263`): inline 403s with the
         // `{"error": ...}` shape, not the gate's `detail` body.
-        if requester_role < pidash_auth::permissions::ROLE_ADMIN && !is_workspace_admin {
+        if is_target_workspace_admin && target_member_id != user_id {
+            return Err(forbidden_error(
+                "You cannot update the role of a workspace admin",
+            ));
+        }
+        if requester_role < pidash_auth::permissions::ROLE_ADMIN && !is_requester_workspace_admin {
             return Err(forbidden_error(
                 "You do not have permission to update roles",
             ));
         }
-        if i128::from(target.role) >= i128::from(requester_role) && !is_workspace_admin {
+        if i128::from(target.role) >= i128::from(requester_role) && !is_requester_workspace_admin {
             return Err(forbidden_error(
                 "You cannot update the role of a member with a role equal to or higher than your own",
             ));
@@ -3052,7 +3060,7 @@ async fn member_partial_update_inner(
             Some(value) => python_int(value).ok_or(Denial::ServerError)?,
             None => return Err(Denial::ServerError),
         };
-        if new_role >= i128::from(requester_role) && !is_workspace_admin {
+        if new_role >= i128::from(requester_role) && !is_requester_workspace_admin {
             return Err(forbidden_error(
                 "You cannot assign a role equal to or higher than your own",
             ));
@@ -3063,7 +3071,7 @@ async fn member_partial_update_inner(
             ));
         }
     }
-    // The serializer stage (`member.py:252-265`).
+    // The serializer stage (`member.py:273-278`).
     let JVal::Object(object) = &data.value else {
         return Err(Denial::ServerError);
     };
