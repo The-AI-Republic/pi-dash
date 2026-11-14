@@ -34,7 +34,7 @@ def noop_reverse(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0176_update_timezone_choices_pytz_2025_2"),
+        ("db", "0178_ticker_failure_disarm_reasons"),
     ]
 
     operations = [
