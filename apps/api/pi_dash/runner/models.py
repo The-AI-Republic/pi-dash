@@ -1412,6 +1412,13 @@ class AgentRun(models.Model):
     # ``RefusalCategory``; ``run_lifecycle._normalize_refusal_category``
     # is what constrains them on the way in.
     refusal_category = JSONKeyTextField(source="error_details", key="refusal_category")
+    # Canonical failure taxonomy value (``pi_dash.runner.failure.
+    # RunFailureReason``), classified at write time from the runner's
+    # ``FailureReason`` plus the error text. Non-empty exactly when
+    # ``status == FAILED``. The stored string is a wire contract for
+    # dashboards and the ticker's per-reason retry policy; not declared as
+    # ``choices`` so adding a taxonomy value never needs a migration.
+    failure_reason = models.CharField(max_length=64, blank=True, default="", db_index=True)
     llm_model = models.CharField(max_length=128, blank=True, default="")
     # Token usage as one bag of counters in the canonical shape documented in
     # ``pi_dash.runner.services.usage`` — input / output / total, the cache
