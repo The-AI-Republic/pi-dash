@@ -235,6 +235,40 @@ class TestProjectAPIPost(TestProjectBase):
         assert response_data["description"] == project_data["description"]
         assert response_data["network"] == project_data["network"]
 
+    @pytest.mark.django_db
+    def test_create_project_with_context(self, session_client, workspace, create_user):
+        """Description and context are separate fields and both persist on create"""
+        url = self.get_project_url(workspace.slug)
+        project_data = {
+            "name": "Agent Project",
+            "identifier": "AGP",
+            "description": "Billing admin tool.",
+            "context": "Prefer additive migrations.\nNever push to main.",
+        }
+
+        response = session_client.post(url, project_data, format="json")
+
+        assert response.status_code == status.HTTP_201_CREATED
+        response_data = response.json()
+        assert response_data["description"] == project_data["description"]
+        assert response_data["context"] == project_data["context"]
+
+        project = Project.objects.get(identifier="AGP", workspace=workspace)
+        assert project.description == project_data["description"]
+        assert project.context == project_data["context"]
+
+    @pytest.mark.django_db
+    def test_create_project_context_is_optional(self, session_client, workspace, create_user):
+        """A description alone never populates the agent context"""
+        url = self.get_project_url(workspace.slug)
+        response = session_client.post(
+            url, {"name": "Plain Project", "identifier": "PLN", "description": "Just a summary"}, format="json"
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.json()["context"] == ""
+        assert Project.objects.get(identifier="PLN", workspace=workspace).context == ""
+
 
 @pytest.mark.contract
 class TestProjectAPIGet(TestProjectBase):
@@ -410,6 +444,38 @@ class TestProjectAPIPatchDelete(TestProjectBase):
         assert project.description == "Updated description"
         assert project.cycle_view is True
         assert project.module_view is False
+
+    @pytest.mark.django_db
+    def test_partial_update_project_context_round_trips(self, session_client, workspace, create_user):
+        """Updating context leaves description alone, and the detail read returns both"""
+        project = Project.objects.create(
+            name="Context Project",
+            identifier="CTX",
+            workspace=workspace,
+            description="Original description",
+            context="Original context",
+        )
+        ProjectMember.objects.create(project=project, member=create_user, role=20, is_active=True)
+        url = self.get_project_url(workspace.slug, pk=project.id)
+
+        response = session_client.patch(url, {"context": "Updated context"}, format="json")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["context"] == "Updated context"
+        project.refresh_from_db()
+        assert project.context == "Updated context"
+        assert project.description == "Original description"
+
+        response = session_client.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["context"] == "Updated context"
+        assert response.json()["description"] == "Original description"
+
+        # Clearing it is allowed: the field is optional.
+        response = session_client.patch(url, {"context": ""}, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        project.refresh_from_db()
+        assert project.context == ""
 
     @pytest.mark.django_db
     def test_partial_update_project_forbidden_non_admin(self, session_client, workspace):

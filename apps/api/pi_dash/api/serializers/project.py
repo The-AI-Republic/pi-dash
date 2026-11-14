@@ -88,6 +88,7 @@ class ProjectCreateSerializer(BaseSerializer):
         fields = [
             "name",
             "description",
+            "context",
             "project_lead",
             "default_assignee",
             "identifier",
