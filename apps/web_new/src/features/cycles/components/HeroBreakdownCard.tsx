@@ -61,6 +61,11 @@ function entryClass(disabled: boolean): string {
   return `text-body flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left text-(--text) hover:bg-(--subtle)${disabled ? " cursor-wait opacity-60" : ""}`;
 }
 
+/** Null buckets (no filter id) render inert, like the sidebar entries. */
+function inertEntryClass(): string {
+  return "text-body flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left text-(--text-muted)";
+}
+
 /** Priority-tab sentinel that loads the next filtered page when scrolled into view. */
 function useHeroPrioritySentinel(onIntersect: () => void, enabled: boolean): React.RefObject<HTMLDivElement | null> {
   const ref = React.useRef<HTMLDivElement | null>(null);
@@ -158,22 +163,42 @@ export function HeroBreakdownCard({
         </div>
       ) : (
         <div className="flex flex-col">
-          {entries.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              data-testid="hero-breakdown-entry"
-              data-dimension="assignee_id"
-              data-value={entry.id}
-              disabled={disabled}
-              onClick={() => onEntryClick("assignee_id", entry.id)}
-              className={entryClass(disabled)}
-            >
-              <Avatar name={entry.name} size="small" {...(entry.avatar === null ? {} : { src: entry.avatar })} />
-              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-              <span className="text-(--text-muted)">{entry.count}</span>
-            </button>
-          ))}
+          {entries.map((entry, index) => {
+            const body = (
+              <>
+                <Avatar name={entry.name} size="small" {...(entry.avatar === null ? {} : { src: entry.avatar })} />
+                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                <span className="text-(--text-muted)">{entry.count}</span>
+              </>
+            );
+            const id = entry.id;
+            if (id === null) {
+              return (
+                <div
+                  key={`no-assignee-${index}`}
+                  data-testid="hero-breakdown-entry"
+                  data-dimension="assignee_id"
+                  className={inertEntryClass()}
+                >
+                  {body}
+                </div>
+              );
+            }
+            return (
+              <button
+                key={id}
+                type="button"
+                data-testid="hero-breakdown-entry"
+                data-dimension="assignee_id"
+                data-value={id}
+                disabled={disabled}
+                onClick={() => onEntryClick("assignee_id", id)}
+                className={entryClass(disabled)}
+              >
+                {body}
+              </button>
+            );
+          })}
         </div>
       );
   } else {
@@ -185,26 +210,46 @@ export function HeroBreakdownCard({
         </div>
       ) : (
         <div className="flex flex-col">
-          {entries.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              data-testid="hero-breakdown-entry"
-              data-dimension="label_id"
-              data-value={entry.id}
-              disabled={disabled}
-              onClick={() => onEntryClick("label_id", entry.id)}
-              className={entryClass(disabled)}
-            >
-              <span
-                aria-hidden="true"
-                style={entry.color === null ? undefined : { backgroundColor: entry.color }}
-                className="size-2 shrink-0 rounded-full bg-(--subtle)"
-              />
-              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-              <span className="text-(--text-muted)">{entry.count}</span>
-            </button>
-          ))}
+          {entries.map((entry, index) => {
+            const body = (
+              <>
+                <span
+                  aria-hidden="true"
+                  style={entry.color === null ? undefined : { backgroundColor: entry.color }}
+                  className="size-2 shrink-0 rounded-full bg-(--subtle)"
+                />
+                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                <span className="text-(--text-muted)">{entry.count}</span>
+              </>
+            );
+            const id = entry.id;
+            if (id === null) {
+              return (
+                <div
+                  key={`no-label-${index}`}
+                  data-testid="hero-breakdown-entry"
+                  data-dimension="label_id"
+                  className={inertEntryClass()}
+                >
+                  {body}
+                </div>
+              );
+            }
+            return (
+              <button
+                key={id}
+                type="button"
+                data-testid="hero-breakdown-entry"
+                data-dimension="label_id"
+                data-value={id}
+                disabled={disabled}
+                onClick={() => onEntryClick("label_id", id)}
+                className={entryClass(disabled)}
+              >
+                {body}
+              </button>
+            );
+          })}
         </div>
       );
   }

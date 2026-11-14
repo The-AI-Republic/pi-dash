@@ -358,6 +358,101 @@ test(
 );
 
 test(
+  specTitle(["CYC-041"], "Hero shows the no-assignee and no-label rows with counts and no click navigation"),
+  { tag: specTags(["CYC-041"]) },
+  async ({ driver, seed }, testInfo) => {
+    const tag = Date.now().toString(36);
+    const member = requireMentionMember(seed);
+    const ownerSession = await signInSession(seed.email, seed.password);
+    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    const projectId = await createCyclesProject(seed, `NF254 S41e ${tag} project`, ownerSession);
+    try {
+      const memberId = await serverWorkspaceMemberId(seed.workspaceSlug, member.email, ownerSession);
+      await serverAddProjectMembers(seed.workspaceSlug, projectId, [{ memberId, role: ROLE_MEMBER }], ownerSession);
+      const labelName = `S41e label ${tag}`;
+      const label = await createProjectLabel(seed.workspaceSlug, projectId, ownerSession, labelName);
+      const cycleName = `S41e active ${tag}`;
+      const cycleId = await serverCreateCycle(
+        seed.workspaceSlug,
+        projectId,
+        cycleName,
+        CURRENT_START,
+        CURRENT_END,
+        ownerSession
+      );
+      const assignedName = `S41e assigned ${tag}`;
+      const unassignedName = `S41e unassigned ${tag}`;
+      const assignedId = await serverCreateIssue(seed.workspaceSlug, projectId, ownerSession, assignedName);
+      const unassignedId = await serverCreateIssue(seed.workspaceSlug, projectId, ownerSession, unassignedName);
+      await serverPatchIssue(
+        seed.workspaceSlug,
+        projectId,
+        assignedId,
+        { assignee_ids: [member.id], label_ids: [label.id] },
+        ownerSession
+      );
+      await serverAttachCycleIssues(seed.workspaceSlug, projectId, cycleId, [assignedId, unassignedId], ownerSession);
+      await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
+
+      await test.step("assignees shows the no-assignee row with its count", async () => {
+        await expect
+          .poll(() => driver.cyclesHeroBreakdownTabs(), { timeout: 60_000 })
+          .toEqual(["Priority work items", "Assignees", "Labels"]);
+        await driver.cyclesHeroBreakdownSelectTab("Assignees");
+        await expect
+          .poll(async () => (await driver.cyclesHeroBreakdownEntries()).join("\n"), { timeout: 60_000 })
+          .toContain(member.displayName);
+        await expect
+          .poll(async () => (await driver.cyclesHeroBreakdownEntries()).join("\n"), { timeout: 60_000 })
+          .toContain("No assignee");
+        const entries = await driver.cyclesHeroBreakdownEntries();
+        const joined = entries.join("\n");
+        // New renders the bare count, old renders "of <total>".
+        if (testInfo.project.name === "new") {
+          expect(entries).toContain("1");
+        } else {
+          expect(joined).toContain("of 1");
+        }
+        expect((await serverCycleProgress(seed.workspaceSlug, projectId, cycleId, ownerSession)).total).toBe(2);
+      });
+
+      await test.step("labels shows the no-label row with its count", async () => {
+        await driver.cyclesHeroBreakdownSelectTab("Labels");
+        await expect
+          .poll(async () => (await driver.cyclesHeroBreakdownEntries()).join("\n"), { timeout: 60_000 })
+          .toContain(labelName);
+        await expect
+          .poll(async () => (await driver.cyclesHeroBreakdownEntries()).join("\n"), { timeout: 60_000 })
+          .toContain("No labels");
+        const entries = await driver.cyclesHeroBreakdownEntries();
+        const joined = entries.join("\n");
+        if (testInfo.project.name === "new") {
+          expect(entries).toContain("1");
+        } else {
+          expect(joined).toContain("of 1");
+        }
+      });
+
+      await test.step("clicking the no-assignee row does not navigate or filter", async () => {
+        await driver.cyclesHeroBreakdownSelectTab("Assignees");
+        await expect
+          .poll(async () => (await driver.cyclesHeroBreakdownEntries()).join("\n"), { timeout: 60_000 })
+          .toContain("No assignee");
+        const before = await driver.currentPath();
+        await driver.cyclesHeroTapBreakdownEntryByText("No assignee");
+        await driver.page.waitForTimeout(5000);
+        expect(await driver.currentPath()).toBe(before);
+        expect(await driver.currentPath()).not.toContain(`/cycles/${cycleId}`);
+        const props = await serverCycleUserProperties(seed.workspaceSlug, projectId, cycleId, ownerSession);
+        expect(JSON.stringify(props.richFilters)).not.toContain("assignee_id");
+      });
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, ownerSession);
+    }
+  }
+);
+
+test(
   specTitle(["CYC-041"], "bug: NEWFRONT-266 fresh breakdown clicks die before the properties row exists"),
   { tag: specTags(["CYC-041"]) },
   async ({ driver, seed }, testInfo) => {

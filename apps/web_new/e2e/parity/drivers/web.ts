@@ -35422,6 +35422,14 @@ export class WebDriver implements ParityDriver {
     await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebDriver.OPEN_MS });
   }
 
+  async cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void> {
+    // No navigation wait: the no-assignee row renders without the
+    // pointer cursor and carries no click action, so the scenario
+    // asserts the address stays on the list.
+    const row = this.cyclesHeroActiveBreakdownPanel().locator("div").filter({ hasText: entryText }).first();
+    await row.click({ timeout: WebDriver.OPEN_MS });
+  }
+
   async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/active-cycles`);
     await this.page.waitForLoadState("domcontentloaded");

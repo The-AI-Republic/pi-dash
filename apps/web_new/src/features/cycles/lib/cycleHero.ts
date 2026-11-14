@@ -121,34 +121,45 @@ export function heroChartAvailable(
 }
 
 export interface HeroAssigneeEntry {
-  id: string;
+  /** Null for the unassigned bucket, which has no filter id. */
+  id: string | null;
   name: string;
   avatar: string | null;
   count: number;
 }
 
-/** Assignee rows: display names with issue or estimate counts. Sparse server rows fall back to blanks. */
+/** Caption of the unassigned bucket (CYC-041). */
+export const HERO_NO_ASSIGNEE = "No assignee";
+
+/** Assignee rows: display names with issue or estimate counts. The unassigned row names itself. */
 export function heroAssigneeEntries(distribution: CycleDistribution, measure: HeroMeasure): HeroAssigneeEntry[] {
-  return distribution.assignees.map((row) => ({
-    id: row.assignee_id ?? "",
-    name: row.display_name ?? "",
-    avatar: row.avatar_url ?? null,
-    count: (measure === "points" ? row.total_estimates : row.total_issues) ?? 0,
-  }));
+  return distribution.assignees.map((row) => {
+    const id = row.assignee_id ?? null;
+    return {
+      id,
+      name: id === null ? HERO_NO_ASSIGNEE : (row.display_name ?? ""),
+      avatar: row.avatar_url ?? null,
+      count: (measure === "points" ? row.total_estimates : row.total_issues) ?? 0,
+    };
+  });
 }
 
 export interface HeroLabelEntry {
-  id: string;
+  /** Null for the unlabeled bucket, which has no filter id. */
+  id: string | null;
   name: string;
   color: string | null;
   count: number;
 }
 
-/** Label rows: names with dots and issue or estimate counts. Sparse server rows fall back to blanks. */
+/** Caption of the unlabeled bucket (CYC-041). */
+export const HERO_NO_LABELS = "No labels";
+
+/** Label rows: names with dots and issue or estimate counts. Unnamed rows read "No labels". */
 export function heroLabelEntries(distribution: CycleDistribution, measure: HeroMeasure): HeroLabelEntry[] {
   return distribution.labels.map((row) => ({
-    id: row.label_id ?? "",
-    name: row.label_name ?? "",
+    id: row.label_id ?? null,
+    name: row.label_name ?? HERO_NO_LABELS,
     color: row.color ?? null,
     count: (measure === "points" ? row.total_estimates : row.total_issues) ?? 0,
   }));

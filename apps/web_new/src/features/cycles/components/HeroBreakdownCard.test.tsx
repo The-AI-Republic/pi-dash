@@ -193,6 +193,58 @@ describe("HeroBreakdownCard", () => {
     expect(onEntryClick).toHaveBeenCalledWith("label_id", "docs");
   });
 
+  it("shows the unassigned row with its count without click navigation", async () => {
+    reads.analytics.mockResolvedValue({
+      completion_chart: {},
+      assignees: [
+        { assignee_id: MEMBER, display_name: "Ada Lovelace", avatar_url: null, total_issues: 1, total_estimates: 2 },
+        { assignee_id: null, display_name: null, avatar_url: null, total_issues: 3, total_estimates: 7 },
+      ],
+      labels: [],
+    });
+    const onEntryClick = vi.fn();
+    renderCard(onEntryClick);
+    fireEvent.click(await screen.findByRole("tab", { name: "Assignees" }));
+    expect(await screen.findByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
+    const caption = await screen.findByText("No assignee");
+    expect(caption).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /No assignee/ })).not.toBeInTheDocument();
+    const row = caption.closest('[data-testid="hero-breakdown-entry"]');
+    expect(row).not.toBeNull();
+    expect(row?.tagName).toBe("DIV");
+    expect(row).toHaveTextContent("3");
+    fireEvent.click(row as HTMLElement);
+    expect(onEntryClick).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Ada Lovelace/ }));
+    expect(onEntryClick).toHaveBeenCalledWith("assignee_id", MEMBER);
+  });
+
+  it("shows the unlabeled row with its count without click navigation", async () => {
+    reads.analytics.mockResolvedValue({
+      completion_chart: {},
+      assignees: [],
+      labels: [
+        { label_id: "bug", label_name: "Bug", color: "#ff0000", total_issues: 1, total_estimates: 1 },
+        { label_id: null, label_name: null, color: null, total_issues: 2, total_estimates: 3 },
+      ],
+    });
+    const onEntryClick = vi.fn();
+    renderCard(onEntryClick);
+    fireEvent.click(await screen.findByRole("tab", { name: "Labels" }));
+    expect(await screen.findByRole("button", { name: /Bug/ })).toBeInTheDocument();
+    const caption = await screen.findByText("No labels");
+    expect(caption).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /No labels/ })).not.toBeInTheDocument();
+    const row = caption.closest('[data-testid="hero-breakdown-entry"]');
+    expect(row).not.toBeNull();
+    expect(row?.tagName).toBe("DIV");
+    expect(row).toHaveTextContent("2");
+    fireEvent.click(row as HTMLElement);
+    expect(onEntryClick).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Bug/ }));
+    expect(onEntryClick).toHaveBeenCalledWith("label_id", "bug");
+  });
+
   it("reads estimate counts under the points measure", async () => {
     renderCard(() => undefined, "points");
     fireEvent.click(await screen.findByRole("tab", { name: "Assignees" }));
