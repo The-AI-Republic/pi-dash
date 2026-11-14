@@ -243,3 +243,69 @@ def wait_for_queue_drain(broker, *, queue="celery", baseline=0, timeout=WORKER_T
         time.sleep(poll)
     raise AssertionError(f"timed out waiting for queue {queue!r} to drain to {baseline}")
 
+
+STUB_MODEL = "oracle-stub"
+
+_channel = None
+
+
+def _live_channel():
+    """The live worker's delivery channel, detected once per process.
+
+    A Django worker answers Celery inspect and consumes the redis wire;
+    otherwise the Rust worker claims ``rust_job_queue`` rows. Exactly one
+    worker runs in any contract run, so exactly one channel delivers.
+    """
+    global _channel
+    from _harness import broker_probe, rust_queue
+
+    if _channel is None:
+        try:
+            live = bool(broker_probe.registered_tasks(timeout=5.0))
+        except Exception:
+            live = False
+        _channel = "celery" if live else "rust_queue"
+        if _channel == "rust_queue":
+            rust_queue.ensure_schema()
+    return _channel
+
+
+def publish_task(broker, task, args=()):
+    """Publish an arbitrary task through the live worker's channel."""
+    if _live_channel() == "celery":
+        broker.publish(task, list(args))
+    else:
+        from _harness import rust_queue
+
+        rust_queue.publish(task, list(args))
+
+
+def seed_llm_config(
+    seeder,
+    user_id,
+    base_url,
+    api_key,
+    *,
+    provider_kind="openai_compatible",
+    model_name=STUB_MODEL,
+):
+    """Seed a decryptable BYOK config pointing at a stub endpoint.
+
+    The Fernet token is encrypted with the backend's
+    ``ASSISTANT_ENCRYPTION_KEY`` so both Django and Rust decrypt the same
+    ciphertext.
+    """
+    import os
+
+    from cryptography.fernet import Fernet
+
+    key = os.environ["ASSISTANT_ENCRYPTION_KEY"].encode("utf-8")
+    token = Fernet(key).encrypt(api_key.encode("utf-8"))
+    seeder.db.execute(
+        """INSERT INTO assistant_user_llm_config
+           (provider_kind, base_url, model_name, api_key_encrypted,
+            last_verified_at, created_at, updated_at, user_id)
+           VALUES (%s,%s,%s,%s,NULL,now(),now(),%s)""",
+        (provider_kind, base_url, model_name, token, user_id),
+    )
+
