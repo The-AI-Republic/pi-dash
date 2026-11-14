@@ -576,7 +576,7 @@ pub trait PodRunnerMatcher: Send + Sync {
 /// Sync methods are the D-11 seams (closures the store carries):
 /// `has_usable_llm_config` (`agent_execution.py:78-80`),
 /// `managed_llm_profile` (`managed_runner/policy.py:27-36`), and the
-/// operator kill switch (`managed_runner_is_enabled`, L3).
+/// operator kill switch (`pidash_agent_is_enabled`, L3).
 #[allow(async_fn_in_trait)]
 pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
     /// The Re-tick issue lock + read ([`RETICK_ISSUE_LOCK_SQL`] then the
@@ -686,7 +686,7 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         workspace_slug: &str,
         project_id: Uuid,
     ) -> Result<RoleVerdict, DispatchError>;
-    /// The operator kill switch (`managed_runner_is_enabled`, L3).
+    /// The operator kill switch (`pidash_agent_is_enabled`, L3).
     fn managed_runner_enabled(&self) -> bool;
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
     fn has_usable_llm_config(&self, user_id: Uuid) -> bool;

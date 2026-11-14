@@ -8,16 +8,16 @@
 //!   `MACHINE_EXECUTORS`, `DEPRECATED_EXECUTORS`, `normalize_executor_write`,
 //!   `get_default_agent_executor`).
 //! * [`managed_runner`] — `managed_runner/errors.py:15-45`
-//!   (`ManagedRunnerReason`, `ManagedRunnerUnavailable`).
+//!   (`PidashAgentReason`, `PidashAgentUnavailable`).
 //!
 //! Fixture id replayed by the unit tests alongside each module:
 //! `rust-api/fixtures/dispatch/fx-disp-01-types.golden.json` (FX-DISP-01).
 
+#[allow(clippy::module_inception)]
 pub mod executor;
-
 pub mod pidash_agent;
 pub use executor::{
     get_default_agent_executor, normalize_executor_write, AgentExecutorKind, DEPRECATED_EXECUTORS,
     MACHINE_EXECUTORS,
 };
-pub use pidash_agent::{ManagedRunnerReason, ManagedRunnerUnavailable};
+pub use pidash_agent::{PidashAgentReason, PidashAgentUnavailable};

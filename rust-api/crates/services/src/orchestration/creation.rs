@@ -4665,7 +4665,7 @@ mod tests {
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::ManagedRunner,
+            executor_kind: AgentExecutorKind::PidashAgent,
             tool_plan: json!({}),
             pinned_runner_entry: Some(Some(uid(0x61))),
             error_code: None,

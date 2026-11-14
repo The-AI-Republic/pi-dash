@@ -128,11 +128,11 @@ use pidash_services::app_issues::serializers_detail::{
 };
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::issuing::admission::{
+use pidash_services::run_creation::pidash_agent_availability::{
     pidash_agent_availability, pidash_agent_probe, LlmProfile, PidashAgentProbe,
     HEARTBEAT_GRACE_SECS,
 };
-use pidash_services::issuing::resolution::{pidash_agent_is_enabled, UserFlags};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -140,7 +140,7 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::issuing::{AgentExecutorKind, PidashAgentReason};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 

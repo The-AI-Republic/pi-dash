@@ -131,7 +131,7 @@ fn desktop_denied() -> Response {
 /// expires). Anything unrecognised is treated as transient rather than
 /// signing the user out on a bug. `name` is the Python exception class
 /// name; only the cloud overlay ever raises the session trio — CE only
-/// ever reaches the `ManagedRunnerUnavailable` branch in the handler.
+/// ever reaches the `PidashAgentUnavailable` branch in the handler.
 /// The cloud seam classifies with its own copy and returns the outcome
 /// through `CredentialError::Classified`; this port pins the shared
 /// mapping.
@@ -299,7 +299,7 @@ async fn post_token(
             // The client should have consulted the profile first; answer
             // with the same reason code it would have seen there.
             // `str(exc)`: the detail, or the code when empty (the
-            // `ManagedRunnerUnavailable` Display the ported seam renders).
+            // `PidashAgentUnavailable` Display the ported seam renders).
             let reason = unavailable.reason;
             let detail = if unavailable.message.is_empty() {
                 reason.clone()

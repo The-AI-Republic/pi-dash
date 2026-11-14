@@ -461,7 +461,7 @@ pub fn check_description_html(
 pub struct SharedChecks<'a> {
     /// Raw `default_agent_executor` input.
     pub executor: Option<&'a str>,
-    /// `managed_runner_is_enabled()`.
+    /// `pidash_agent_is_enabled()`.
     pub managed_enabled: bool,
     /// Raw `name` input.
     pub name: Option<&'a str>,
