@@ -2337,10 +2337,6 @@ async fn git_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, 
     serializers_engage::git_issue_synced(&orm(pool), *issue_id).await
 }
 
-async fn github_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
-    serializers_engage::github_issue_synced(&orm(pool), *issue_id).await
-}
-
 async fn has_active_run(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
     serializers_create::has_active_run(&orm(pool), *issue_id).await
 }
@@ -2638,7 +2634,7 @@ async fn run_validate(
         false
     };
     let github_sync = if synced_source && !git_sync {
-        github_issue_synced(pool, &instance_id)
+        git_issue_synced(pool, &instance_id)
             .await
             .map_err(|_| db_error())?
     } else {
@@ -3792,7 +3788,7 @@ async fn render_detail_map(
         let git = git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?;
-        git || github_issue_synced(pool, &row.save.id)
+        git || git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?
     } else {
@@ -5124,7 +5120,7 @@ async fn destroy_issue_inner(
     let synced = git_issue_synced(&pool, &pk)
         .await
         .map_err(|_| Denial::ServerError)?
-        || github_issue_synced(&pool, &pk)
+        || git_issue_synced(&pool, &pk)
             .await
             .map_err(|_| Denial::ServerError)?;
     if synced {

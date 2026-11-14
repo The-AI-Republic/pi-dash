@@ -35,11 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use super::status::{AgentRunStatus, AgentRunTrigger};
 use crate::integrations::OnDelete;
-<<<<<<<< HEAD:rust-api/crates/db/src/dispatch/agent_run.rs
-use pidash_types::dispatch::AgentExecutorKind;
-========
 use pidash_types::agent_runs::AgentExecutorKind;
->>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/db/src/agent_runs/agent_run.rs
 
 /// Physical table (`Meta.db_table`, `models.py:1038`).
 pub const TABLE: &str = "agent_run";
