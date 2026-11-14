@@ -268,15 +268,17 @@ async fn count_queued_cloud(
 }
 
 /// SeaORM form of the `GITHUB_BINDING_EXISTS_SQL` probe (policy.py):
-/// the four-join provider chain, no deleted_at scope on joined
-/// tables (Django filters only the base table).
+/// the provider chain, no deleted_at scope on joined tables (Django
+/// filters only the base table). NEWPIDASH-210: the
+/// verified/suspended legs read git_provider_accounts (WHERE
+/// `provider_account__workspace_integration__github_app_installation__*`
+/// read the legacy installation row; the account row itself carries
+/// `verified_at`/`suspended_at` since PDASHOSS01-356) — the
+/// `workspace_integration` link join is kept, only the legacy leg goes.
 fn github_binding_exists_select(
     project: &ProjectScope,
 ) -> sea_orm::Select<pidash_db::entity::git_repository_bindings::Entity> {
-    use pidash_db::entity::{
-        git_provider_accounts, git_repositories, git_repository_bindings, github_app_installations,
-        workspace_integrations,
-    };
+    use pidash_db::entity::{git_provider_accounts, git_repositories, git_repository_bindings};
     use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
     git_repository_bindings::Entity::find()
         .select_only()
@@ -293,10 +295,6 @@ fn github_binding_exists_select(
             JoinType::InnerJoin,
             git_provider_accounts::Relation::WorkspaceIntegrations.def(),
         )
-        .join(
-            JoinType::InnerJoin,
-            workspace_integrations::Relation::GithubAppInstallations.def(),
-        )
         .filter(git_repository_bindings::Column::ProjectId.eq(project.project_id))
         .filter(git_repository_bindings::Column::WorkspaceId.eq(project.workspace_id))
         .filter(git_repository_bindings::Column::DeletedAt.is_null())
@@ -308,8 +306,7 @@ fn github_binding_exists_select(
         .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
         .filter(git_provider_accounts::Column::Status.eq("connected"))
         .filter(git_provider_accounts::Column::VerifiedAt.is_not_null())
-        .filter(github_app_installations::Column::VerifiedAt.is_not_null())
-        .filter(github_app_installations::Column::SuspendedAt.is_null())
+        .filter(git_provider_accounts::Column::SuspendedAt.is_null())
         .limit(1)
 }
 
@@ -511,7 +508,10 @@ mod tests {
         assert!(sql.contains("git_repositories"), "join r: {sql}");
         assert!(sql.contains("git_provider_accounts"), "join a: {sql}");
         assert!(sql.contains("workspace_integrations"), "join w: {sql}");
-        assert!(sql.contains("github_app_installations"), "join i: {sql}");
+        assert!(
+            !sql.contains("github_app_installations"),
+            "legacy leg gone (NEWPIDASH-210): {sql}"
+        );
         assert!(sql.contains("github"), "provider filter: {sql}");
         assert!(sql.contains("connected"), "status filter: {sql}");
         assert!(sql.contains("LIMIT 1"), "first-row: {sql}");

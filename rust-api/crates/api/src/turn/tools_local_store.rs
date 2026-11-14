@@ -671,15 +671,6 @@ pub trait ToolStore {
         repo: &str,
     ) -> Result<Option<Value>, StoreError>;
 
-    /// Newest GitHub sync credentials on a member project
-    /// (`github._find_token` fallback arm).
-    async fn github_sync_credentials(
-        &self,
-        deps: &AssistantDeps,
-        namespace: &str,
-        repo: &str,
-    ) -> Result<Option<Value>, StoreError>;
-
     /// Decrypt a stored token (`license.utils.encryption.decrypt_data`
     /// — catches everything, returns `""` on failure).
     fn decrypt_token(&self, stored: Option<&str>) -> Option<String>;
@@ -700,8 +691,8 @@ pub type RedisClient = Arc<redis::Client>;
 use pidash_db::entity::{
     agent_run, assistant_event, assistant_message, assistant_thread, assistant_turn,
     assistant_user_llm_config, git_provider_accounts, git_repositories, git_repository_bindings,
-    github_repositories, github_repository_syncs, issue_comments, issue_relations, issue_sequences,
-    issues, labels, pod, project_members, projects, runner, states, users, workspaces,
+    issue_comments, issue_relations, issue_sequences, issues, labels, pod, project_members,
+    projects, runner, states, users, workspaces,
 };
 use pidash_services::assistant::tools_issues::ListFilterPredicates;
 use sea_orm::sea_query::{Alias, Expr, Func};
@@ -3446,58 +3437,6 @@ impl ToolStore for PgToolStore {
             .await
             .map_err(orm_err)?;
         Ok(config)
-    }
-
-    async fn github_sync_credentials(
-        &self,
-        deps: &AssistantDeps,
-        namespace: &str,
-        repo: &str,
-    ) -> Result<Option<Value>, StoreError> {
-        let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        let member_projects = projects::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                projects::Relation::ProjectMembers.def(),
-            )
-            .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
-            .select_only()
-            .column(projects::Column::Id)
-            .distinct()
-            .filter(project_members::Column::MemberId.eq(deps.user_id))
-            .filter(project_members::Column::IsActive.eq(true))
-            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
-            .filter(projects::Column::DeletedAt.is_null())
-            .into_query();
-        let credentials: Option<Value> = github_repository_syncs::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                github_repository_syncs::Relation::GithubRepositories.def(),
-            )
-            .select_only()
-            .column(github_repository_syncs::Column::Credentials)
-            .filter(github_repository_syncs::Column::ProjectId.in_subquery(member_projects))
-            .filter(
-                Expr::expr(Func::upper(Expr::col((
-                    github_repositories::Entity,
-                    github_repositories::Column::Owner,
-                ))))
-                .eq(Func::upper(Expr::val(namespace.to_owned()))),
-            )
-            .filter(
-                Expr::expr(Func::upper(Expr::col((
-                    github_repositories::Entity,
-                    github_repositories::Column::Name,
-                ))))
-                .eq(Func::upper(Expr::val(repo.to_owned()))),
-            )
-            .filter(github_repository_syncs::Column::DeletedAt.is_null())
-            .order_by_desc(github_repository_syncs::Column::CreatedAt)
-            .into_tuple()
-            .one(&db)
-            .await
-            .map_err(orm_err)?;
-        Ok(credentials)
     }
 
     fn decrypt_token(&self, stored: Option<&str>) -> Option<String> {
