@@ -59,13 +59,11 @@
 //!   (`git.py:173-175`).
 //! - `set_binding_sync_enabled` on a missing binding raises
 //!   `ProviderAccountNotFound("Repository is not bound")`, a 404
-//!   (`services.py:361-364`), and also flips the legacy
-//!   `GithubRepositorySync` rows for github-provider bindings (`:367-370`).
-//! - `bind_repository` hard-deletes the existing binding and the legacy
-//!   sync rows inside the transaction, creates the binding with
-//!   `is_sync_enabled=False`, and only touches `project.repo_url` /
-//!   `project.base_branch` when the guarded comparisons pass
-//!   (`services.py:324-349`).
+//!   (`services.py:361-364`).
+//! - `bind_repository` hard-deletes the existing binding inside the
+//!   transaction, creates the binding with `is_sync_enabled=False`, and
+//!   only touches `project.repo_url` / `project.base_branch` when the
+//!   guarded comparisons pass (`services.py:324-349`).
 //! - GitHub lowercases owner/name; GitLab preserves case
 //!   (`github.py:60-68`, `gitlab.py:227-233`).
 //! - Token handling differs per adapter: GitHub returns the Fernet-decrypted
@@ -700,15 +698,15 @@ async fn patch_repository(
 }
 
 /// `set_binding_sync_enabled` (`services.py:361-371`): flip the binding
-/// row; github-provider bindings also flip the legacy sync rows (scoped
-/// by `workspace__slug`, like the Django filter).
+/// row. The legacy `GithubRepositorySync` mirror is gone (frozen table);
+/// the binding is the only row that carries the flag now.
 async fn set_binding_sync_enabled(
     pool: &sqlx::PgPool,
-    slug: &str,
+    _slug: &str,
     binding: &ProjectBinding,
     enabled: bool,
 ) -> Result<(), RepoDenial> {
-    use pidash_db::entity::{git_repository_bindings, github_repository_syncs};
+    use pidash_db::entity::git_repository_bindings;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let db = pidash_db::pool::sea_orm_connection(pool);
     let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
@@ -726,31 +724,11 @@ async fn set_binding_sync_enabled(
         .exec(&db)
         .await
         .map_err(|_| RepoDenial::ServerError)?;
-    if binding.repository.provider == "github" {
-        // `UPDATE ... FROM workspaces w`: scope the sync rows to the
-        // slug's workspace in two steps (resolve the id, then update).
-        let workspace_id = pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?;
-        if let Some(workspace_id) = workspace_id {
-            github_repository_syncs::Entity::update_many()
-                .col_expr(
-                    github_repository_syncs::Column::IsSyncEnabled,
-                    sea_orm::sea_query::Expr::value(enabled),
-                )
-                .filter(github_repository_syncs::Column::ProjectId.eq(binding.binding.project_id))
-                .filter(github_repository_syncs::Column::WorkspaceId.eq(workspace_id))
-                .filter(github_repository_syncs::Column::DeletedAt.is_null())
-                .exec(&db)
-                .await
-                .map_err(|_| RepoDenial::ServerError)?;
-        }
-    }
     Ok(())
 }
 
-/// `DELETE repository/` (`git.py:151-154`): hard-delete the binding and the
-/// legacy sync rows; a missing binding is not an error.
+/// `DELETE repository/` (`git.py:151-154`): hard-delete the binding
+/// (with its issue/comment syncs); a missing binding is not an error.
 async fn delete_repository(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
@@ -809,40 +787,6 @@ pub(crate) async fn delete_git_binding_children(
     Ok(())
 }
 
-/// The `GithubRepositorySync` half of the Collector cascade
-/// (`github.py:81` → `:107`): `GithubCommentSync` rows first, then
-/// `GithubIssueSync` rows, with no `deleted_at` filter (see
-/// [`delete_git_binding_children`]). Shared with the `github_proj` bind
-/// rebind (`github.py:1026-1032`).
-pub(crate) async fn delete_github_sync_children(
-    db: &impl sea_orm::ConnectionTrait,
-    sync_ids: &[uuid::Uuid],
-) -> Result<(), sea_orm::DbErr> {
-    use pidash_db::entity::{github_comment_syncs, github_issue_syncs};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    if sync_ids.is_empty() {
-        return Ok(());
-    }
-    let issue_ids: Vec<uuid::Uuid> = github_issue_syncs::Entity::find()
-        .select_only()
-        .column(github_issue_syncs::Column::Id)
-        .filter(github_issue_syncs::Column::RepositorySyncId.is_in(sync_ids.iter().copied()))
-        .into_tuple()
-        .all(db)
-        .await?;
-    if !issue_ids.is_empty() {
-        github_comment_syncs::Entity::delete_many()
-            .filter(github_comment_syncs::Column::IssueSyncId.is_in(issue_ids.iter().copied()))
-            .exec(db)
-            .await?;
-    }
-    github_issue_syncs::Entity::delete_many()
-        .filter(github_issue_syncs::Column::RepositorySyncId.is_in(sync_ids.iter().copied()))
-        .exec(db)
-        .await?;
-    Ok(())
-}
-
 /// `unbind_repository` (`services.py:374-378`): hard deletes scoped to the
 /// live rows of this workspace slug + project, in one transaction. The
 /// parent filters stay live-only (the default manager); the child deletes
@@ -853,7 +797,7 @@ async fn unbind_repository(
     project_id: &uuid::Uuid,
 ) -> Result<(), RepoDenial> {
     let mut tx = pool.begin().await.map_err(|_| RepoDenial::ServerError)?;
-    use pidash_db::entity::{git_repository_bindings, github_repository_syncs, workspaces};
+    use pidash_db::entity::{git_repository_bindings, workspaces};
     use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
     let binding_ids: Vec<uuid::Uuid> = {
         let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
@@ -872,7 +816,7 @@ async fn unbind_repository(
             .await
             .map_err(|_| RepoDenial::ServerError)?
     };
-    let sync_ids: Vec<uuid::Uuid> = {
+    {
         let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
         delete_git_binding_children(&conn, &binding_ids)
             .await
@@ -882,32 +826,6 @@ async fn unbind_repository(
         git_repository_bindings::Entity::delete_many()
             .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
             .filter(git_repository_bindings::Column::DeletedAt.is_null())
-            .exec(&conn)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?;
-        github_repository_syncs::Entity::find()
-            .select_only()
-            .column(github_repository_syncs::Column::Id)
-            .join(
-                JoinType::InnerJoin,
-                github_repository_syncs::Relation::Workspaces.def(),
-            )
-            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
-            .filter(workspaces::Column::Slug.eq(slug))
-            .filter(github_repository_syncs::Column::DeletedAt.is_null())
-            .into_tuple()
-            .all(&conn)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?
-    };
-    {
-        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
-        delete_github_sync_children(&conn, &sync_ids)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?;
-        github_repository_syncs::Entity::delete_many()
-            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
-            .filter(github_repository_syncs::Column::DeletedAt.is_null())
             .exec(&conn)
             .await
             .map_err(|_| RepoDenial::ServerError)?;
@@ -1945,8 +1863,8 @@ async fn bind_transaction(
     };
     // Rebind (`services.py:324-328`): Collector-cascade the children of the
     // live rows first — the FKs have no `ON DELETE CASCADE`, so the bare
-    // parent DELETEs below would 23503 at COMMIT once anything synced.
-    use pidash_db::entity::{git_repository_bindings, github_repository_syncs};
+    // parent DELETE below would 23503 at COMMIT once anything synced.
+    use pidash_db::entity::git_repository_bindings;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let rebind_binding_ids: Vec<uuid::Uuid> = {
         let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
@@ -1968,30 +1886,6 @@ async fn bind_transaction(
         git_repository_bindings::Entity::delete_many()
             .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
             .filter(git_repository_bindings::Column::DeletedAt.is_null())
-            .exec(&conn)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?;
-    }
-    let rebind_sync_ids: Vec<uuid::Uuid> = {
-        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
-        github_repository_syncs::Entity::find()
-            .select_only()
-            .column(github_repository_syncs::Column::Id)
-            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
-            .filter(github_repository_syncs::Column::DeletedAt.is_null())
-            .into_tuple()
-            .all(&conn)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?
-    };
-    {
-        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
-        delete_github_sync_children(&conn, &rebind_sync_ids)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?;
-        github_repository_syncs::Entity::delete_many()
-            .filter(github_repository_syncs::Column::ProjectId.eq(*project_id))
-            .filter(github_repository_syncs::Column::DeletedAt.is_null())
             .exec(&conn)
             .await
             .map_err(|_| RepoDenial::ServerError)?;
