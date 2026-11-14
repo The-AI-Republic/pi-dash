@@ -995,15 +995,10 @@ pub async fn execute_terminal_effects(
         ));
     };
     if capacity.terminal_capacity_released_at.is_none() {
-        // Drains and dispatch run *before* the marker write,
-        // unisolated — a failure leaves the marker unset for the
-        // reconciler.
-        if capacity.executor_kind == AgentExecutorKind::CloudAgent.value() {
-            ports
-                .dispatch_waiting(capacity.workspace_id)
-                .await
-                .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
-        } else {
+        // Drains run *before* the marker write, unisolated — a
+        // failure leaves the marker unset for the reconciler.
+        // (P4: the cloud dispatch arm died with dispatch_waiting.)
+        {
             if let Some(runner_id) = capacity.runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): every
                 // finalization path frees a stale `busy` runner before
@@ -1224,6 +1219,7 @@ pub async fn drain_lifecycle_effects(
                     .await
                     .map_err(|_| server_error())?;
             }
+
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
                 if let Err(error) = ports
                     .complete_project_move_handoff(run_id, terminal_created_by)
