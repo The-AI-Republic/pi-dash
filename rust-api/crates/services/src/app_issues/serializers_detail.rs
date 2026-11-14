@@ -601,7 +601,13 @@ pub fn agent_run_to_representation<'a>(
 }
 
 /// `get_agent_status` wire keys (`issue.py:1407-1412`), in dict order: 4.
-pub const AGENT_STATUS_FIELDS: [&str; 4] = ["ticker", "active_run", "latest_run", "run_count"];
+pub const AGENT_STATUS_FIELDS: [&str; 5] = [
+    "ticker",
+    "active_run",
+    "latest_run",
+    "run_count",
+    "total_tokens",
+];
 
 /// `get_agent_status` output (`issue.py:1373-1412`), in dict order. The
 /// `ticker` value duplicates the top-level `agent_ticker` block (Python
@@ -612,6 +618,8 @@ pub struct AgentStatusView<'a> {
     pub active_run: Option<AgentRunView<'a>>,
     pub latest_run: Option<AgentRunView<'a>>,
     pub run_count: i64,
+    /// Cumulative tokens over every run of the issue (PDASHOSS01-189).
+    pub total_tokens: i64,
 }
 
 /// Port of `get_agent_status` (`issue.py:1373-1412`).
@@ -619,7 +627,9 @@ pub struct AgentStatusView<'a> {
 /// `ticker` is the already-rendered `agent_ticker` block (or `None` without
 /// a ticker row); `active_run` / `latest_run` are the
 /// runs from [`super::agent_runs::issue_agent_runs`] (or `None` without
-/// one); `run_count` is its [`super::agent_runs::IssueAgentRuns::count`].
+/// one); `run_count` is its [`super::agent_runs::IssueAgentRuns::count`]
+/// and `total_tokens` its
+/// [`super::agent_runs::IssueAgentRuns::total_tokens`].
 /// Returns `None` when the ticker block is `None` and there is no latest
 /// run (`:1404-1405`). The active run always carries live state; the latest
 /// carries it only when there is no active run (`:1410-1411`).
@@ -628,6 +638,7 @@ pub fn agent_status_to_representation<'a>(
     active_run: Option<&'a AgentRunDetailRow<'a>>,
     latest_run: Option<&'a AgentRunDetailRow<'a>>,
     run_count: i64,
+    total_tokens: i64,
 ) -> Option<AgentStatusView<'a>> {
     if ticker.is_none() && latest_run.is_none() {
         return None;
@@ -637,6 +648,7 @@ pub fn agent_status_to_representation<'a>(
         active_run: agent_run_to_representation(active_run, true),
         latest_run: agent_run_to_representation(latest_run, active_run.is_none()),
         run_count,
+        total_tokens,
     })
 }
 
@@ -812,6 +824,7 @@ pub struct IssueDetailRow<'a> {
     pub latest_run: Option<AgentRunDetailRow<'a>>,
     pub active_run: Option<AgentRunDetailRow<'a>>,
     pub run_count: i64,
+    pub run_total_tokens: i64,
     pub blockers: &'a RelationsSummary,
     pub assigned_runner_detail: Option<serde_json::Value>,
 }
@@ -848,6 +861,7 @@ pub fn issue_detail_to_representation<'a>(row: &'a IssueDetailRow<'a>) -> IssueD
         row.active_run.as_ref(),
         row.latest_run.as_ref(),
         row.run_count,
+        row.run_total_tokens,
     );
     IssueDetailView {
         base: issue_detail_base_to_representation(&row.base),
@@ -1352,6 +1366,7 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &summary,
             assigned_runner_detail: None,
         };
@@ -1377,6 +1392,7 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &summary,
             assigned_runner_detail: None,
         };
@@ -1434,6 +1450,7 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &summary,
             assigned_runner_detail: None,
         };
@@ -1590,10 +1607,12 @@ mod tests {
         // TRACE: issue.py:1404-1405 (None iff no ticker and no latest);
         // :1410-1411 (latest carries live state iff no active run).
         let usage = serde_json::json!({});
-        assert!(agent_status_to_representation(None, None, None, 0).is_none());
+        assert!(agent_status_to_representation(None, None, None, 0, 0).is_none());
 
         let latest = run_row(RUN, "completed", Some(live_row(Some(RUN), &usage)));
-        let status = agent_status_to_representation(None, None, Some(&latest), 1).expect("renders");
+        let status =
+            agent_status_to_representation(None, None, Some(&latest), 1, 12_800).expect("renders");
+        assert_eq!(status.total_tokens, 12_800);
         assert_eq!(serialized_keys(&status), const_keys(&AGENT_STATUS_FIELDS));
         assert!(status.ticker.is_none());
         assert!(status.active_run.is_none());
@@ -1602,8 +1621,8 @@ mod tests {
         assert_eq!(status.run_count, 1);
 
         let active = run_row(RUN, "running", Some(live_row(Some(RUN), &usage)));
-        let status =
-            agent_status_to_representation(None, Some(&active), Some(&latest), 2).expect("renders");
+        let status = agent_status_to_representation(None, Some(&active), Some(&latest), 2, 0)
+            .expect("renders");
         assert!(status
             .active_run
             .expect("active renders")

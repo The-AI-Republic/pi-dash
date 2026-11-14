@@ -32,7 +32,7 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { auditViewAbsence } from "./viewAbsence.js";
-import { makeMember, makeView, VIEWS_OWNER_ID } from "../testing.js";
+import { makeMember, makeProjectMember, makeView, VIEWS_OWNER_ID } from "../testing.js";
 import { DeleteViewDialog } from "../dialog/DeleteViewDialog.js";
 import { PublishViewDialog } from "../dialog/PublishViewDialog.js";
 import { SavedViewMissingState } from "../detail/SavedViewMissingState.js";
@@ -138,6 +138,8 @@ beforeEach(() => {
       return jsonResponse(url, 200, harness.views);
     }
     if (url.includes("/api/workspaces/acme/views/?")) return jsonResponse(url, 200, harness.customs);
+    if (url.endsWith(`/api/workspaces/acme/projects/${PROJECT_ID}/members/`))
+      return jsonResponse(url, 200, [makeProjectMember(VIEWS_OWNER_ID, PROJECT_ID)]);
     if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, [makeMember(VIEWS_OWNER_ID)]);
     if (url.endsWith("/api/users/me/")) return jsonResponse(url, 200, { id: VIEWS_OWNER_ID });
     if (url.endsWith("/api/users/me/workspaces/")) {

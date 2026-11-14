@@ -69,7 +69,6 @@ from pi_dash.api.serializers import (
 from pi_dash.app.permissions import (
     ProjectEntityPermission,
     ProjectLitePermission,
-    ProjectMemberPermission,
 )
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.db.models import (
@@ -1298,6 +1297,14 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
     must be active and belong to this workspace; the caller must be a
     workspace member (the agent's CLI token resolves to the runner owner).
     See ``.ai_design/ticking_relevance/design.md`` §7.
+
+    A run with no work item yields too (PDASHOSS01-276): a scheduler run is
+    project-scoped (``work_item`` NULL, ``scheduler_binding`` set), and its
+    agent ends on the same command. The outcome is recorded on the run the
+    same way; ``run_kind`` in the response says which sort of run it was
+    (``issue`` | ``scheduler`` | ``direct``). Such a run has no ticking
+    clock, so ``stop_ticking`` is accepted but not stored — it never
+    disables the schedule — and the response's ``detail`` says so.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1330,7 +1337,7 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
             .filter(pk=run_id, workspace__slug=slug)
             .first()
         )
-        if run is None or run.work_item_id is None:
+        if run is None:
             return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
         if not is_workspace_member(request.user, run.workspace_id):
             return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1346,20 +1353,31 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
         payload["yielded_at"] = timezone.now().isoformat()
         if isinstance(note, str) and note.strip():
             payload["note"] = note.strip()[:2000]
-        if stop_ticking is not None:
+        # Only an issue run has a ticker for ``stop_ticking`` to stop.
+        has_clock = run.work_item_id is not None
+        if stop_ticking is not None and has_clock:
             payload["stop_ticking"] = stop_ticking
         run.done_payload = payload
         run.save(update_fields=["done_payload"])
-        return Response(
-            {
-                "ok": True,
-                "run_id": str(run.id),
-                "work_item_id": str(run.work_item_id),
-                "outcome": outcome,
-                "stop_ticking": bool(stop_ticking),
-            },
-            status=status.HTTP_200_OK,
-        )
+        body = {
+            "ok": True,
+            "run_id": str(run.id),
+            "work_item_id": str(run.work_item_id) if has_clock else None,
+            "outcome": outcome,
+            "stop_ticking": bool(stop_ticking) and has_clock,
+            "run_kind": "issue",
+        }
+        if not has_clock:
+            if run.scheduler_binding_id is not None:
+                body["run_kind"] = "scheduler"
+                body["scheduler_binding_id"] = str(run.scheduler_binding_id)
+                subject = "scheduled runs have"
+            else:
+                body["run_kind"] = "direct"
+                subject = "a run without a work item has"
+            if stop_ticking:
+                body["detail"] = f"outcome recorded; {subject} no ticking clock, so stop_ticking was ignored"
+        return Response(body, status=status.HTTP_200_OK)
 
 
 class LabelListCreateAPIEndpoint(BaseAPIView):
@@ -1367,7 +1385,9 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
 
     serializer_class = LabelSerializer
     model = Label
-    permission_classes = [ProjectMemberPermission]
+    # Labels are project entities: create must check the caller's *project*
+    # role like update/delete do, not the workspace role (PDASHOSS01-239).
+    permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     def get_queryset(self):
@@ -1493,7 +1513,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
 
     serializer_class = LabelSerializer
     model = Label
-    permission_classes = [ProjectMemberPermission]
+    permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     @label_docs(

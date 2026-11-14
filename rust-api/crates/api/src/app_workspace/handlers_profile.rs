@@ -935,6 +935,79 @@ const RELATION_JOINS: &[(&str, &str)] = &[
     ("issue_subscribers", "issue_subscribers"),
 ];
 
+/// Map a legacy `issue_filters` predicate name to the relation alias it
+/// references (mirrors `crate::app_issues::list_engine::legacy_alias_for_predicate`).
+/// `__isnull` predicates are nullable references; `__in` predicates are
+/// positive references. Used to decide which relations the legacy stack
+/// needs joins for and which are shared with the rich stack
+/// (NEWPIDASH-195 / NEWPIDASH-218).
+fn legacy_alias_for_predicate(name: &str) -> Option<&'static str> {
+    if let Some(path) = name.strip_suffix("__isnull") {
+        return Some(match path {
+            "labels" | "label_issue__deleted_at" => "label_issue",
+            "assignees" | "issue_assignee__deleted_at" => "issue_assignee",
+            "issue_cycle__cycle_id" | "issue_cycle__deleted_at" => "issue_cycle",
+            "issue_module__module_id" | "issue_module__deleted_at" => "issue_module",
+            "issue_subscribers__deleted_at" => "issue_subscribers",
+            "issue_mention__mention__id" => "issue_mention",
+            _ => return None,
+        });
+    }
+    Some(match name {
+        "labels__in" => "label_issue",
+        "assignees__in" => "issue_assignee",
+        "issue_mention__mention__id__in" => "issue_mention",
+        "issue_cycle__cycle_id__in" => "issue_cycle",
+        "issue_module__module_id__in" => "issue_module",
+        "issue_subscribers__subscriber_id__in" => "issue_subscribers",
+        "issue_intake__status__in" => "issue_intake",
+        _ => return None,
+    })
+}
+
+/// Which relation aliases legacy predicates reference (mirrors
+/// `crate::app_issues::list_engine::legacy_referenced_aliases`).
+fn legacy_referenced_aliases(query: &QueryMap) -> std::collections::BTreeSet<&'static str> {
+    let flat: HashMap<String, String> = query
+        .keys()
+        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
+        .collect();
+    let today = chrono::Utc::now().date_naive();
+    let Ok(legacy) = pidash_db::issue_filters::issue_filters_get(&flat, "", today) else {
+        return std::collections::BTreeSet::new();
+    };
+    let mut out = std::collections::BTreeSet::new();
+    for (name, _) in legacy.predicates() {
+        if let Some(alias) = legacy_alias_for_predicate(name) {
+            out.insert(alias);
+        }
+    }
+    out
+}
+
+/// The join alias a legacy predicate filters through. Django applies the
+/// rich `filters` tree and legacy predicates as two separate `.filter()`
+/// calls; a relation filtered by BOTH stacks joins twice with the legacy
+/// copy over `<alias>_legacy` (NEWPIDASH-195 / NEWPIDASH-218). Unshared
+/// relations keep the primary alias.
+fn legacy_join_alias(
+    shared: &std::collections::BTreeSet<&'static str>,
+    alias: &'static str,
+) -> &'static str {
+    if !shared.contains(alias) {
+        return alias;
+    }
+    match alias {
+        "issue_assignee" => "issue_assignee_legacy",
+        "issue_cycle" => "issue_cycle_legacy",
+        "issue_module" => "issue_module_legacy",
+        "issue_mention" => "issue_mention_legacy",
+        "label_issue" => "label_issue_legacy",
+        "issue_subscribers" => "issue_subscribers_legacy",
+        _ => alias,
+    }
+}
+
 /// True when every `"alias".` / `alias.` reference in the filter SQL is an
 /// `IS NULL` / `IS NOT NULL` test (the `__isnull` predicates take the
 /// LEFT join). Both spellings are scanned: sea-query renders quoted
@@ -1114,69 +1187,24 @@ fn profile_id_exists(user_id: uuid::Uuid, slug: &str) -> SimpleExpr {
 }
 
 /// The rich `filters` param compiled like `complex_filter`, over the
-/// `issue` / `state` aliases. Returns the condition plus the relation
-/// aliases a leaf filters through (a declared relation leaf that compiled
-/// to a predicate, not to the match-all / match-none constants).
+/// `issue` / `state` aliases. Returns the compiled tree: the condition
+/// plus the relation aliases with a plain positive occurrence (`inner`,
+/// INNER join) or with an occurrence only under `or` (`left`, LEFT join).
+/// Aliases under an odd `not` compile to `NOT EXISTS` with no join
+/// (Django `split_exclude`, NEWPIDASH-194).
 fn p_rich_condition(
     query: &QueryMap,
     tz: &chrono_tz::Tz,
-) -> Result<Option<(Condition, std::collections::BTreeSet<&'static str>)>, Denial> {
+) -> Result<Option<pidash_db::filterset::CompiledTree>, Denial> {
     use pidash_db::filter::FilterTree;
-    fn relation_alias(name: &str) -> Option<&'static str> {
-        use pidash_db::filterset::{FilterKind, ISSUE_FILTERSET};
-        let decl = ISSUE_FILTERSET.iter().find(|decl| decl.name == name)?;
-        match decl.kind {
-            FilterKind::Relation { join_table, .. } => Some(join_table),
-            _ => None,
-        }
-    }
-    fn walk(
-        tree: &FilterTree,
-        tz: &chrono_tz::Tz,
-        used: &mut std::collections::BTreeSet<&'static str>,
-    ) -> Result<Condition, pidash_db::filter::FilterError> {
-        match tree {
-            FilterTree::And(children) => {
-                let mut cond = Condition::all();
-                for child in children {
-                    cond = cond.add(walk(child, tz, used)?);
-                }
-                Ok(cond)
-            }
-            FilterTree::Or(children) => {
-                let mut cond = Condition::any();
-                for child in children {
-                    cond = cond.add(walk(child, tz, used)?);
-                }
-                Ok(cond)
-            }
-            FilterTree::Not(child) => Ok(walk(child, tz, used)?.not()),
-            FilterTree::Leaf(leaves) => {
-                let mut combined = Condition::all();
-                for leaf in leaves {
-                    let name = crate::app_issues::leaf_name(&leaf.field, leaf.lookup);
-                    let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !pidash_db::filterset::is_constant(&expr) {
-                        if let Some(alias) = relation_alias(&name) {
-                            used.insert(alias);
-                        }
-                    }
-                    combined = combined.add(expr);
-                }
-                Ok(combined)
-            }
-        }
-    }
     let raw = query_last(query, "filters").unwrap_or_default();
     if raw.is_empty() {
         return Ok(None);
     }
     match FilterTree::parse_param_opt(&raw).map_err(crate::app_issues::filter_denial)? {
-        Some(tree) => {
-            let mut used = std::collections::BTreeSet::new();
-            let cond = walk(&tree, tz, &mut used).map_err(crate::app_issues::filter_denial)?;
-            Ok(Some((cond, used)))
-        }
+        Some(tree) => pidash_db::filterset::compile_tree(&tree, tz)
+            .map(Some)
+            .map_err(crate::app_issues::filter_denial),
         None => Ok(None),
     }
 }
@@ -1184,7 +1212,13 @@ fn p_rich_condition(
 /// The legacy `issue_filters(params, "GET")` predicates over the `issue`
 /// alias, truncated in UTC (this slice's current truncation; the
 /// actor-zone fix follows the `app_issues` pattern separately).
-fn p_legacy_condition(query: &QueryMap) -> Result<Option<Condition>, Denial> {
+/// `shared` is the set of relation aliases the rich tree also filters
+/// through (NEWPIDASH-195 / NEWPIDASH-218); their legacy predicates
+/// resolve over `legacy_join_alias`.
+fn p_legacy_condition(
+    query: &QueryMap,
+    shared: &std::collections::BTreeSet<&'static str>,
+) -> Result<Option<Condition>, Denial> {
     let flat: HashMap<String, String> = query
         .keys()
         .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
@@ -1199,6 +1233,7 @@ fn p_legacy_condition(query: &QueryMap) -> Result<Option<Condition>, Denial> {
             name,
             value,
             &chrono_tz::UTC,
+            shared,
         )?);
         any = true;
     }
@@ -1267,46 +1302,87 @@ fn profile_filtered_set(
             .and_where(p_col("pp", projects::Column::ArchivedAt).is_null());
         cond = cond.add(Expr::exists(member));
     }
-    let rich_pair = p_rich_condition(query, tz)?;
-    let mut rich_used = std::collections::BTreeSet::new();
-    if let Some((rich, used)) = rich_pair.as_ref() {
-        cond = cond.add(rich.clone());
-        rich_used = used.clone();
+    let rich_compiled = p_rich_condition(query, tz)?;
+    let mut rich_inner = std::collections::BTreeSet::new();
+    let mut rich_left = std::collections::BTreeSet::new();
+    if let Some(ref compiled) = rich_compiled {
+        rich_inner = compiled.inner.clone();
+        rich_left = compiled.left.clone();
+        cond = cond.add(compiled.condition.clone());
     }
-    let legacy = p_legacy_condition(query)?;
+    let legacy_used = legacy_referenced_aliases(query);
+    // Relations both stacks filter through (NEWPIDASH-195 / NEWPIDASH-218):
+    // the legacy copy resolves over its own `*_legacy` join alias so one
+    // link row cannot be required to satisfy both stacks. A `not`-only
+    // rich alias compiles to NOT EXISTS with no join, so it cannot be
+    // shared (NEWPIDASH-194).
+    let shared: std::collections::BTreeSet<&'static str> =
+        if rich_inner.is_empty() && rich_left.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            rich_inner
+                .union(&rich_left)
+                .filter(|alias| legacy_used.contains(*alias))
+                .copied()
+                .collect()
+        };
+    let legacy = p_legacy_condition(query, &shared)?;
     // Rendered filter text decides the relation joins (the text engine's
-    // scan): rich leaves that filter through a relation take INNER,
-    // legacy values keep LEFT+WHERE semantics, `__isnull`-only stays LEFT.
+    // scan): INNER only on a plain positive rich occurrence or a positive
+    // legacy predicate on an unshared alias; a rich `or`-only alias joins
+    // LEFT (Django LEFT-OUTERs disjuncts) and a `not`'d alias is
+    // `NOT EXISTS` with no join.
     {
         let mut probe = Condition::all();
-        if let Some((rich, _)) = rich_pair.as_ref() {
-            probe = probe.add(rich.clone());
+        if let Some(ref compiled) = rich_compiled {
+            probe = probe.add(compiled.condition.clone());
         }
         if let Some(legacy_cond) = legacy.clone() {
             probe = probe.add(legacy_cond);
         }
         let (fragment, _) = render_condition(&probe);
+        let legacy_fragment: String = match legacy.as_ref() {
+            Some(legacy_cond) => render_condition(legacy_cond).0,
+            None => String::new(),
+        };
         for (table, alias) in RELATION_JOINS {
             let mentioned = fragment.contains(&format!("\"{alias}\"."))
                 || fragment.contains(&format!("{alias}."));
-            let nullable_only = mentioned && alias_nullable_only(&fragment, alias);
+            let legacy_mentioned = legacy_fragment.contains(&format!("\"{alias}\"."))
+                || legacy_fragment.contains(&format!("{alias}."));
+            let legacy_positive = legacy_mentioned && !alias_nullable_only(&legacy_fragment, alias);
             let grouped = group_join_alias(group_by, sub_group_by, alias);
-            let rich_inner = rich_used.contains(alias);
-            let used_leg = mentioned || grouped;
-            if !used_leg {
+            let rich_inner_flag = rich_inner.contains(alias);
+            let rich_left_flag = rich_left.contains(alias);
+            let legacy_need = legacy_used.contains(alias);
+            let needs_join =
+                mentioned || grouped || legacy_need || rich_inner_flag || rich_left_flag;
+            if !needs_join {
                 continue;
             }
             // NEWPIDASH-152 (NEWPIDASH-131 twin): a grouped m2m alias is
             // joined LEFT (Django's LEFT OUTER JOIN + `deleted_at IS NULL`
-            // on `utils/grouper.py:41-49`); only a rich leaf or a
-            // positive legacy predicate upgrades to INNER.
-            let inner = rich_inner || (mentioned && !nullable_only);
+            // on `utils/grouper.py:41-49`); only a plain positive rich
+            // leaf (or, when unshared, a positive legacy predicate)
+            // upgrades to INNER. A shared legacy alias never upgrades the
+            // primary join — it gets its own `*_legacy` LEFT join below
+            // (NEWPIDASH-195/218).
+            let inner = rich_inner_flag || (legacy_positive && !shared.contains(alias));
             let kind = if inner {
                 JoinType::InnerJoin
             } else {
                 JoinType::LeftJoin
             };
             p_add_relation_join(&mut stmt, table, alias, kind);
+            // The legacy stack's own copy of a shared relation join
+            // (NEWPIDASH-195/218). LEFT keeps the same rows as the
+            // legacy layer's other joins: `__isnull` predicates keep
+            // linkless issues, and a positive predicate over the LEFT
+            // join filters the NULL row exactly like Django's INNER.
+            if legacy_need && shared.contains(alias) {
+                let legacy_alias = legacy_join_alias(&shared, alias);
+                p_add_relation_join(&mut stmt, table, legacy_alias, JoinType::LeftJoin);
+            }
         }
         if fragment.contains("\"issue_intake\".") || fragment.contains("issue_intake.") {
             let kind = if alias_nullable_only(&fragment, "issue_intake") {
@@ -2237,11 +2313,11 @@ fn s_legacy_expr_i(name: &str, value: &FilterValue) -> Result<SimpleExpr, Denial
                 return Err(Denial::ServerError);
             }
             let left = s_date_term_i(term).ok_or(Denial::ServerError)?;
-            if raw.parse::<chrono::NaiveDate>().is_err() && p_parse_datetime_param(raw).is_none() {
-                return Err(Denial::BadError("Please provide valid detail".to_owned()));
-            }
             if operator == "contains" {
                 return Ok(left.cast_as(p_a("text")).like(s_like_pattern(raw)));
+            }
+            if raw.parse::<chrono::NaiveDate>().is_err() && p_parse_datetime_param(raw).is_none() {
+                return Err(Denial::BadError("Please provide valid detail".to_owned()));
             }
             s_date_bound_i(left, operator, raw.to_owned()).ok_or(Denial::ServerError)
         }
@@ -2419,8 +2495,8 @@ fn p_parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// Compile the legacy predicates for the Q7 subscriber scope
 /// (`user.py:484-494`): the SAME `**filters` dict, resolved against
-/// `IssueSubscriber`. Only `created_by`, `project` and `created_at`
-/// lookups resolve there; every other name is a Django `FieldError` →
+/// `IssueSubscriber`. Only `created_by`, `project`, `created_at` and
+/// `updated_at` lookups resolve there; every other name is a Django `FieldError` →
 /// generic 500. Date validation mirrors the pilot compiler (garbage
 /// bounds are `ValidationError` → 400 invalid detail).
 fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr, Denial> {
@@ -2470,28 +2546,23 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
-            if text.parse::<chrono::NaiveDate>().is_err()
-                && chrono::DateTime::parse_from_rfc3339(text).is_err()
-            {
-                return Err(Denial::BadError(INVALID.to_owned()));
-            }
+            let column = match term {
+                "created_at__date" => pidash_db::entity::issue_subscribers::Column::CreatedAt,
+                "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
+                _ => return Err(Denial::ServerError),
+            };
             match operator {
-                "contains" => Ok(p_col(
-                    "sub",
-                    pidash_db::entity::issue_subscribers::Column::CreatedAt,
-                )
-                .cast_as(p_a("text"))
-                .like(s_like_pattern(text))),
+                "contains" => Ok(p_col("sub", column)
+                    .cast_as(p_a("text"))
+                    .like(s_like_pattern(text))),
                 "gte" | "lte" => {
+                    if text.parse::<chrono::NaiveDate>().is_err()
+                        && chrono::DateTime::parse_from_rfc3339(text).is_err()
+                    {
+                        return Err(Denial::BadError(INVALID.to_owned()));
+                    }
                     let right = Expr::val(text.clone()).cast_as(p_a("date"));
-                    let left = p_col(
-                        "sub",
-                        pidash_db::entity::issue_subscribers::Column::CreatedAt,
-                    )
-                    .cast_as(p_a("date"));
+                    let left = p_col("sub", column).cast_as(p_a("date"));
                     Ok(if operator == "gte" {
                         left.gte(right)
                     } else {
@@ -2506,19 +2577,17 @@ fn subscriber_legacy_expr(name: &str, value: &FilterValue) -> Result<SimpleExpr,
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => pidash_db::entity::issue_subscribers::Column::CreatedAt,
+                "updated_at__date" => pidash_db::entity::issue_subscribers::Column::UpdatedAt,
+                _ => return Err(Denial::ServerError),
+            };
             let operator = match operator {
                 "gte" => ">=",
                 "lte" => "<=",
                 _ => return Err(Denial::ServerError),
             };
-            let left = p_col(
-                "sub",
-                pidash_db::entity::issue_subscribers::Column::CreatedAt,
-            )
-            .cast_as(p_a("date"));
+            let left = p_col("sub", column).cast_as(p_a("date"));
             let right = Expr::val(day.to_string()).cast_as(p_a("date"));
             Ok(if operator == ">=" {
                 left.gte(right)
@@ -4295,6 +4364,115 @@ mod tests {
             text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
             "{text}"
         );
+    }
+
+    #[test]
+    fn shared_assignee_relation_gets_a_second_legacy_join() {
+        // NEWPIDASH-218 (NEWPIDASH-195 twin): a rich assignee leaf AND a
+        // legacy assignees= key must join twice; the legacy predicate
+        // resolves over `issue_assignee_legacy` (list_engine twin:
+        // `shared_relation_gets_a_second_legacy_join`).
+        use crate::app_issues::OneOrMany;
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let mut query = QueryMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned(),
+            ),
+        );
+        query.insert(
+            "assignees".to_owned(),
+            OneOrMany::One("00000000-0000-0000-0000-000000000002".to_owned()),
+        );
+        let filtered =
+            profile_filtered_set(&uid, "acme", &viewer, &query, None, None, &chrono_tz::UTC)
+                .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert_parens_balanced(&text);
+        assert!(
+            text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_assignees" AS "issue_assignee_legacy""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""issue_assignee_legacy"."assignee_id" IN ("#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""issue_assignee"."assignee_id" IN ("#),
+            "{text}"
+        );
+        assert!(!text.contains("label_issue_legacy"));
+    }
+
+    #[test]
+    fn shared_label_relation_gets_a_second_legacy_join() {
+        // NEWPIDASH-218 (NEWPIDASH-195 twin): rich label leaf + legacy
+        // labels= key -> second `label_issue_legacy` LEFT join.
+        use crate::app_issues::OneOrMany;
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let mut query = QueryMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(r#"{"label_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned()),
+        );
+        query.insert(
+            "labels".to_owned(),
+            OneOrMany::One("00000000-0000-0000-0000-000000000002".to_owned()),
+        );
+        let filtered =
+            profile_filtered_set(&uid, "acme", &viewer, &query, None, None, &chrono_tz::UTC)
+                .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert_parens_balanced(&text);
+        assert!(
+            text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue_legacy""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""label_issue_legacy"."label_id" IN ("#),
+            "{text}"
+        );
+        assert!(text.contains(r#""label_issue"."label_id" IN ("#), "{text}");
+        assert!(!text.contains("issue_assignee_legacy"));
+    }
+
+    #[test]
+    fn negated_relation_leaf_uses_not_exists_without_a_join() {
+        // NEWPIDASH-218 (NEWPIDASH-194 twin): a `not` relation leaf
+        // compiles to NOT EXISTS (Django `split_exclude`) with no
+        // INNER join, so unlabelled issues survive.
+        use crate::app_issues::OneOrMany;
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let mut query = QueryMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"not":{"label_id__in":"00000000-0000-0000-0000-000000000001"}}"#.to_owned(),
+            ),
+        );
+        let filtered =
+            profile_filtered_set(&uid, "acme", &viewer, &query, None, None, &chrono_tz::UTC)
+                .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert_parens_balanced(&text);
+        assert!(text.contains("NOT EXISTS"), "{text}");
+        assert!(
+            !text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
+        assert!(!text.contains("label_issue_legacy"), "{text}");
     }
 
     #[test]

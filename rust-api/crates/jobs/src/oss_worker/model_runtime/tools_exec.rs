@@ -3318,17 +3318,20 @@ struct GithubOpCtx {
     default_branch: Option<String>,
 }
 
-/// `_github_context` (`tools.py:516-554`): the binding load (`.get()`
-/// miss is `GitRepositoryBinding.DoesNotExist`), the verification
-/// verdict, the installation lookup, and the installation client.
-async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx, ToolExecError> {
+/// The GitHub binding lookup (`tools.py:516-554`): the live binding
+/// for the run's project joined to its repository and provider
+/// account, projecting every [`GithubBindingRow`] field so the
+/// `FromQueryResult` decode succeeds. Extracted so a unit test can
+/// pin the projection.
+fn github_binding_query(
+    project_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::git_repository_bindings::Entity> {
     use pidash_db::entity::{
         git_provider_accounts as acc_entity, git_repositories as repo_entity,
-        git_repository_bindings as bind_entity, github_app_installations as inst_entity,
+        git_repository_bindings as bind_entity,
     };
-    let db = sea_conn(&ctx.pool);
-    let row = bind_entity::Entity::find()
-        .filter(bind_entity::Column::ProjectId.eq(scope.project_id))
+    bind_entity::Entity::find()
+        .filter(bind_entity::Column::ProjectId.eq(project_id))
         .filter(bind_entity::Column::DeletedAt.is_null())
         .join(
             JoinType::InnerJoin,
@@ -3344,7 +3347,33 @@ async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx,
                 .to(acc_entity::Column::Id)
                 .into(),
         )
+        .select_only()
+        .column_as(bind_entity::Column::WorkspaceId, "binding_workspace_id")
+        .column_as(repo_entity::Column::Provider, "repo_provider")
+        .column_as(repo_entity::Column::HostUrl, "repo_host_url")
+        .column_as(repo_entity::Column::Namespace, "repo_namespace")
+        .column_as(repo_entity::Column::Name, "repo_name")
+        .column_as(repo_entity::Column::DefaultBranch, "repo_default_branch")
+        .column_as(acc_entity::Column::WorkspaceId, "account_workspace_id")
+        .column_as(acc_entity::Column::Provider, "account_provider")
+        .column_as(acc_entity::Column::HostUrl, "account_host_url")
+        .column_as(acc_entity::Column::AuthType, "account_auth_type")
+        .column_as(acc_entity::Column::Status, "account_status")
+        .column_as(acc_entity::Column::VerifiedAt, "account_verified_at")
+        .column_as(
+            acc_entity::Column::WorkspaceIntegrationId,
+            "account_workspace_integration_id",
+        )
         .limit(1)
+}
+
+/// `_github_context` (`tools.py:516-554`): the binding load (`.get()`
+/// miss is `GitRepositoryBinding.DoesNotExist`), the verification
+/// verdict, the installation lookup, and the installation client.
+async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx, ToolExecError> {
+    use pidash_db::entity::git_provider_accounts as acc_entity;
+    let db = sea_conn(&ctx.pool);
+    let row = github_binding_query(scope.project_id)
         .into_model::<GithubBindingRow>()
         .one(&db)
         .await
@@ -3373,20 +3402,26 @@ async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx,
     plan::check_github_binding(&verdict)?;
     let row_workspace_integration_id = row.account_workspace_integration_id;
     let installation_id = if let Some(integration) = row_workspace_integration_id {
-        let row = inst_entity::Entity::find()
-            .filter(inst_entity::Column::WorkspaceIntegrationId.eq(integration))
-            .filter(inst_entity::Column::SuspendedAt.is_null())
-            .filter(inst_entity::Column::VerifiedAt.is_not_null())
-            .filter(inst_entity::Column::DeletedAt.is_null())
-            .order_by_desc(inst_entity::Column::CreatedAt)
+        // `tools.py:543-549`: the workspace's installation, unsuspended
+        // and verified. On the generic table the `github_app` filters
+        // keep PAT accounts (which share the WI) out of the pick.
+        let row = acc_entity::Entity::find()
+            .filter(acc_entity::Column::WorkspaceIntegrationId.eq(Some(integration)))
+            .filter(acc_entity::Column::Provider.eq("github"))
+            .filter(acc_entity::Column::HostUrl.eq("https://github.com"))
+            .filter(acc_entity::Column::AuthType.eq("github_app"))
+            .filter(acc_entity::Column::SuspendedAt.is_null())
+            .filter(acc_entity::Column::VerifiedAt.is_not_null())
+            .filter(acc_entity::Column::DeletedAt.is_null())
+            .order_by_desc(acc_entity::Column::CreatedAt)
             .limit(1)
             .select_only()
-            .column(inst_entity::Column::InstallationId)
-            .into_tuple::<i64>()
+            .column(acc_entity::Column::ExternalAccountId)
+            .into_tuple::<String>()
             .one(&db)
             .await
             .map_err(orm_error)?;
-        row
+        row.and_then(|external_id| external_id.parse::<i64>().ok())
     } else {
         None
     };
@@ -4167,6 +4202,40 @@ mod tests {
             sql.contains(r#""deleted_at" IS NULL"#),
             "lookup must exclude soft-deleted states: {sql}"
         );
+    }
+
+    /// The GitHub binding lookup projects every `GithubBindingRow`
+    /// alias (`binding_workspace_id`, `repo_*`, `account_*`) under
+    /// `select_only()` — without them SeaORM selects only the
+    /// binding's own columns and the decode fails with
+    /// `no column found for name: binding_workspace_id`, so every
+    /// GitHub tool call errors before reaching GitHub (NEWPIDASH-187).
+    #[test]
+    fn github_binding_query_selects_binding_row_aliases() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = github_binding_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        for alias in [
+            "binding_workspace_id",
+            "repo_provider",
+            "repo_host_url",
+            "repo_namespace",
+            "repo_name",
+            "repo_default_branch",
+            "account_workspace_id",
+            "account_provider",
+            "account_host_url",
+            "account_auth_type",
+            "account_status",
+            "account_verified_at",
+            "account_workspace_integration_id",
+        ] {
+            assert!(
+                sql.contains(alias),
+                "binding lookup must select alias {alias}: {sql}"
+            );
+        }
     }
 
     /// The CPython `uuid.UUID(hex=...)` acceptance battery (probed on

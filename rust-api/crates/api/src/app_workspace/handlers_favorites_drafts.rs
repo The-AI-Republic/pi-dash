@@ -51,8 +51,7 @@
 //!   at the project's workspace; a missing project row 404s (not the FK 400).
 //! * Draft list `issue_filters` run over the DraftIssue queryset, so `labels`,
 //!   `assignees`, `cycle`, `module`, `mentions`, `subscriber`, `intake_status`,
-//!   `inbox_status` and `logged_by` params raise `FieldError` → the generic 500; the
-//!   `updated_at` param filters `created_at` (`issue_filters.py:236`).
+//!   `inbox_status` and `logged_by` params raise `FieldError` → the generic 500.
 //! * The draft cycle subquery is `[:1]` with NO `ORDER BY` (nondeterministic pick);
 //!   the assignee `ArrayAgg` guard accepts ANY active project membership of the
 //!   assignee (no project scoping) (`draft.py:55-60`, `:76`).
@@ -61,9 +60,10 @@
 //!   → `IntegrityError`); the
 //!   `project` input key is validated and then silently overwritten by the context
 //!   `project_id` (`DraftIssue(project=…, project_id=…)` keeps the latter).
-//! * Draft patch/retrieve creator gates look the draft pk up in the `Issue` table
-//!   (`model=Issue`), so the creator bypass ~never fires and the role check decides
-//!   (`draft.py:159`, `:186`; ported as-is per [`gates::CreatorModel::Issue`]).
+//! * Draft patch/retrieve/destroy creator gates look the draft pk up in the
+//!   `DraftIssue` table (`model=DraftIssue`, `draft.py:158`, `:185`, `:198`), so a
+//!   draft's creator passes at any workspace role (PDASHOSS01-320; patch/retrieve
+//!   used to read `Issue`, which made the bypass dead).
 //! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404);
 //!   the cycle activity's `project_id` is the string `"None"` (the route carries no
 //!   `project_id` kwarg); the module activity fires once per `module_ids` entry.
@@ -456,8 +456,8 @@ async fn check_allow_gate(
 
 /// The creator probe behind the draft creator gates
 /// (`app/permissions/base.py:36`): `model.objects.filter(id=pk,
-/// created_by=user).exists()` over `table` (`issues` — the dead branch — or
-/// `draft_issues`), default soft-delete scope.
+/// created_by=user).exists()` over `table` (`draft_issues` for every draft
+/// gate since PDASHOSS01-320), default soft-delete scope.
 async fn creator_exists(
     pool: &sqlx::PgPool,
     table: &str,
@@ -3222,8 +3222,8 @@ async fn favorite_list(
 
 /// Dispatcher order (`issue_filters.py:437-465`): presence-based, each filter
 /// inserts its predicates; shared keys keep FIRST position with the LATER
-/// value (`updated_at` overwrites `created_at`'s `created_at__date__*`;
-/// `inbox_status` overwrites `intake_status`'s `issue_intake__status__in`).
+/// value (`inbox_status` overwrites `intake_status`'s
+/// `issue_intake__status__in`).
 /// `.filter(**filters)` then builds predicates in final-dict order and the
 /// FIRST failure wins: `FieldError` → generic 500, `ValidationError` → 400
 /// `{"error": "Please provide valid detail"}`.
@@ -3287,6 +3287,7 @@ fn draft_zoned_date(column: draft_issues::Column, timezone: &Tz) -> SimpleExpr {
 fn draft_date_term(term: &str, timezone: &Tz) -> SimpleExpr {
     match term {
         "created_at__date" => draft_zoned_date(draft_issues::Column::CreatedAt, timezone),
+        "updated_at__date" => draft_zoned_date(draft_issues::Column::UpdatedAt, timezone),
         "completed_at__date" => draft_zoned_date(draft_issues::Column::CompletedAt, timezone),
         "start_date" => draft_col(draft_issues::Column::StartDate).into(),
         "target_date" => draft_col(draft_issues::Column::TargetDate).into(),
@@ -3477,9 +3478,7 @@ fn compile_draft_filters(
                 }
             }
             "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
-            // BUG: the `updated_at` param filters `created_at`
-            // (`issue_filters.py:236`), overwriting that param's keys.
-            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
+            "updated_at" => compile_date_param(&mut insert, "updated_at__date", raw, now, timezone),
             "start_date" => compile_date_param(&mut insert, "start_date", raw, now, timezone),
             "target_date" => compile_date_param(&mut insert, "target_date", raw, now, timezone),
             "completed_at" => {
@@ -5728,12 +5727,12 @@ async fn draft_patch(
     };
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
-    // The creator bypass looks the draft pk up in the ISSUE table
-    // (`model=Issue`, `draft.py:159`) — ported as-is.
-    let is_creator = creator_exists(&pool, "issues", &draft_pk, &user_id).await?;
+    // The creator bypass looks the draft pk up in the draft table
+    // (`model=DraftIssue`, `draft.py:158`, PDASHOSS01-320).
+    let is_creator = creator_exists(&pool, "draft_issues", &draft_pk, &user_id).await?;
     let gate = gates::Gate::WorkspaceCreator {
         roles: &[ROLE_ADMIN, ROLE_MEMBER],
-        model: gates::CreatorModel::Issue,
+        model: gates::CreatorModel::DraftIssue,
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);
@@ -6155,12 +6154,12 @@ async fn draft_retrieve(
     };
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
-    // The creator bypass looks the draft pk up in the ISSUE table
-    // (`model=Issue`, `draft.py:186`) — ported as-is.
-    let is_creator = creator_exists(&pool, "issues", &draft_pk, &user_id).await?;
+    // The creator bypass looks the draft pk up in the draft table
+    // (`model=DraftIssue`, `draft.py:185`, PDASHOSS01-320).
+    let is_creator = creator_exists(&pool, "draft_issues", &draft_pk, &user_id).await?;
     let gate = gates::Gate::WorkspaceCreator {
         roles: &[ROLE_ADMIN],
-        model: gates::CreatorModel::Issue,
+        model: gates::CreatorModel::DraftIssue,
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);
@@ -6752,9 +6751,8 @@ async fn run_issue_create_validate(
     let probes = ValidateProbes {
         // Unreached on create (`instance=None`): step 1 never runs, the
         // pod-reassign / mid-flight legs need an instance, the triage
-        // manager leg is off.
+        // manager leg is off. Git-only after PDASHOSS01-354.
         git_sync_exists: &|| false,
-        github_sync_exists: &|| false,
         has_active_run: &|| false,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),

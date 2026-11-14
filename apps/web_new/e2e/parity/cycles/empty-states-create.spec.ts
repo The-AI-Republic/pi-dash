@@ -516,6 +516,111 @@ test(
 );
 
 test(
+  specTitle(["CYC-014"], "palette New cycle opens the create dialog defaulting to the current project"),
+  { tag: specTags(["CYC-014"]) },
+  async ({ driver, seed }) => {
+    const tag = `NF250 palette create ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N250"),
+      { cycleView: true },
+      session
+    );
+    const name = `${tag} via palette`;
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await driver.cyclesEmptyOpenList(seed.workspaceSlug, projectId);
+
+      await test.step("the palette lists New cycle for a member and opens the dialog", async () => {
+        await driver.pressPaletteOpenChord();
+        await expect.poll(() => driver.isCommandPaletteOpen(), { timeout: 60_000 }).toBe(true);
+        await driver.typeInCommandPalette("New cycle");
+        await expect.poll(() => driver.paletteHasCommand("New cycle"), { timeout: 60_000 }).toBe(true);
+        await driver.activatePaletteCommand("New cycle");
+        await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(true);
+        await driver.cyclesCreateDialogCancel();
+        await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(false);
+      });
+
+      await test.step("the nc key sequence opens the create dialog", async () => {
+        await driver.pressKey("n");
+        await driver.pressKey("c");
+        await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(true);
+        await driver.cyclesCreateDialogCancel();
+        await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(false);
+      });
+
+      await test.step("submitting from the palette creates in the current project", async () => {
+        await driver.pressPaletteOpenChord();
+        await expect.poll(() => driver.isCommandPaletteOpen(), { timeout: 60_000 }).toBe(true);
+        await driver.typeInCommandPalette("New cycle");
+        await expect.poll(() => driver.paletteHasCommand("New cycle"), { timeout: 60_000 }).toBe(true);
+        await driver.activatePaletteCommand("New cycle");
+        await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(true);
+        // The palette's close-on-select re-render swaps the create
+        // dialog's title input; filling before the palette fully closes
+        // lands in the detached node (oracle: "Title is required").
+        await expect.poll(() => driver.isCommandPaletteOpen(), { timeout: 30_000 }).toBe(false);
+        await driver.cyclesCreateFillTitle(name);
+        await driver.cyclesCreateSubmit();
+        expect(await toastText(driver)).toMatch(/creat/i);
+        await expect.poll(() => driver.cyclesCreateDialogOpen(), { timeout: 30_000 }).toBe(false);
+        await expect.poll(() => driver.cyclesEmptyVisibleNames(), { timeout: 30_000 }).toContain(name);
+        const cycles = await serverProjectCycles(seed.workspaceSlug, projectId, session);
+        expect(cycles.map((row) => row.name)).toEqual([name]);
+      });
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["CYC-014"], "a guest has no New cycle command in the palette"),
+  { tag: specTags(["CYC-014"]) },
+  async ({ driver, seed }) => {
+    const tag = `NF250 palette guest ${Date.now()}`;
+    const guest = requireGuest(seed);
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N250"),
+      { cycleView: true },
+      session
+    );
+    await serverEnsureProjectGuest(seed.workspaceSlug, projectId, guest.email, session);
+    try {
+      await driver.rulesEnsureSignedIn(guest.email, guest.password, seed.workspaceSlug);
+      await driver.cyclesEmptyOpenList(seed.workspaceSlug, projectId);
+
+      await test.step("guests see the list but no create command", async () => {
+        await driver.pressPaletteOpenChord();
+        await expect.poll(() => driver.isCommandPaletteOpen(), { timeout: 60_000 }).toBe(true);
+        // Load-proof first: a global command proves the palette rendered.
+        await expect
+          .poll(async () => (await driver.paletteCommandTitles()).some((t) => t.includes("Go to home")), {
+            timeout: 60_000,
+          })
+          .toBe(true);
+        await driver.typeInCommandPalette("New cycle");
+        await expect.poll(() => driver.paletteCommandTitles(), { timeout: 60_000 }).toEqual([]);
+        expect(await driver.paletteHasCommand("New cycle")).toBe(false);
+        await driver.pressInCommandPalette("Escape");
+      });
+
+      await test.step("the server agrees the project has no cycles", async () => {
+        expect(await serverProjectCycles(seed.workspaceSlug, projectId, session)).toEqual([]);
+      });
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
   specTitle(["CYC-015"], "empty and overlong titles are refused inline without saving"),
   { tag: specTags(["CYC-015"]) },
   async ({ driver, seed }) => {

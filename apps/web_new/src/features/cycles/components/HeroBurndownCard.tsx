@@ -35,6 +35,8 @@ export interface HeroBurndownCardProps {
   cycleId: string;
   startDate: string | null | undefined;
   endDate: string | null | undefined;
+  /** IANA name of the project's timezone; the chart gate reads in this zone. */
+  projectTimeZone: string;
   measure: HeroMeasure;
   /** Estimates ride the switch only where the project enables them. */
   estimatesEnabled: boolean;
@@ -49,6 +51,7 @@ export function HeroBurndownCard({
   cycleId,
   startDate,
   endDate,
+  projectTimeZone,
   measure,
   estimatesEnabled,
   estimateType,
@@ -126,7 +129,7 @@ export function HeroBurndownCard({
             </div>
           ) : null}
         </div>
-        {heroChartAvailable(startDate, endDate) ? (
+        {heroChartAvailable(startDate, endDate, projectTimeZone) ? (
           <AreaChart
             points={points}
             series={[

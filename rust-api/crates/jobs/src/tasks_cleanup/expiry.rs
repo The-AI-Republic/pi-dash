@@ -287,14 +287,21 @@ impl LiveS3Deleter {
     /// Scheme/host are dummy: both arms resolve without them (the
     /// MinIO arm rides the EndpointUrl branch, the regional arm the
     /// Region branch — see [`Self::signing_storage`]).
-    fn signed_request_for(
+    async fn signed_request_for(
         &self,
         key: &str,
         amz_date: &str,
         date_stamp: &str,
     ) -> Result<pidash_storage::SignedRequest, String> {
         let storage = self.signing_storage()?;
-        pidash_storage::sign_delete(&storage, "", "", key, amz_date, date_stamp)
+        let creds = pidash_storage::resolve_storage_credentials(&storage)
+            .await
+            .map_err(|error| format!("s3 misconfigured: {error}"))?;
+        let mut resolved = storage.clone();
+        resolved.access_key_id = creds.access_key.clone();
+        resolved.secret_access_key = creds.secret_key.clone();
+        resolved.session_token = creds.session_token.clone();
+        pidash_storage::sign_delete(&resolved, "", "", key, amz_date, date_stamp)
             .map_err(|error| format!("s3 delete {key}: {error}"))
     }
 }
@@ -335,7 +342,7 @@ impl ObjectDeleter for LiveS3Deleter {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = self.signed_request_for(key, &amz_date, &date_stamp)?;
+        let signed = self.signed_request_for(key, &amz_date, &date_stamp).await?;
         // Unreachable in production: [`run_expiry`] runs `check_client`
         // before the loop, so a stored build error already failed the
         // run; direct callers get the same failure text per call.
@@ -343,11 +350,15 @@ impl ObjectDeleter for LiveS3Deleter {
             .client
             .as_ref()
             .map_err(|error| format!("s3 delete {key}: {error}"))?;
-        let response = client
+        let mut delete_req = client
             .delete(signed.url)
             .header("Authorization", signed.authorization)
             .header("x-amz-date", signed.amz_date)
-            .header("x-amz-content-sha256", signed.content_sha256)
+            .header("x-amz-content-sha256", signed.content_sha256);
+        if let Some(token) = &signed.security_token {
+            delete_req = delete_req.header("x-amz-security-token", token);
+        }
+        let response = delete_req
             .send()
             .await
             .map_err(|error| format!("s3 delete {key}: transport failure: {error}"))?;
@@ -595,8 +606,8 @@ mod tests {
         assert!(!sql.contains("\"updated_at\""), "{sql}");
     }
 
-    #[test]
-    fn minio_region_follows_probed_chain() {
+    #[tokio::test]
+    async fn minio_region_follows_probed_chain() {
         // AWS_REGION unset: the resolved chain (tail included) is reused.
         assert_eq!(minio_signing_region(None, None, "us-east-1"), "us-east-1");
         assert_eq!(
@@ -626,6 +637,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "minioadmin".to_owned(),
             secret_access_key: "minioadmin".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: region.to_owned(),
             endpoint_url: endpoint_url.map(str::to_owned),
@@ -655,8 +667,8 @@ mod tests {
         scope.split('/').skip(1).collect::<Vec<_>>().join("/")
     }
 
-    #[test]
-    fn minio_arm_signs_path_style_against_endpoint() {
+    #[tokio::test]
+    async fn minio_arm_signs_path_style_against_endpoint() {
         // Contract env: USE_MINIO=1, endpoint LocalStack, AWS_REGION
         // unset (chain us-east-1) — probed `DELETE /{bucket}/{key}`.
         let deleter = deleter_with(
@@ -668,23 +680,25 @@ mod tests {
         );
         let signed = deleter
             .signed_request_for("contract-key.zip", "20261017T000000Z", "20261017")
+            .await
             .expect("signs");
         assert_eq!(signed.method, "DELETE");
         assert_eq!(signed.url, "http://localhost:4566/uploads/contract-key.zip");
         assert!(auth_scope(&signed.authorization).starts_with("20261017/us-east-1/s3/"));
     }
 
-    #[test]
-    fn minio_arm_requires_endpoint() {
+    #[tokio::test]
+    async fn minio_arm_requires_endpoint() {
         let deleter = deleter_with(true, None, "us-east-1", "us-east-1", "");
         let error = deleter
             .signed_request_for("k.zip", "20261017T000000Z", "20261017")
+            .await
             .expect_err("no endpoint fails");
         assert!(error.contains("USE_MINIO"), "{error}");
     }
 
-    #[test]
-    fn regional_arm_ignores_endpoint() {
+    #[tokio::test]
+    async fn regional_arm_ignores_endpoint() {
         // USE_MINIO=0 with an endpoint set: Django ignores it (`:36-42`)
         // and goes regional — so does the deleter.
         let deleter = deleter_with(
@@ -696,6 +710,7 @@ mod tests {
         );
         let signed = deleter
             .signed_request_for("k.zip", "20261017T000000Z", "20261017")
+            .await
             .expect("signs");
         assert_eq!(
             signed.url,
@@ -704,22 +719,24 @@ mod tests {
         assert!(auth_scope(&signed.authorization).starts_with("20261017/eu-west-1/s3/"));
     }
 
-    #[test]
-    fn regional_arm_uses_global_endpoint_for_us_east_1() {
+    #[tokio::test]
+    async fn regional_arm_uses_global_endpoint_for_us_east_1() {
         let deleter = deleter_with(false, None, "us-east-1", "us-east-1", "us-east-1");
         let signed = deleter
             .signed_request_for("k.zip", "20261017T000000Z", "20261017")
+            .await
             .expect("signs");
         assert_eq!(signed.url, "https://uploads.s3.amazonaws.com/k.zip");
     }
 
-    #[test]
-    fn regional_arm_empty_region_fails_like_boto3() {
+    #[tokio::test]
+    async fn regional_arm_empty_region_fails_like_boto3() {
         // region_name="" explicitly passed: boto3 fails client
         // construction (`ValueError: Invalid endpoint`) — the task fails.
         let deleter = deleter_with(false, None, "us-east-1", "us-east-1", "");
         deleter
             .signed_request_for("k.zip", "20261017T000000Z", "20261017")
+            .await
             .expect_err("empty region fails");
     }
 

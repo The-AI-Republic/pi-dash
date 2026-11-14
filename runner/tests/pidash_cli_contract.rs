@@ -837,6 +837,42 @@ async fn run_yield_stop_ticking_succeeds_against_an_older_server_that_ignores_it
 }
 
 #[tokio::test]
+async fn run_yield_succeeds_for_a_scheduler_run() {
+    // A scheduler run has no work item. The server records the outcome on
+    // the run and answers 200 with `work_item_id: null` — the command must
+    // exit 0 on that shape, with the scheduler run's id on the same route
+    // an issue run uses.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(
+            r#"{"ok":true,"run_id":"471f1cf9-0000-4000-8000-000000000000","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"b1","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#,
+        )
+    }))
+    .await;
+    let run_id = "471f1cf9-0000-4000-8000-000000000000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("a scheduler run's yield must succeed");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/agent-runs/{run_id}/yield/")
+    );
+    assert_eq!(recorded[0].run_id.as_deref(), Some(run_id));
+}
+
+#[tokio::test]
 async fn run_yield_without_a_run_id_fails_before_any_request() {
     let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
     let client = client(&fake);
@@ -1098,6 +1134,78 @@ async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
         .unwrap_err();
     assert_eq!(err.exit_code, EXIT_INVALID);
     assert!(err.detail.unwrap_or_default().contains("Valid states"));
+}
+
+// ---------------------------------------------------------------------------
+// Truncation note (PDASHOSS01-216): the server's default page size equals its
+// maximum (1000), so a >1000-item project is silently truncated unless the
+// caller checks `next_page_results`. The CLI flags that case on stderr —
+// stdout must stay the bare envelope and the exit code must stay 0.
+// ---------------------------------------------------------------------------
+
+const TRUNCATED_LIST_ENVELOPE: &str = r#"{"grouped_by":null,"sub_grouped_by":null,"total_count":4200,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":true,"prev_page_results":false,"count":1000,"total_pages":5,"total_results":4200,"extra_stats":null,"results":[]}"#;
+
+#[tokio::test]
+async fn issue_list_truncation_notes_on_stderr_with_clean_stdout() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(TRUNCATED_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stderr.trim(),
+        "note: 1000 of 4200 results; pass --cursor 1000:1:0 for more"
+    );
+    // stdout carries the envelope — the note must not leak into it. The only
+    // addition is the applied `state_group` filter the CLI echoes (`open` by
+    // default).
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let mut expected: serde_json::Value = serde_json::from_str(TRUNCATED_LIST_ENVELOPE).unwrap();
+    expected["state_group"] = serde_json::json!("open");
+    assert_eq!(printed, expected);
+}
+
+#[tokio::test]
+async fn issue_list_final_page_prints_nothing_on_stderr() {
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"total_count":3,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"count":3,"results":[]}"#,
+        )
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stderr, "");
+}
+
+#[tokio::test]
+async fn issue_list_envelope_without_next_page_results_stays_silent() {
+    // A server old enough to omit the field looks like a complete list;
+    // the note must not fire on guesswork.
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stderr, "");
+}
+
+#[tokio::test]
+async fn page_list_truncation_notes_on_stderr_too() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(TRUNCATED_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["page", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stderr.trim(),
+        "note: 1000 of 4200 results; pass --cursor 1000:1:0 for more"
+    );
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(TRUNCATED_LIST_ENVELOPE).unwrap();
+    assert_eq!(printed, expected);
 }
 
 // ---------------------------------------------------------------------------

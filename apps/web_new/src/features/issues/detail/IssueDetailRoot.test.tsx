@@ -141,6 +141,35 @@ describe("IssueDetailRoot", () => {
     expect(screen.getByText("widget slot")).toBeInTheDocument();
   });
 
+  it("places Properties above Activity in narrow layout (NEWPIDASH-233)", () => {
+    stubViewport(true);
+    renderRoot({ activity: <p>activity slot</p> });
+    const root = screen.getByTestId("issue-detail-root");
+    const aside = screen.getByRole("complementary", { name: "Properties" });
+    const activity = screen.getByText("activity slot");
+    const title = screen.getByRole("textbox", { name: TITLE_LABEL });
+    // Title/description → Properties → Activity in document order.
+    expect(title.compareDocumentPosition(aside)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(aside.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    // Narrow grid stacks main, sidebar, activity in that order.
+    expect(root).toHaveStyle({ gridTemplateAreas: '"main" "sidebar" "activity"' });
+    expect(root).toHaveStyle({ gridTemplateColumns: "minmax(0,1fr)" });
+    expect(aside).toHaveStyle({ gridArea: "sidebar" });
+    expect(activity.closest('[data-slot="activity"]')).toHaveStyle({ gridArea: "activity" });
+  });
+
+  it("keeps wide two-column layout with Properties beside main and activity below it", () => {
+    stubViewport(false);
+    renderRoot({ activity: <p>activity slot</p> });
+    const root = screen.getByTestId("issue-detail-root");
+    const aside = screen.getByRole("complementary", { name: "Properties" });
+    expect(root).toHaveStyle({
+      gridTemplateAreas: '"main sidebar" "activity sidebar"',
+    });
+    expect(aside).toHaveStyle({ gridArea: "sidebar" });
+    expect(screen.getByText("activity slot")).toBeInTheDocument();
+  });
+
   it("collapses and expands the sidebar from its toggle and rail", async () => {
     const user = userEvent.setup();
     stubViewport(false);

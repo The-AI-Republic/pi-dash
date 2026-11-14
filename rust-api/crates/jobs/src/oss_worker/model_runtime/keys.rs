@@ -105,20 +105,29 @@ impl FallibleKeyCache {
         }
     }
 
+    /// Unexpired cached plaintext for `token` (an LRU touch on hit).
+    fn get(&mut self, token: &[u8]) -> Option<String> {
+        let entry = self.entries.get(token)?;
+        if entry.inserted.elapsed() >= self.ttl {
+            return None;
+        }
+        let hit = entry.plaintext.clone();
+        self.touch(token);
+        Some(hit)
+    }
+
     /// `get_decrypted_api_key`'s cache half: hit, expiring-miss, or
     /// decrypt-and-store. `decrypt` runs at most once per miss and its
-    /// error propagates without storing.
+    /// error propagates without storing. (The resolver splits this around
+    /// its lock; kept whole for the eviction tests.)
+    #[cfg(test)]
     fn get_or_try_decrypt(
         &mut self,
         token: &[u8],
         decrypt: impl FnOnce() -> Result<String, KeyFailure>,
     ) -> Result<String, KeyFailure> {
-        if let Some(entry) = self.entries.get(token) {
-            if entry.inserted.elapsed() < self.ttl {
-                let hit = entry.plaintext.clone();
-                self.touch(token);
-                return Ok(hit);
-            }
+        if let Some(hit) = self.get(token) {
+            return Ok(hit);
         }
         let plaintext = decrypt()?;
         self.insert(token.to_owned(), plaintext.clone());
@@ -195,15 +204,29 @@ impl KeyResolver {
 
     /// Decrypt `token` (ciphertext bytes), cached per
     /// `get_decrypted_api_key`.
+    ///
+    /// The cache lock is a `std` mutex taken on async worker threads, so
+    /// it is held only for the lookup and the store — never across the
+    /// decrypt, which is a KMS (and possibly IMDS) round trip. Two
+    /// concurrent misses on one token may both decrypt; the second store
+    /// just refreshes the entry.
     pub fn decrypted_key(&self, token: &[u8]) -> Result<String, KeyFailure> {
         if self.cache_ttl_raw <= 0 || token.is_empty() {
             return self.decrypt(token);
         }
-        let mut cache = self
-            .cache
+        if let Some(hit) = self.lock_cache().get(token) {
+            return Ok(hit);
+        }
+        let plaintext = self.decrypt(token)?;
+        self.lock_cache()
+            .insert(token.to_owned(), plaintext.clone());
+        Ok(plaintext)
+    }
+
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, FallibleKeyCache> {
+        self.cache
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        cache.get_or_try_decrypt(token, || self.decrypt(token))
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     fn decrypt(&self, token: &[u8]) -> Result<String, KeyFailure> {

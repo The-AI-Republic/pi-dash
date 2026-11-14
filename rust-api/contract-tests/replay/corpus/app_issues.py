@@ -130,8 +130,38 @@ def _seed_followup(conn) -> None:
             """,
             (PR_LINK_ID, admin_id, ISSUE_A_ID, project_id, admin_id, ws_id),
         )
+        # Sunset 2/6 (PDASHOSS01-355): PR links now live in generic
+        # git_code_review_links. Rust reads only generic, Django dual-writes
+        # legacy + generic (legacy removed in 6/6 PDASHOSS01-359). Seed
+        # the generic mirror for the PR so Rust DELETE (which looks up
+        # git_code_review_links by id) finds it. The mirror shares the
+        # PR's repo/number (iid 7) and carries the legacy pointer
+        # metadata that Django's _ensure_code_review_link writes. It
+        # serves as REVIEW1 (iid 7) — the cascade leg deletes it via
+        # the PR detach.
+        cur.execute(
+            """
+            INSERT INTO git_code_review_links (created_at, updated_at, id,
+                provider, host_url, namespace, repo_name, external_iid, url,
+                title, state, merged, draft, created_by_id, issue_id,
+                project_id, updated_by_id, workspace_id, external_id,
+                repo_external_id, metadata)
+            VALUES (now(), now(), %s, 'github', 'https://github.com',
+                'octo', 'demo', '7', 'https://github.com/octo/demo/pull/7',
+                'Seed PR', 'open', false, false, %s, %s, %s, %s, %s, '', '',
+                %s::jsonb)
+            """,
+            (
+                PR_LINK_ID,
+                admin_id,
+                ISSUE_A_ID,
+                project_id,
+                admin_id,
+                ws_id,
+                '{"legacy_github_pull_request_link_id": "%s"}' % PR_LINK_ID,
+            ),
+        )
         for review_id, iid, url, title in (
-            (REVIEW1_ID, "7", "https://github.com/octo/demo/pull/7", "Seed review"),
             (REVIEW2_ID, "8", "https://github.com/octo/demo/pull/8", "Seed review 2"),
         ):
             cur.execute(
@@ -319,6 +349,13 @@ SESSIONS = (
         },
         payload_time_paths={
             "pi_dash.bgtasks.issue_activities_task.issue_activity": ["kwargs/epoch"],
+        },
+        # Sunset 2/6 (PDASHOSS01-355): Django dual-writes
+        # github_pull_request_links + git_code_review_links, Rust writes
+        # only generic. Legacy writes diverge until Django 6/6
+        # PDASHOSS01-359 removes legacy. Skip legacy table comparison.
+        skip_tables={
+            "github_pull_request_links": "sunset 2/6 legacy: Django dual-writes, Rust generic-only (PDASHOSS01-355)",
         },
         # BulkCreateIssueLabelsEndpoint mints color=f"#{random...}" per
         # row (app/views/issue/label.py:104), ignoring any input color:
