@@ -2,6 +2,7 @@
 # table/model mention. Format: `path | reason`. The list only shrinks:
 # remove the entry in the same PR that removes the last hit.
 # Paths are relative to rust-api/.
+crates/api/src/app_issues/handlers_relations.rs | PR-link list/destroy reads reverted to legacy github_pull_request_links by NEWPIDASH-227 to match Django dual-write state; generic-only read breaks contract parity (seed row mismatch, DELETE 404). Removed with PDASHOSS01-359, not PDASHOSS01-358 (which does not touch these reads).
 crates/db/src/app_issues/mod.rs | re-export of legacy GithubPullRequestLink; removed with models_links in NEWPIDASH-210 part 3 after PDASHOSS01-358 merges
 crates/db/src/app_issues/models_links.rs | legacy github_pull_request_link mod + GITHUB_* consts; deleted in NEWPIDASH-210 part 3
 crates/db/src/integrations/github_models.rs | legacy model definitions; deleted in NEWPIDASH-210 part 3 after PDASHOSS01-358 merges
