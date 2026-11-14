@@ -908,9 +908,7 @@ class Runner(models.Model):
             # revoking transaction itself (§13.1).
             from pi_dash.db.models.issue import Issue
 
-            dedicated_issue_ids = list(
-                Issue.objects.filter(assigned_runner=self).values_list("pk", flat=True)
-            )
+            dedicated_issue_ids = list(Issue.objects.filter(assigned_runner=self).values_list("pk", flat=True))
             dedicated_issue_ids.extend(
                 AgentRun.objects.filter(
                     pinned_runner=self,
@@ -923,14 +921,14 @@ class Runner(models.Model):
                     pinned_runner=self,
                     status=AgentRunStatus.QUEUED,
                     pin_kind__isnull=False,
-                ).exclude(pin_kind="dedicated").values_list(
-                    "pod_id", flat=True
                 )
+                .exclude(pin_kind="dedicated")
+                .values_list("pod_id", flat=True)
             )
             if pinned_pod_ids:
-                AgentRun.objects.filter(
-                    pinned_runner=self, status=AgentRunStatus.QUEUED
-                ).exclude(pin_kind="dedicated").update(pinned_runner=None)
+                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).exclude(
+                    pin_kind="dedicated"
+                ).update(pinned_runner=None)
                 affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
             if dedicated_issue_ids:
                 from pi_dash.runner.services.issue_assignment import (
@@ -956,8 +954,7 @@ class Runner(models.Model):
                     # stream cleanup; leave the durable marker in place and
                     # log enough context for reconciliation.
                     _logger.exception(
-                        "failed to complete project-move handoff after "
-                        "revoking runner %s (run %s)",
+                        "failed to complete project-move handoff after revoking runner %s (run %s)",
                         self.pk,
                         run_id,
                     )
@@ -977,6 +974,20 @@ class Runner(models.Model):
         transaction.on_commit(lambda rid=self.pk: schedule_stream_cleanup_for_runner(rid))
 
 
+# Capability a dev-machine daemon advertises at session open when it
+# supports local capacity queueing (``machine_run_queue_v1``). The
+# matcher reads the runner's current active session for this string to
+# decide whether a fresh assignment is a legacy (protocol 0) or machine
+# queue (protocol 1) attempt. See
+# ``.ai_design/dev_machine_run_queue/implementation.md`` §3.
+MACHINE_RUN_QUEUE_CAPABILITY = "machine_run_queue_v1"
+
+
+class AssignmentProtocol(models.IntegerChoices):
+    LEGACY = 0, "Legacy"
+    MACHINE_QUEUE = 1, "Machine queue"
+
+
 class RunnerSession(models.Model):
     """Per-runner cloud session: owns delivery for one runner.
 
@@ -991,6 +1002,10 @@ class RunnerSession(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     runner = models.ForeignKey("Runner", on_delete=models.CASCADE, related_name="sessions")
     protocol_version = models.PositiveIntegerField(default=4)
+    # Negotiated capabilities the daemon advertised at session open
+    # (e.g. ``machine_run_queue_v1``). The matcher reads this on the
+    # runner's current active session to choose the assignment protocol.
+    capabilities = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -1029,9 +1044,7 @@ class MachineSession(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    dev_machine = models.ForeignKey(
-        "DevMachine", on_delete=models.CASCADE, related_name="sessions"
-    )
+    dev_machine = models.ForeignKey("DevMachine", on_delete=models.CASCADE, related_name="sessions")
     # The token (of any workspace on the machine) the session was opened
     # with. Revoking or expiring that token ends the session (design §4.9);
     # polls may present any live token of the same machine.
@@ -1426,6 +1439,24 @@ class AgentRun(models.Model):
     total_tokens = JSONKeyBigIntegerField(source="usage", key="total")
     created_at = models.DateTimeField(auto_now_add=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
+    # Attempt identity for the dev-machine run queue
+    # (``.ai_design/dev_machine_run_queue/implementation.md`` §3).
+    # ``assignment_token`` is minted inside every new assignment
+    # transaction (including reassign to the same runner) and preserved
+    # across session-open redelivery; it fences protocol-1 lifecycle
+    # writes. ``assignment_protocol`` is 0 (legacy) / 1 (machine queue)
+    # and immutable for an assignment attempt — enforcement never keys
+    # off a client-supplied version string. ``capacity_wait`` carries
+    # the daemon-reported capacity phase (waiting_for_capacity /
+    # preparing) with revision, counts and admission id; it is cleared
+    # on requeue/new assignment, on Accept, and on terminal
+    # transitions. The web serializer projects presentation fields only.
+    assignment_token = models.UUIDField(null=True, blank=True)
+    assignment_protocol = models.PositiveSmallIntegerField(
+        choices=AssignmentProtocol.choices,
+        default=AssignmentProtocol.LEGACY,
+    )
+    capacity_wait = models.JSONField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
 
@@ -1577,6 +1608,13 @@ class AgentRun(models.Model):
             AgentRunStatus.AWAITING_APPROVAL,
             AgentRunStatus.AWAITING_REAUTH,
         }
+
+    @property
+    def is_machine_queue(self) -> bool:
+        """True for protocol-1 attempts (machine queue). Lifecycle
+        token/session fencing applies only to these; protocol-0 keeps
+        the existing compatibility behaviour."""
+        return int(self.assignment_protocol or 0) == int(AssignmentProtocol.MACHINE_QUEUE)
 
 
 class AgentRunEvent(models.Model):

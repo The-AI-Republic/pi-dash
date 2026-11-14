@@ -266,12 +266,20 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
                     )
                 except Exception:
                     logger.exception(
-                        "session_service: failed to redeliver cancellation "
-                        "for run %s",
+                        "session_service: failed to redeliver cancellation for run %s",
                         run_id,
                     )
 
             transaction.on_commit(_retry_cancel)
+
+    # Fresh same-attempt capacity waits are normal (T2 reaper guards):
+    # a run holding a fresh ``waiting_for_capacity`` report is excluded
+    # from the heartbeat reap even when the poll did not name it
+    # in-flight. Offline recovery is unaffected — a stale report (or a
+    # silent runner) still reaps as before.
+    protected_ids = _fresh_capacity_wait_run_ids(runner, reapable_statuses)
+    if protected_ids:
+        stale = stale.exclude(id__in=protected_ids)
 
     _finish_unclaimed_runs(
         runner,
@@ -282,6 +290,22 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
         ),
         error_code="heartbeat_reaped",
     )
+
+
+def _fresh_capacity_wait_run_ids(runner, statuses) -> list:
+    """Ids of runs holding a fresh same-attempt capacity wait."""
+    from pi_dash.runner.services.capacity import CAPACITY_FRESH_SECS, fresh_capacity_wait
+
+    cutoff_iso = (timezone.now() - timedelta(seconds=CAPACITY_FRESH_SECS)).isoformat()
+    candidates = list(
+        AgentRun.objects.filter(
+            runner=runner,
+            status__in=statuses,
+            capacity_wait__phase="waiting_for_capacity",
+            capacity_wait__reported_at__gte=cutoff_iso,
+        )
+    )
+    return [run.id for run in candidates if fresh_capacity_wait(run) is not None]
 
 
 def _finish_unclaimed_runs(

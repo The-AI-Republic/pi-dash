@@ -34,6 +34,7 @@ from pi_dash.runner.models import (
     Runner,
     RunnerStatus,
 )
+from pi_dash.runner.services.capacity import mint_assignment_attempt
 from pi_dash.runner.services.permissions import filter_runs_usable_by_runner
 
 logger = logging.getLogger(__name__)
@@ -149,16 +150,8 @@ def _last_served_dedicated(runner: Runner) -> bool:
     """
     from pi_dash.runner.models import PinKind
 
-    last = (
-        AgentRun.objects.filter(runner=runner, assigned_at__isnull=False)
-        .order_by("-assigned_at")
-        .first()
-    )
-    return bool(
-        last is not None
-        and last.pinned_runner_id is not None
-        and last.pin_kind == PinKind.DEDICATED
-    )
+    last = AgentRun.objects.filter(runner=runner, assigned_at__isnull=False).order_by("-assigned_at").first()
+    return bool(last is not None and last.pinned_runner_id is not None and last.pin_kind == PinKind.DEDICATED)
 
 
 def next_for_runner(runner: Runner) -> Optional[AgentRun]:
@@ -277,7 +270,22 @@ def drain_pod(pod: Pod) -> int:
             run.owner_id = runner.owner_id
             run.status = AgentRunStatus.ASSIGNED
             run.assigned_at = timezone.now()
-            run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+            # Fresh attempt identity (T1): mint token + resolve protocol
+            # from the runner's negotiated session capability, clear any
+            # prior capacity presentation. Includes reassign to the same
+            # runner — a new assignment is always a new attempt.
+            mint_assignment_attempt(run, runner)
+            run.save(
+                update_fields=[
+                    "runner",
+                    "owner",
+                    "status",
+                    "assigned_at",
+                    "assignment_token",
+                    "assignment_protocol",
+                    "capacity_wait",
+                ]
+            )
             assignments.append((runner, run))
 
     for runner, run in assignments:
@@ -330,7 +338,18 @@ def drain_for_runner(runner: Runner) -> bool:
         run.owner_id = locked.owner_id
         run.status = AgentRunStatus.ASSIGNED
         run.assigned_at = timezone.now()
-        run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+        mint_assignment_attempt(run, locked)
+        run.save(
+            update_fields=[
+                "runner",
+                "owner",
+                "status",
+                "assigned_at",
+                "assignment_token",
+                "assignment_protocol",
+                "capacity_wait",
+            ]
+        )
         assignment = (locked, run)
 
     runner_obj, run = assignment
@@ -500,7 +519,14 @@ def _build_assign_msg(run: AgentRun) -> dict:
     a fresh agent session per run and reconstructs context from the issue's
     workpad / comments / repo state. See
     ``.ai_design/ticking_optimization/design.md``.
+
+    Carries ``assignment_token`` / ``assignment_protocol`` (T1) so the
+    daemon echoes them on capacity and lifecycle calls. Redelivery
+    reuses this builder without minting, so the attempt token is
+    preserved across session reopen; old daemons ignore the additive
+    fields.
     """
+    token = getattr(run, "assignment_token", None)
     return {
         "v": 1,
         "type": "assign",
@@ -513,6 +539,8 @@ def _build_assign_msg(run: AgentRun) -> dict:
         "expected_codex_model": run.run_config.get("model"),
         "approval_policy_overrides": run.run_config.get("approval_policy_overrides"),
         "deadline": None,
+        "assignment_token": str(token) if token is not None else None,
+        "assignment_protocol": int(getattr(run, "assignment_protocol", 0) or 0),
     }
 
 

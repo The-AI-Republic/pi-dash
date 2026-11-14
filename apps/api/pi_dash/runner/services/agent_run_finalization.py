@@ -56,6 +56,10 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
         "ended_at": timezone.now(),
         "terminal_hooks_applied_at": None,
         "terminal_capacity_released_at": None,
+        # Terminal transitions clear the capacity presentation (T1/T2):
+        # late reports carrying the old attempt token then fail token
+        # fencing instead of mutating the closed row.
+        "capacity_wait": None,
         **(updates or {}),
     }
     with transaction.atomic():
