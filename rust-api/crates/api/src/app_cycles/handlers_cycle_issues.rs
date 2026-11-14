@@ -2522,6 +2522,48 @@ mod tests {
     }
 
     #[test]
+    fn shared_nullable_only_legacy_takes_left_join() {
+        // NEWPIDASH-217: a legacy `__isnull`-only predicate on a
+        // relation the rich tree also filters must join the link
+        // table a second time with LEFT (Django's `__isnull`
+        // annotation join), not INNER: `assignees=None` means "no
+        // assignee" and must keep the linkless rows the rich `IN`
+        // on the primary alias already filters.
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned(),
+            ),
+        );
+        query.insert("assignees".to_owned(), OneOrMany::One("None".to_owned()));
+        let filtered = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            filtered
+                .from_where
+                .contains("LEFT JOIN issue_assignees AS issue_assignee_legacy ON"),
+            "nullable-only legacy join must be LEFT: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered.from_where.contains("issue_assignee_legacy."),
+            "legacy predicate must resolve over the legacy alias: {}",
+            filtered.from_where
+        );
+    }
+
+    #[test]
     fn routes_expose_the_four_cycle_issue_paths() {
         assert!(CYCLE_ISSUES_PATH.contains("cycles/{cycle_id}/cycle-issues/"));
         assert!(CYCLE_ISSUE_PATH.contains("cycle-issues/{issue_id}/"));
