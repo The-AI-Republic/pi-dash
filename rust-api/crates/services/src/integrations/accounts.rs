@@ -309,7 +309,7 @@ pub const PROVIDER_ACCOUNT_SCOPE_SQL: &str = "workspace_id = $1 AND provider = $
 /// `resolve_provider_account_repository` (`.order_by("created_at")`,
 /// `services.py:169-175`); the single-row `select` path narrows with
 /// [`PROVIDER_ACCOUNT_GET_SQL`].
-pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY created_at ASC";
+pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, suspended_at, last_checked_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY created_at ASC";
 
 /// Scoped single-account fetch (`services.py:127`
 /// `queryset.filter(id=…).first()`).
@@ -317,7 +317,7 @@ pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, 
 /// Parameters: `$1` workspace id, `$2` provider key, `$3` normalized
 /// host, `$4` account id. Django's `first()` on an unordered queryset
 /// orders by pk; the id predicate already yields at most one row.
-pub const PROVIDER_ACCOUNT_GET_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND id = $4 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY id ASC LIMIT 1";
+pub const PROVIDER_ACCOUNT_GET_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, suspended_at, last_checked_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND id = $4 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY id ASC LIMIT 1";
 
 /// `INSERT` for `create_provider_account` (`services.py:95-114`).
 ///
@@ -1226,6 +1226,8 @@ pub(crate) mod fakes {
                 workspace_integration_id: None,
                 status: row.status,
                 verified_at: Some(row.verified_at),
+                suspended_at: None,
+                last_checked_at: None,
                 last_check_error: String::new(),
                 metadata: row.metadata,
             };
@@ -1385,6 +1387,8 @@ pub(crate) mod fakes {
             workspace_integration_id: None,
             status: git_provider_account::STATUS_CONNECTED.into(),
             verified_at: Some(created_at),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: serde_json::json!({}),
         }

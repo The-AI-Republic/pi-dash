@@ -2339,10 +2339,6 @@ async fn git_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, 
     serializers_engage::git_issue_synced(&orm(pool), *issue_id).await
 }
 
-async fn github_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
-    serializers_engage::github_issue_synced(&orm(pool), *issue_id).await
-}
-
 async fn has_active_run(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
     serializers_create::has_active_run(&orm(pool), *issue_id).await
 }
@@ -2624,8 +2620,8 @@ async fn run_validate(
     });
 
     // Step 1 probes. `issue_is_actively_synced` short-circuits: empty /
-    // missing source runs nothing; otherwise git, then github iff git
-    // misses — ahead of the blocked-keys check either way.
+    // missing source runs nothing; otherwise git-only (PDASHOSS01-354) —
+    // ahead of the blocked-keys check either way.
     let synced_source = current
         .as_ref()
         .and_then(|row| row.external_source)
@@ -2634,13 +2630,6 @@ async fn run_validate(
     let instance_id = instance.map(|row| row.id).unwrap_or(Uuid::nil());
     let git_sync = if synced_source {
         git_issue_synced(pool, &instance_id)
-            .await
-            .map_err(|_| db_error())?
-    } else {
-        false
-    };
-    let github_sync = if synced_source && !git_sync {
-        github_issue_synced(pool, &instance_id)
             .await
             .map_err(|_| db_error())?
     } else {
@@ -2901,7 +2890,6 @@ async fn run_validate(
     };
     let probes = ValidateProbes {
         git_sync_exists: &|| git_sync,
-        github_sync_exists: &|| github_sync,
         has_active_run: &|| run_value,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),
@@ -3720,17 +3708,18 @@ async fn fetch_clock_policy(
     })
 }
 
-/// The issue's latest and active runs plus the run count through the
+/// The issue's latest and active runs, the run count and the cumulative
+/// token total (`issue.py:1376-1421`) through the
 /// SeaORM agent-run reader. The live-state rule (`include_live_state`, the
 /// observed-run guard) is applied by `agent_status_to_representation`.
 async fn fetch_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
-) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64), Denial> {
+) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64, i64), Denial> {
     let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok((runs.latest, runs.active, runs.count))
+    Ok((runs.latest, runs.active, runs.count, runs.total_tokens))
 }
 
 /// The cached blocker summary via the public read service: both
@@ -3783,7 +3772,8 @@ async fn render_detail_map(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    let (latest, active, run_count) = fetch_agent_runs(pool, &row.save.id).await?;
+    let (latest, active, run_count, run_total_tokens) =
+        fetch_agent_runs(pool, &row.save.id).await?;
     let blockers = fetch_blocker_summary(pool, &row.save.id).await?;
     let synced = if row
         .save
@@ -3791,10 +3781,7 @@ async fn render_detail_map(
         .as_deref()
         .is_some_and(|source| !source.is_empty())
     {
-        let git = git_issue_synced(pool, &row.save.id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        git || github_issue_synced(pool, &row.save.id)
+        git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?
     } else {
@@ -3887,6 +3874,7 @@ async fn render_detail_map(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
         assigned_runner_detail,
     };
@@ -5121,13 +5109,10 @@ async fn destroy_issue_inner(
     let Some(mut row) = fetch_destroy_issue(&pool, &slug, &tenant.project_id, &pk).await? else {
         return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
     };
-    // `GitIssueSync...exists() or GithubIssueSync...exists()` — short-circuit.
+    // Git-only synced guard (PDASHOSS01-354).
     let synced = git_issue_synced(&pool, &pk)
         .await
-        .map_err(|_| Denial::ServerError)?
-        || github_issue_synced(&pool, &pk)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?;
     if synced {
         return Ok(not_found_detail(DESTROY_SYNCED_BODY, StatusCode::CONFLICT));
     }

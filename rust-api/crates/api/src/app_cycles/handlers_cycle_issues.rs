@@ -63,8 +63,8 @@ use sqlx::{Postgres, Row};
 use crate::app_cycles::gates;
 use crate::app_issues::{
     complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
-    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
-    FilteredSet, QueryMap,
+    multi_map, order_key, page_denial, query_last, render_condition, rich_inner_aliases, shape_row,
+    Binder, Denial, FilteredSet, QueryMap,
 };
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
@@ -838,7 +838,7 @@ fn cycle_filtered_set(
         }
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
     // group key — group or sub — filters its join's `deleted_at`. The
@@ -858,16 +858,21 @@ fn cycle_filtered_set(
     let where_sql = fragments.join(" AND ");
     let mut joins = String::from(" JOIN cycle_issues AS bridge ON bridge.issue_id = issue.id");
     let mut referenced = vec!["bridge"];
+    // INNER only for positive filter references (Django's `filter()`
+    // join): a plain positive rich occurrence or a positive legacy
+    // predicate. Group-forced and `__isnull`-only references take LEFT
+    // (Django's annotation join), a rich `or`-only alias takes LEFT
+    // (Django LEFT-OUTERs disjuncts), and a `not`'d alias stays in
+    // `NOT EXISTS` with no join. Unreferenced relations are not joined
+    // at all — Django never scaffolds them, and an unreferenced LEFT
+    // JOIN fans the grouped window out (window functions evaluate before
+    // DISTINCT, so the duplicate row numbers survive it).
+    let rich_inner = rich_inner_aliases(query, tz);
     for (table, alias) in RELATION_JOINS {
         let mentioned = alias_mentioned(&where_sql, alias);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
-        // INNER only for positive filter references (Django's `filter()`
-        // join); group-forced and `__isnull`-only references take LEFT
-        // (Django's annotation join). Unreferenced relations are not
-        // joined at all — Django never scaffolds them, and an unreferenced
-        // LEFT JOIN fans the grouped window out (window functions evaluate
-        // before DISTINCT, so the duplicate row numbers survive it).
-        let inner = mentioned && !nullable_only;
+        let legacy_positive = alias_mentioned(&legacy_sql_text, alias)
+            && !alias_nullable_only(&legacy_sql_text, alias);
+        let inner = rich_inner.contains(alias) || legacy_positive;
         if !(mentioned || group_join_alias(group_by, sub_group_by, alias)) {
             continue;
         }

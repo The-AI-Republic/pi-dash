@@ -150,12 +150,16 @@ impl RenderedAgentRun {
     }
 }
 
-/// The issue's newest run, its newest active run, and its run count.
+/// The issue's newest run, its newest active run, its run count and the
+/// cumulative token total over every run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueAgentRuns {
     pub latest: Option<RenderedAgentRun>,
     pub active: Option<RenderedAgentRun>,
     pub count: i64,
+    /// `runs.aggregate(total=Sum("total_tokens"))["total"] or 0`
+    /// (`issue.py:1415-1421`, PDASHOSS01-189).
+    pub total_tokens: i64,
 }
 
 /// Latest run, active run and count for one issue, over the request's pool
@@ -173,9 +177,11 @@ pub async fn issue_agent_runs(
             latest: None,
             active: None,
             count: 0,
+            total_tokens: 0,
         });
     };
     let count = run_count(&db, issue_id).await?;
+    let total_tokens = run_total_tokens(&db, issue_id).await?;
     let active = if ACTIVE_RUN_STATUSES.contains(&latest.status.as_str()) {
         Some(latest.clone())
     } else {
@@ -185,7 +191,37 @@ pub async fn issue_agent_runs(
         latest: Some(latest),
         active,
         count,
+        total_tokens,
     })
+}
+
+/// `runs.aggregate(total=Sum("total_tokens"))["total"] or 0`
+/// (`issue.py:1415-1421`): cumulative tokens over every run of the issue.
+/// `total_tokens` is the generated column over `usage`; `SUM` skips the
+/// NULLs a run that never reported usage leaves, and an issue with none
+/// reads 0.
+async fn run_total_tokens(db: &DatabaseConnection, issue_id: Uuid) -> Result<i64, DbErr> {
+    let total: Option<Option<i64>> = total_tokens_query(issue_id)
+        .into_tuple()
+        .one(db)
+        .await
+        .inspect_err(|error| tracing::error!(%error, %issue_id, "agent run token total failed"))?;
+    Ok(total.flatten().unwrap_or(0))
+}
+
+/// `SELECT CAST(SUM("agent_run"."total_tokens") AS bigint) AS "total" ...
+/// WHERE work_item_id = $1`. `SUM(bigint)` is `numeric`; the cast lets it
+/// decode as `i64` (Django's `Sum` over an integer field renders an int).
+fn total_tokens_query(issue_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column_as(
+            agent_run::Column::TotalTokens
+                .sum()
+                .cast_as(sea_orm::sea_query::Alias::new("bigint")),
+            "total",
+        )
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
 }
 
 /// `runs.count()` (`issue.py:1412`): every run of the issue, any status.

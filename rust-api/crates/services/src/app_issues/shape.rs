@@ -257,6 +257,37 @@ pub fn envelope(
     total_results: i64,
     results_json: &str,
 ) -> String {
+    let head = envelope_head(
+        grouped_by,
+        sub_grouped_by,
+        total_count,
+        next_cursor,
+        prev_cursor,
+        next_page_results,
+        prev_page_results,
+        count,
+        total_pages,
+        total_results,
+    );
+    format!("{head},\"results\":{results_json}}}")
+}
+
+/// The [`envelope`] up to and including `extra_stats`, left open (no
+/// closing brace) for views that rename or follow `results` with their own
+/// keys.
+#[allow(clippy::too_many_arguments)]
+pub fn envelope_head(
+    grouped_by: Option<&str>,
+    sub_grouped_by: Option<&str>,
+    total_count: i64,
+    next_cursor: &str,
+    prev_cursor: &str,
+    next_page_results: bool,
+    prev_page_results: bool,
+    count: usize,
+    total_pages: i64,
+    total_results: i64,
+) -> String {
     let grouped = grouped_by
         .map(|value| format!("\"{value}\""))
         .unwrap_or_else(|| "null".to_owned());
@@ -269,7 +300,7 @@ pub fn envelope(
         \"prev_cursor\":\"{prev_cursor}\",\
         \"next_page_results\":{next_page_results},\"prev_page_results\":{prev_page_results},\
         \"count\":{count},\"total_pages\":{total_pages},\"total_results\":{total_results},\
-        \"extra_stats\":null,\"results\":{results_json}}}"
+        \"extra_stats\":null"
     )
 }
 

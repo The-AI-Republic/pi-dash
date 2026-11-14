@@ -91,8 +91,8 @@ use pidash_services::app_modules::tasks;
 use super::gates;
 use crate::app_issues::{
     complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
-    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
-    FilteredSet, QueryMap,
+    multi_map, order_key, page_denial, query_last, render_condition, rich_inner_aliases, shape_row,
+    Binder, Denial, FilteredSet, QueryMap,
 };
 use pidash_db::entity::{module_issues, modules, project_members, projects, workspaces};
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
@@ -774,7 +774,7 @@ fn module_filtered_set(
         }
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     // Guest creator scoping (`issue.py:139-140`): one `WHERE` fragment
     // covers the rows and every total (flat and grouped), like Django's
@@ -808,16 +808,22 @@ fn module_filtered_set(
     // window `__rn` differs per fanned row), inflating the window.
     let mut joins = String::from(" JOIN module_issues AS bridge ON bridge.issue_id = issue.id");
     let mut referenced = vec!["bridge"];
+    // INNER only on a plain positive reference (rich positive occurrence
+    // or positive legacy predicate); a rich `or`-only alias joins LEFT
+    // (Django LEFT-OUTERs disjuncts) and a `not`'d alias stays in
+    // `NOT EXISTS` with no join.
+    let rich_inner = rich_inner_aliases(query, tz);
     for (table, alias) in RELATION_JOINS {
         let marker = format!("\"{alias}\".");
         let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+        let legacy_positive =
+            legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
         if !used {
             continue;
         }
         referenced.push(*alias);
-        let inner = used && !nullable_only;
+        let inner = rich_inner.contains(alias) || legacy_positive;
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"

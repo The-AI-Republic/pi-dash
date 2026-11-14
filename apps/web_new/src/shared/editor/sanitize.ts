@@ -388,3 +388,72 @@ export function isStoredHtmlEmptyIgnoring(html: string, allowedTags: readonly st
 export function hasStoredDescriptionContent(html: string): boolean {
   return !isStoredHtmlEmptyIgnoring(html, MENTION_CONTENT_TAGS);
 }
+
+/**
+ * NEWPIDASH-232: Stored bodies from the assistant/MCP path before the fix
+ * wrapped raw markdown inside a single level of <p> tags:
+ * `"<p>## Summary\\nHello **world**</p>"`. The frontend's editor and the
+ * backend sanitizer both keep those <p> wrappers, so the read surface
+ * renders the markdown markers literally. This helper detects that shape
+ * and extracts the original markdown source for the Markdown renderer.
+ *
+ * It returns the markdown source only when the stored body is a
+ * `<p>`-only document (no heading/list/table/code/blockquote) whose text
+ * contains markdown markers (headings, bold/italic, inline code, fences,
+ * list markers, tables or links). Proper HTML from the rich-text editor
+ * returns `null` so the normal `renderableHtml` path paints it.
+ */
+export function extractMarkdownSource(html: string): string | null {
+  if (typeof globalThis.DOMParser === "undefined") return null;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const body = doc.body;
+  // If any formatted tag exists, this is proper HTML, not wrapped markdown.
+  if (body.querySelector("h1,h2,h3,h4,h5,h6,ul,ol,li,pre,code,blockquote,table,thead,tbody,tr,th,td,strong,em,s,hr")) {
+    return null;
+  }
+  const paras = Array.from(body.querySelectorAll("p"));
+  if (paras.length === 0) return null;
+  // Quick check for markdown markers in the visible text.
+  const text = body.textContent ?? "";
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const hasHeading = /(^|\n)#{1,6}\s+\S/.test(trimmed);
+  const hasBold = /\*\*[^*]+\*\*|__[^_]+__/.test(trimmed);
+  const hasItalic = /[*_][^*_]+[*_]/.test(trimmed) && !hasBold;
+  const hasInlineCode = /`[^`\n]+`/.test(trimmed);
+  const hasFence = /```/.test(trimmed) || /~~~/.test(trimmed);
+  const hasList = /(^|\n)\s*[-*+]\s+\S/.test(trimmed) || /(^|\n)\s*\d+[.)]\s+\S/.test(trimmed);
+  const hasTable = /(^|\n)\s*\|.*\|\s*$/.test(trimmed) && /(^|\n)\s*\|[\s:|-]+\|\s*$/.test(trimmed);
+  const hasLink = /\[[^\]]+\]\([^)]+\)/.test(trimmed);
+  const hasStrike = /~~[^~]+~~/.test(trimmed);
+  if (
+    !hasHeading &&
+    !hasBold &&
+    !hasItalic &&
+    !hasInlineCode &&
+    !hasFence &&
+    !hasList &&
+    !hasTable &&
+    !hasLink &&
+    !hasStrike
+  ) {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const p of paras) {
+    // <br> inside <p> is the naive single-newline; turn it back into \n.
+    // innerHTML may contain entities; read text via a temp node.
+    const inner = p.innerHTML.replace(/<br\s*\/?>/gi, "\n");
+    const div = doc.createElement("div");
+    div.innerHTML = inner;
+    const txt = div.textContent ?? "";
+    // Untrim only outermost paragraph breaks; inner <br> newlines are kept.
+    if (txt.trim() !== "") parts.push(txt.trim());
+    else parts.push(txt);
+  }
+  // Join paragraphs with blank line to recover the original markdown break.
+  const md = parts.join("\n\n").trim();
+  // Final guard: the extracted source must still look like markdown.
+  const recheck = /(^|\n)#{1,6}\s|(\*\*|__).+?(\*\*|__)|`[^`]+`|```|^\s*[-*+]\s|^\s*\d+[.)]\s|\[.+?\]\(.+?\)/.test(md);
+  return recheck ? md : null;
+}

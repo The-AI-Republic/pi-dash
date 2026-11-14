@@ -44,6 +44,8 @@ class GitProviderAccount(BaseModel):
     )
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.CONNECTED)
     verified_at = models.DateTimeField(null=True, blank=True)
+    suspended_at = models.DateTimeField(null=True, blank=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
     last_check_error = models.TextField(blank=True, default="")
     metadata = models.JSONField(default=dict)
 
@@ -311,6 +313,36 @@ class GitWebhookDelivery(BaseModel):
                 name="git_wh_delivery_uniq_active",
             ),
         ]
+
+
+class GitProviderInstallSession(BaseModel):
+    class Status(models.TextChoices):
+        STARTED = "started", "Started"
+        COMPLETED = "completed", "Completed"
+        EXPIRED = "expired", "Expired"
+        FAILED = "failed", "Failed"
+
+    state = models.CharField(max_length=128, unique=True, db_index=True)
+    provider = models.CharField(max_length=32)
+    workspace = models.ForeignKey(
+        "db.Workspace", related_name="git_provider_install_sessions", on_delete=models.CASCADE
+    )
+    actor = models.ForeignKey("db.User", related_name="git_provider_install_sessions", on_delete=models.CASCADE)
+    external_account_id = models.CharField(max_length=255, null=True, blank=True)
+    account_login = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.STARTED, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True, default="")
+
+    def __str__(self):
+        return f"{self.workspace.slug}:{self.status}:{self.state}"
+
+    class Meta:
+        db_table = "git_provider_install_sessions"
+        verbose_name = "Git Provider Install Session"
+        verbose_name_plural = "Git Provider Install Sessions"
+        ordering = ("-created_at",)
 
 
 class GitWebhookRegistration(BaseModel):

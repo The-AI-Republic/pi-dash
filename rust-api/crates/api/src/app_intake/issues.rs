@@ -1811,7 +1811,7 @@ pub struct IssueObjectValidation {
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
 /// `serializers/issue.py:63-76`): empty `external_source` short-circuits
-/// before any query.
+/// before any query. Git-only after PDASHOSS01-354.
 pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1819,9 +1819,10 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
     if source.is_empty() {
         return Ok(false);
     }
-    // No `is_synced` annotation rides these handlers, so the sync tables
-    // decide.
-    use pidash_db::entity::{git_issue_syncs as git_entity, github_issue_syncs as gh_entity};
+    // No `is_synced` annotation rides these handlers, so the sync table
+    // decides (generic `git_issue_syncs`, provider='github' rows included;
+    // legacy GitHub tables sunset, PDASHOSS01-354).
+    use pidash_db::entity::git_issue_syncs as git_entity;
     let db = sea_conn(pool);
     let git = git_entity::Entity::find()
         .filter(git_entity::Column::IssueId.eq(issue.id))
@@ -1831,18 +1832,7 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = gh_entity::Entity::find()
-        .filter(gh_entity::Column::IssueId.eq(issue.id))
-        .select_only()
-        .column(gh_entity::Column::IssueId)
-        .into_tuple::<Uuid>()
-        .one(&db)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// Table names for the sync probes above live behind Django model
@@ -3102,10 +3092,16 @@ pub async fn render_agent_status(
         .await
         .map_err(|_| Denial::ServerError)?;
     let run_count = runs.count;
+    let total_tokens = runs.total_tokens;
     let latest_row = runs.latest.as_ref().map(RenderedAgentRun::detail_row);
     let active_row = runs.active.as_ref().map(RenderedAgentRun::detail_row);
-    let status =
-        agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
+    let status = agent_status_to_representation(
+        ticker,
+        active_row.as_ref(),
+        latest_row.as_ref(),
+        run_count,
+        total_tokens,
+    );
     match status {
         None => Ok(serde_json::Value::Null),
         Some(view) => serde_json::to_value(&view).map_err(|_| Denial::ServerError),
@@ -4928,6 +4924,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -4972,19 +4969,16 @@ fn compile_text_predicate(
     };
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
         _ => return Ok(None),
     };
-    // Explicit bounds must parse as dates: Django's `get_prep_value`
-    // raises `ValidationError` (400 invalid detail) on garbage.
-    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
-    }
     if operator == "=" {
-        // Single-value form on a date term: Django's `contains`
-        // lookup, i.e. LIKE with metacharacters escaped.
+        // Bare token: Django __contains is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates). The single-value form
+        // LIKEs the date text with metacharacters escaped.
         let escaped = text
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -4992,6 +4986,11 @@ fn compile_text_predicate(
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
+    }
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
     }
     let holder = placeholder(next);
     binds.push(OwnedBind::Text(text.to_owned()));
@@ -7212,6 +7211,26 @@ mod tests {
             app_origin(&state).as_deref(),
             Some("https://app.example.invalid")
         );
+    }
+
+    #[test]
+    fn updated_at_predicates_hit_the_issue_updated_column() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let (mut binds, mut next) = (Vec::new(), 1);
+        let sql = compile_predicate(
+            "issue__updated_at__date__gte",
+            &FilterValue::Day(day),
+            &mut binds,
+            &mut next,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
+            .expect("compiles")
+            .expect("known key");
+        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
     }
 
     #[test]

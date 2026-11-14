@@ -59,8 +59,8 @@ in this domain; `transfer_cycle_issues` is synchronous.
 
 ## Permissions
 
-- `perms.json` — F-C27-07 — `@allow_permission` matrix: base.py:183 (GUEST list),
-  :270/:335/:411 (MEMBER write/read), :477-478 (ADMIN creator-only destroy),
+- `perms.json` — F-C27-07 — `@allow_permission` matrix: base.py:183/:411 (GUEST list/retrieve,
+  PDASHOSS01-327), :270/:335 (MEMBER write), :477-478 (ADMIN creator-only destroy),
   :521/:571/:581/:595 (MEMBER date-check/favorite/transfer),
   :626/:646/:659/:787 (GUEST userprops/progress/analytics); archive.py:271/:586/:606
   (MEMBER); issue.py:132/:242 (GUEST list/retrieve, PDASHOSS01-310),

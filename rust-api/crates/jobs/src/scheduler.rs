@@ -359,7 +359,7 @@ mod tests {
         // Phase 2 (2.2): None keeps all; Some(set) keeps only named entries
         // in beat order.
         let schedule = default_schedule();
-        assert_eq!(schedule.len(), 31);
+        assert_eq!(schedule.len(), 32);
         assert_eq!(
             filter_schedule_by_allowlist(schedule.clone(), &None),
             schedule
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn default_schedule_is_the_full_beat_table() {
-        assert_eq!(default_schedule().len(), 31);
+        assert_eq!(default_schedule().len(), 32);
     }
 
     #[test]

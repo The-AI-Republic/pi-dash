@@ -2328,6 +2328,21 @@ pub async fn patch_user_properties(
     };
     // `request.data.get("filters", cycle_properties.filters)` per key:
     // a present key wins even when null; an absent key keeps the row.
+    // Django stores None into the NOT NULL JSONField columns
+    // (`db/models/cycle.py:137-140`); `save()` then raises IntegrityError
+    // → `handle_exception` 400 {"error":"The payload is not valid"}
+    // (`app/views/base.py:220-224`). Explicit JSON null must 400 before
+    // the UPDATE, otherwise the JSON null scalar would persist.
+    for key in [
+        "filters",
+        "rich_filters",
+        "display_filters",
+        "display_properties",
+    ] {
+        if matches!(data.get(key), Some(Value::Null)) {
+            return Denial::InvalidPayload.into_response();
+        }
+    }
     if let Some(filters) = data.get("filters") {
         row.filters = filters.clone();
     }

@@ -274,4 +274,13 @@ describe("ArchivedIssuePeek", () => {
     expect(screen.queryByRole("textbox", { name: /title/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
+
+  it("places Properties above Activity (NEWPIDASH-233)", async () => {
+    renderPeek();
+    const heading = await screen.findByRole("heading", { name: "Old login form" });
+    const properties = screen.getByRole("region", { name: "Properties" });
+    const activity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(heading.compareDocumentPosition(properties)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(properties.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
 });

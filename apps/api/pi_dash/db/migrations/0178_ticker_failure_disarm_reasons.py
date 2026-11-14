@@ -16,7 +16,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0176_update_timezone_choices_pytz_2025_2"),
+        ("db", "0177_git_provider_app_columns"),
     ]
 
     operations = [

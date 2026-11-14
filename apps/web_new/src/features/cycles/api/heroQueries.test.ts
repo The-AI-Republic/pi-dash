@@ -28,6 +28,7 @@ import {
   HERO_ISSUES_PAGE_SIZE,
   heroAnalyticsQueryOptions,
   heroIssuesQueryOptions,
+  heroIssuesRows,
   heroProgressQueryOptions,
   heroQueryOptions,
 } from "./heroQueries.js";
@@ -69,13 +70,37 @@ describe("heroAnalyticsQueryOptions", () => {
 });
 
 describe("heroIssuesQueryOptions", () => {
-  it("reads the first issues page under the hero-issues key", async () => {
+  it("requests urgent and high server-side and follows next_cursor", async () => {
     mocks.listCycleIssues.mockResolvedValue({});
     const options = heroIssuesQueryOptions(CLIENT, "acme", PROJECT, CYCLE);
     expect(options.queryKey).toEqual(["ws", "acme", "cycles", "hero-issues", PROJECT, CYCLE]);
-    await options.queryFn?.({} as never);
+    expect(options.initialPageParam).toBeUndefined();
+    await options.queryFn?.({ pageParam: undefined } as never);
     expect(mocks.listCycleIssues).toHaveBeenCalledWith(CLIENT, "acme", PROJECT, CYCLE, {
       perPage: HERO_ISSUES_PAGE_SIZE,
+      filters: { priority: "urgent,high" },
     });
+    await options.queryFn?.({ pageParam: "100:1:0" } as never);
+    expect(mocks.listCycleIssues).toHaveBeenCalledWith(CLIENT, "acme", PROJECT, CYCLE, {
+      perPage: HERO_ISSUES_PAGE_SIZE,
+      filters: { priority: "urgent,high" },
+      cursor: "100:1:0",
+    });
+    expect(options.getNextPageParam({ next_page_results: true, next_cursor: "100:1:0" } as never)).toBe("100:1:0");
+    expect(options.getNextPageParam({ next_page_results: false, next_cursor: "100:1:0" } as never)).toBeUndefined();
+    expect(options.getNextPageParam({ next_page_results: true, next_cursor: "" } as never)).toBeUndefined();
+  });
+});
+
+describe("heroIssuesRows", () => {
+  it("concatenates pages in server order and tolerates absent pages", () => {
+    const page = (ids: string[]) => ({ results: ids.map((id) => ({ id, name: id, priority: "urgent" })) }) as never;
+    expect(heroIssuesRows([page(["a", "b"]), page(["c"])])).toEqual([
+      { id: "a", name: "a", priority: "urgent" },
+      { id: "b", name: "b", priority: "urgent" },
+      { id: "c", name: "c", priority: "urgent" },
+    ]);
+    expect(heroIssuesRows(undefined)).toEqual([]);
+    expect(heroIssuesRows([])).toEqual([]);
   });
 });

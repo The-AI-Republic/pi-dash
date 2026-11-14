@@ -288,6 +288,20 @@ async fn write_assignment(
     Ok(())
 }
 
+/// `release_runner_if_idle` (`matcher.py:306-328`, PDASHOSS01-231):
+/// flip a `busy` runner with no busy-status run back to `online`.
+/// Returns whether a row changed (the Python `bool(...)`). Runs on the
+/// caller's connection, so session open keeps it inside its transaction.
+pub async fn release_runner_if_idle<C: ConnectionTrait>(
+    db: &C,
+    runner_id: Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    let result = db
+        .execute(DbBackend::Postgres.build(&drain_kernel::release_runner_if_idle_stmt(runner_id)))
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// `drain_for_runner_by_id` (`matcher.py:298-304`): runner lookup
 /// (miss ⇒ `Ok(false)`, no transaction), else the single-assignment
 /// drain. Answers whether a run was assigned.
@@ -495,6 +509,7 @@ mod tests {
             offline_threshold_secs: 90,
             offline_pin_release_secs: 300,
             offline_run_fail_secs: 3600,
+            pin_auto_release_secs: 600,
             offline_stream_ttl_secs: 86400,
             offline_stream_maxlen: 1000,
             stream_min_retention_secs: 3600,

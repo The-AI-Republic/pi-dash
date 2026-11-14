@@ -1825,7 +1825,12 @@ class Seeder:
         return {"id": binding_id, "repository_id": repo_id}
 
     def create_github_app_installation(self, wi_id: str) -> dict[str, Any]:
-        """Seed a ``github_app_installations`` row with a unique install id."""
+        """Seed a ``github_app_installations`` row with a unique install id.
+
+        Also seeds the ``git_provider_accounts`` row the 0173 backfill
+        would produce, so the suite passes on both backends during the
+        3/6 migration (Django reads legacy; Rust reads generic).
+        """
         installation_id = random.randint(1_000_000, 9_999_999)
         row_id = _uid()
         self.db.execute(
@@ -1838,6 +1843,31 @@ class Seeder:
                        3,'{}','[]','',now(),now())""",
             (row_id, wi_id, installation_id),
         )
+        workspace_row = self.db.fetchone(
+            "SELECT workspace_id FROM workspace_integrations WHERE id = %s", (wi_id,)
+        )
+        account_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_provider_accounts
+               (id, workspace_id, provider, host_url, auth_type,
+                external_account_id, external_account_login, display_name,
+                capabilities, credential_config, workspace_integration_id,
+                status, metadata, last_check_error, created_at, updated_at)
+               VALUES (%s,%s,'github','https://github.com','github_app',
+                       %s,'contract-octocat','contract-octocat',
+                       '{"read_repositories": true, "read_issues": true, "write_comments": false, "manage_webhooks": true, "clone": false}',
+                       %s, %s, 'connected',
+                       '{"account_type": "Organization", "repository_count": 3, "permissions": {}, "events": [], "repository_selection": "selected", "installed_at": null, "suspended_at": null}',
+                       '', now(), now())""",
+            (
+                account_id,
+                workspace_row["workspace_id"],
+                str(installation_id),
+                f'{{"auth_type": "github_app", "host_url": "https://github.com", "installation_id": {installation_id}}}',
+                wi_id,
+            ),
+        )
+        self._put("git_provider_accounts", account_id)
         self._put("github_app_installations", row_id)
         return {"id": row_id, "installation_id": installation_id}
 
@@ -2144,25 +2174,60 @@ class Seeder:
         workspace_id: str,
         created_by_id: str,
         pod_id: str,
-        work_item_id: str,
+        work_item_id: str | None,
         *,
         status: str = "running",
+        # A scheduler run (PDASHOSS01-276) passes work_item_id=None plus
+        # its binding; trigger follows, as dispatch_scheduler_run sets it.
+        scheduler_binding_id: str | None = None,
     ) -> dict[str, Any]:
         run_id = _uid()
+        trigger = "scheduler" if scheduler_binding_id else "human"
         self.db.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
                 error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
-                usage, pin_kind, created_at)
+                usage, pin_kind, scheduler_binding_id, created_at)
                VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}',
-                       %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
-                       '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())""",
-            (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
+                       %s,%s,%s,%s,'contract-model', %s, 'local_runner', 0,
+                       '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality',
+                       %s, now())""",
+            (
+                run_id, status, workspace_id, work_item_id, pod_id, created_by_id,
+                trigger, scheduler_binding_id,
+            ),
         )
         self._put("agent_run", run_id)
         return {"id": run_id}
+
+    def create_scheduler_binding(
+        self, workspace_id: str, project_id: str, actor_id: str
+    ) -> dict[str, Any]:
+        """A workspace scheduler installed (enabled) on the project."""
+        scheduler_id = _uid()
+        self.db.execute(
+            """INSERT INTO schedulers
+               (id, workspace_id, slug, name, description, prompt, source,
+                is_enabled, color, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'contract scheduler','Scan the project.',
+                       'manifest', true, '#3b82f6', now(), now())""",
+            (scheduler_id, workspace_id, self._slug("ct-sched"), "Contract scheduler"),
+        )
+        self._put("schedulers", scheduler_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO scheduler_bindings
+               (id, workspace_id, project_id, scheduler_id, actor_id, dtstart,
+                tzid, rrule, rdates, exdates, extra_context, enabled, last_error,
+                outcome_mode, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,now(),'UTC','FREQ=HOURLY','[]','[]','',
+                       true,'','create_issue',now(),now())""",
+            (binding_id, workspace_id, project_id, scheduler_id, actor_id),
+        )
+        self._put("scheduler_bindings", binding_id)
+        return {"id": binding_id, "scheduler_id": scheduler_id}
 
     # -- runner daemon domain (PIDASHCONV-97) --------------------------------
     # Factories for the daemon-facing runner API (``/api/v1/runner/``):

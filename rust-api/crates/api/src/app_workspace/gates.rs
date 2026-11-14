@@ -100,9 +100,9 @@
 //! booleans; the SQL stays theirs):
 //!
 //! - Creator rows name their model ([`CreatorModel`]): sticky rows read
-//!   `Sticky`, draft destroy reads `DraftIssue`, draft retrieve and
-//!   partial_update read **`Issue`** with the draft pk (the dead branch
-//!   — ported as-is, handlers must query `Issue`, not `DraftIssue`).
+//!   `Sticky`; draft retrieve, partial_update and destroy read
+//!   `DraftIssue` (PDASHOSS01-320 fixed retrieve/partial_update, which
+//!   used to read `Issue` with the draft pk).
 //! - `WorkspaceOwnerPermission` has no `is_active` filter
 //!   (`workspace.py:56-58`): handlers fill
 //!   `is_admin_unfiltered` from the unfiltered Admin row.
@@ -122,7 +122,7 @@
 //! belongs to the handlers (each row says so).
 //!
 //! Ported quirks (translate, don't redesign): the collection-list 400;
-//! the draft creator-vs-`Issue` dead branch; sticky creator-only with
+//! sticky creator-only with
 //! `roles=[]`; the creator membership gate firing first; the Owner
 //! `is_active` omission; the missing-PUT-decorator looseness (member
 //! PUT allows, member PATCH denies); the slash-less leave-invalidate
@@ -173,12 +173,9 @@ pub enum CreatorModel {
     /// `Sticky` (`sticky.py:54,58`): `Sticky.created_by`, auto-set by
     /// `BaseModel.save` (`db/models/base.py:23-38`).
     Sticky,
-    /// **`Issue`** (`draft.py:159,186`): the draft pk is looked up in
-    /// the `Issue` table, so the branch ~never matches a draft row and
-    /// the role check decides. Ported as-is — handlers must query
-    /// `Issue`, not `DraftIssue`.
-    Issue,
-    /// `DraftIssue` (`draft.py:199`): the only consistent creator row.
+    /// `DraftIssue` (`draft.py:158,185,198`): draft retrieve,
+    /// partial_update and destroy. Retrieve/partial_update read `Issue`
+    /// until PDASHOSS01-320, which made the creator bypass dead.
     DraftIssue,
 }
 
@@ -646,18 +643,18 @@ pub static GATES: &[RouteGate] = &[
         path: "workspaces/<slug>/draft-issues/<pk>/",
         gate: Gate::WorkspaceCreator {
             roles: ADMIN,
-            model: CreatorModel::Issue,
+            model: CreatorModel::DraftIssue,
         },
-        source: "draft.py:186-187 (retrieve; ADMIN + creator model=Issue — dead branch, ported as-is)",
+        source: "draft.py:185-186 (retrieve; ADMIN + creator model=DraftIssue, PDASHOSS01-320)",
     },
     RouteGate {
         method: "PATCH",
         path: "workspaces/<slug>/draft-issues/<pk>/",
         gate: Gate::WorkspaceCreator {
             roles: ADMIN_MEMBER,
-            model: CreatorModel::Issue,
+            model: CreatorModel::DraftIssue,
         },
-        source: "draft.py:156-162 (partial_update; ADMIN/MEMBER + creator model=Issue — dead branch, ported as-is)",
+        source: "draft.py:155-161 (partial_update; ADMIN/MEMBER + creator model=DraftIssue, PDASHOSS01-320)",
     },
     RouteGate {
         method: "DELETE",
@@ -1879,7 +1876,8 @@ mod tests {
             2,
             "ADMIN member-write rows"
         );
-        // Creator-model tags: sticky x2, Issue x2 (the quirk), DraftIssue x1.
+        // Creator-model tags: sticky x2, DraftIssue x3 (draft retrieve,
+        // partial_update and destroy — PDASHOSS01-320).
         let creators: Vec<(&[i32], CreatorModel)> = GATES
             .iter()
             .filter_map(|row| match &row.gate {
@@ -1897,17 +1895,10 @@ mod tests {
         assert_eq!(
             creators
                 .iter()
-                .filter(|(_, model)| *model == CreatorModel::Issue)
-                .count(),
-            2,
-            "draft retrieve + partial_update query Issue, not DraftIssue"
-        );
-        assert_eq!(
-            creators
-                .iter()
                 .filter(|(_, model)| *model == CreatorModel::DraftIssue)
                 .count(),
-            1
+            3,
+            "draft retrieve + partial_update + destroy query DraftIssue"
         );
         for (roles, model) in &creators {
             if *model == CreatorModel::Sticky {
@@ -2322,10 +2313,10 @@ mod tests {
 
     #[test]
     fn draft_creator_checks_run_before_the_role_check() {
-        // `draft.py:156-162,186-187,199-200`: a creator passes
+        // `draft.py:155-161,185-186,198-199`: a creator passes
         // regardless of role; only non-creators reach the role list.
-        // (The retrieve/partial_update lookups run against `Issue` —
-        // the tag test above pins the model; here the bypass order.)
+        // (All three look the creator up in `DraftIssue` — the tag test
+        // above pins the model; here the bypass order.)
         let cases = [
             ("GET", "workspaces/<slug>/draft-issues/<pk>/", ADMIN),
             (

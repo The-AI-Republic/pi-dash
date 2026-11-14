@@ -28,13 +28,13 @@
 //! request are combined, all with AND. None of the declared filters sets
 //! `exclude`, so there is no negation branch to port.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use chrono::{TimeZone, Timelike};
-use sea_query::{Alias, Condition, Expr, Keyword, SimpleExpr};
+use sea_query::{Alias, Condition, Expr, Keyword, Query, SimpleExpr};
 use serde_json::Value;
 
-use crate::filter::FilterError;
+use crate::filter::{FilterError, FilterTree, Lookup};
 
 /// Lifecycle ordering shared by filtering (`pi_dash/utils/constants.py`).
 /// Triage is excluded upstream; the tuple starts at `backlog`.
@@ -855,6 +855,19 @@ pub fn compile_leaf(
     value: &Value,
     tz: &chrono_tz::Tz,
 ) -> Result<SimpleExpr, FilterError> {
+    compile_leaf_in_relation_table(name, value, tz, None)
+}
+
+/// Like [`compile_leaf`] but a relation leaf's column and soft-delete
+/// guard reference `relation_table` instead of the declared join alias.
+/// The [`relation_exists`] builder uses this with its own subquery alias;
+/// `None` is the outer-join form. Non-relation leaves ignore the override.
+pub fn compile_leaf_in_relation_table(
+    name: &str,
+    value: &Value,
+    tz: &chrono_tz::Tz,
+    relation_table: Option<&str>,
+) -> Result<SimpleExpr, FilterError> {
     let decl = find_decl(name).ok_or_else(|| FilterError::InvalidField(name.to_owned()))?;
     let field = decl.alias_of.unwrap_or(decl.name);
     match decl.kind {
@@ -886,8 +899,9 @@ pub fn compile_leaf(
             join_column,
             many,
         } => {
-            let target = col(join_table, join_column);
-            let guard = col(join_table, "deleted_at").is_null();
+            let table = relation_table.unwrap_or(join_table);
+            let target = Expr::col((Alias::new(table), Alias::new(join_column)));
+            let guard = Expr::col((Alias::new(table), Alias::new("deleted_at"))).is_null();
             if many {
                 let parts = csv_parts(field, value)?;
                 if parts.is_empty() {
@@ -1057,6 +1071,178 @@ pub fn is_constant(expr: &SimpleExpr) -> bool {
     )
 }
 
+/// A rich leaf's `IssueFilterSet` name: `field` plus the lookup suffix
+/// (`exact` has none). Shared by the tree compiler and every API kernel
+/// that walks leaves by hand.
+pub fn leaf_name(field: &str, lookup: Lookup) -> String {
+    let suffix = match lookup {
+        Lookup::Exact => return field.to_owned(),
+        Lookup::In => "in",
+        Lookup::Gt => "gt",
+        Lookup::Gte => "gte",
+        Lookup::Lt => "lt",
+        Lookup::Lte => "lte",
+        Lookup::Contains => "contains",
+        Lookup::IContains => "icontains",
+        Lookup::StartsWith => "startswith",
+        Lookup::IStartsWith => "istartswith",
+        Lookup::EndsWith => "endswith",
+        Lookup::IEndsWith => "iendswith",
+        Lookup::IExact => "iexact",
+        Lookup::IsNull => "isnull",
+        Lookup::Range => "range",
+    };
+    format!("{field}__{suffix}")
+}
+
+/// The relation-join alias a declared filter name filters through, if
+/// any. `__exact` aliases resolve to their base declaration.
+pub fn relation_alias(name: &str) -> Option<&'static str> {
+    match find_decl(name)?.kind {
+        FilterKind::Relation { join_table, .. } => Some(join_table),
+        _ => None,
+    }
+}
+
+/// The physical table behind a relation-join alias.
+pub fn relation_table(alias: &str) -> Option<&'static str> {
+    Some(match alias {
+        "issue_assignee" => "issue_assignees",
+        "issue_cycle" => "cycle_issues",
+        "issue_module" => "module_issues",
+        "issue_mention" => "issue_mentions",
+        "label_issue" => "issue_labels",
+        "issue_subscribers" => "issue_subscribers",
+        _ => return None,
+    })
+}
+
+/// Prefix for the subquery alias [`relation_exists`] uses instead of the
+/// outer join alias. The `__e_` prefix keeps text join scans (which look
+/// for `"alias".` / `alias.` with a word boundary) from mistaking the
+/// subquery for an outer reference.
+const EXISTS_ALIAS_PREFIX: &str = "__e_";
+
+/// `EXISTS (SELECT 1 FROM <table> AS __e_<alias> WHERE __e_<alias>.issue_id
+/// = issue.id AND <leaf predicate>)` for a relation leaf. This is
+/// Django's `split_exclude` shape for a negated multi-valued relation:
+/// the issue survives exactly when it has no live link matching the leaf,
+/// with no join fan-out. Callers must not wrap constants here (a match-all
+/// / match-nothing leaf already filters correctly without a subquery).
+pub fn relation_exists(
+    name: &str,
+    value: &Value,
+    tz: &chrono_tz::Tz,
+) -> Result<SimpleExpr, FilterError> {
+    let invalid = || FilterError::InvalidField(name.to_owned());
+    let alias = relation_alias(name).ok_or_else(invalid)?;
+    let table = relation_table(alias).ok_or_else(invalid)?;
+    let sub = format!("{EXISTS_ALIAS_PREFIX}{alias}");
+    let predicate = compile_leaf_in_relation_table(name, value, tz, Some(&sub))?;
+    let mut stmt = Query::select();
+    stmt.expr(Expr::val(1))
+        .from_as(Alias::new(table), Alias::new(sub.clone()))
+        .and_where(
+            Expr::col((Alias::new(sub.clone()), Alias::new("issue_id")))
+                .equals((Alias::new("issue"), Alias::new("id"))),
+        )
+        .and_where(predicate);
+    Ok(Expr::exists(stmt))
+}
+
+/// The result of [`compile_tree`]: the compiled condition plus, per
+/// relation alias, whether the tree requires an INNER join (a positive
+/// occurrence outside any `or`/`not`) or only a LEFT join (an occurrence
+/// under `or`, never a positive one). Aliases under an odd `not` compile
+/// to [`relation_exists`] and appear in neither set; constants appear in
+/// neither either.
+pub struct CompiledTree {
+    pub condition: Condition,
+    pub inner: BTreeSet<&'static str>,
+    pub left: BTreeSet<&'static str>,
+}
+
+/// Compile a whole `filters` tree against `IssueFilterSet` with Django's
+/// negation / disjunction semantics. Walks the tree tracking whether each
+/// leaf sits under an odd `not` (negated) and under any `or`:
+/// - negated relation leaves → [`relation_exists`] (tree `not`s apply on
+///   top, giving `NOT EXISTS` at the leaf level);
+/// - relation leaves under `or` (even `not` count) → the join predicate,
+///   alias recorded in `left` (fan-out preserved over the LEFT join);
+/// - everything else → the plain leaf, relation aliases recorded in
+///   `inner` unless under `or`.
+///
+/// Constants (`1 = 1` / `FALSE`) are never wrapped and never join.
+pub fn compile_tree(tree: &FilterTree, tz: &chrono_tz::Tz) -> Result<CompiledTree, FilterError> {
+    fn walk(
+        tree: &FilterTree,
+        tz: &chrono_tz::Tz,
+        negated: bool,
+        in_or: bool,
+        inner: &mut BTreeSet<&'static str>,
+        left: &mut BTreeSet<&'static str>,
+    ) -> Result<Condition, FilterError> {
+        use FilterTree as T;
+        match tree {
+            T::And(children) => {
+                let mut cond = Condition::all();
+                for child in children {
+                    cond = cond.add(walk(child, tz, negated, in_or, inner, left)?);
+                }
+                Ok(cond)
+            }
+            T::Or(children) if children.len() == 1 => {
+                // Django's `Q() | Q(child)` is `Q(child)`: a single
+                // disjunct filters like a plain occurrence (INNER), not a
+                // LEFT OUTER disjunct.
+                walk(&children[0], tz, negated, in_or, inner, left)
+            }
+            T::Or(children) => {
+                let mut cond = Condition::any();
+                for child in children {
+                    cond = cond.add(walk(child, tz, negated, true, inner, left)?);
+                }
+                Ok(cond)
+            }
+            T::Not(child) => Ok(walk(child, tz, !negated, in_or, inner, left)?.not()),
+            T::Leaf(leaves) => {
+                let mut combined = Condition::all();
+                for leaf in leaves {
+                    let name = leaf_name(&leaf.field, leaf.lookup);
+                    let expr = compile_leaf(&name, &leaf.value, tz)?;
+                    if is_constant(&expr) {
+                        combined = combined.add(expr);
+                        continue;
+                    }
+                    match relation_alias(&name) {
+                        Some(_) if negated => {
+                            combined = combined.add(relation_exists(&name, &leaf.value, tz)?);
+                        }
+                        Some(alias) => {
+                            if in_or {
+                                left.insert(alias);
+                            } else {
+                                inner.insert(alias);
+                            }
+                            combined = combined.add(expr);
+                        }
+                        None => combined = combined.add(expr),
+                    }
+                }
+                Ok(combined)
+            }
+        }
+    }
+    let mut inner = BTreeSet::new();
+    let mut left = BTreeSet::new();
+    let condition = walk(tree, tz, false, false, &mut inner, &mut left)?;
+    Ok(CompiledTree {
+        condition,
+        inner,
+        left,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1165,6 +1351,102 @@ mod tests {
             rendered.contains(r#""label_issue"."deleted_at" IS NULL"#),
             "{rendered}"
         );
+    }
+
+    fn tree(json: &str) -> crate::filter::FilterTree {
+        crate::filter::FilterTree::parse_param_opt(json)
+            .unwrap()
+            .expect("test tree parses")
+    }
+
+    fn compiled(json: &str) -> (String, BTreeSet<&'static str>, BTreeSet<&'static str>) {
+        let out = compile_tree(&tree(json), &chrono_tz::UTC).unwrap();
+        let text = Query::select()
+            .expr(Expr::cust("1"))
+            .and_where(out.condition.into())
+            .to_string(PostgresQueryBuilder);
+        (text, out.inner, out.left)
+    }
+
+    #[test]
+    fn relation_exists_uses_subquery_alias() {
+        let rendered = select_where(
+            relation_exists(
+                "assignee_id__in",
+                &Value::from("123e4567-e89b-42d3-a456-426614174000"),
+                &chrono_tz::UTC,
+            )
+            .unwrap(),
+        );
+        assert!(
+            rendered.contains("EXISTS(SELECT 1 FROM \"issue_assignees\" AS \"__e_issue_assignee\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#""__e_issue_assignee"."issue_id" = "issue"."id""#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#""__e_issue_assignee"."assignee_id" IN"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#""__e_issue_assignee"."deleted_at" IS NULL"#),
+            "{rendered}"
+        );
+        // The outer join alias must not leak into the subquery, or text
+        // join scans would take it for an outer INNER reference.
+        assert!(!rendered.contains("\"issue_assignee\"."), "{rendered}");
+    }
+
+    #[test]
+    fn negated_relation_compiles_to_not_exists_without_join() {
+        let (text, inner, left) =
+            compiled(r#"{"not":{"assignee_id__in":"123e4567-e89b-42d3-a456-426614174000"}}"#);
+        assert!(text.contains("EXISTS"), "{text}");
+        assert!(text.contains("NOT EXISTS("), "{text}");
+        assert!(inner.is_empty(), "{inner:?}");
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn double_negation_restores_inner() {
+        let (text, inner, left) = compiled(
+            r#"{"not":{"not":{"assignee_id__in":"123e4567-e89b-42d3-a456-426614174000"}}}"#,
+        );
+        assert!(!text.contains("EXISTS"), "{text}");
+        assert_eq!(inner, [("issue_assignee")].into_iter().collect());
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn or_context_marks_left_positive_marks_inner() {
+        let (_, inner, left) = compiled(
+            r#"{"or":[{"assignee_id":"123e4567-e89b-42d3-a456-426614174000"},{"label_id":"123e4567-e89b-42d3-a456-426614174000"}]}"#,
+        );
+        assert!(inner.is_empty(), "{inner:?}");
+        assert_eq!(
+            left,
+            [("issue_assignee"), ("label_issue")].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn negated_constant_stays_constant_without_join() {
+        let (text, inner, left) = compiled(r#"{"not":{"assignee_id":""}}"#);
+        assert!(!text.contains("EXISTS"), "{text}");
+        assert!(inner.is_empty(), "{inner:?}");
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn relation_alias_and_table_maps() {
+        assert_eq!(relation_alias("assignee_id__exact"), Some("issue_assignee"));
+        assert_eq!(relation_alias("label_id__in"), Some("label_issue"));
+        assert_eq!(relation_alias("state_id"), None);
+        assert_eq!(relation_table("issue_assignee"), Some("issue_assignees"));
+        assert_eq!(relation_table("label_issue"), Some("issue_labels"));
+        assert_eq!(relation_table("nope"), None);
     }
 
     #[test]
