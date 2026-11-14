@@ -1377,7 +1377,7 @@ pub async fn assignee_distribution(
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
            {TRANSFER_SCOPE_JOIN}
-           LEFT JOIN issue_assignees ia ON ia.issue_id = i.id
+           LEFT JOIN issue_assignees ia ON ia.issue_id = i.id AND ia.deleted_at IS NULL
            LEFT JOIN users u ON u.id = ia.assignee_id
            WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY u.display_name, u.id, u.avatar_asset_id, u.avatar
@@ -1423,7 +1423,7 @@ pub async fn label_distribution(
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
            {TRANSFER_SCOPE_JOIN}
-           LEFT JOIN issue_labels il ON il.issue_id = i.id
+           LEFT JOIN issue_labels il ON il.issue_id = i.id AND il.deleted_at IS NULL
            LEFT JOIN labels l ON l.id = il.label_id
            WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY l.name, l.color, l.id
@@ -1479,13 +1479,13 @@ async fn estimate_distribution(
 ) -> Result<Vec<EstimateRow>, Denial> {
     let (join, names, order) = if by_assignee {
         (
-            "LEFT JOIN issue_assignees ia ON ia.issue_id = i.id LEFT JOIN users u ON u.id = ia.assignee_id",
+            "LEFT JOIN issue_assignees ia ON ia.issue_id = i.id AND ia.deleted_at IS NULL LEFT JOIN users u ON u.id = ia.assignee_id",
             format!("u.display_name, u.id, {AVATAR_URL_CASE}"),
             "u.display_name",
         )
     } else {
         (
-            "LEFT JOIN issue_labels il ON il.issue_id = i.id LEFT JOIN labels l ON l.id = il.label_id",
+            "LEFT JOIN issue_labels il ON il.issue_id = i.id AND il.deleted_at IS NULL LEFT JOIN labels l ON l.id = il.label_id",
             "l.name, l.id, l.color".to_owned(),
             "l.name",
         )
