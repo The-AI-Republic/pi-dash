@@ -22,10 +22,10 @@
 //! [`clock`][crate::orchestration::clock] (`reconcile`, `on_retick` via
 //! the event, `reset_ticker_after_comment_and_run`, `disarm_ticker`,
 //! `compute_next_run_at`, `effective_interval_seconds`), executor policy
-//! from L3/L4 ([`effective_executor_for_issue`][crate::dispatch::effective_executor_for_issue],
-//! [`user_has_llm_config`][crate::dispatch::user_has_llm_config],
-//! [`LlmProfile`][crate::dispatch::LlmProfile],
-//! [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`][crate::dispatch::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL])
+//! from L3/L4 ([`effective_executor_for_issue`][crate::run_creation::effective_executor_for_issue],
+//! [`user_has_llm_config`][crate::run_creation::user_has_llm_config],
+//! [`LlmProfile`][crate::run_creation::LlmProfile],
+//! [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`][crate::run_creation::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL])
 //! and the role verdict from
 //! [`check_project_role`][pidash_auth::permissions::membership::check_project_role].
 //!
@@ -88,7 +88,7 @@ use super::creation::{
     self, ContinuationRequest, CreateDispatchRequest, CreationError, CreationSeam,
     DedicatedPinArgs, FinalizeAgentRunSeam, IssueView, StateView,
 };
-use crate::dispatch::{effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags};
+use crate::run_creation::{effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags};
 
 // ---------------------------------------------------------------------------
 // Reasons + bodies
@@ -901,7 +901,7 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
     let effective = effective_executor(seam, &issue).await?;
     // Every machine executor (including a stale `managed_runner`
     // value, the legacy spelling of one) takes the machine branch.
-    if pidash_types::dispatch::MACHINE_EXECUTORS
+    if pidash_types::agent_runs::MACHINE_EXECUTORS
         .iter()
         .any(|kind| kind.value() == effective)
     {
@@ -2047,12 +2047,12 @@ pub async fn maybe_apply_deferred_pause<S: DispatchSeam>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_types::dispatch::AgentExecutorKind;
+    use pidash_types::agent_runs::AgentExecutorKind;
     use serde_json::{json, Value};
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+    use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
     use pidash_types::orchestration::{TRIGGER_COMMENT_AND_RUN, TRIGGER_TICK, WAIT_ACTIVITY_FIELD};
 
     use super::super::creation::{

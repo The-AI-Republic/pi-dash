@@ -6,7 +6,7 @@
 //! error type. It performs no I/O: no database, no network, no filesystem.
 
 pub mod assistant;
-pub mod dispatch;
+pub mod agent_runs;
 pub mod error;
 pub mod health;
 pub mod html_entities;

@@ -88,7 +88,7 @@ use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
 use pidash_services::runner_runs::lifecycle::{self, LifecycleError};
 use pidash_services::runner_runs::scheduler_hook::{self, SchedulerHookPlan};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     classify_run_error, run_message_dedupe_ttl_secs, AgentChatMessageRole, AgentChatMessageStatus,
     AgentChatSessionStatus, AgentRunStatus, DevMachineInfo, RunErrorKind, RunnerInfo,
@@ -422,11 +422,14 @@ pub fn reconcile_terminal_candidate_select() -> sea_orm::Selector<sea_orm::Selec
 
 /// The locked finalize row's decision columns (`agent_run` only).
 struct FinalizeLocked {
+    executor_kind: AgentExecutorKind,
     done_payload: Option<Value>,
 }
 
 fn map_finalize_locked(row: &orm::agent_run::Model) -> Result<FinalizeLocked, SweepError> {
     Ok(FinalizeLocked {
+        executor_kind: AgentExecutorKind::from_value(&row.executor_kind)
+            .ok_or(SweepError::BadRow("executor_kind"))?,
         done_payload: row.done_payload.clone(),
     })
 }
@@ -1031,6 +1034,16 @@ async fn run_finalize_transaction(
         );
         let now = Utc::now();
         finalization::finalize_update(&conn, values, *run_id, now).await?;
+        if facts.executor_kind == AgentExecutorKind::CloudAgent {
+            finalization::append_terminal_event_once(
+                &conn,
+                *run_id,
+                AgentRunStatus::Failed,
+                &finalization::finalize_error_code(values),
+                now,
+            )
+            .await?;
+        }
     }
     tx.commit().await?;
     Ok(())

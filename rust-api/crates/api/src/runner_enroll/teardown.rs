@@ -2452,7 +2452,7 @@ use pidash_jobs::runner_enroll::{
 use pidash_services::runner_enroll::delete as delete_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 
 // Executors: the first pool-backed `PubsubStore`s (F8: called, never inlined)

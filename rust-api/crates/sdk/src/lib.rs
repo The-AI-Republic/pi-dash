@@ -339,7 +339,7 @@ pub mod ops {
     pub use pidash_services::domain::issue_create_sql::CREATE_SAVE_FALLBACK_STATE_SQL;
     pub use pidash_services::domain::issue_create_sql::CREATE_SEQ_SCAN_SQL;
     pub use pidash_services::domain::issue_create_sql::CREATE_SORT_ORDER_MAX_SQL;
-    pub use pidash_services::dispatch::LlmProfile;
+    pub use pidash_services::run_creation::LlmProfile;
     pub use pidash_services::domain::identity::agent_system_user_id;
     pub use pidash_services::domain::identity::GetAgentUserError;
     pub use pidash_services::domain::issues::move_to_project;
@@ -807,6 +807,8 @@ pub mod cloud_agent {
     pub use pidash_jobs::cloud_agent::history::TurnState;
     pub use pidash_jobs::cloud_agent::keys::KeyFailure;
     pub use pidash_jobs::cloud_agent::keys::KeyResolver;
+    pub use pidash_jobs::cloud_agent::provider::anthropic_request_body;
+    pub use pidash_jobs::cloud_agent::provider::openai_request_body;
     pub use pidash_jobs::cloud_agent::provider::transform_anthropic_schema;
     pub use pidash_jobs::cloud_agent::provider::transform_openai_schema;
     pub use pidash_jobs::cloud_agent::provider::wire_tool_for;
@@ -893,7 +895,7 @@ pub mod jobs {
     pub use pidash_jobs::OssWorkerCtx;
     pub use pidash_jobs::TaskMessage;
     pub use pidash_jobs::WorkerConfig;
-    pub use pidash_types::dispatch::AgentExecutorKind;
+    pub use pidash_types::agent_runs::AgentExecutorKind;
 }
 
 /// Database layer: pools, settings/config, transactions, and query helpers.
@@ -914,7 +916,7 @@ pub mod db {
     pub use pidash_db::config::Profile;
     pub use pidash_db::config::Settings;
     pub use pidash_db::config::SettingsOverlay;
-    pub use pidash_db::dispatch::status::AgentRunStatus;
+    pub use pidash_db::agent_runs::status::AgentRunStatus;
     pub use pidash_db::license::models::instance::TABLE;
     pub use pidash_db::license::models::instance_admin;
     pub use pidash_db::license::models::instance_configuration;

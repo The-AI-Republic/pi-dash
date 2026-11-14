@@ -35,7 +35,7 @@
 //! (pure — the drivers lock, call, and save around it), L6 builders /
 //! parenting / resolvers, the F-06 [`check_project_role`](pidash_auth::permissions::membership::check_project_role)
 //! kernel over L2 role-fact SQL, D-11 L3
-//! [`user_has_llm_config`](crate::dispatch::policy::user_has_llm_config), and
+//! [`user_has_llm_config`](crate::run_creation::executor_policy::user_has_llm_config), and
 //! the merged prompting scheduler composer. `run_config` for scheduler runs
 //! is the literal `{}` (`service.py:963`); scheduler rows stamp no
 //! `phase_kind` (the model default `""`).
@@ -89,17 +89,17 @@ use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::check_project_role;
 pub use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_project::models::state::StateGroup;
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::querysets::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{
     is_ticking_state, ContinuationOutcome, StateRef, TickerDecision, TickerEvent,
     TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
 };
 
-use crate::dispatch::policy::{user_has_llm_config, UserFlags};
+use crate::run_creation::executor_policy::{user_has_llm_config, UserFlags};
 use crate::prompting::composer::OverrideRow;
 use crate::prompting::context::SchedulerContextInput;
 use crate::prompting::{composer, context};
@@ -1479,13 +1479,13 @@ mod tests {
 
     use crate::domain::identity::AgentUserCollisionError;
     use pidash_auth::permissions::membership::ProjectRoleFacts;
-    use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+    use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-    use pidash_types::dispatch::AgentExecutorKind;
+    use pidash_types::agent_runs::AgentExecutorKind;
     use pidash_types::orchestration::StateRef;
 
     use super::*;
-    use crate::dispatch::UserFlags;
+    use crate::run_creation::UserFlags;
     use crate::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use crate::orchestration::creation::{
         AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, IssueView, NewAgentRun,

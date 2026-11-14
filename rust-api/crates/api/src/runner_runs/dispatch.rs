@@ -49,13 +49,13 @@ use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::pod::Pod;
 use pidash_db::runner_runs::AgentRun;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_jobs::dispatch::{
+use pidash_jobs::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DispatchDecision,
 };
 use pidash_jobs::orchestration::LiveCreationStore;
-use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::dispatch::{ExecutionFieldsError, ExecutionInputs, ProjectScope};
+use pidash_services::run_creation::executor_policy::UserFlags;
+use pidash_services::run_creation::{ExecutionFieldsError, ExecutionInputs, ProjectScope};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
 use pidash_services::orchestration::creation::CreationSeam;
 use pidash_services::orchestration::dispatch::DispatchSeam;
@@ -582,7 +582,7 @@ fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
         ExecutionFieldsError::Resolve(resolve) => {
             // P1: only `UnknownExecutor` remains — cloud resolves to local.
             let (error, code) = match resolve {
-                pidash_services::dispatch::policy::ResolveExecutorError::UnknownExecutor => (
+                pidash_services::run_creation::executor_policy::ResolveExecutorError::UnknownExecutor => (
                     "unknown agent executor".to_owned(),
                     "unknown agent executor".to_owned(),
                 ),

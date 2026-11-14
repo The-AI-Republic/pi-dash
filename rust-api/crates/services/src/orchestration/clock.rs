@@ -89,7 +89,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::tasks_ticker::{
     models::issue_agent_ticker::{
         IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,

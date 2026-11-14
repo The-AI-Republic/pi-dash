@@ -34,7 +34,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, issue_agent_ticker, issues, pod, scheduler_bindings, schedulers, workspaces,
 };
@@ -43,7 +43,7 @@ use pidash_db::orchestration::querysets::{
 };
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::LlmProfile;
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
 use pidash_services::extensions::AssistantModelSeam;
@@ -57,14 +57,14 @@ use pidash_services::orchestration::entries::{
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
 use super::creation_jobs::{bundle_overrides, LiveCreationStore, StoreDeps};
 use super::fire_tick_seam::{drain_dispatch, DispatchJobsError, DispatchOutcome};
 use super::live_inputs::{
     fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
 };
-use crate::dispatch::DispatchDecision;
+use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_binding::{
     BindingForDispatch, DispatchRun, SchedulerDispatch, SchedulerDispatchResult,
 };
@@ -895,7 +895,7 @@ mod tests {
     // through `TxConn`, exactly as production does. Skipped when
     // `DATABASE_URL` is unset.
 
-    use pidash_services::dispatch::LlmProfile;
+    use pidash_services::run_creation::LlmProfile;
 
     #[allow(clippy::type_complexity)]
     fn test_deps() -> StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {

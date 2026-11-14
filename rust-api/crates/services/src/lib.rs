@@ -22,7 +22,7 @@ pub mod app_workspace;
 pub mod assistant;
 pub mod auth_oauth;
 pub mod auth_session;
-pub mod dispatch;
+pub mod run_creation;
 pub mod domain;
 pub mod extensions;
 pub mod health;

@@ -194,7 +194,7 @@ impl AppState {
     /// still 401s), keeping this predicate purely the desktop check.
     pub fn is_desktop_request(&self, credential: &DesktopCredential) -> bool {
         let gate = self.desktop_gate();
-        pidash_services::dispatch::is_desktop_session(true, || gate.is_desktop(credential))
+        pidash_services::run_creation::is_desktop_session(true, || gate.is_desktop(credential))
     }
 
     /// Attach the F-04 pools. `None` until the binary connects, so unit

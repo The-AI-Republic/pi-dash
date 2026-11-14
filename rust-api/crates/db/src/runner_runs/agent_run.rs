@@ -13,7 +13,7 @@
 //! live on the L1 [`pidash_types::runner_runs::AgentRunStatus`] and
 //! are reused, not re-ported.
 //!
-//! D-11's `db::dispatch::agent_run` keeps its own 22-column read
+//! D-11's `db::agent_runs::agent_run` keeps its own 22-column read
 //! shape for dispatch queries; this is the runner-domain full port.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-02-models-runs.golden.json`
@@ -32,7 +32,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::integrations::OnDelete;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, AgentRunTrigger};
 
 /// Physical table (`Meta.db_table`, `models.py:1038`).
@@ -491,7 +491,7 @@ impl AgentRun {
 mod tests {
     use super::*;
     use crate::runner_runs::test_support as ts;
-    use pidash_types::dispatch::MACHINE_EXECUTORS;
+    use pidash_types::agent_runs::MACHINE_EXECUTORS;
 
     fn run_fixture() -> serde_json::Value {
         ts::model(&ts::fx02(), "AgentRun").clone()

@@ -39,7 +39,7 @@ use super::fire_tick_seam::{
 use super::live_inputs::{
     creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
 };
-use crate::dispatch::DispatchDecision;
+use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the injected

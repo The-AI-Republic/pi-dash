@@ -84,6 +84,7 @@ use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains;
 use pidash_services::runner_sessions::pubsub as pubsub_svc;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::{remove_runner_frame, revoke_frame};
 
@@ -348,13 +349,13 @@ pub fn overlay_store_deps(
     managed: &ManagedRunnerSettings,
 ) -> crate::orchestration::StoreDeps<
     fn(Uuid) -> bool,
-    fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile,
+    fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile,
 > {
     fn no_llm(_: Uuid) -> bool {
         false
     }
-    fn no_profile(_: Option<Uuid>) -> pidash_services::dispatch::LlmProfile {
-        pidash_services::dispatch::LlmProfile {
+    fn no_profile(_: Option<Uuid>) -> pidash_services::run_creation::LlmProfile {
+        pidash_services::run_creation::LlmProfile {
             available: false,
             reason_code: "revoke-no-profile".to_owned(),
         }
@@ -574,7 +575,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         // First-writer-wins lock with the expected-runner predicate; a
         // miss is `Ok(())` — Python ignores the `False`.
         let conn = TxConn::new(self.tx);
-        let Some(_locked) = revoke::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
+        let Some(locked) = revoke::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
             .await
             .map_err(store_err)?
         else {
@@ -583,6 +584,17 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         revoke::execute_revoke_finalize_update(&conn, &values, run_id, now_micros())
             .await
             .map_err(store_err)?;
+        if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
+            revoke::append_terminal_event_once(
+                &conn,
+                run_id,
+                AgentRunStatus::Cancelled,
+                &finalize_kernel::finalize_error_code(&values),
+                now_micros(),
+            )
+            .await
+            .map_err(store_err)?;
+        }
         // D-15's terminal-effects `on_commit` (registered in-tx, fires
         // first post-commit).
         self.effects.extend(
@@ -1110,7 +1122,6 @@ mod tests {
                 access_token_ttl_secs: 900,
                 offline_threshold_secs: 90,
                 offline_pin_release_secs: 60,
-                pin_auto_release_secs: 600,
                 offline_run_fail_secs: 300,
                 offline_stream_ttl_secs: 86400,
                 offline_stream_maxlen: 1000,

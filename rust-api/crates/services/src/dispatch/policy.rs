@@ -60,7 +60,11 @@
 
 use pidash_db::config::ManagedRunnerSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
+<<<<<<<< HEAD:rust-api/crates/services/src/dispatch/policy.rs
 use pidash_types::dispatch::AgentExecutorKind;
+========
+use pidash_types::agent_runs::AgentExecutorKind;
+>>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/services/src/run_creation/executor_policy.rs
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
