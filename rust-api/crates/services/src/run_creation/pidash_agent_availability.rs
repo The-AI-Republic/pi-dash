@@ -63,15 +63,9 @@
 //! overshoot (`admission.py:40-42`) and the +5s consume overhang (`:24`) are
 //! documented-by-design and translated as-is.
 
-<<<<<<<< HEAD:rust-api/crates/services/src/dispatch/admission.rs
-use super::policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
-use pidash_db::config::ManagedRunnerSettings;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
-========
 use super::executor_policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
 use pidash_db::config::ManagedRunnerSettings;
 use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
->>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/services/src/run_creation/pidash_agent_availability.rs
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------

@@ -13,17 +13,9 @@ use serde_json::{Map, Value};
 use pidash_types::agent_runs::AgentExecutorKind;
 use uuid::Uuid;
 
-<<<<<<<< HEAD:rust-api/crates/services/src/dispatch/execution.rs
-use pidash_types::dispatch::AgentExecutorKind;
-
-use super::policy::resolve_executor_kind;
-use super::policy::ResolveExecutorError;
-use super::policy::UserFlags;
-========
 use super::executor_policy::resolve_executor_kind;
 use super::executor_policy::ResolveExecutorError;
 use super::executor_policy::UserFlags;
->>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/services/src/run_creation/execution.rs
 
 /// The captured quota shape (`creation.py:70,175`): `{code, detail}` — the
 /// `retry_after_seconds` the raised error carries is dropped on capture.

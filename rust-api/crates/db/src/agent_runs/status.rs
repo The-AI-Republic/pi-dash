@@ -12,11 +12,7 @@
 //! Values are verbatim, in declaration order. `Display` renders the
 //! value, as `str(member)` does in Django; serde reads/writes the
 //! value and unknown values are rejected, as Django choice validation
-<<<<<<<< HEAD:rust-api/crates/db/src/dispatch/status.rs
-//! would (same enum API as the L1 [`pidash_types::dispatch::AgentExecutorKind`]
-========
 //! would (same enum API as the L1 [`pidash_types::agent_runs::AgentExecutorKind`]
->>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/db/src/agent_runs/status.rs
 //! port, PIDASHCONV-482).
 //!
 //! Out of scope here: `is_active` / `is_terminal`

@@ -14,13 +14,9 @@
 //! `rust-api/fixtures/dispatch/fx-disp-01-types.golden.json` (FX-DISP-01).
 
 pub mod executor;
-<<<<<<<< HEAD:rust-api/crates/types/src/dispatch/mod.rs
-pub mod managed_runner;
-========
 pub mod pidash_agent;
->>>>>>>> eb1cb02bc (refactor(p5): redo module moves with the spec names):rust-api/crates/types/src/agent_runs/mod.rs
 pub use executor::{
     get_default_agent_executor, normalize_executor_write, AgentExecutorKind, DEPRECATED_EXECUTORS,
     MACHINE_EXECUTORS,
 };
-pub use managed_runner::{ManagedRunnerReason, ManagedRunnerUnavailable};
+pub use pidash_agent::{ManagedRunnerReason, ManagedRunnerUnavailable};

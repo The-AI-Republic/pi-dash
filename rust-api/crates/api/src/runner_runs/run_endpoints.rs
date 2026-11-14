@@ -1230,10 +1230,6 @@ pub async fn drain_lifecycle_effects(
                     .await
                     .map_err(|_| server_error())?;
             }
-            // `LifecycleEffect::DispatchWaiting` is unconstructable now
-            // (CapacityPlan::Cloud died in P3c); keep the arm for the
-            // enum's exhaustive match.
-            LifecycleEffect::DispatchWaiting { .. } => {}
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
                 if let Err(error) = ports
                     .complete_project_move_handoff(run_id, terminal_created_by)

@@ -45,7 +45,7 @@
 
 use chrono::{DateTime, Utc};
 use pidash_db::entity::{agent_run as run, runner};
-use pidash_types::dispatch::{AgentExecutorKind, MACHINE_EXECUTORS};
+use pidash_types::agent_runs::{AgentExecutorKind, MACHINE_EXECUTORS};
 use pidash_types::runner_runs::AgentRunStatus;
 use sea_orm::sea_query::{Alias, Condition, Expr, LockBehavior, LockType, Query, SimpleExpr};
 use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};

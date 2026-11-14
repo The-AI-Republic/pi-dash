@@ -759,7 +759,6 @@ pub fn issue_create_validate(
             current.external_source,
             current.annotated_is_synced,
             || (probes.git_sync_exists)(),
-            || (probes.github_sync_exists)(),
         ) {
             let blocked = sync_locked_blocked(&attrs.locked, &current.locked);
             if !blocked.is_empty() {

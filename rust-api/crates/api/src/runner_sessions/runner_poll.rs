@@ -138,8 +138,6 @@ use pidash_services::runner_sessions::guards::heartbeat_grace;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
-use pidash_types::agent_runs::AgentExecutorKind;
-use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::keys::runner as runner_keys;
 use pidash_types::runner_sessions::{
     json_parse_error_poll, poll_200, runner_id_mismatch_poll, runner_state_locked_poll,
@@ -423,7 +421,7 @@ async fn finalize_reaped_run(
 ) -> Result<Option<[LifecycleEffect; 2]>, Response> {
     let values = session_kernel::plan_reap_finalize(detail);
     let conn = TxConn::new(tx);
-    let Some(locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
+    let Some(_locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
         .await
         .map_err(heartbeat_db_error)?
     else {
@@ -432,20 +430,6 @@ async fn finalize_reaped_run(
     finalize_orm::finalize_update(&conn, &values, run_id, now_micros())
         .await
         .map_err(heartbeat_db_error)?;
-    // Cloud-only terminal event (`finalization.py:72-84`): the
-    // executor kind reads tolerant (an unparseable stored value is
-    // simply not cloud, as Django's `==` comparison is).
-    if AgentExecutorKind::from_value(&locked.executor_kind) == Some(AgentExecutorKind::CloudAgent) {
-        finalize_orm::append_terminal_event_once(
-            &conn,
-            run_id,
-            AgentRunStatus::Failed,
-            &finalize_kernel::finalize_error_code(&values),
-            now_micros(),
-        )
-        .await
-        .map_err(heartbeat_db_error)?;
-    }
     Ok(Some(finalize_kernel::plan_publish_effects(run_id)))
 }
 
