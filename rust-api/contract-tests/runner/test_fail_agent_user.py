@@ -120,8 +120,8 @@ def test_fail_creates_agent_user_and_posts_comment(
     assert bot["is_bot"] is True
     assert bot["email"] == "agent@example.com"
     assert bot["first_name"] == "Pi Dash"
-    assert bot["last_name"] == "Agent"
-    assert bot["display_name"] == "agent"
+    assert bot["last_name"] == "Bot"
+    assert bot["display_name"] == "Pi Dash Bot"
     assert bot["is_active"] is True
     assert bot["user_timezone"] == "UTC"
     assert bot["password"].startswith("!")
