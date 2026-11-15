@@ -46,10 +46,11 @@ use pidash_services::dispatch::{
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
 use pidash_services::orchestration::creation::{
-    finalize_error_details_patch, AdmissionError as ServiceAdmissionError, CreationError,
-    CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
-    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
-    PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
+    finalize_error_details_patch, finalize_failure_reason, AdmissionError as ServiceAdmissionError,
+    CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
+    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
+    LockedIssue, NewAgentRun, NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle,
+    RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -854,6 +855,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             lease_expires_at: Set(None),
             done_payload: Set(None),
             error_details: Set(row.error_details.clone()),
+            failure_reason: Set(String::new()),
             llm_model: Set(String::new()),
             usage: Set(serde_json::json!({})),
             created_at: Set(row.now.into()),
@@ -2130,6 +2132,10 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
                     Expr::value(Option::<Moment>::None),
                 )
                 .col_expr(agent_run::Column::ErrorDetails, Expr::value(merged))
+                .col_expr(
+                    agent_run::Column::FailureReason,
+                    Expr::value(finalize_failure_reason(error_code, error)),
+                )
                 .filter(agent_run::Column::Id.eq(run_id))
                 .exec(&conn)
                 .await

@@ -299,6 +299,16 @@ def test_corpus_manifests_valid():
                 assert re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", issue), (
                     f"{label}: pinned {task} must name its fix issue"
                 )
+            for entry in req.known_django_extra_jobs or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 3
+                    and "." in entry[0]
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
+                    and isinstance(entry[2], dict)
+                    and entry[2]
+                    and entry[2].get("task") == entry[0]
+                ), f"{label}: bad known django extra job {entry!r}"
             for entry in req.known_headers or []:
                 assert (
                     isinstance(entry, (list, tuple))
@@ -1091,6 +1101,42 @@ def test_known_job_shapes_share_task_and_consume_one_each():
     # An extra unpinned job on one side still fails (leftovers compare).
     extra = rs + [job("page", "p1", True)]
     assert compare.compare_jobs(dj, extra, known_shapes=pins) is not None
+
+
+def test_known_django_extra_jobs_consume_one_each():
+    """A one-sided Django pin excuses exactly the Django surplus, nothing else."""
+    from . import compare
+
+    task = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+
+    def job(model):
+        return {
+            "task": task,
+            "args": ["db", model, "{row:x}"],
+            "kwargs": {"using": None},
+            "eta": None,
+            "retries": 0,
+            "queue": "celery",
+        }
+
+    generic = job("gitcodereviewlink")
+    legacy = job("githubpullrequestlink")
+    dj = [generic, legacy]
+    rs = [generic]
+    pin = [(task, "NEWPIDASH-229", dict(legacy))]
+    # The Django surplus is excused; the shared generic job still compares.
+    assert compare.compare_jobs(dj, rs, django_extra=pin) is None
+    # Unpinned, the same pair fails.
+    assert compare.compare_jobs(dj, rs) is not None
+    # Rust emitting the legacy job too leaves a rust-only leftover: loud.
+    assert compare.compare_jobs(dj, rs + [legacy], django_extra=pin) is not None
+    # Django stopping emitting it breaks the pin loudly.
+    error = compare.compare_jobs([generic], rs, django_extra=pin)
+    assert error is not None and "NEWPIDASH-229" in error
+    # Bytes changed on Django breaks the pin loudly.
+    changed = [generic, {**legacy, "args": ["db", "githubpullrequestlink", "other"]}]
+    error = compare.compare_jobs(changed, rs, django_extra=pin)
+    assert error is not None and "NEWPIDASH-229" in error
 
 
 def test_known_cell_diff_blanks_exact_and_fails_on_change():

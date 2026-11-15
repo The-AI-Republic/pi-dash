@@ -6229,10 +6229,25 @@ fn python_truthy(value: &Value) -> bool {
     }
 }
 
+/// Resolve a `PATCH projects/<pk>/` intake flag from the request body
+/// (NEWPIDASH-263, DIFF-30). Django reads only `inbox_view`
+/// (`app/views/project/base.py:342`); the canonical write key is the
+/// model field `intake_view` (`api/views/project.py:414`). The fixed
+/// Rust handler prefers `intake_view` and falls back to `inbox_view`
+/// so the old (and new) frontends that PATCH `inbox_view` keep
+/// working while `intake_view` PATCHes stop no-opping.
+fn resolve_patch_intake(data: &Map<String, Value>, stored: bool) -> Value {
+    data.get("intake_view")
+        .or_else(|| data.get("inbox_view"))
+        .cloned()
+        .unwrap_or(Value::Bool(stored))
+}
+
 /// `PATCH projects/<pk>/` (`base.py:314-380`): the admin-guard matrix
 /// (workspace OR project admin, else the decorator-body 403), the bare
-/// gets, the archived 400, the `inbox_view` → `intake_view` alias forced
-/// into the data, partial validation, the default-intake ensure, and the
+/// gets, the archived 400, the intake flag forced into the data
+/// (`intake_view` preferred, `inbox_view` fallback — NEWPIDASH-263,
+/// DIFF-30), partial validation, the default-intake ensure, and the
 /// re-fetch + `model_activity` 200.
 async fn project_patch(
     State(state): State<AppState>,
@@ -6271,13 +6286,14 @@ async fn project_patch(
             ARCHIVED_UPDATE_BODY.to_owned(),
         ));
     }
-    // `intake_view = request.data.get("inbox_view", project.intake_view)`,
-    // forced over any explicit `intake_view` key (`:348-350`); the
-    // intake gate below tests this RAW value's truthiness (`:358`).
-    let intake_raw = data
-        .get("inbox_view")
-        .cloned()
-        .unwrap_or(Value::Bool(instance.intake_view));
+    // Django `intake_view = request.data.get("inbox_view",
+    // project.intake_view)` (`:348-350`) forced over any explicit
+    // `intake_view` key, so `PATCH {intake_view: false}` no-opped.
+    // NEWPIDASH-263 (DIFF-30): prefer the canonical `intake_view`
+    // key and fall back to `inbox_view` for the old/new frontends
+    // that still PATCH it. The intake gate below tests this RAW
+    // value's truthiness (`:358`).
+    let intake_raw = resolve_patch_intake(&data, instance.intake_view);
     let mut aliased = data.clone();
     aliased.insert("intake_view".to_owned(), intake_raw.clone());
     let mut validated = match validate_project_input(
@@ -7630,6 +7646,38 @@ mod tests {
         assert!(!python_truthy(&Value::Null));
         assert!(!python_truthy(&json!([])));
         assert!(!python_truthy(&json!({})));
+        // PATCH intake resolution (NEWPIDASH-263, DIFF-30): `intake_view`
+        // wins, `inbox_view` falls back, otherwise the stored value.
+        // `intake_view: false` on a stored `true` must resolve to
+        // `false` (the old `inbox_view`-only read no-opped here).
+        let map_of = |body: Value| body.as_object().unwrap().clone();
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"intake_view": false})), true),
+            json!(false)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"intake_view": true})), false),
+            json!(true)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"inbox_view": false})), true),
+            json!(false)
+        );
+        assert_eq!(
+            resolve_patch_intake(
+                &map_of(json!({"intake_view": false, "inbox_view": true})),
+                true
+            ),
+            json!(false)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"name": "x"})), true),
+            json!(true)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"name": "x"})), false),
+            json!(false)
+        );
     }
 
     #[test]

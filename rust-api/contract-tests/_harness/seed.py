@@ -2186,11 +2186,11 @@ class Seeder:
         self.db.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, pin_kind, scheduler_binding_id, created_at)
-               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}',
+               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}','',
                        %s,%s,%s,%s,'contract-model', %s, 'local_runner', 0,
                        '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality',
                        %s, now())""",
@@ -2357,13 +2357,14 @@ class Seeder:
                (id, workspace_id, owner_id, created_by_id, pod_id, runner_id,
                 status, prompt, trigger, executor_kind, run_config,
                 required_capabilities, thread_id, agent_metadata, tool_plan,
-                usage, dispatch_attempts, error_details, llm_model,
+                usage, dispatch_attempts, error_details, failure_reason,
+                llm_model,
                 cancel_reason, phase_kind, pin_kind,
                 created_at)
                VALUES (%s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
-                       '{}',0,'{}','',
+                       '{}',0,'{}','','',
                        '','','locality',
                        now())""",
             (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),

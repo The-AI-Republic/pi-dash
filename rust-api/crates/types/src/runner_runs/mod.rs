@@ -11,6 +11,9 @@
 //! * [`diagnostics`] — `diagnostics.py:1-245` (`infer_agent_label`,
 //!   `enrich_run_error`, `classify_run_error`) plus the serializer's
 //!   list-`None` contract (`serializers.py:266-272`).
+//! * [`failure`] — `failure.py` (PDASHOSS01-183): the stored
+//!   `RunFailureReason` taxonomy, per-reason `FailurePolicy`, backstop
+//!   limits and the write-path `classify`.
 //! * [`consts`] — pagination, dedupe TTL, payload caps, chat timeout, SSE
 //!   channel prefix, stream-ticket TTL, metrics active-status set.
 //!
@@ -24,6 +27,7 @@
 pub mod consts;
 pub mod diagnostics;
 pub mod enums;
+pub mod failure;
 pub mod usage;
 
 pub use consts::{
@@ -34,13 +38,20 @@ pub use consts::{
     WS_UPGRADE_TICKET_PAYLOAD_KEYS, WS_UPGRADE_TICKET_TTL_SECS,
 };
 pub use diagnostics::{
-    classify_run_error, enrich_run_error, error_diagnostic, infer_agent_label, DevMachineInfo,
-    RunErrorDiagnostic, RunErrorKind, RunErrorSource, RunnerInfo,
+    classify_run_error, classify_run_error_for_reason, enrich_run_error, error_diagnostic,
+    infer_agent_label, DevMachineInfo, RunErrorDiagnostic, RunErrorKind, RunErrorSource,
+    RunnerInfo,
 };
 pub use enums::{
     run_is_human_triggered, AgentChatMessageRole, AgentChatMessageStatus, AgentChatSessionStatus,
     AgentRunStatus, AgentRunTrigger, ApprovalKind, ApprovalStatus, RefusalCategory, ToolCallStatus,
     AUTOMATIC_ISSUE_TRIGGERS, HUMAN_TRIGGERS, TERMINAL_RUN_STATUSES,
+};
+pub use failure::{
+    classify as classify_failure, failure_streak_from_rows, is_agent_side, policy_for,
+    repeated_failure_limit_for, FailurePolicy, RunFailureReason, AGENT_ERROR_PREFIX,
+    FAILURE_STREAK_WINDOW, FREE_RETRY_BACKOFF_SECONDS, FREE_RETRY_MAX_ATTEMPTS,
+    REPEATED_FAILURE_LIMIT,
 };
 pub use usage::{
     coerce_token, flat_token_fields, merge_usage, normalize_usage, FlatTokenFields, BIGINT_MAX,

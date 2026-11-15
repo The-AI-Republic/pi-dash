@@ -533,10 +533,12 @@ fn mentioned_cond(param_present: bool) -> Condition {
 
 /// `subscribed` issue ids (list, `base.py:107-115`): the subscriber's
 /// issue ids minus issues they created or are assigned to (the inner
-/// soft-delete conjuncts preserved). The assigned leg keeps Django's
-/// `pk=OuterRef("issue_id")` correlation verbatim: an assignee row is
-/// found by its own `id`, not by `issue_id` (so assignment almost never
-/// excludes under Django either; do not "fix" to `issue_id`).
+/// soft-delete conjuncts preserved).
+///
+/// Old-bug fix (NEWPIDASH-270): Django's `pk=OuterRef("issue_id")`
+/// compares the assignee row's own PK to the subscribed `issue_id`, so
+/// assigned issues almost never exclude. The Rust port now excludes by
+/// `issue_id` — the intended subscribed-but-not-assigned behaviour (NTF-015).
 async fn subscribed_issue_ids(
     pool: &PgPool,
     ws_ids: &[Uuid],
@@ -570,9 +572,9 @@ async fn subscribed_issue_ids(
     let assigned = issue_assignees::Entity::find()
         .filter(issue_assignees::Column::AssigneeId.eq(*user_id))
         .filter(issue_assignees::Column::DeletedAt.is_null())
-        .filter(issue_assignees::Column::Id.is_in(subs.iter().copied()))
+        .filter(issue_assignees::Column::IssueId.is_in(subs.iter().copied()))
         .select_only()
-        .columns([issue_assignees::Column::Id])
+        .columns([issue_assignees::Column::IssueId])
         .into_tuple::<Uuid>()
         .all(&db)
         .await
@@ -3300,12 +3302,12 @@ mod tests {
         );
     }
 
-    /// The `subscribed` assigned leg correlates Django's
-    /// `pk=OuterRef("issue_id")` (`base.py:110`): the assignee row's
-    /// own `id`, not its `issue_id`. Pinned at statement shape so the
-    /// "fix" to `issue_id` cannot re-land silently.
+    /// Old-bug fix (NEWPIDASH-270, DIFF-31): the `subscribed` assigned leg
+    /// must correlate by `issue_id`, not by the assignee row's own `id`
+    /// (`pk=OuterRef("issue_id")` in Django almost never matches, so
+    /// assigned issues leak into subscribed).
     #[test]
-    fn subscribed_assigned_correlates_by_pk() {
+    fn subscribed_assigned_correlates_by_issue_id() {
         use pidash_db::entity::issue_assignees;
         use sea_orm::{
             DbBackend, EntityTrait as _, QueryFilter as _, QuerySelect as _, QueryTrait as _,
@@ -3314,14 +3316,18 @@ mod tests {
         let sql = issue_assignees::Entity::find()
             .filter(issue_assignees::Column::AssigneeId.eq(Uuid::nil()))
             .filter(issue_assignees::Column::DeletedAt.is_null())
-            .filter(issue_assignees::Column::Id.is_in([issue_id]))
+            .filter(issue_assignees::Column::IssueId.is_in([issue_id]))
             .select_only()
-            .columns([issue_assignees::Column::Id])
+            .columns([issue_assignees::Column::IssueId])
             .build(DbBackend::Postgres)
             .to_string();
         assert!(
-            sql.contains("\"issue_assignees\".\"id\" IN"),
-            "subscribed assigned leg must correlate by pk: {sql}"
+            sql.contains("\"issue_assignees\".\"issue_id\" IN"),
+            "subscribed assigned leg must correlate by issue_id: {sql}"
+        );
+        assert!(
+            !sql.contains("\"issue_assignees\".\"id\" IN"),
+            "subscribed assigned leg must not correlate by pk: {sql}"
         );
     }
 

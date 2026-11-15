@@ -44,6 +44,10 @@ Reading material only: `tests/unit/bg_tasks/test_agent_ticker.py` (564),
   (`SchedulerSource`), `:30-45` (`OutcomeMode`), `:52-93`
   (`OUTCOME_MODE_DIRECTIVES` verbatim), `:96-104`
   (`outcome_mode_directive` unknown-mode fallback probe).
+- PDASHOSS01-183 (db migration 0169): `TickerDisarmReason` gained
+  `failure_needs_human` / `repeated_failure` (choices only, after
+  `user_disabled`) in both `models/enums.json` and the `disarm_reason`
+  choices of `models/issue_agent_ticker.columns.json`.
 - `models/constants.json` — `db/models/issue_agent_ticker.py:35-38`
   (`DEFAULT_INTERVAL_SECONDS`, `DEFAULT_MAX_TICKS`, `INFINITE_MAX_TICKS`,
   `JITTER_FRACTION`); `db/models/scheduler.py:22`

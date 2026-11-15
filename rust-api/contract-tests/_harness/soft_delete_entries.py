@@ -196,6 +196,7 @@ def seed_scheduler_binding(conn, tag: str):
             "required_capabilities": [],
             "thread_id": uuid.uuid4().hex,
             "error_details": {},
+            "failure_reason": "",
             "workspace_id": str(ws["id"]),
             "pod_id": str(pod["id"]),
             "created_by_id": str(owner["id"]),

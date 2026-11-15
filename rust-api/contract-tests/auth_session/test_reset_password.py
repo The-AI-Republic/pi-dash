@@ -13,8 +13,11 @@ Tokens are minted with the stdlib replica of Django 4.2's
   both backends; space answers HTTP 500 on Django (``DoesNotExist``
   escapes) and the 5125 redirect on Rust (DIFF-4: old bug fixed in
   the new system only)
-- a uid that is not a UUID at all → HTTP 500 on both (field
-  ``ValidationError`` escapes both Views)
+- a uid that is not a UUID at all, and an undecodable uid on the space
+  twin → HTTP 500 on Django (field ``ValidationError`` / ``binascii``
+  error escapes both Views) and the 5125 redirect on Rust (DIFF-26:
+  old bug fixed in the new system only; the undecodable-uid app twin
+  already answers 5125 on both)
 - non-UTF-8 uid bytes: app → 5125 (the inner ``except (ValueError, ...)``
   swallows the decode error, so the EXPIRED branch is dead there);
   space → EXPIRED_PASSWORD_TOKEN (5130) at a double-slash URL
@@ -84,13 +87,24 @@ def test_unknown_uuid_user(browser, base):
     assert_error_redirect(res, base=base, error_code=5125)
 
 
-def test_non_uuid_uid_returns_500(browser, user):
+def test_non_uuid_uid_is_invalid_token(browser, base, user):
     uidb64, token = _fresh_token(user)
     res = browser().post(
         f"/auth/reset-password/{tokens.non_uuid_uidb64()}/{token}/",
         data={"password": NEW_PASSWORD},
     )
-    assert res.status_code == 500
+    assert res.status_code == expect("DIFF-26", django=500, rust=302)
+    if is_rust():
+        assert_error_redirect(res, base=base, error_code=5125)
+
+
+def test_undecodable_uid_is_invalid_token(browser, base, user):
+    _, token = _fresh_token(user)
+    res = browser().post(
+        f"/auth/reset-password/{tokens.undecodable_uidb64()}/{token}/",
+        data={"password": NEW_PASSWORD},
+    )
+    assert_error_redirect(res, base=base, error_code=5125)
 
 
 def test_space_success_redirects_to_space_base(browser, space_base, user):
@@ -127,6 +141,28 @@ def test_space_unknown_uuid_user(browser, space_base, user):
         data={"password": NEW_PASSWORD},
     )
     assert res.status_code == expect("DIFF-4", django=500, rust=302)
+    if is_rust():
+        assert_error_redirect(res, base=space_base, error_code=5125)
+
+
+def test_space_non_uuid_uid_is_invalid_token(browser, space_base, user):
+    _, token = _fresh_token(user)
+    res = browser().post(
+        f"/auth/spaces/reset-password/{tokens.non_uuid_uidb64()}/{token}/",
+        data={"password": NEW_PASSWORD},
+    )
+    assert res.status_code == expect("DIFF-26", django=500, rust=302)
+    if is_rust():
+        assert_error_redirect(res, base=space_base, error_code=5125)
+
+
+def test_space_undecodable_uid_is_invalid_token(browser, space_base, user):
+    _, token = _fresh_token(user)
+    res = browser().post(
+        f"/auth/spaces/reset-password/{tokens.undecodable_uidb64()}/{token}/",
+        data={"password": NEW_PASSWORD},
+    )
+    assert res.status_code == expect("DIFF-26", django=500, rust=302)
     if is_rust():
         assert_error_redirect(res, base=space_base, error_code=5125)
 
