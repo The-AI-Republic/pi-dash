@@ -20,7 +20,7 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
-import { markExplicitLogout } from "./cloudLogin.js";
+import { markChatHistoryDeleteFailed, markExplicitLogout } from "./cloudLogin.js";
 import { platform, type SessionTeardownApi } from "../../core/platform/index.js";
 import { getRuntimeSignOutHooks, instanceKeys, type RuntimeSignOutChoice } from "../../core/session/index.js";
 import { signOut as clearSession } from "../../core/session/store.js";
@@ -40,6 +40,10 @@ export const SIGN_OUT_FAILED_TITLE = "Could not sign out";
 // workspace-switcher scenario asserts this exact text, so the wording
 // stays aligned with the old app.
 export const SIGN_OUT_FAILED_MESSAGE = "Failed to sign out. Please try again.";
+
+/** The user asked to delete chat history but the native side could not finish. */
+export const CHAT_HISTORY_DELETE_FAILED_TITLE = "Chat history not deleted";
+export const CHAT_HISTORY_DELETE_FAILED_MESSAGE = "Chat history could not be fully deleted from this computer.";
 
 /** Cloud sign-out landing (CLOUD-016): the login card, reached by a full navigation. */
 export const CLOUD_SIGN_OUT_LANDING = "/login";
@@ -117,8 +121,17 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
   // torn down. A failed POST never reaches this point: chat history, the
   // computer sign-in and the runtime identity stay untouched, and the user
   // who stays signed in can carry on chatting without a page reload.
+  let chatHistoryDeleteFailed = false;
   if (runtime !== null && choice !== null) {
-    await runtime.disposeRuntimeForSignOut(choice);
+    const disposal = await runtime.disposeRuntimeForSignOut(choice);
+    chatHistoryDeleteFailed = choice.deleteChatHistory && disposal?.chatHistoryDeleted === false;
+    if (chatHistoryDeleteFailed && !cloud) {
+      // Credentials are already gone, so sign-out continues; the user still
+      // needs to know transcripts remain on this computer. On the hosted
+      // backend the landing reload would drop this toast, so /login shows
+      // it from the one-shot flag written after the wipe below.
+      notifyError(CHAT_HISTORY_DELETE_FAILED_TITLE, CHAT_HISTORY_DELETE_FAILED_MESSAGE);
+    }
   }
   clearSession(queryClient);
   if (teardown !== undefined) {
@@ -134,6 +147,11 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
   // webview wipe, which clears sessionStorage; tab-scoped and best-effort,
   // so other tabs keep their own state.
   markExplicitLogout(tabSessionStorage());
+  if (chatHistoryDeleteFailed && cloud) {
+    // The landing reload below would discard the direct toast; the one-shot
+    // flag survives that navigation and /login shows (then clears) it.
+    markChatHistoryDeleteFailed(tabSessionStorage());
+  }
   if (cloud) {
     globalThis.window.location.replace(CLOUD_SIGN_OUT_LANDING);
     return CLOUD_SIGN_OUT_LANDING;
