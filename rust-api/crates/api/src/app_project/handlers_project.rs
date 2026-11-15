@@ -1977,7 +1977,6 @@ async fn executor_options(
     };
     Ok(
         pidash_services::app_project::ser_project::project_executor_options(
-            &settings.cloud_agent,
             flags.copied(),
             flags.is_some(),
             || llm_usable,
@@ -7828,7 +7827,6 @@ mod live_tests {
 
     fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> AppState {
         let mut settings = pidash_db::config::Settings::test_defaults();
-        settings.cloud_agent.enabled = true;
         settings.managed_runner.enabled = true;
         let mut state = AppState::with_settings("test", settings);
         if let Some(seam) = seam {

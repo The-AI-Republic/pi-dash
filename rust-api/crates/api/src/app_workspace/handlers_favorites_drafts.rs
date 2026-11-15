@@ -6760,7 +6760,6 @@ async fn run_issue_create_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        cloud: &state.settings().cloud_agent,
         managed: &state.settings().managed_runner,
         viewer: viewer.as_ref(),
     };

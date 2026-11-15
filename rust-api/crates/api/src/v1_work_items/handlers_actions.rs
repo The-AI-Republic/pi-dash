@@ -1026,7 +1026,6 @@ pub async fn dispatch_deps(
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
             has_usable_llm_config: gate_fn(verdicts),
             llm_profile: profile_fn(presence),
@@ -1060,7 +1059,6 @@ pub async fn dispatch_deps_for_ids(
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
             has_usable_llm_config: gate_fn(verdicts),
             llm_profile: profile_fn(presence),

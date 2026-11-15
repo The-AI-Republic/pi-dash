@@ -875,13 +875,8 @@ impl LiveTurnSeam {
             .build()
             .map_err(|error| SeamError(error.to_string()))?;
         let tool_store = Arc::new(
-            PgToolStore::new(
-                pool.clone(),
-                redis.clone(),
-                settings.cloud_agent.clone(),
-                settings.managed_runner.clone(),
-            )
-            .map_err(|error| SeamError(error.message()))?,
+            PgToolStore::new(pool.clone(), redis.clone(), settings.managed_runner.clone())
+                .map_err(|error| SeamError(error.message()))?,
         );
         let key_cache = KeyCache::new(
             settings.assistant.key_cache_ttl_secs,

@@ -624,12 +624,11 @@ async fn rollback_then(tx: DbTransaction<'_>, response: Response) -> Response {
 async fn drain_direct_dispatch(
     pool: &PgPool,
     state: &AppState,
-    cloud: &pidash_db::config::CloudAgentSettings,
     dispatches: Vec<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<(), Response> {
     for run_id in dispatches {
-        match dispatch_agent_run(pool, cloud, run_id, now).await {
+        match dispatch_agent_run(pool, run_id, now).await {
             Ok(DispatchDecision::PodDrain { pod_id }) => {
                 if crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id)
                     .await
@@ -1213,7 +1212,6 @@ pub async fn post_direct(
         id: actor_id,
         flags: scope.actor_flags,
     };
-    let cloud = state.settings().cloud_agent.clone();
     let inputs = ExecutionInputs {
         project: &project,
         run_kind: RUN_KIND_DIRECT,
@@ -1296,7 +1294,7 @@ pub async fn post_direct(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if let Err(response) = drain_direct_dispatch(pool, state, &cloud, dispatches, now).await {
+    if let Err(response) = drain_direct_dispatch(pool, state, dispatches, now).await {
         return response;
     }
     // The one-shot pod path records its system comment on commit
@@ -1459,7 +1457,6 @@ async fn post_issue_dispatch(
         Ok(deps) => deps,
         Err(_) => return server_error(),
     };
-    let cloud = state.settings().cloud_agent.clone();
 
     let tx = match DbTransaction::begin(pool).await {
         Ok(tx) => tx,
@@ -1620,7 +1617,7 @@ async fn post_issue_dispatch(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if let Err(response) = drain_direct_dispatch(pool, state, &cloud, dispatches, now).await {
+    if let Err(response) = drain_direct_dispatch(pool, state, dispatches, now).await {
         return response;
     }
     render_created_snapshot(pool, &snapshot).await

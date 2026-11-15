@@ -264,15 +264,13 @@ surprise overlay breakage. Add an export by editing `src/lib.rs`,
 
 ## Extension seams (F-10)
 
-The six `ee/` stubs are traits with CE defaults; the private crate
+The four `ee/` stubs are traits with CE defaults; the private crate
 replaces the implementation, never the callers:
 
 | Trait                    | Module                              | CE default                                                                                                                      | Python source                      |
 | ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
 | `AssistantModelSeam`     | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py`   |
 | `SttSeam`                | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`     |
-| `CloudAgentModelSeam`    | `pidash-services::extensions`       | `CreatorModelSeam`                                                                                                              | `ee/cloud_agent/model_provider.py` |
-| `CloudAgentToolsetsSeam` | `pidash-services::extensions`       | `NoExtraToolsets`                                                                                                               | `ee/cloud_agent/toolsets.py`       |
 | `DesktopGate`            | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`     |
 | `UserSettingsSchema`     | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`     |
 
@@ -282,8 +280,9 @@ a whole group (the cloud auth replacement), `.drop(RouteGroup::Auth)`
 removes every OSS mount in the group (`_strip_oss_auth`), and
 `.add_routes(router)` shadows individual OSS paths — additive routes sit in
 front of the OSS groups via fallback dispatch, the cloud pattern of placing
-paths ahead of the OSS include. Model/toolset _construction_ extends the
-same traits when the assistant/cloud-agent runtimes are ported (D-06/D-11).
+paths ahead of the OSS include. (The retired cloud agent's model and
+toolsets seams were removed with it; see
+`.ai_design/agent_naming_convention/design.md`.)
 
 Private migrations live in the private crate at
 `rust-api/private/migrations/` (`NNN_name.sql`, lexical order, applied
@@ -315,8 +314,8 @@ pidash_api::startup::WorkerBuilder::from_env()
     .await?;
 ```
 
-`ServeBuilder` extension points: `with_settings`, the four seams above
-(`with_toolsets`, `with_desktop_gate`, `with_assistant_seam`,
+`ServeBuilder` extension points: `with_settings`, the seams above
+(`with_desktop_gate`, `with_assistant_seam`,
 `with_user_settings_schema`), `with_state` for other state tweaks,
 `merge_routes` (rides the overlay `add_routes` fallback path, so an
 extra route shadows rather than colliding), `wrap` (outside the OSS
