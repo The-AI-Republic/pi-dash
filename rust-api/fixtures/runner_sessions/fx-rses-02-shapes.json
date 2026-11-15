@@ -4,8 +4,19 @@
   "_method": "Called the real view methods (APIView.post/delete) via APIRequestFactory requests with D-13 auth stubbed (request.auth_runner / auth_machine_token set directly); real scratch Postgres + real Redis DB 14 behind a logging proxy. Ran the real async poll views via RequestFactory; D-13 auth stubbed except for the 401 cases which run the real auth classes; real scratch Postgres + real Redis DB 14 behind a logging proxy. Real D-13 tokens minted via mint_access_token/mint_machine_token (setup only); every recorded response rendered by the real D-14 views + real DRF dispatch; scratch Postgres + Redis DB 14.",
   "runner_open_201": {
     "status": 201,
-    "key_order": ["session_id", "welcome", "resume_ack", "redeliver"],
-    "welcome_key_order": ["type", "rid", "server_time", "long_poll_interval_secs", "protocol_version"],
+    "key_order": [
+      "session_id",
+      "welcome",
+      "resume_ack",
+      "redeliver"
+    ],
+    "welcome_key_order": [
+      "type",
+      "rid",
+      "server_time",
+      "long_poll_interval_secs",
+      "protocol_version"
+    ],
     "session_id_is_uuid4": "4941e665-a688-4b04-9f61-de965ee5e968",
     "welcome_sample": {
       "type": "welcome",
@@ -69,7 +80,9 @@
       },
       {
         "cmd": "xrange",
-        "args": ["'runner_offline_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'"],
+        "args": [
+          "'runner_offline_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'"
+        ],
         "kwargs": {},
         "result": "[]"
       }
@@ -117,7 +130,9 @@
       },
       {
         "cmd": "delete",
-        "args": ["'session_pel_drained:4941e665-a688-4b04-9f61-de965ee5e968'"],
+        "args": [
+          "'session_pel_drained:4941e665-a688-4b04-9f61-de965ee5e968'"
+        ],
         "kwargs": {},
         "result": "0"
       },
@@ -146,7 +161,9 @@
       },
       {
         "cmd": "xrange",
-        "args": ["'runner_offline_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'"],
+        "args": [
+          "'runner_offline_stream:28a83b35-9dd5-42bc-9d94-d1a4cf880fb1'"
+        ],
         "kwargs": {},
         "result": "[]"
       }
@@ -257,7 +274,9 @@
     "redis": [
       {
         "cmd": "delete",
-        "args": ["'session_pel_drained:45fdf734-eba9-42d4-80b8-39a4163ee3bc'"],
+        "args": [
+          "'session_pel_drained:45fdf734-eba9-42d4-80b8-39a4163ee3bc'"
+        ],
         "kwargs": {},
         "result": "0"
       }
@@ -280,8 +299,17 @@
   },
   "machine_open_201": {
     "status": 201,
-    "key_order": ["session_id", "welcome"],
-    "welcome_key_order": ["type", "dev_machine_id", "server_time", "long_poll_interval_secs", "protocol_version"],
+    "key_order": [
+      "session_id",
+      "welcome"
+    ],
+    "welcome_key_order": [
+      "type",
+      "dev_machine_id",
+      "server_time",
+      "long_poll_interval_secs",
+      "protocol_version"
+    ],
     "welcome_sample": {
       "type": "welcome",
       "dev_machine_id": "e985a543-b79a-48a8-bdfe-7e0aaa937914",
@@ -320,7 +348,9 @@
       },
       {
         "cmd": "xrange",
-        "args": ["'machine_offline_stream:e985a543-b79a-48a8-bdfe-7e0aaa937914'"],
+        "args": [
+          "'machine_offline_stream:e985a543-b79a-48a8-bdfe-7e0aaa937914'"
+        ],
         "kwargs": {},
         "result": "[]"
       }
@@ -367,7 +397,9 @@
     "redis": [
       {
         "cmd": "delete",
-        "args": ["'machine_session_pel_drained:2086b8f4-37e7-4fe9-9783-0dabef282911'"],
+        "args": [
+          "'machine_session_pel_drained:2086b8f4-37e7-4fe9-9783-0dabef282911'"
+        ],
         "kwargs": {},
         "result": "0"
       }
@@ -383,28 +415,39 @@
   },
   "endpoint_classes": {
     "RunnerSessionOpenEndpoint": {
-      "authentication": ["RunnerAccessTokenAuthentication"],
+      "authentication": [
+        "RunnerAccessTokenAuthentication"
+      ],
       "permission_classes": [],
       "throttle_classes": []
     },
     "RunnerSessionDeleteEndpoint": {
-      "authentication": ["RunnerAccessTokenAuthentication"],
+      "authentication": [
+        "RunnerAccessTokenAuthentication"
+      ],
       "permission_classes": [],
       "throttle_classes": []
     },
     "MachineSessionOpenEndpoint": {
-      "authentication": ["MachineTokenAuthentication"],
+      "authentication": [
+        "MachineTokenAuthentication"
+      ],
       "permission_classes": [],
       "throttle_classes": []
     },
     "MachineSessionDeleteEndpoint": {
-      "authentication": ["MachineTokenAuthentication"],
+      "authentication": [
+        "MachineTokenAuthentication"
+      ],
       "permission_classes": [],
       "throttle_classes": []
     }
   },
   "bound_txn_waits": {
-    "sql": ["SET LOCAL lock_timeout = '5000ms'", "SET LOCAL statement_timeout = '20000ms'"],
+    "sql": [
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL statement_timeout = '20000ms'"
+    ],
     "vendor": "postgresql"
   },
   "bookkeeping_missing_session": {
@@ -454,7 +497,9 @@
     "redis": [
       {
         "cmd": "exists",
-        "args": ["'session_pel_drained:e07b372e-2d62-47e6-b309-0397b4065c17'"],
+        "args": [
+          "'session_pel_drained:e07b372e-2d62-47e6-b309-0397b4065c17'"
+        ],
         "kwargs": {},
         "result": "0"
       }
@@ -486,7 +531,9 @@
     "redis": [
       {
         "cmd": "exists",
-        "args": ["'session_pel_drained:c420dbb3-2509-4a96-9c4d-ccc6e39ede19'"],
+        "args": [
+          "'session_pel_drained:c420dbb3-2509-4a96-9c4d-ccc6e39ede19'"
+        ],
         "kwargs": {},
         "result": "0"
       }
@@ -507,7 +554,9 @@
     "redis": [
       {
         "cmd": "exists",
-        "args": ["'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'"],
+        "args": [
+          "'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'"
+        ],
         "kwargs": {},
         "result": "0"
       }
@@ -560,7 +609,11 @@
   },
   "poll_200_first": {
     "status": 200,
-    "key_order": ["messages", "server_time", "long_poll_interval_secs"],
+    "key_order": [
+      "messages",
+      "server_time",
+      "long_poll_interval_secs"
+    ],
     "messages": [],
     "long_poll_interval_secs": 25,
     "server_time_sample": "2026-10-02T23:58:25.738360+00:00",
@@ -568,7 +621,9 @@
     "redis": [
       {
         "cmd": "exists",
-        "args": ["'session_pel_drained:13fbb116-0adb-4793-8252-cd81f7c9a666'"],
+        "args": [
+          "'session_pel_drained:13fbb116-0adb-4793-8252-cd81f7c9a666'"
+        ],
         "kwargs": {},
         "result": "0"
       },
@@ -597,7 +652,10 @@
       },
       {
         "cmd": "set",
-        "args": ["'session_pel_drained:13fbb116-0adb-4793-8252-cd81f7c9a666'", "'1'"],
+        "args": [
+          "'session_pel_drained:13fbb116-0adb-4793-8252-cd81f7c9a666'",
+          "'1'"
+        ],
         "kwargs": {
           "ex": "7200"
         },
@@ -612,22 +670,43 @@
     "long_poll_interval_secs": 2,
     "elapsed_secs": 2.21,
     "redis_cmds": [
-      ["exists", null],
-      ["pubsub", null],
-      ["xgroup_create", null],
-      ["xreadgroup", "1000"],
-      ["xreadgroup", "961"]
+      [
+        "exists",
+        null
+      ],
+      [
+        "pubsub",
+        null
+      ],
+      [
+        "xgroup_create",
+        null
+      ],
+      [
+        "xreadgroup",
+        "1000"
+      ],
+      [
+        "xreadgroup",
+        "961"
+      ]
     ]
   },
   "machine_poll_200_first": {
     "status": 200,
-    "key_order": ["messages", "server_time", "long_poll_interval_secs"],
+    "key_order": [
+      "messages",
+      "server_time",
+      "long_poll_interval_secs"
+    ],
     "messages": [],
     "long_poll_interval_secs": 25,
     "redis": [
       {
         "cmd": "exists",
-        "args": ["'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'"],
+        "args": [
+          "'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'"
+        ],
         "kwargs": {},
         "result": "0"
       },
@@ -656,7 +735,10 @@
       },
       {
         "cmd": "set",
-        "args": ["'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'", "'1'"],
+        "args": [
+          "'machine_session_pel_drained:3f9f2343-c0ad-49d3-99cf-d23a7b645487'",
+          "'1'"
+        ],
         "kwargs": {
           "ex": "7200"
         },
@@ -703,7 +785,9 @@
   },
   "slice_expired_deadline": {
     "messages": [],
-    "redis_cmds": ["pubsub"],
+    "redis_cmds": [
+      "pubsub"
+    ],
     "note": "monotonic jumped past the deadline; only subscribe ran, no xreadgroup BLOCK issued"
   },
   "slice_eviction_break": {
@@ -714,7 +798,13 @@
     "body": {
       "error": "session_evicted"
     },
-    "redis_cmds": ["exists", "pubsub", "xgroup_create", "xreadgroup", "xreadgroup"]
+    "redis_cmds": [
+      "exists",
+      "pubsub",
+      "xgroup_create",
+      "xreadgroup",
+      "xreadgroup"
+    ]
   },
   "open_401_cross_runner": {
     "status": 401,
@@ -723,7 +813,12 @@
   "open_201_dispatch_wire": {
     "status": 201,
     "body_bytes": "{\"session_id\":\"3c493411-a8a6-420b-aaad-69fbd93fc69a\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"da5e0788-02b9-48c3-9f91-87c3d2c3798e\",\"server_time\":\"2026-10-03T00:02:59.399590+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4},\"resume_ack\":null,\"redeliver\":null}",
-    "redis_cmds": ["xgroup_create", "xautoclaim", "publish", "xrange"]
+    "redis_cmds": [
+      "xgroup_create",
+      "xautoclaim",
+      "publish",
+      "xrange"
+    ]
   },
   "poll_401_cross_runner": {
     "status": 401,
@@ -764,8 +859,12 @@
         }
       ]
     },
-    "first_xreads": ["{'runner_stream:2ebe18e6-2c80-4144-819c-e3be23ea39c7': '0'}"],
-    "second_xreads": ["{'runner_stream:2ebe18e6-2c80-4144-819c-e3be23ea39c7': '>'}"],
+    "first_xreads": [
+      "{'runner_stream:2ebe18e6-2c80-4144-819c-e3be23ea39c7': '0'}"
+    ],
+    "second_xreads": [
+      "{'runner_stream:2ebe18e6-2c80-4144-819c-e3be23ea39c7': '>'}"
+    ],
     "note": "entries enqueued before the first poll are NOT in the consumer's PEL, so the use_zero (0) replay misses them; the follow-up (>) poll delivers"
   },
   "machine_poll_two_step_delivery": {

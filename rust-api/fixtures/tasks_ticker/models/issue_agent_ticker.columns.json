@@ -136,15 +136,42 @@
       "max_length": 32,
       "default": "",
       "choices": [
-        ["", "None"],
-        ["left_ticking_state", "Left Ticking State"],
-        ["cap_hit", "Cap Hit"],
-        ["pool_spent", "Pool Spent"],
-        ["terminal_signal", "Terminal Signal"],
-        ["stop_signal", "Stop Signal"],
-        ["user_disabled", "User Disabled"],
-        ["failure_needs_human", "Failure Needs Human"],
-        ["repeated_failure", "Repeated Failure"]
+        [
+          "",
+          "None"
+        ],
+        [
+          "left_ticking_state",
+          "Left Ticking State"
+        ],
+        [
+          "cap_hit",
+          "Cap Hit"
+        ],
+        [
+          "pool_spent",
+          "Pool Spent"
+        ],
+        [
+          "terminal_signal",
+          "Terminal Signal"
+        ],
+        [
+          "stop_signal",
+          "Stop Signal"
+        ],
+        [
+          "user_disabled",
+          "User Disabled"
+        ],
+        [
+          "failure_needs_human",
+          "Failure Needs Human"
+        ],
+        [
+          "repeated_failure",
+          "Repeated Failure"
+        ]
       ]
     },
     {
@@ -200,7 +227,10 @@
   "indexes": [
     {
       "name": "iaticker_enabled_next_run_idx",
-      "fields": ["enabled", "next_run_at"]
+      "fields": [
+        "enabled",
+        "next_run_at"
+      ]
     }
   ]
 }

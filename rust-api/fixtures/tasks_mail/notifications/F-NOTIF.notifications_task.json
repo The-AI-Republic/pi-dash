@@ -1,7 +1,14 @@
 {
   "EmailNotificationLog_shape": "same + issue.project_id, issue.workspace_slug, activity_time=activity.created_at; triggered_by=actor, receiver=subscriber, entity_identifier=issue_id, entity_name='issue'",
   "Notification_shape": {
-    "data.issue": ["id", "name", "identifier", "sequence_id", "state_name", "state_group"],
+    "data.issue": [
+      "id",
+      "name",
+      "identifier",
+      "sequence_id",
+      "state_name",
+      "state_group"
+    ],
     "data.issue_activity": [
       "id",
       "verb",

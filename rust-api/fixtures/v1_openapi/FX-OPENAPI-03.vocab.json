@@ -1643,7 +1643,10 @@
           "name": "Required Fields Missing",
           "value": {
             "error": "Required fields are missing",
-            "fields": ["name", "type"]
+            "fields": [
+              "name",
+              "type"
+            ]
           },
           "summary": null,
           "description": null,
@@ -1737,7 +1740,9 @@
           "value": {
             "error": "Validation failed",
             "details": {
-              "field_name": ["This field is required."]
+              "field_name": [
+                "This field is required."
+              ]
             }
           },
           "summary": null,
@@ -1982,7 +1987,10 @@
       "lines": "255-264",
       "name": "CycleIssueRequestSerializer",
       "value": {
-        "issues": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd", "0ec6cfa4-e906-4aad-9390-2df0303a41ce"]
+        "issues": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ]
       },
       "summary": null,
       "description": "Example request for adding cycle issues",
@@ -2261,7 +2269,9 @@
       "name": "IssueCommentCreateSerializer",
       "value": {
         "comment_html": "<p>Updated comment content</p>",
-        "labels": ["fold"],
+        "labels": [
+          "fold"
+        ],
         "external_id": "1234567890",
         "external_source": "github"
       },
@@ -2278,8 +2288,12 @@
         "description_markdown": "## Context\n\n- [ ] First step",
         "priority": "medium",
         "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
-        "assignees": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd"],
-        "labels": ["0ec6cfa4-e906-4aad-9390-2df0303a41ce"],
+        "assignees": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd"
+        ],
+        "labels": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ],
         "external_id": "1234567890",
         "external_source": "github"
       },
@@ -2297,8 +2311,12 @@
         "description": "Add OAuth 2.0 authentication flow",
         "sequence_id": 1,
         "priority": "high",
-        "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
-        "labels": ["550e8400-e29b-41d4-a716-446655440002"],
+        "assignees": [
+          "550e8400-e29b-41d4-a716-446655440001"
+        ],
+        "labels": [
+          "550e8400-e29b-41d4-a716-446655440002"
+        ],
         "created_at": "2024-01-15T10:30:00Z",
         "updated_at": "2024-01-15T10:30:00Z"
       },
@@ -2387,8 +2405,12 @@
         "description_markdown": "## Context\n\n- [x] First step",
         "priority": "medium",
         "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
-        "assignees": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd"],
-        "labels": ["0ec6cfa4-e906-4aad-9390-2df0303a41ce"]
+        "assignees": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd"
+        ],
+        "labels": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ]
       },
       "summary": null,
       "description": "Example request for updating a work item",
@@ -2403,8 +2425,12 @@
         "description": "Updated issue description",
         "priority": "high",
         "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
-        "assignees": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd"],
-        "labels": ["0ec6cfa4-e906-4aad-9390-2df0303a41ce"],
+        "assignees": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd"
+        ],
+        "labels": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ],
         "external_id": "1234567890",
         "external_source": "github"
       },
@@ -2519,7 +2545,10 @@
       "lines": "301-310",
       "name": "ModuleIssueRequestSerializer",
       "value": {
-        "issues": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd", "0ec6cfa4-e906-4aad-9390-2df0303a41ce"]
+        "issues": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ]
       },
       "summary": null,
       "description": "Example request for adding module issues",
@@ -3115,7 +3144,9 @@
   "decorators": {
     "asset_docs": {
       "lines": "121-132",
-      "tags": ["Assets"],
+      "tags": [
+        "Assets"
+      ],
       "summary": null,
       "parameters": [],
       "responses": {
@@ -3132,7 +3163,9 @@
     },
     "cycle_docs": {
       "lines": "76-88",
-      "tags": ["Cycles"],
+      "tags": [
+        "Cycles"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3162,7 +3195,9 @@
     },
     "estimate_docs": {
       "lines": "302-313",
-      "tags": ["Estimates"],
+      "tags": [
+        "Estimates"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3192,7 +3227,9 @@
     },
     "estimate_point_docs": {
       "lines": "316-327",
-      "tags": ["Estimate Points"],
+      "tags": [
+        "Estimate Points"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3222,7 +3259,9 @@
     },
     "intake_docs": {
       "lines": "106-118",
-      "tags": ["Intake"],
+      "tags": [
+        "Intake"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3252,7 +3291,9 @@
     },
     "issue_activity_docs": {
       "lines": "196-208",
-      "tags": ["Work Item Activity"],
+      "tags": [
+        "Work Item Activity"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3282,7 +3323,9 @@
     },
     "issue_attachment_docs": {
       "lines": "211-223",
-      "tags": ["Work Item Attachments"],
+      "tags": [
+        "Work Item Attachments"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3312,7 +3355,9 @@
     },
     "issue_comment_docs": {
       "lines": "181-193",
-      "tags": ["Work Item Comments"],
+      "tags": [
+        "Work Item Comments"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3342,7 +3387,9 @@
     },
     "issue_docs": {
       "lines": "91-103",
-      "tags": ["Work Items"],
+      "tags": [
+        "Work Items"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3372,7 +3419,9 @@
     },
     "issue_link_docs": {
       "lines": "166-178",
-      "tags": ["Work Item Links"],
+      "tags": [
+        "Work Item Links"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3402,7 +3451,9 @@
     },
     "label_docs": {
       "lines": "151-163",
-      "tags": ["Labels"],
+      "tags": [
+        "Labels"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3432,7 +3483,9 @@
     },
     "module_docs": {
       "lines": "241-253",
-      "tags": ["Modules"],
+      "tags": [
+        "Modules"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3462,7 +3515,9 @@
     },
     "module_issue_docs": {
       "lines": "256-268",
-      "tags": ["Modules"],
+      "tags": [
+        "Modules"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3492,7 +3547,9 @@
     },
     "page_docs": {
       "lines": "330-342",
-      "tags": ["Pages"],
+      "tags": [
+        "Pages"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3522,7 +3579,9 @@
     },
     "project_docs": {
       "lines": "61-73",
-      "tags": ["Projects"],
+      "tags": [
+        "Projects"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3548,7 +3607,9 @@
     },
     "state_docs": {
       "lines": "271-283",
-      "tags": ["States"],
+      "tags": [
+        "States"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3578,7 +3639,9 @@
     },
     "sticky_docs": {
       "lines": "286-299",
-      "tags": ["Stickies"],
+      "tags": [
+        "Stickies"
+      ],
       "summary": "Endpoints for sticky create/update/delete and fetch sticky details",
       "parameters": [
         {
@@ -3604,7 +3667,9 @@
     },
     "user_docs": {
       "lines": "33-43",
-      "tags": ["Users"],
+      "tags": [
+        "Users"
+      ],
       "summary": null,
       "parameters": [],
       "responses": {
@@ -3617,7 +3682,9 @@
     },
     "work_item_docs": {
       "lines": "136-148",
-      "tags": ["Work Items"],
+      "tags": [
+        "Work Items"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3647,7 +3714,9 @@
     },
     "work_item_relation_docs": {
       "lines": "226-238",
-      "tags": ["Work Item Relations"],
+      "tags": [
+        "Work Item Relations"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3677,7 +3746,9 @@
     },
     "workspace_docs": {
       "lines": "46-58",
-      "tags": ["Workspaces"],
+      "tags": [
+        "Workspaces"
+      ],
       "summary": null,
       "parameters": [
         {
@@ -3709,7 +3780,10 @@
         "kwargs": {
           "responses": "{404: ...}"
         },
-        "result_responses_keys": [401, 404],
+        "result_responses_keys": [
+          401,
+          404
+        ],
         "kwargs_consumed": true,
         "rule": "responses merged via dict.update (keys union)"
       },
@@ -3717,15 +3791,23 @@
         "kwargs": {
           "parameters": "[p1, p2]"
         },
-        "result_parameters": ["p0", "p1", "p2"],
+        "result_parameters": [
+          "p0",
+          "p1",
+          "p2"
+        ],
         "rule": "parameters merged via list.extend (appended after defaults)"
       },
       {
         "kwargs": {
-          "tags": ["O"],
+          "tags": [
+            "O"
+          ],
           "summary": "S"
         },
-        "result_tags": ["O"],
+        "result_tags": [
+          "O"
+        ],
         "result_summary": "S",
         "rule": "all other kwargs override via defaults.update"
       },
