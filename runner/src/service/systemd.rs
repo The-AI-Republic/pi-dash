@@ -76,6 +76,10 @@ Wants=network-online.target
 Type=simple
 ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}{data_line}{path_line}
+# NEWPIDASH-255: per-run containment cgroups are children of this
+# service's cgroup; control-group kill (the default, pinned here so it
+# can't drift) reaps every run's processes when the daemon stops.
+KillMode=control-group
 Restart=on-failure
 RestartSec=5
 
@@ -291,7 +295,9 @@ mod tests {
             "unit body must not export PIDASH_DATA_DIR for a default-location install; got:\n{body}"
         );
         // The config line must survive the omission without a dangling blank line.
-        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash\nRestart=on-failure"));
+        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash"));
+        assert!(body.contains("Restart=on-failure"));
+        assert!(body.contains("KillMode=control-group"));
     }
 
     /// The value a unit body exports for `key` via `Environment=KEY=VALUE`,

@@ -33,6 +33,19 @@ use crate::ipc::protocol::{
     version_lt,
 };
 use crate::ipc::server::IpcServer;
+use crate::util::containment::{self, RunGroup};
+
+/// Empty a run's containment unit and execute its run-end hook, if the
+/// run wrote one (parity-stack teardown). Runs on the normal terminal
+/// path, after the cloud has been told; the abort path relies on the
+/// guard's [`Drop`] (processes only — hooks are left for the sweep).
+async fn run_cleanup(mut guard: RunGroup) {
+    guard.cleanup().await;
+    guard.mark_cleaned();
+    if let Some(ws) = guard.workspace().map(|p| p.to_path_buf()) {
+        containment::run_end_hook(&ws).await;
+    }
+}
 use crate::util::fs::create_dir_all_private;
 use crate::util::paths::{Paths, RunnerPaths};
 
@@ -85,6 +98,14 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
+        // NEWPIDASH-255: reap run containment left by a previous daemon
+        // (no run is live at start, so every leftover is orphaned) and
+        // execute run-end hooks such a daemon never got to (parity-stack
+        // teardown survives a daemon crash through the hook file).
+        containment::sweep_orphaned_run_groups().await;
+        for runner_cfg in &config.runners {
+            containment::run_end_hook(&runner_cfg.workspace.working_dir).await;
+        }
         // Daemon-level state has no single runner_id any more — runners
         // come and go under one connection. Per-instance state still
         // holds its own runner_id (set in RunnerInstance::new).
@@ -3802,15 +3823,32 @@ impl AssignWorker {
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
+        // Per-run process containment (NEWPIDASH-255): create the run's
+        // cgroup now and carry its backend on RUN_ENV so every agent
+        // spawn below is contained. The guard empties the unit on drop,
+        // covering every exit path — normal end, failure, cancellation,
+        // daemon shutdown and task abort alike.
+        let mut guard = containment::create_run_group(run_id);
         // Scope the run id over everything this run does so every agent
         // subprocess the bridges spawn (and re-spawn per turn) inherits
         // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
-        crate::util::shell::RUN_ENV
-            .scope(
-                crate::util::shell::RunEnv { run_id },
-                self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
-            )
-            .await
+        let scope = crate::util::shell::RUN_ENV.scope(
+            crate::util::shell::RunEnv {
+                run_id,
+                backend: guard.backend_kind(),
+            },
+            self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model, &mut guard),
+        );
+        // Cleanup runs even when the run fails: a failed run must not
+        // leave its processes (or its parity-stack hook) behind.
+        let result = scope.await;
+        // Containment cleanup runs after the run's terminal report has
+        // been sent: empty the unit, then execute a run-end hook the
+        // run opted into (parity-stack teardown), outside the unit.
+        // `workspace` is None when workspace resolution never produced
+        // one; then there is no hook to run either.
+        run_cleanup(guard).await;
+        result
     }
 
     async fn handle_assign_inner(
@@ -3819,6 +3857,7 @@ impl AssignWorker {
         prompt: String,
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
+        guard: &mut RunGroup,
     ) -> Result<()> {
         // Resolve the directory the agent runs in: this runner's single,
         // exclusive `workspace.working_dir`. Clone-bootstrap it once if a repo
@@ -3855,6 +3894,12 @@ impl AssignWorker {
                 }
             }
         };
+        // Fresh run starts clean: drop any hook left by a previous run
+        // (the daemon-start sweep is the only other consumer), then
+        // record the workspace so containment cleanup can find a hook
+        // this run writes.
+        containment::discard_stale_hook(&workspace_path);
+        guard.set_workspace(workspace_path.clone());
         if let Some(project_ref) = self.runner_config.project_slug.as_deref()
             && let Err(err) = crate::cli::context::write_context_for_project(
                 &self.daemon_paths,
@@ -3949,6 +3994,10 @@ impl AssignWorker {
         // observes termination — independent of stdout-close detection.
         // See `.ai_design/runner_agent_bridge/design.md` §4.4.
         let process_handle = bridge.process_handle();
+        // Move the agent into the run's containment unit BEFORE any
+        // await: the agent binary starts seconds after spawn (engine
+        // startup), so this prompt move contains everything it starts.
+        guard.move_pid(process_handle.pid);
         self.state.set_agent_pid(process_handle.pid).await;
         self.state.set_agent_alive(true).await;
         spawn_exit_watch(self.state.clone(), run_id, process_handle.exit_rx.clone());
