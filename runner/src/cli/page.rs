@@ -143,6 +143,12 @@ pub struct UpdateArgs {
     /// New page visibility.
     #[arg(long, value_enum)]
     pub access: Option<PageAccess>,
+
+    /// Allow an empty or whitespace-only body to clear the page.
+    /// Without this flag an empty body is rejected so an accidental empty
+    /// file cannot wipe the page.
+    #[arg(long = "allow-empty")]
+    pub allow_empty: bool,
 }
 
 #[derive(Debug, Args)]
@@ -350,13 +356,26 @@ fn update_payload(args: &UpdateArgs, stdin: impl Read) -> Result<Map<String, Val
         payload.insert("access".into(), Value::from(access.as_api()));
     }
     if let Some(body) = load_body(&args.body, stdin)? {
+        check_page_body(&body, args.allow_empty)?;
         payload.insert("description_markdown".into(), Value::String(body));
     }
     Ok(payload)
 }
 
+/// Refuse an empty or whitespace-only page body unless `--allow-empty`.
+/// Mirrors the workpad guard so an accidental empty file cannot wipe a page.
+fn check_page_body(body: &str, allow_empty: bool) -> Result<(), CliError> {
+    if !allow_empty && body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "page body is empty (empty or whitespace-only); pass --allow-empty to clear intentionally and do not upload an empty file when a get failed (e.g. 429)",
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve the body source. `--body-file -` reads `stdin`; `None` when no
-/// body flag was given. An empty body is legitimate (it clears the page).
+/// body flag was given. Empty bodies require `--allow-empty` on update.
 fn load_body(args: &PageBodyArgs, mut stdin: impl Read) -> Result<Option<String>, CliError> {
     match (&args.body, &args.body_file) {
         (Some(body), _) => Ok(Some(body.clone())),
@@ -468,9 +487,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CreateArgs, GetArgs, ListArgs, PageAccess, PageBodyArgs, UpdateArgs, create_payload,
-        list_params, load_body, markdown_body, render_get, update_payload, validated_page_id,
-        validated_project,
+        CreateArgs, GetArgs, ListArgs, PageAccess, PageBodyArgs, UpdateArgs, check_page_body,
+        create_payload, list_params, load_body, markdown_body, render_get, update_payload,
+        validated_page_id, validated_project,
     };
     use crate::api_client::{EXIT_INVALID, EXIT_SERVER};
     use crate::cli::issue::build_query_string;
@@ -631,6 +650,7 @@ mod tests {
             parent: None,
             clear_parent: false,
             access: None,
+            allow_empty: false,
         }
     }
 
@@ -769,12 +789,28 @@ mod tests {
     }
 
     #[test]
-    fn update_accepts_an_empty_body_to_clear_the_page() {
+    fn update_rejects_an_empty_body_without_allow_empty() {
+        let args = UpdateArgs {
+            body: PageBodyArgs {
+                body: Some("   \n".to_string()),
+                body_file: None,
+            },
+            ..update_args()
+        };
+
+        let err = update_payload(&args, NO_STDIN).expect_err("empty must be rejected");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--allow-empty"));
+    }
+
+    #[test]
+    fn update_accepts_an_empty_body_to_clear_the_page_with_allow_empty() {
         let args = UpdateArgs {
             body: PageBodyArgs {
                 body: Some(String::new()),
                 body_file: None,
             },
+            allow_empty: true,
             ..update_args()
         };
 
@@ -843,5 +879,19 @@ mod tests {
         .expect("parse");
 
         assert_eq!(parsed.args.access, Some(PageAccess::Private));
+    }
+
+    #[test]
+    fn empty_page_body_is_rejected_without_allow_empty() {
+        for body in ["", "   ", "\n"] {
+            let err = check_page_body(body, false).expect_err("empty must be rejected");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+        }
+    }
+
+    #[test]
+    fn empty_page_body_is_allowed_with_allow_empty() {
+        check_page_body("", true).expect("allow-empty passes");
+        check_page_body("  \n", true).expect("allow-empty passes");
     }
 }

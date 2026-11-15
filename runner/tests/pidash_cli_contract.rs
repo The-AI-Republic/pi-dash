@@ -1413,6 +1413,7 @@ fn update_args() -> pidash::cli::page::UpdateArgs {
         parent: None,
         clear_parent: false,
         access: None,
+        allow_empty: false,
     }
 }
 
