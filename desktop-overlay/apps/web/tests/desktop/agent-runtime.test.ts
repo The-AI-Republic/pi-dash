@@ -237,3 +237,47 @@ describe("app sign-out", () => {
     expect(other.canSignOutComputer()).toBe(false);
   });
 });
+
+describe("reconnect after an outage", () => {
+  it("wakes the daemon on refresh (window focus and the minute tick)", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.refreshAgentRuntime();
+    expect(commands()).toContain("daemon_reconnect");
+  });
+
+  it("rate-limits the wake so focus storms do not hammer the daemon", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.refreshAgentRuntime();
+    await runtime.refreshAgentRuntime();
+    expect(commands().filter((c) => c === "daemon_reconnect")).toHaveLength(1);
+  });
+
+  it("never breaks a refresh when the daemon cannot be woken", async () => {
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "daemon_reconnect") throw new Error("daemon down");
+      if (command === "daemon_discover") return discovery;
+      if (command === "daemon_runners") return localRunners;
+      return undefined;
+    });
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await expect(runtime.refreshAgentRuntime()).resolves.toBeUndefined();
+    expect(commands()).toContain("daemon_reconnect");
+  });
+
+  it("kicks the daemon before the Run availability poll, and leaves other executors alone", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.prepareAgentRun(target);
+    const invoked = commands();
+    expect(invoked).toContain("daemon_reconnect");
+    expect(invoked.indexOf("daemon_reconnect")).toBeLessThan(invoked.indexOf("daemon_engine_runner_add"));
+
+    invoke.mockClear();
+    issueExecutor = "local_runner";
+    await runtime.prepareAgentRun(target);
+    expect(commands()).not.toContain("daemon_reconnect");
+  });
+});
