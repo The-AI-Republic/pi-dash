@@ -87,15 +87,15 @@ export interface AgentAppIdentity {
 }
 
 /** The engine's state as the daemon reports it (`pidash-ipc`, snake_case). */
-export type DaemonEngineState = "available" | "signed_out" | "expiring" | "unavailable";
+export type DaemonPidashAgentState = "available" | "signed_out" | "expiring" | "unavailable";
 
 /** The engine's sign-in state, mirrored from the server per machine. */
-export type DaemonEngineSignInState = "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
+export type DaemonPidashAgentSignInState = "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
 
-export interface DaemonEngineStatus {
-  state: DaemonEngineState;
+export interface DaemonPidashAgentStatus {
+  state: DaemonPidashAgentState;
   reason_code?: string | undefined;
-  sign_in_state: DaemonEngineSignInState;
+  sign_in_state: DaemonPidashAgentSignInState;
   credential_expires_at?: string | undefined;
   model?: string | undefined;
 }
@@ -108,8 +108,8 @@ export interface DaemonHello {
   account?: { user_id?: string | undefined; email?: string | undefined; cloud_url: string } | undefined;
   workspaces: Array<{ slug: string; signed_in: boolean; runners: number }>;
   machine_id?: string | undefined;
-  engine: DaemonEngineState;
-  engine_detail?: DaemonEngineStatus | undefined;
+  engine: DaemonPidashAgentState;
+  engine_detail?: DaemonPidashAgentStatus | undefined;
 }
 
 /** The installed command-line tool, as discovery reports it. */
@@ -142,12 +142,12 @@ export interface DaemonLocalRunner {
   workspace_slug: string | null;
   project_slug: string | null;
   working_dir: string;
-  /** `agent.kind` of the block: `engine` for the built-in engine. */
+  /** `agent.kind` of the block: `engine` for the Pi Dash Agent. */
   agent: string;
 }
 
 /** What `EngineRunnerAdd` answers: the engine runner now set up for a project. */
-export interface DaemonEngineRunner {
+export interface DaemonPidashAgentRunner {
   runner: string;
   runner_id: string;
   workspace: string;
@@ -156,7 +156,7 @@ export interface DaemonEngineRunner {
 }
 
 /** One engine runner block of a legacy per-workspace tree still on disk. */
-export interface LegacyEngineRunner {
+export interface LegacyPidashAgentRunner {
   name: string;
   runner_id: string | null;
   project: string;
@@ -169,7 +169,7 @@ export interface LegacyTree {
   dir: string;
   cloud_url: string | null;
   dev_machine_id: string | null;
-  engine_runners: LegacyEngineRunner[];
+  engine_runners: LegacyPidashAgentRunner[];
 }
 
 /** A legacy task folder the migration left unused (design §13, "Collision"). */
@@ -209,18 +209,18 @@ export interface AgentRuntimeApi {
   discover(identity: AgentAppIdentity): Promise<DaemonDiscovery>;
   /** The daemon's runners (engine and own-agent). */
   localRunners(): Promise<DaemonLocalRunner[]>;
-  /** Turn the built-in engine on for a project on this computer (enrol on use). */
-  addEngineRunner(input: {
+  /** Turn the Pi Dash Agent on for a project on this computer (enrol on use). */
+  addPidashAgentRunner(input: {
     workspace: string;
     project: string;
     workingDir?: string | undefined;
-  }): Promise<DaemonEngineRunner>;
+  }): Promise<DaemonPidashAgentRunner>;
   /** Install and start the daemon's user service through the CLI (`pidash install` + `pidash start`). */
   installService(): Promise<void>;
-  /** Install the built-in engine through the CLI when it is not there. */
-  ensureEngine(): Promise<void>;
+  /** Install the Pi Dash Agent through the CLI when it is not there. */
+  ensurePidashAgent(): Promise<void>;
   /** Hand an engine-only device grant the app approved to the CLI (stdin, never argv). */
-  engineLogin(deviceCode: string): Promise<void>;
+  pidashAgentLogin(deviceCode: string): Promise<void>;
   /** Have the daemon re-read its workspace tokens after a CLI sign-in. */
   reloadCredentials(): Promise<void>;
   /**

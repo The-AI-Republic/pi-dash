@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Pod members (built-in engine design §7, §11). Shown under the pod filter
+// Pod members (Pi Dash Agent design §7, §11). Shown under the pod filter
 // bar while a pod is selected: every live runner in the pod, whether it
 // takes the pod's work or has pod work off, and — for the
 // viewer's own runners — add, remove and move. "Add runner to pod" lists
@@ -13,7 +13,7 @@ import type { Pod, Runner, RunnerPatch } from "@pidash/api-client";
 import { Plus } from "lucide-react";
 import * as React from "react";
 
-import { BUILT_IN_BADGE, isEngineRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
+import { PIDASH_AGENT_BADGE, isPidashAgentRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import {
   POD_MEMBERSHIP_LABELS,
@@ -70,7 +70,7 @@ function MemberRow({
     >
       <span className="flex flex-wrap items-center gap-(--space-2)">
         <span className="text-body text-(--text)">{runnerDisplayName(runner)}</span>
-        {isEngineRunner(runner) ? <Badge tone="accent">{BUILT_IN_BADGE}</Badge> : null}
+        {isPidashAgentRunner(runner) ? <Badge tone="accent">{PIDASH_AGENT_BADGE}</Badge> : null}
         <span data-testid="pod-member-dispatch" className="text-meta text-(--text-muted)">
           {POD_MEMBERSHIP_LABELS[dispatch]}
         </span>

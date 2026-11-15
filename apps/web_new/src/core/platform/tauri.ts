@@ -19,7 +19,7 @@ import type {
   CliSetupApi,
   CliStatus,
   DaemonDiscovery,
-  DaemonEngineRunner,
+  DaemonPidashAgentRunner,
   DaemonLocalRunner,
   DeepLinkApi,
   DesktopNotices,
@@ -565,15 +565,15 @@ const desktopAgentRuntime: AgentRuntimeApi = {
       },
     }),
   localRunners: async () => (await invokeNative<DaemonLocalRunner[] | null>("daemon_runners")) ?? [],
-  addEngineRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
-    invokeNative<DaemonEngineRunner>("daemon_engine_runner_add", {
+  addPidashAgentRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
+    invokeNative<DaemonPidashAgentRunner>("daemon_engine_runner_add", {
       workspace: input.workspace,
       project: input.project,
       workingDir: input.workingDir || null,
     }),
   installService: () => invokeNative("daemon_install_service"),
-  ensureEngine: () => invokeNative("daemon_ensure_engine"),
-  engineLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
+  ensurePidashAgent: () => invokeNative("daemon_ensure_engine"),
+  pidashAgentLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
   reloadCredentials: () => invokeNative("daemon_credentials_reload"),
   requestReconnect: () => invokeNative("daemon_reconnect"),
   saveApprovalModes: (account: string, modes: Record<string, string>) =>
