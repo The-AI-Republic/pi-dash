@@ -280,10 +280,11 @@ export async function updateProjectEstimate(
  * Body for POST .../estimates/<eid>/estimate-points/. Both fields are
  * required: the server answers 400 when either is falsy, and a zero
  * position counts as falsy there, so the caller's position starts at 1.
- * This shape deliberately promises no value-length cap: the server
- * stores the text without the 20-character check the bulk and update
- * paths run (NEWFRONT-347), so callers cap the value themselves and
- * never rely on this endpoint to refuse it.
+ * The server enforces the same 20-character value cap the bulk and
+ * update paths run (`EstimatePointSerializer.validate()`,
+ * NEWPIDASH-275 / DIFF-32): a value over 20 characters answers 400
+ * with `{"non_field_errors": ["Value can't be more than 20
+ * characters"]}` and stores nothing.
  */
 export const EstimatePointCreateBody = z.object({
   key: z.int().check(z.minimum(1)),
