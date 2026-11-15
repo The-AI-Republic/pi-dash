@@ -10,7 +10,6 @@
 //!   `AgentRunTrigger` (`models.py:237-253`), values verbatim.
 //! * [`agent_run`] — `AgentRun` (`models.py:872-1035`) read shape:
 //!   exactly the 22 columns dispatch touches, with defaults.
-//! * [`event`] — `AgentRunEvent` (`models.py:1162-1175`) read shape.
 //! * [`tool_call`] — `ToolCallStatus` (`models.py:1178-1184`) +
 //!   `AgentRunToolCall` (`models.py:1187-1216`) read shape (15
 //!   dispatch-touched columns).
@@ -25,11 +24,9 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod agent_run;
-pub mod event;
 pub mod status;
 pub mod tool_call;
 
 pub use agent_run::AgentRun;
-pub use event::AgentRunEvent;
 pub use status::{AgentRunStatus, AgentRunTrigger};
 pub use tool_call::{AgentRunToolCall, ToolCallStatus};
