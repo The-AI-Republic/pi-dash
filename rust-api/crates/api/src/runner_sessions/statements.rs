@@ -645,8 +645,8 @@ mod tests {
                 value: SetValue::Text("linux".to_owned()),
             },
             SetClause {
-                column: "last_heartbeat_at",
-                value: SetValue::Now,
+                column: "dev_metadata",
+                value: SetValue::Json(serde_json::json!({})),
             },
         ];
         let sql = pg_update(hello_update_statement(&clauses, Uuid::nil(), at()).expect("stmt"));
@@ -655,7 +655,8 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("\"os\" = 'linux'"), "{sql}");
-        assert!(sql.contains("\"last_heartbeat_at\" = '2026-01-02 03:04:05.000000 +00:00'"));
+        // NEWPIDASH-262: hello must not carry last_heartbeat_at.
+        assert!(!sql.contains("last_heartbeat_at"), "{sql}");
         assert!(sql.ends_with("WHERE \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000'"));
         assert!(hello_update_statement(
             &[SetClause {
@@ -666,6 +667,20 @@ mod tests {
             at()
         )
         .is_err());
+        // A heartbeat clause is still a legal column for the generic
+        // builder (poll path uses `Now`), but hello no longer supplies it.
+        let hb = pg_update(
+            hello_update_statement(
+                &[SetClause {
+                    column: "last_heartbeat_at",
+                    value: SetValue::Now,
+                }],
+                Uuid::nil(),
+                at(),
+            )
+            .expect("hb"),
+        );
+        assert!(hb.contains("\"last_heartbeat_at\" = '2026-01-02 03:04:05.000000 +00:00'"));
     }
 
     #[test]
