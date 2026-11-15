@@ -67,6 +67,9 @@ pub struct Model {
     pub error_details: Json,
     #[sea_orm(column_type = "Text", nullable)]
     pub refusal_category: Option<String>,
+    // Canonical failure taxonomy (PDASHOSS01-183, runner 0040):
+    // `RunFailureReason` string, blank for non-failed runs.
+    pub failure_reason: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

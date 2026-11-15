@@ -42,9 +42,12 @@
 //! - reset-app EXPIRED branch is dead (inner `except (ValueError,
 //!   User.DoesNotExist)` catches the `DjangoUnicodeDecodeError`, a
 //!   `ValueError` subclass, so bad-UTF-8 uids answer 5125, never 5130).
-//! - reset-space has no decode/lookup guard: unknown ids raise
-//!   `DoesNotExist` (HTTP 500) and non-UUID uids raise `ValidationError`
-//!   (HTTP 500 on both surfaces).
+//! - reset-space has no decode/lookup guard in Django: unknown ids raise
+//!   `DoesNotExist` (HTTP 500; fixed in Rust by DIFF-4) and non-UUID
+//!   uids raise `ValidationError` (HTTP 500 on both surfaces in Django;
+//!   fixed in Rust by DIFF-26, which also covers undecodable space
+//!   uids). The HTTP shell owns the fixed mapping; this module keeps
+//!   the codec and branch tables.
 //! - reset-app failure targets carry no trailing slash
 //!   (`accounts/reset-password?<params>`) while space targets carry a
 //!   double slash (`<base>/accounts/reset-password/?<params>`); the app

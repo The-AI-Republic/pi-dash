@@ -562,6 +562,7 @@ where
                 lease_expires_at: Set(None),
                 done_payload: Set(None),
                 error_details: Set(row.error_details.clone()),
+                failure_reason: Set(String::new()),
                 llm_model: Set(String::new()),
                 usage: Set(serde_json::json!({})),
                 created_at: Set(row

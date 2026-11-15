@@ -41,7 +41,7 @@
 //!   without it. D-13's future auth port subsumes it (edge then).
 //! * `send_to_runner` (`pubsub.py:45-60` + `outbox.py:220-253`) is
 //!   implemented for real in [`LivePorts`]: the contract suite pins the
-//!   offline fan-out 500s (`test_web_chat_close_shape`,
+//!   DIFF-25 offline divergence (`test_web_chat_close_shape`,
 //!   `test_web_chat_approval_decide_shape`), so the session lookup, the
 //!   offline-reject matrix, and the XADD wire shape are behavior, not
 //!   plumbing. D-14's outbox port takes over when it merges.
@@ -74,11 +74,11 @@
 //!   unauthenticated daemon chat POSTs answer 500, not 401/403. Pinned
 //!   by `test_daemon_chat_requires_auth` (status only).
 //! * BUG-offline-fanout-500 (`chat.py:380-425,457-510` + `outbox.py:57-67`):
-//!   close/decide send `chat_close`/`chat_decide` inside `on_commit`;
-//!   for an offline runner `send_to_runner` raises `RunnerOfflineError`
-//!   after the row committed, so the 500 carries a persisted close.
-//!   Pinned by `test_web_chat_close_shape` /
-//!   `test_web_chat_approval_decide_shape` (status + row).
+//!   close/decide once 500ed on offline `RunnerOfflineError` after the
+//!   row committed. Fixed by NEWPIDASH-259 (DIFF-25) — Rust now swallows
+//!   the offline dispatch and returns the persisted write, pinned as a
+//!   DIFF-25 divergence by `test_web_chat_close_shape` /
+//!   `test_web_chat_approval_decide_shape`.
 //! * BUG-runner-count (inherited via D-13 shapes): the nested
 //!   `runner_detail` count quirk rides along through reuse.
 //!

@@ -42,11 +42,11 @@ use pidash_db::entity as orm;
 use pidash_db::runner_runs::{agent_run, event, pod};
 use pidash_db::tasks_ticker::models::scheduler_binding;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::AgentRunStatus;
+use pidash_types::runner_runs::{classify_failure, AgentRunStatus};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::lifecycle::{has_project_move_handoff, plan_failure_comment, CommentPlan};
+use super::lifecycle::{has_project_move_handoff, plan_failure_comment, FailureCommentPlan};
 use super::scheduler_hook::{plan_scheduler_hook, BindingFacts, SchedulerHookPlan};
 use super::{
     qualified_columns, LifecycleEffect, SetClause, SetValue, ISSUE_COLUMNS, PROJECT_COLUMNS,
@@ -224,8 +224,50 @@ pub fn plan_finalize_values(
             }),
         }
     }
+    // Safety net for the canonical failure taxonomy (PDASHOSS01-183,
+    // `finalize_agent_run`): every FAILED row carries a non-empty
+    // `failure_reason`. Terminal frames classify earlier (with the
+    // runner's reason); cloud-side writers (Cloud Agent tasks, reapers,
+    // managed-runner expiry) land here with only `error` / `error_code`.
+    // A present-but-empty value is replaced in place, a missing one
+    // appended — the dict-assignment order. Runs before the fold, which
+    // removes the flat `error` / `error_code` clauses this reads.
+    if new_status == AgentRunStatus::Failed && !text_clause_truthy(&clauses, "failure_reason") {
+        let error = text_clause(&clauses, "error");
+        let error_code = text_clause(&clauses, "error_code");
+        let reason = SetValue::Text(classify_failure(&error, "", &error_code).value().to_owned());
+        match clauses
+            .iter_mut()
+            .find(|clause| clause.column == "failure_reason")
+        {
+            Some(existing) => existing.value = reason,
+            None => clauses.push(SetClause {
+                column: "failure_reason",
+                value: reason,
+            }),
+        }
+    }
     fold_error_details(&mut clauses);
     Ok(FinalizeValues { clauses })
+}
+
+/// `str(values.get(column) or "")` over the assembled clauses: the text
+/// value, `""` for an absent, null or non-text clause (every writer binds
+/// these columns as text).
+fn text_clause(clauses: &[SetClause], column: &str) -> String {
+    clauses
+        .iter()
+        .find(|clause| clause.column == column)
+        .and_then(|clause| match &clause.value {
+            SetValue::Text(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// `values.get(column)` truthiness for a text column.
+fn text_clause_truthy(clauses: &[SetClause], column: &str) -> bool {
+    !text_clause(clauses, column).is_empty()
 }
 
 /// Merge the locked row's `done_payload` into the values
@@ -495,7 +537,7 @@ pub fn lock_issue_sql() -> String {
 /// `select_related("work_item", "work_item__state",
 /// "work_item__project", "scheduler_binding").filter(pk,
 /// status__in=terminal).first()` with `FOR UPDATE OF "agent_run"` —
-/// 41 + 34 + 46 + 18 + 22 columns. Param: `$1` run id, `$2..$6` the
+/// 42 + 34 + 46 + 18 + 22 columns. Param: `$1` run id, `$2..$6` the
 /// terminal values in tuple order (same set-ordering quirk as the
 /// finalize lock).
 pub fn lock_run_for_effects_sql() -> String {
@@ -524,7 +566,7 @@ pub fn update_hooks_marker_sql() -> &'static str {
 }
 
 /// Capacity re-read (`apply_terminal_effects:183`):
-/// `select_related("runner", "pod").get(pk)` — 40 + 10 + 31 columns,
+/// `select_related("runner", "pod").get(pk)` — 41 + 10 + 31 columns,
 /// `.get()` so no `LIMIT`. A missing row raises `DoesNotExist` (no
 /// guard in the source); the executing layer propagates it. Param:
 /// `$1` run id.
@@ -559,8 +601,14 @@ pub enum EffectsSql {
     LockRunForEffects,
     FailureCommentSavepoint,
     FailureCommentReread,
+    /// `consecutive_failure_streak` (PDASHOSS01-183): only for a run whose
+    /// re-read carries a non-empty `failure_reason`.
+    FailureCommentStreak,
     FailureCommentDedupeCheck,
     FailureCommentInserts,
+    /// The clock-stopped notification rows (PDASHOSS01-183): only when the
+    /// gate says the clock stopped and a receiver survives the filter.
+    FailureCommentNotify,
     FailureCommentRelease,
     SchedulerSavepoint,
     SchedulerUpdate,
@@ -575,7 +623,7 @@ pub enum EffectsSql {
 /// (skipped on handoff), scheduler hook (savepointed, when bound).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HooksPlan {
-    pub failure_comment: Option<CommentPlan>,
+    pub failure_comment: Option<FailureCommentPlan>,
     pub orchestration: bool,
     pub scheduler: Option<SchedulerHookPlan>,
 }
@@ -686,20 +734,22 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         None
     } else {
         let failure_comment = if inputs.status == AgentRunStatus::Failed && !handoff {
-            // The savepoint pair always runs around the hook call;
-            // the reads only when the comment is not suppressed
-            // (suppression returns before any SQL). The inserts are
-            // additionally runtime-gated: a dedupe hit or a missing
-            // work item means silence after the reads.
+            // The savepoint pair always runs around the hook call, and
+            // so does the re-read: infra noise is only silenced once the
+            // clock effect says the clock keeps running. Everything after
+            // the re-read is runtime-gated: the clock-effect reads need a
+            // stored reason and an armed clock, a free-retry / infra gate,
+            // dedupe hit or missing work item means silence, and the
+            // notification needs a stopped clock plus a surviving receiver.
             statements.push(EffectsSql::FailureCommentSavepoint);
             let comment = plan_failure_comment(inputs.error, inputs.run_id);
-            if comment.is_some() {
-                statements.push(EffectsSql::FailureCommentReread);
-                statements.push(EffectsSql::FailureCommentDedupeCheck);
-                statements.push(EffectsSql::FailureCommentInserts);
-            }
+            statements.push(EffectsSql::FailureCommentReread);
+            statements.push(EffectsSql::FailureCommentStreak);
+            statements.push(EffectsSql::FailureCommentDedupeCheck);
+            statements.push(EffectsSql::FailureCommentInserts);
+            statements.push(EffectsSql::FailureCommentNotify);
             statements.push(EffectsSql::FailureCommentRelease);
-            comment
+            Some(comment)
         } else {
             None
         };
@@ -1719,7 +1769,12 @@ mod tests {
         };
         let hooks = plan.hooks.as_ref().expect("hooks run");
         let comment = hooks.failure_comment.as_ref().expect("failure comment");
-        assert!(comment.comment_html.contains("Run failed."));
+        assert_eq!(comment.detail, "boom detail");
+        assert!(comment
+            .render("", false)
+            .comment
+            .comment_html
+            .contains("Run failed."));
         assert!(hooks.orchestration);
         assert_eq!(
             effect_names(&plan),
@@ -1747,24 +1802,34 @@ mod tests {
                 LockRunForEffects,
                 FailureCommentSavepoint,
                 FailureCommentReread,
+                FailureCommentStreak,
                 FailureCommentDedupeCheck,
                 FailureCommentInserts,
+                FailureCommentNotify,
                 FailureCommentRelease,
                 UpdateHooksMarker,
                 SelectRunForCapacity,
                 UpdateCapacityMarker,
             ]
         );
-        // Suppressed detail: savepoint pair runs, reads do not.
+        // Infra detail: still re-read — it is only silenced once the clock
+        // effect says the clock keeps running (a backstop stop is reported).
         inputs.error = "daemon shutdown requested: restart";
         let outcome = plan_terminal_effects(&inputs);
         let TerminalEffectsOutcome::Applied(plan) = outcome else {
             panic!("expected Applied");
         };
-        assert_eq!(plan.hooks.as_ref().expect("hooks").failure_comment, None);
+        let comment = plan
+            .hooks
+            .as_ref()
+            .expect("hooks")
+            .failure_comment
+            .as_ref()
+            .expect("planned");
+        assert!(comment.infra);
         assert!(plan.statements.contains(&FailureCommentSavepoint));
         assert!(plan.statements.contains(&FailureCommentRelease));
-        assert!(!plan.statements.contains(&FailureCommentReread));
+        assert!(plan.statements.contains(&FailureCommentReread));
     }
 
     #[test]
@@ -1983,7 +2048,7 @@ mod tests {
     #[test]
     fn finalize_lock_sql_variants() {
         let bare = lock_run_for_finalize_sql(false, false);
-        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 40)]);
+        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 41)]);
         assert!(
             bare.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND NOT \
@@ -2080,7 +2145,7 @@ mod tests {
         assert_eq!(
             select_runs(&fetch),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
+                ("\"agent_run\"".to_owned(), 41),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -2101,7 +2166,7 @@ mod tests {
         assert_eq!(
             select_runs(&capacity),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
+                ("\"agent_run\"".to_owned(), 41),
                 ("\"pod\"".to_owned(), 10),
                 ("\"runner\"".to_owned(), 31),
             ]

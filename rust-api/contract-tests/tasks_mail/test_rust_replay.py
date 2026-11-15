@@ -1042,3 +1042,121 @@ def test_rust_notifications_mention_mail_renders_stray_lt(smtp_sink, db_conn):
         assert _sent_at(db_conn, row["id"]) is not None, (
             f"fanned-out send did not mark sent_at on {row['id']}"
         )
+
+
+# NEWPIDASH-271 (DIFF-28) replay: the fan-out's `property_change`
+# catch-all must not rescue comment/state emails while those topics are
+# off. Mirrors test_mail_tasks.py::test_notifications_property_catch_all_leaks_topics,
+# which pins Django queuing both email rows; here both inbox rows land
+# and no email row is written. The settle proves the task ran (inbox
+# rows are written in the same run), so the email absence is exact.
+def _seed_271_world(conn, slug):
+    """Issue chain + subscriber S (not the actor), property on, topics off."""
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws, issue = chain["project"], chain["workspace"], chain["issue"]
+    subscriber = seed_helpers.user(conn, f"contract-notif271-{slug}")
+    seed_helpers.project_member(conn, project["id"], ws["id"], subscriber["id"])
+    insert_row(
+        conn,
+        "issue_subscribers",
+        {
+            "workspace_id": str(ws["id"]),
+            "project_id": str(project["id"]),
+            "issue_id": str(issue["id"]),
+            "subscriber_id": str(subscriber["id"]),
+        },
+    )
+    insert_row(
+        conn,
+        "user_notification_preferences",
+        {
+            "user_id": str(subscriber["id"]),
+            "property_change": True,
+            "state_change": False,
+            "comment": False,
+            "mention": False,
+            "issue_completed": False,
+        },
+    )
+    return chain, subscriber
+
+
+def _comment_271_activity(issue_id, actor_id):
+    """Created-comment activity (plain text, no mentions)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "created",
+        "field": "comment",
+        "actor_id": str(actor_id),
+        "new_value": "<p>plain hello</p>",
+        "old_value": None,
+        "comment": "created a comment",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": None,
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _state_271_activity(issue_id, actor_id, state_id):
+    """Non-completed state activity (chain state's group is backlog)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "state",
+        "actor_id": str(actor_id),
+        "new_value": str(state_id),
+        "old_value": str(state_id),
+        "comment": "changed the state",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": str(state_id),
+        "new_identifier": str(state_id),
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _notifications_271_args(chain, activities):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    plain = json.dumps({"description_html": "<p>plain</p>"})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        [],
+        json.dumps(activities),
+        plain,
+        plain,
+    ]
+
+
+def _count_271_rows(conn, table, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT count(*) AS n FROM {table} "
+            "WHERE receiver_id = %s AND entity_identifier = %s",
+            (str(receiver_id), str(issue_id)),
+        )
+        return cur.fetchone()["n"]
+
+
+def test_rust_notifications_topics_gate_independently(db_conn):
+    """Rust: comment/state toggles off stop the emails (DIFF-28 new arm)."""
+    chain, subscriber = _seed_271_world(db_conn, "notif271r")
+    issue = chain["issue"]
+    activities = [
+        _comment_271_activity(issue["id"], chain["owner"]["id"]),
+        _state_271_activity(issue["id"], chain["owner"]["id"], chain["state"]["id"]),
+    ]
+    celery_id = rust_queue.publish(
+        NOTIFICATIONS,
+        args=_notifications_271_args(chain, activities),
+        kwargs={},
+    )
+    rust_queue.wait_for_settled(celery_id, what="271 notifications executed")
+    inbox_n = _count_271_rows(db_conn, "notifications", subscriber["id"], issue["id"])
+    email_n = _count_271_rows(
+        db_conn, "email_notification_logs", subscriber["id"], issue["id"]
+    )
+    assert inbox_n == 2, f"rust inbox rows for notif271r: {inbox_n}"
+    assert email_n == 0, f"rust email rows leaked with topics off: {email_n}"

@@ -188,14 +188,16 @@ const CHAT_RELEASE_DETAIL: &str =
 /// default): claim everything pending, however fresh.
 const CLAIM_MIN_IDLE_MS: i64 = 0;
 /// The reaper's finalize `SET` order (`status`, `ended_at`, the two
-/// markers, then the `error_details` patch the `error` / `error_code`
-/// updates fold into): pinned so a kernel drift fails loudly instead of
+/// markers, then the `failure_reason` safety net (PDASHOSS01-183) and
+/// the `error_details` patch the `error` / `error_code` updates fold
+/// into): pinned so a kernel drift fails loudly instead of
 /// mis-binding (the `runs.rs` `CANCEL_FINALIZE_COLUMNS` precedent).
-const REAP_FINALIZE_COLUMNS: [&str; 5] = [
+const REAP_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
+    "failure_reason",
     "error_details",
 ];
 /// The hello `SET` order with a capabilities change (model
