@@ -2037,6 +2037,8 @@ mod tests {
                 )),
             )),
             std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            std::sync::Arc::new(pidash_jobs::dispatch_execute::NoPreInvokeRunHook),
+            std::sync::Arc::new(pidash_jobs::dispatch_execute::PassthroughRunModelRequestSeam),
         );
         // The same call the worker builder makes (PIDASHCONV-865): every seam
         // constructor is lazy (no I/O), so the mirror builds them over

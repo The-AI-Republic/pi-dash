@@ -776,6 +776,16 @@ pub mod jobs {
     pub use pidash_jobs::admission::RedisAdmissionCache;
     pub use pidash_jobs::default_schedule;
     pub use pidash_jobs::dispatch_execute::extra_toolsets_allowed;
+    pub use pidash_jobs::dispatch_execute::InvokeError;
+    pub use pidash_jobs::dispatch_execute::ModelFailure;
+    pub use pidash_jobs::dispatch_execute::ModelInvocation;
+    pub use pidash_jobs::dispatch_execute::ModelSettings;
+    pub use pidash_jobs::dispatch_execute::NoPreInvokeRunHook;
+    pub use pidash_jobs::dispatch_execute::PassthroughRunModelRequestSeam;
+    pub use pidash_jobs::dispatch_execute::PreInvokeRun;
+    pub use pidash_jobs::dispatch_execute::PreInvokeRunHookSeam;
+    pub use pidash_jobs::dispatch_execute::RunModelFailureAction;
+    pub use pidash_jobs::dispatch_execute::RunModelRequestSeam;
     pub use pidash_jobs::integrations::git_sync::TASK_NAMES as GIT_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::integrations::github_signals::dispatch_completion_comment;
     pub use pidash_jobs::integrations::github_signals::dispatch_job;

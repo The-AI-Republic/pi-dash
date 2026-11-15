@@ -52,6 +52,7 @@ use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
 use pidash_db::Pools;
 use pidash_services::extensions::{AssistantModelSeam, NoExtraToolsets};
 
+use crate::dispatch_execute::{PreInvokeRunHookSeam, RunModelRequestSeam};
 use crate::worker::Registry;
 
 /// The OSS worker's registration inputs: everything
@@ -78,6 +79,16 @@ pub struct OssWorkerCtx {
     /// executor). The OSS binary installs the CE default; the cloud
     /// binary installs its overlay implementation.
     pub assistant_seam: std::sync::Arc<dyn AssistantModelSeam>,
+    /// The pre-invoke run hook the execute plane calls between
+    /// `resolve_model_for_run` and `model_started` (PIDASHCONV-1741).
+    /// The OSS binary installs the CE no-op; the cloud binary
+    /// installs its overlay implementation.
+    pub pre_invoke_hook: std::sync::Arc<dyn PreInvokeRunHookSeam>,
+    /// The run-model request wrapper the execute plane consults per
+    /// model invocation (PIDASHCONV-1741). The OSS binary installs
+    /// the CE passthrough; the cloud binary installs its overlay
+    /// implementation.
+    pub model_request_seam: std::sync::Arc<dyn RunModelRequestSeam>,
 }
 
 impl OssWorkerCtx {
@@ -142,6 +153,8 @@ impl OssWorkerCtx {
 ///     mongo: None,
 ///     seed_dir: std::env::temp_dir(),
 ///     assistant_seam: std::sync::Arc::new(DefaultSeam),
+///     pre_invoke_hook: std::sync::Arc::new(pidash_jobs::dispatch_execute::NoPreInvokeRunHook),
+///     model_request_seam: std::sync::Arc::new(pidash_jobs::dispatch_execute::PassthroughRunModelRequestSeam),
 /// };
 /// register_oss_handlers(&mut registry, &ctx).expect("mail seams build");
 /// assert!(registry.owns(pidash_jobs::assistant::SWEEP_TASK));
@@ -472,6 +485,8 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.assistant_seam.clone(),
         )),
         std::sync::Arc::new(NoExtraToolsets),
+        ctx.pre_invoke_hook.clone(),
+        ctx.model_request_seam.clone(),
     );
     // D-08 issue_activity (PIDASHCONV-836; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`, where the
@@ -565,6 +580,10 @@ mod tests {
             mongo: None,
             seed_dir: std::env::temp_dir(),
             assistant_seam: std::sync::Arc::new(DefaultSeam),
+            pre_invoke_hook: std::sync::Arc::new(crate::dispatch_execute::NoPreInvokeRunHook),
+            model_request_seam: std::sync::Arc::new(
+                crate::dispatch_execute::PassthroughRunModelRequestSeam,
+            ),
         };
         let mut registry = Registry::new();
         register_oss_handlers(&mut registry, &ctx).expect("mail seams build");
