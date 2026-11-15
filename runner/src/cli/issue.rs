@@ -400,6 +400,7 @@ pub struct PatchArgs {
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
 
+
     /// Record the git branch this issue's work lives on, so later agent runs
     /// check it out instead of cutting a new one. Set it only after the
     /// branch exists on the remote. `--git-work-branch ""` clears it.
@@ -424,6 +425,18 @@ pub struct PatchArgs {
     /// runner; with `--runner` the two must agree (server-validated).
     #[arg(long)]
     pub pod: Option<String>,
+
+    /// Work type for this issue (e.g. `software`, `general`) — selects which
+    /// per-work-type guidance the agent prompts carry. The server validates
+    /// the key and rejects agent-attributed changes while the issue is being
+    /// worked. Mutually exclusive with `--clear-work-type`.
+    #[arg(long = "work-type", conflicts_with = "clear_work_type")]
+    pub work_type: Option<String>,
+
+    /// Clear the per-issue work type, inheriting the project default (sends
+    /// `work_type: null`). Mutually exclusive with `--work-type`.
+    #[arg(long = "clear-work-type")]
+    pub clear_work_type: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1295,6 +1308,16 @@ enum ParentPatch {
     Unchanged,
 }
 
+enum WorkTypePatch {
+    /// `--work-type` given; the work-type key (validated server-side).
+    Set(String),
+    /// `--clear-work-type` given; inherit the project default by sending
+    /// `work_type: null`.
+    Clear,
+    /// Neither flag given; leave the work type untouched.
+    Unchanged,
+}
+
 pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
     let description = load_description(&args.description, std::io::stdin())?;
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
@@ -1316,6 +1339,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
 
     let labels = resolve_label_patch(client, &issue, &args).await?;
 
+
     let runner = if args.clear_runner {
         RunnerPatch::Clear
     } else if let Some(ref runner) = args.runner {
@@ -1331,6 +1355,17 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         pod: assigned_pod,
         runner,
     };
+    let work_type = if args.clear_work_type {
+        WorkTypePatch::Clear
+    } else if let Some(ref key) = args.work_type {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(CliError::new(EXIT_INVALID, "--work-type must not be empty"));
+        }
+        WorkTypePatch::Set(key.to_string())
+    } else {
+        WorkTypePatch::Unchanged
+    };
 
     let body = build_patch_body(
         args.title.as_deref(),
@@ -1341,6 +1376,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         labels,
         args.git_work_branch.as_deref(),
         execution_target,
+        work_type,
     )?;
 
     let path = format!(
@@ -1490,6 +1526,7 @@ fn build_patch_body(
     label_uuids: Option<Vec<String>>,
     git_work_branch: Option<&str>,
     execution_target: ExecutionTargetPatch,
+    work_type: WorkTypePatch,
 ) -> Result<Map<String, Value>, CliError> {
     let mut body: Map<String, Value> = Map::new();
 
@@ -1524,6 +1561,7 @@ fn build_patch_body(
     if let Some(uuids) = label_uuids {
         body.insert("labels".into(), label_array(uuids));
     }
+
     // An empty string is a real mutation too: it clears the recorded branch.
     if let Some(branch) = git_work_branch {
         body.insert("git_work_branch".into(), Value::String(branch.to_string()));
@@ -1547,11 +1585,20 @@ fn build_patch_body(
             }
         }
     }
+    match work_type {
+        WorkTypePatch::Set(key) => {
+            body.insert("work_type".into(), Value::String(key));
+        }
+        WorkTypePatch::Clear => {
+            body.insert("work_type".into(), Value::Null);
+        }
+        WorkTypePatch::Unchanged => {}
+    }
 
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch/--runner/--clear-runner/--pod is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch/--runner/--clear-runner/--pod/--work-type/--clear-work-type is required",
         ));
     }
 
@@ -1985,6 +2032,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("description alone is a valid mutation");
         assert_eq!(
@@ -2008,6 +2056,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("a work branch alone is a valid mutation");
         assert_eq!(
@@ -2029,6 +2078,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clearing is a valid mutation");
         assert_eq!(
@@ -2532,6 +2582,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("parent is a valid mutation");
         assert_eq!(
@@ -2554,6 +2605,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clear-parent is a valid mutation");
         // `--clear-parent` must emit an explicit JSON null (detach), not omit
@@ -2578,6 +2630,7 @@ mod tests {
                     pod: None,
                     runner: RunnerPatch::Unchanged
                 },
+                WorkTypePatch::Unchanged,
             )
             .is_ok()
         );
@@ -2593,7 +2646,8 @@ mod tests {
                 ExecutionTargetPatch {
                     pod: None,
                     runner: RunnerPatch::Unchanged
-                }
+                },
+                WorkTypePatch::Unchanged,
             )
             .is_ok()
         );
@@ -2613,6 +2667,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect_err("no mutations must be rejected");
         assert_eq!(err.exit_code, EXIT_INVALID);
@@ -2660,6 +2715,97 @@ mod tests {
             PatchArgsHarness::try_parse_from(["patch", "PROJ-1", "--clear-parent"]).unwrap();
         assert!(parsed.args.clear_parent);
         assert!(parsed.args.parent.is_none());
+    }
+
+    #[test]
+    fn patch_work_type_and_clear_work_type_conflict() {
+        use clap::Parser;
+        let err = PatchArgsHarness::try_parse_from([
+            "patch",
+            "PROJ-1",
+            "--work-type",
+            "general",
+            "--clear-work-type",
+        ])
+        .expect_err("--work-type and --clear-work-type are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn patch_work_type_alone_parses() {
+        use clap::Parser;
+        let parsed =
+            PatchArgsHarness::try_parse_from(["patch", "PROJ-1", "--work-type", "software"])
+                .unwrap();
+        assert_eq!(parsed.args.work_type.as_deref(), Some("software"));
+        assert!(!parsed.args.clear_work_type);
+    }
+
+    #[test]
+    fn build_patch_body_sets_work_type() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+            WorkTypePatch::Set("general".to_string()),
+        )
+        .expect("work type alone is a valid mutation");
+        assert_eq!(
+            body.get("work_type").and_then(Value::as_str),
+            Some("general")
+        );
+    }
+
+    #[test]
+    fn build_patch_body_clear_work_type_sends_null() {
+        // `--clear-work-type` must emit an explicit JSON null (inherit the
+        // project default), not omit the key — omitting it would leave the
+        // work type unchanged server-side.
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+            WorkTypePatch::Clear,
+        )
+        .expect("clear-work-type is a valid mutation");
+        assert_eq!(body.get("work_type"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn build_patch_body_guard_advertises_the_work_type_flags() {
+        let err = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+            WorkTypePatch::Unchanged,
+        )
+        .expect_err("no mutations must be rejected");
+        assert!(err.message.contains("--work-type"));
+        assert!(err.message.contains("--clear-work-type"));
     }
 
     #[derive(Debug, clap::Parser)]
@@ -2830,6 +2976,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("labels alone is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!(["l-bug"])));
@@ -2851,6 +2998,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clear-labels is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!([])));
@@ -2901,6 +3049,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Set("runner-uuid".to_string()),
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("runner alone is a valid mutation");
         assert_eq!(
@@ -2924,6 +3073,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Clear,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clear-runner alone is a valid mutation");
         assert_eq!(body.get("assigned_runner"), Some(&Value::Null));
@@ -2945,6 +3095,7 @@ mod tests {
                 pod: Some("pod-uuid".to_string()),
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("pod alone is a valid mutation");
         assert_eq!(
@@ -2968,6 +3119,7 @@ mod tests {
                 pod: Some("pod-uuid".to_string()),
                 runner: RunnerPatch::Set("runner-uuid".to_string()),
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("pod+runner is a valid mutation");
         assert_eq!(
@@ -2994,6 +3146,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("title alone is a valid mutation");
         assert!(!body.contains_key("assigned_pod"));
@@ -3121,6 +3274,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect_err("no mutations must be rejected");
         for flag in ["--label", "--add-label", "--remove-label", "--clear-labels"] {
