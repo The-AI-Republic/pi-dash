@@ -408,6 +408,7 @@ pub async fn bounce_issue_for_revoke(
         triggered_by,
         reason,
         reason_name,
+        false,
     )
     .await
 }

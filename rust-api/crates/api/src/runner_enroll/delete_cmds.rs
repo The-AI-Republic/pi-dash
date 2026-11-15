@@ -951,6 +951,7 @@ async fn fire_delete_bundle(
                         &triggered_by,
                         &reason,
                         &name,
+                        false,
                     )
                     .await
                     {

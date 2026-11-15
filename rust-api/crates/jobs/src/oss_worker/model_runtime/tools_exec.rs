@@ -1715,6 +1715,7 @@ where
         creator_id: Uuid,
         pod_id: Uuid,
         triggered_by: &str,
+        preserve_state: bool,
     ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
         let Some(deps) = self.deps.take() else {
             return Err(pidash_services::orchestration::creation::CreationError::Db(
@@ -1731,6 +1732,7 @@ where
             Some(creator_id),
             pod_id,
             triggered_by,
+            preserve_state,
         )
         .await
         .map_err(|error| {
@@ -2340,6 +2342,7 @@ impl PreflightSeam for BinPreflight {
         _creator_id: Uuid,
         _pod_id: Uuid,
         _triggered_by: &str,
+        _preserve_state: bool,
     ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
         Err(pidash_services::orchestration::creation::CreationError::Db(
             "tool transition reached preflight: agent moves never dispatch_now".to_owned(),

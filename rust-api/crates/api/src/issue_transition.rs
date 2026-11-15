@@ -474,6 +474,7 @@ pub(crate) mod test_support {
             _creator_id: Uuid,
             _pod_id: Uuid,
             _triggered_by: &str,
+            _preserve_state: bool,
         ) -> Result<bool, CreationError> {
             Err(CreationError::Db(
                 "signal test: preflight is unreachable on this path".to_owned(),

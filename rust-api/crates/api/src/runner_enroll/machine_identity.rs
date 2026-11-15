@@ -696,6 +696,7 @@ pub async fn merge_into_post(
                     &bounce.triggered_by,
                     &bounce.reason,
                     &name,
+                    false,
                 )
                 .await
                 {
