@@ -439,22 +439,6 @@ pub fn initial_error_details(error_code: &str) -> Value {
     )
 }
 
-/// The cloud terminal-event guard (`agent_run_finalization.py:72-75`).
-/// `$1` is the run id.
-pub const TERMINAL_EVENT_EXISTS_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM agent_run_event WHERE agent_run_id = $1 AND kind = 'terminal')";
-
-/// The next event seq (`agent_run_finalization.py:76-78`):
-/// `max(seq) + 1`, `1` when no rows. `$1` is the run id.
-pub const TERMINAL_EVENT_SEQ_SQL: &str =
-    "SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_run_event WHERE agent_run_id = $1";
-
-/// The cloud terminal event (`agent_run_finalization.py:79-84`): `$1`
-/// run id, `$2` seq, `$3` the `{"status", "error_code"}` payload, `$4`
-/// created_at.
-pub const TERMINAL_EVENT_INSERT_SQL: &str = "INSERT INTO agent_run_event \
-    (agent_run_id, seq, kind, payload, created_at) VALUES ($1, $2, 'terminal', $3, $4)";
-
 /// Creator flags for the executor seam (`user_has_llm_config` reads
 /// `is_active` / `is_bot`, `agent_execution.py:76`). `$1` is the user id.
 pub const USER_FLAGS_SELECT_SQL: &str = "SELECT is_active, is_bot FROM users WHERE id = $1";
@@ -600,11 +584,10 @@ pub fn run_insert_returning_sql() -> String {
 pub mod orm {
     use chrono::{DateTime, Utc};
     use pidash_db::entity::{
-        agent_run as run, agent_run_event as event, dev_machine, git_code_review_links as reviews,
-        git_repositories as repos, git_repository_bindings as bindings,
-        issue_agent_ticker as ticker, issue_assignees, issue_comments as comments, issue_labels,
-        issue_relations as relations, issues, labels, pod, projects,
-        prompt_section_override as overrides, runner, states, users, workspaces,
+        agent_run as run, dev_machine, git_code_review_links as reviews, git_repositories as repos,
+        git_repository_bindings as bindings, issue_agent_ticker as ticker, issue_assignees,
+        issue_comments as comments, issue_labels, issue_relations as relations, issues, labels,
+        pod, projects, prompt_section_override as overrides, runner, states, users, workspaces,
     };
     use sea_orm::sea_query::extension::postgres::{PgBinOper, PgFunc};
     use sea_orm::sea_query::{
@@ -1053,66 +1036,6 @@ pub mod orm {
             .table(run::Entity)
             .value(run::Column::RunConfig, config.clone())
             .and_where(run_col(run::Column::Id).eq(run_id))
-            .to_owned()
-    }
-
-    /// [`super::TERMINAL_EVENT_EXISTS_SQL`]: output name `exists`.
-    pub fn terminal_event_exists_select(run_id: Uuid) -> SelectStatement {
-        Query::select()
-            .expr_as(
-                Expr::exists(
-                    Query::select()
-                        .expr(Expr::val(1))
-                        .from(event::Entity)
-                        .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
-                        .and_where(Expr::col(event::Column::Kind).eq("terminal"))
-                        .to_owned(),
-                ),
-                alias("exists"),
-            )
-            .to_owned()
-    }
-
-    /// [`super::TERMINAL_EVENT_SEQ_SQL`]: `COALESCE(MAX(seq), 0) + 1`,
-    /// output name `seq` (int4, as `MAX(int4) + 1` is).
-    pub fn terminal_event_seq_select(run_id: Uuid) -> SelectStatement {
-        Query::select()
-            .expr_as(
-                Expr::expr(Func::coalesce([
-                    Expr::col(event::Column::Seq).max(),
-                    Expr::val(0_i32).into(),
-                ]))
-                .add(1_i32),
-                alias("seq"),
-            )
-            .from(event::Entity)
-            .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
-            .to_owned()
-    }
-
-    /// [`super::TERMINAL_EVENT_INSERT_SQL`].
-    pub fn terminal_event_insert(
-        run_id: Uuid,
-        seq: i32,
-        payload: &Value,
-        now: DateTime<Utc>,
-    ) -> InsertStatement {
-        Query::insert()
-            .into_table(event::Entity)
-            .columns([
-                event::Column::AgentRunId,
-                event::Column::Seq,
-                event::Column::Kind,
-                event::Column::Payload,
-                event::Column::CreatedAt,
-            ])
-            .values_panic([
-                Expr::value(run_id),
-                Expr::value(seq),
-                Expr::value("terminal"),
-                Expr::value(payload.clone()),
-                Expr::value(now),
-            ])
             .to_owned()
     }
 
@@ -3497,20 +3420,6 @@ mod tests {
                     .join(", ")
             )),
             "{insert}"
-        );
-        let seq = render(orm::terminal_event_seq_select(id));
-        assert!(
-            seq.contains("COALESCE(MAX(\"seq\"), 0) + 1 AS \"seq\""),
-            "{seq}"
-        );
-        let exists = render(orm::terminal_event_exists_select(id));
-        assert!(
-            exists.contains("EXISTS(SELECT 1 FROM \"agent_run_event\" WHERE"),
-            "{exists}"
-        );
-        assert!(
-            exists.contains("\"kind\" = 'terminal') AS \"exists\""),
-            "{exists}"
         );
     }
 
