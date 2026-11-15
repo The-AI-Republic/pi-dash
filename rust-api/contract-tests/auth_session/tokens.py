@@ -75,3 +75,8 @@ def non_uuid_uidb64() -> str:
 def bad_utf8_uidb64() -> str:
     """uidb64 whose bytes are not valid UTF-8 (decode raises)."""
     return base64.urlsafe_b64encode(b"\xff\xfe\x00bad").rstrip(b"=").decode()
+
+
+def undecodable_uidb64() -> str:
+    """uidb64 that fails base64 decode (length % 4 == 1)."""
+    return "A"

@@ -438,7 +438,12 @@ fn issue_ref_statement(ids: &[Uuid]) -> SelectStatement {
 /// `EstimatePoint.objects.filter(pk=...).first()` plus `estimate.type`
 /// (`:444-453,469`; `db_table = "estimate_points"`, joined to
 /// `"estimates"` like the `new_estimate.estimate` follow — no scope on the
-/// joined table, exactly as the ORM follow has none).
+/// joined table, exactly as the ORM follow has none). Deliberate deviation
+/// (NEWPIDASH-273, DIFF-22): the snapshot also returns soft-deleted points
+/// (no `deleted_at` guard), so the delete-without-replacement worker call —
+/// which runs after `old_estimate_point.delete()` tombstones the point —
+/// still resolves the old side for the `removed` field/value instead of
+/// missing it the way the live-only Django lookup does.
 fn estimate_points_statement(ids: &[Uuid]) -> SelectStatement {
     let ep = Alias::new("ep");
     let e = Alias::new("e");
@@ -457,8 +462,7 @@ fn estimate_points_statement(ids: &[Uuid]) -> SelectStatement {
             Expr::col((ep.clone(), estimate_points::Column::EstimateId))
                 .equals((e.clone(), estimates::Column::Id)),
         )
-        .and_where(Expr::col((ep.clone(), estimate_points::Column::Id)).is_in(ids.to_vec()))
-        .and_where(Expr::col((ep.clone(), estimate_points::Column::DeletedAt)).is_null());
+        .and_where(Expr::col((ep.clone(), estimate_points::Column::Id)).is_in(ids.to_vec()));
     stmt
 }
 
@@ -2548,10 +2552,9 @@ mod tests {
         assert!(estimate_sql.contains("\"estimates\""), "{estimate_sql}");
         assert!(estimate_sql.contains("\"value\""), "{estimate_sql}");
         assert!(estimate_sql.contains("\"estimate_type\""), "{estimate_sql}");
-        assert!(
-            estimate_sql.contains("\"deleted_at\" IS NULL"),
-            "{estimate_sql}"
-        );
+        // NEWPIDASH-273 (DIFF-22): tombstoned points still resolve so the
+        // delete-clear history keeps its field/value (no deleted_at scope).
+        assert!(!estimate_sql.contains("deleted_at"), "{estimate_sql}");
         let latest_sql = latest_activity_query(id)
             .build(DbBackend::Postgres)
             .to_string();

@@ -138,7 +138,9 @@ FROM draft_issues d WHERE d.workspace_id = <ws> GROUP BY d.id;
 --   drafts/your_work/stickies :46-55. Response {key:{is_pinned,sort_order}}
 --   ordered sort_order :63-79. PATCH [A,M,G] :82-101: for data in request.data
 --   (:83): pop key else skip (:84-86); filter(key,slug).first() (:88) — NO
---   user filter (vs R10 :69): member can rewrite ANOTHER user's row. PORT BUG.
+--   user filter (vs R10 :69): member could rewrite ANOTHER user's row.
+--   OLD BUG FIXED (NEWPIDASH-267, DIFF-33; PB-0771, PB-0860): new system
+--   scopes the lookup to the requesting user (user=request.user).
 --   Sets is_pinned/sort_order if present, save(update_fields both :99).
 --   Always 200 {"message":"Successfully updated"} :101.
 -- R12 recent visits (recent_visit.py list [A,M,G] :25-36): filter(slug,user)
