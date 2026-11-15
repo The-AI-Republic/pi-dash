@@ -775,6 +775,7 @@ pub mod assistant {
 pub mod jobs {
     pub use pidash_jobs::admission::RedisAdmissionCache;
     pub use pidash_jobs::default_schedule;
+    pub use pidash_jobs::dispatch::append_event;
     pub use pidash_jobs::dispatch_execute::extra_toolsets_allowed;
     pub use pidash_jobs::dispatch_execute::InvokeError;
     pub use pidash_jobs::dispatch_execute::ModelFailure;
