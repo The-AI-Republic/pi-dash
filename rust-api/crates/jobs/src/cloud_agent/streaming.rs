@@ -58,11 +58,11 @@
 //!   it (some OpenAI-lane captures do); the inference itself belongs
 //!   to the schema layer (PIDASHCONV-1113).
 
-use pidash_jobs::oss_worker::model_runtime::provider::{
+use crate::cloud_agent::provider::{
     generate_tool_call_id, py_repr, Finish, Lane, ProviderError, ToolArgs, WireTool,
     ANTHROPIC_VERSION, USER_AGENT,
 };
-use pidash_jobs::oss_worker::model_runtime::usage::{ProviderTable, RequestUsage};
+use crate::cloud_agent::usage::{ProviderTable, RequestUsage};
 use pidash_services::assistant::retry::{should_retry_status, sleep_for_retry, MAX_RETRIES};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -549,7 +549,7 @@ fn tool_args_dict(args: Option<&ToolArgs>) -> Map<String, Value> {
         Some(ToolArgs::Raw(raw)) => match serde_json::from_str::<Value>(raw) {
             Ok(Value::Object(map)) => map,
             _ => Map::from_iter([(
-                pidash_jobs::oss_worker::model_runtime::provider::INVALID_JSON_KEY.to_owned(),
+                crate::cloud_agent::provider::INVALID_JSON_KEY.to_owned(),
                 Value::String(raw.clone()),
             )]),
         },
@@ -1736,7 +1736,7 @@ async fn post_stream(
 /// classify on text alone. `None` is the generic `internal` bucket.
 #[allow(dead_code)] // the loop hands the `TurnLoopError` to the drive's seam hook; pinned here by tests
 pub fn classify_provider_error(lane: &Lane, error: &ProviderError) -> Option<(String, String)> {
-    use pidash_jobs::assistant::{classify_provider_error, provider_detail, BYOK};
+    use crate::cloud_agent::errors::{classify_provider_error, provider_detail, BYOK};
     let (status, body_detail) = match error {
         ProviderError::Http {
             status, body_json, ..
@@ -1760,8 +1760,7 @@ mod tests {
         parse_blob, TurnOutcome, TurnRequestPart, TurnResponsePart, TurnState,
     };
     use super::*;
-    use pidash_jobs::oss_worker::model_runtime::schemas::Golden;
-    use pidash_jobs::oss_worker::model_runtime::usage::UsageNumber;
+    use crate::cloud_agent::usage::UsageNumber;
     use std::path::PathBuf;
 
     fn fixture_dir() -> PathBuf {
@@ -1776,8 +1775,8 @@ mod tests {
     }
 
     fn provider_table() -> ProviderTable {
-        let golden = Golden::load().expect("golden parses");
-        ProviderTable::load(&golden).expect("provider table loads")
+        let document = crate::cloud_agent::usage_table::load().expect("fixture parses");
+        ProviderTable::load(&document).expect("provider table loads")
     }
 
     /// Wire tools from a captured request body, including the
@@ -3343,7 +3342,7 @@ mod tests {
         assert_eq!(
             tool_args_dict(Some(&ToolArgs::Raw("xx".to_owned()))),
             Map::from_iter([(
-                pidash_jobs::oss_worker::model_runtime::provider::INVALID_JSON_KEY.to_owned(),
+                crate::cloud_agent::provider::INVALID_JSON_KEY.to_owned(),
                 Value::String("xx".to_owned())
             )])
         );

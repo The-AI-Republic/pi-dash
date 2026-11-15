@@ -579,14 +579,10 @@ pub fn model_started_payload(model_name: &str) -> Map<String, Value> {
 /// Usage limits for one invocation (`runtime.py:56-63`): each key reads
 /// the run plan's `limits` first, falling back to the setting. `None` is
 /// an explicit plan `null` — pydantic's unlimited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UsageLimits {
-    pub request_limit: Option<i64>,
-    pub tool_calls_limit: Option<i64>,
-    pub input_tokens_limit: Option<i64>,
-    pub output_tokens_limit: Option<i64>,
-    pub total_tokens_limit: Option<i64>,
-}
+///
+/// Lives on the engine (`cloud_agent::usage`) since P2; re-exported
+/// here for the remaining dispatch readers until P3.
+pub use crate::cloud_agent::usage::UsageLimits;
 
 /// Why a plan limit is unusable: the pydantic-`ValidationError` analog —
 /// a present, non-null, non-numeric value. Surfaces through the generic

@@ -11,6 +11,7 @@
 //! (`apps/api/pi_dash/bgtasks/github_signals.py:31-74`).
 
 pub mod git_sync;
+pub mod github_app;
 pub mod github_signals;
 pub mod github_sync;
 
