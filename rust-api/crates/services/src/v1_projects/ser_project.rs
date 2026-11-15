@@ -467,7 +467,7 @@ pub struct SharedChecks<'a> {
     pub executor: Option<&'a str>,
     /// Raw `default_work_type` input (`_validate_default_work_type`).
     pub work_type: Option<&'a str>,
-    /// `managed_runner_is_enabled()`.
+    /// `pidash_agent_is_enabled()`.
     pub managed_enabled: bool,
     /// Raw `name` input.
     pub name: Option<&'a str>,

@@ -1231,7 +1231,7 @@ fn page_view_props() -> Value {
 pub struct PgSeedStore {
     pool: sqlx::PgPool,
     now: DateTime<Utc>,
-    managed: pidash_db::config::ManagedRunnerSettings,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
@@ -1239,7 +1239,7 @@ impl PgSeedStore {
     pub fn new(
         pool: sqlx::PgPool,
         now: DateTime<Utc>,
-        managed: pidash_db::config::ManagedRunnerSettings,
+        managed: pidash_db::config::PidashAgentSettings,
         assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Self {
         Self {
@@ -2509,7 +2509,7 @@ pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
     seed_data_dir: PathBuf,
-    managed: pidash_db::config::ManagedRunnerSettings,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
     let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {

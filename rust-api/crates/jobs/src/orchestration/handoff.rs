@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
-use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::{
     agent_run, dev_machine, git_code_review_links, git_repositories, git_repository_bindings,
     issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
@@ -75,7 +75,7 @@ fn now_micros() -> DateTime<Utc> {
 #[derive(Clone)]
 pub struct HandoffInlineDeps {
     /// Managed-runner executor settings.
-    pub managed: ManagedRunnerSettings,
+    pub managed: PidashAgentSettings,
     /// Shared Redis client for admission buckets and pod drains.
     pub redis: Option<redis::Client>,
     /// Runner-plane settings for pod drains.
@@ -919,8 +919,8 @@ fn twin_map_execution_fields(
     fields: crate::run_dispatch::ExecutionFields,
 ) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -2305,7 +2305,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: serde_json::json!({}),
             tool_plan: serde_json::json!({}),
             trigger: "direct".to_owned(),

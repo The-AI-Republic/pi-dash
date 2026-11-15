@@ -1,4 +1,4 @@
-//! The machine's built-in engine, as the daemon holds it (design §4.3).
+//! The machine's Pi Dash Agent, as the daemon holds it (design §4.3).
 //!
 //! - **Engine credential** (`ec_`, 14 days): read from `config.toml` /
 //!   the keychain through the daemon's [`WorkspaceTokens`] store, so a
@@ -26,7 +26,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 
-use super::api::{EngineApi, EngineApiError, EnginePause, EngineProfile, MachinePayload, reason};
+use super::api::{PidashAgentApi, PidashAgentApiError, PidashAgentPause, PidashAgentProfile, MachinePayload, reason};
 use super::codex_config::{AuthHelper, codex_home, write_engine_config};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::ipc::protocol::{EngineSignInState, EngineState, EngineStatusInfo};
@@ -62,7 +62,7 @@ pub struct ModelTokenError {
 
 #[derive(Default)]
 struct State {
-    profile: Option<EngineProfile>,
+    profile: Option<PidashAgentProfile>,
     profile_fetched_at: Option<DateTime<Utc>>,
     /// Sign-in state the server last reported (profile / login).
     server_sign_in: Option<EngineSignInState>,
@@ -71,15 +71,15 @@ struct State {
     /// next success or a credential change.
     token_failure: Option<String>,
     /// The machine's pause state as the server last reported it, and when.
-    pause: Option<(EnginePause, DateTime<Utc>)>,
+    pause: Option<(PidashAgentPause, DateTime<Utc>)>,
     /// Bumped by every credential change. A model-token fetch started
     /// under an older generation (with the old credential) does not store
     /// its result.
     generation: u64,
 }
 
-pub struct EngineManager {
-    api: Option<EngineApi>,
+pub struct PidashAgentManager {
+    api: Option<PidashAgentApi>,
     paths: Paths,
     tokens: WorkspaceTokens,
     /// Engine binary resolved at daemon start (`None`: not installed).
@@ -92,7 +92,7 @@ pub struct EngineManager {
     changed: Notify,
 }
 
-impl EngineManager {
+impl PidashAgentManager {
     pub(crate) fn new(
         cloud_url: Option<&str>,
         paths: Paths,
@@ -101,7 +101,7 @@ impl EngineManager {
     ) -> Arc<Self> {
         let api = cloud_url
             .filter(|u| !u.is_empty())
-            .and_then(|u| EngineApi::new(u).ok());
+            .and_then(|u| PidashAgentApi::new(u).ok());
         let helper_program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pidash"));
         let server_sign_in = tokens.engine_sign_in_state();
         Arc::new(Self {
@@ -143,7 +143,7 @@ impl EngineManager {
     }
 
     /// Cache the machine's pause state the server reported.
-    pub fn set_pause(&self, pause: EnginePause) {
+    pub fn set_pause(&self, pause: PidashAgentPause) {
         self.state().pause = Some((pause, Utc::now()));
     }
 
@@ -155,7 +155,7 @@ impl EngineManager {
     }
 
     /// The cached pause state, if the server reported one.
-    pub fn pause(&self) -> Option<EnginePause> {
+    pub fn pause(&self) -> Option<PidashAgentPause> {
         self.state().pause.as_ref().map(|(p, _)| p.clone())
     }
 
@@ -166,11 +166,11 @@ impl EngineManager {
         machine_token: &str,
         dev_machine_id: uuid::Uuid,
         paused: bool,
-    ) -> Result<EngineStatusInfo, EngineApiError> {
+    ) -> Result<EngineStatusInfo, PidashAgentApiError> {
         let api = self
             .api
             .as_ref()
-            .ok_or_else(|| EngineApiError::Other("the daemon runs offline".into()))?;
+            .ok_or_else(|| PidashAgentApiError::Other("the daemon runs offline".into()))?;
         let payload = api
             .set_paused(machine_token, dev_machine_id, paused)
             .await?;
@@ -192,11 +192,11 @@ impl EngineManager {
         &self,
         machine_token: &str,
         dev_machine_id: uuid::Uuid,
-    ) -> Result<MachinePayload, EngineApiError> {
+    ) -> Result<MachinePayload, PidashAgentApiError> {
         let api = self
             .api
             .as_ref()
-            .ok_or_else(|| EngineApiError::Other("the daemon runs offline".into()))?;
+            .ok_or_else(|| PidashAgentApiError::Other("the daemon runs offline".into()))?;
         let payload = api.machine(machine_token, dev_machine_id).await?;
         self.note_machine_payload(&payload);
         Ok(payload)
@@ -218,7 +218,7 @@ impl EngineManager {
         let Some(credential) = self.tokens.engine_credential() else {
             return Err(ModelTokenError {
                 reason_code: reason::ENGINE_SIGN_IN_REQUIRED.into(),
-                message: "the built-in engine is not signed in on this computer; run `pidash login --engine`".into(),
+                message: "the Pi Dash Agent is not signed in on this computer; run `pidash login --engine`".into(),
             });
         };
         if credential.expires_at.is_some_and(|e| e <= Utc::now()) {
@@ -260,7 +260,7 @@ impl EngineManager {
                     .reason_code()
                     .unwrap_or("model_token_unavailable")
                     .to_string();
-                if matches!(e, EngineApiError::Refused { .. }) {
+                if matches!(e, PidashAgentApiError::Refused { .. }) {
                     let mut st = self.state();
                     if st.generation != generation {
                         return Err(ModelTokenError {
@@ -301,13 +301,13 @@ impl EngineManager {
                     self.tokens.mark_revoked(&machine_token);
                     continue;
                 }
-                Err(EngineApiError::Refused {
+                Err(PidashAgentApiError::Refused {
                     reason_code,
                     status,
                     ..
                 }) => {
                     tracing::warn!(status, %reason_code, "engine profile refused");
-                    break EngineProfile {
+                    break PidashAgentProfile {
                         available: false,
                         lane: String::new(),
                         base_url: String::new(),
@@ -325,12 +325,12 @@ impl EngineManager {
         self.apply_profile(profile);
     }
 
-    fn apply_profile(&self, profile: EngineProfile) {
+    fn apply_profile(&self, profile: PidashAgentProfile) {
         let codex_home = self.codex_home();
         if profile.available {
             let helper = AuthHelper::for_paths(self.helper_program.clone(), &self.paths);
             match write_engine_config(&codex_home, &profile, &helper) {
-                Ok(_) => super::agent::set_launch(Some(super::agent::EngineLaunch { codex_home })),
+                Ok(_) => super::agent::set_launch(Some(super::agent::PidashAgentLaunch { codex_home })),
                 Err(e) => tracing::error!("writing the engine config failed: {e:#}"),
             }
         } else {
@@ -490,7 +490,7 @@ impl EngineManager {
     }
 
     /// The profile last fetched, if any.
-    pub fn profile(&self) -> Option<EngineProfile> {
+    pub fn profile(&self) -> Option<PidashAgentProfile> {
         self.state().profile.clone()
     }
 
@@ -524,8 +524,8 @@ impl EngineManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{CliSection, EngineCredential};
-    use crate::engine::test_server::{self, Handler};
+    use crate::config::schema::{CliSection, PidashAgentCredential};
+    use crate::pidash_agent::test_server::{self, Handler};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn paths(root: &std::path::Path) -> Paths {
@@ -542,7 +542,7 @@ mod tests {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
             account_user_id: Some("u-1".into()),
-            engine_credential: Some(EngineCredential {
+            engine_credential: Some(PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: Some(Utc::now() + expires_in),
             }),
@@ -559,8 +559,8 @@ mod tests {
         .to_string()
     }
 
-    fn manager(url: &str, root: &std::path::Path, cli: CliSection) -> Arc<EngineManager> {
-        EngineManager::new(
+    fn manager(url: &str, root: &std::path::Path, cli: CliSection) -> Arc<PidashAgentManager> {
+        PidashAgentManager::new(
             Some(url),
             paths(root),
             WorkspaceTokens::from_cli(Some(&cli)),
@@ -626,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn a_token_fetched_with_a_credential_that_changed_meanwhile_is_dropped() {
         // The credential changes (a sign-out) while the fetch is in flight.
-        let slot: Arc<std::sync::OnceLock<Arc<EngineManager>>> = Arc::default();
+        let slot: Arc<std::sync::OnceLock<Arc<PidashAgentManager>>> = Arc::default();
         let s = slot.clone();
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
@@ -678,7 +678,7 @@ mod tests {
             cli(chrono::Duration::days(10)),
         );
         assert_eq!(m.tokens.engine_sign_in_state(), None);
-        let profile: EngineProfile =
+        let profile: PidashAgentProfile =
             serde_json::from_str(&profile_json(false, "engine_disabled")).unwrap();
         m.apply_profile(profile);
         // In memory at once, so the next pass does not rewrite.
@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn no_engine_binary_is_unavailable() {
         let tmp = tempfile::tempdir().unwrap();
-        let m = EngineManager::new(
+        let m = PidashAgentManager::new(
             None,
             paths(tmp.path()),
             WorkspaceTokens::from_cli(Some(&cli(chrono::Duration::days(10)))),
@@ -923,7 +923,7 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let m = EngineManager::new(
+        let m = PidashAgentManager::new(
             None,
             paths(tmp.path()),
             WorkspaceTokens::from_cli(Some(&cli(chrono::Duration::days(10)))),
@@ -936,7 +936,7 @@ mod tests {
         );
         let installed = tmp.path().join("pidash-agent-engine");
         std::fs::write(&installed, "fake engine").unwrap();
-        super::super::locate::init_at_daemon_start(&crate::config::schema::EngineSection {
+        super::super::locate::init_at_daemon_start(&crate::config::schema::PidashAgentSection {
             binary: Some(installed.clone()),
             ..Default::default()
         })

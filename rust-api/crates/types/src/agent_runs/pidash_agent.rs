@@ -3,8 +3,8 @@
 //! Port of `apps/api/pi_dash/managed_runner/errors.py:15-49`
 //! (`09738d222` adds `RUNNER_PAUSED`):
 //!
-//! * `ManagedRunnerReason` (`:15-37`) → [`ManagedRunnerReason`].
-//! * `ManagedRunnerUnavailable` (`:40-49`) → [`ManagedRunnerUnavailable`].
+//! * `PidashAgentReason` (`:15-37`) → [`PidashAgentReason`].
+//! * `PidashAgentUnavailable` (`:40-49`) → [`PidashAgentUnavailable`].
 //!
 //! Translation notes:
 //!
@@ -15,7 +15,7 @@
 //!   (`assistant/views/agent_profile.py:89-95`); that surfacing lives with
 //!   the handlers layer, not here.
 //! * `str(exc)` is `detail or code` (`errors.py:49`); [`Display`] reproduces
-//!   the fallback while [`ManagedRunnerUnavailable::detail`] stays raw.
+//!   the fallback while [`PidashAgentUnavailable::detail`] stays raw.
 //!   `ValueError` becomes `std::error::Error`.
 //!
 //! Fixture: `rust-api/fixtures/dispatch/fx-disp-01-types.golden.json`
@@ -23,12 +23,12 @@
 //!
 //! Ported bugs: none found in this unit on read-through.
 
-/// Reason codes, in the precedence order `managed_runner_availability`
+/// Reason codes, in the precedence order `pidash_agent_availability`
 /// evaluates them (`errors.py:16-18`): the first failing gate wins, which is
 /// what makes the copy deterministic for a given user/project pair.
-pub struct ManagedRunnerReason;
+pub struct PidashAgentReason;
 
-impl ManagedRunnerReason {
+impl PidashAgentReason {
     /// The operator kill switch is off for this instance.
     pub const DISABLED: &'static str = "managed_runner_disabled";
     /// No viewer supplied, or the viewer's desktop app is not connected.
@@ -37,7 +37,7 @@ impl ManagedRunnerReason {
     pub const LLM_CONFIG_MISSING: &'static str = "llm_config_missing";
     /// The viewer's session predates the gateway scopes and cannot acquire them.
     pub const GATEWAY_SCOPES_MISSING: &'static str = "gateway_scopes_missing";
-    /// The viewer's provider is BYOK, which the desktop engine does not serve
+    /// The viewer's provider is BYOK, which the Pi Dash Agent does not serve
     /// in the MVP (no stored key is ever returned to a client).
     pub const BYOK_UNSUPPORTED: &'static str = "byok_not_supported_on_desktop";
     /// The desktop is connected but has not enrolled a runner for this project
@@ -52,18 +52,18 @@ impl ManagedRunnerReason {
 /// Raised at creation when a managed run cannot be admitted
 /// (`errors.py:36-45`).
 ///
-/// `code` is a [`ManagedRunnerReason`] value; `Display` is the human-readable
+/// `code` is a [`PidashAgentReason`] value; `Display` is the human-readable
 /// sentence for API responses (`detail or code`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedRunnerUnavailable {
+pub struct PidashAgentUnavailable {
     code: String,
     detail: String,
 }
 
-impl ManagedRunnerUnavailable {
-    /// `ManagedRunnerUnavailable(code, detail="")` (`errors.py:47-49`).
+impl PidashAgentUnavailable {
+    /// `PidashAgentUnavailable(code, detail="")` (`errors.py:47-49`).
     pub fn new(code: impl Into<String>, detail: impl Into<String>) -> Self {
-        ManagedRunnerUnavailable {
+        PidashAgentUnavailable {
             code: code.into(),
             detail: detail.into(),
         }
@@ -80,7 +80,7 @@ impl ManagedRunnerUnavailable {
     }
 }
 
-impl std::fmt::Display for ManagedRunnerUnavailable {
+impl std::fmt::Display for PidashAgentUnavailable {
     /// `str(exc)`: the detail, or the code when empty (`errors.py:49`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.detail.is_empty() {
@@ -91,7 +91,7 @@ impl std::fmt::Display for ManagedRunnerUnavailable {
     }
 }
 
-impl std::error::Error for ManagedRunnerUnavailable {}
+impl std::error::Error for PidashAgentUnavailable {}
 
 #[cfg(test)]
 mod tests {
@@ -109,25 +109,25 @@ mod tests {
     #[test]
     fn reason_codes_match_fixture_verbatim() {
         let codes = &managed_fixture()["codes"];
-        assert_eq!(codes["DISABLED"], ManagedRunnerReason::DISABLED);
-        assert_eq!(codes["NOT_CONNECTED"], ManagedRunnerReason::NOT_CONNECTED);
+        assert_eq!(codes["DISABLED"], PidashAgentReason::DISABLED);
+        assert_eq!(codes["NOT_CONNECTED"], PidashAgentReason::NOT_CONNECTED);
         assert_eq!(
             codes["LLM_CONFIG_MISSING"],
-            ManagedRunnerReason::LLM_CONFIG_MISSING
+            PidashAgentReason::LLM_CONFIG_MISSING
         );
         assert_eq!(
             codes["GATEWAY_SCOPES_MISSING"],
-            ManagedRunnerReason::GATEWAY_SCOPES_MISSING
+            PidashAgentReason::GATEWAY_SCOPES_MISSING
         );
         assert_eq!(
             codes["BYOK_UNSUPPORTED"],
-            ManagedRunnerReason::BYOK_UNSUPPORTED
+            PidashAgentReason::BYOK_UNSUPPORTED
         );
         assert_eq!(
             codes["NO_RUNNER_FOR_PROJECT"],
-            ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+            PidashAgentReason::NO_RUNNER_FOR_PROJECT
         );
-        assert_eq!(codes["RUNNER_PAUSED"], ManagedRunnerReason::RUNNER_PAUSED);
+        assert_eq!(codes["RUNNER_PAUSED"], PidashAgentReason::RUNNER_PAUSED);
         assert_eq!(codes.as_object().expect("codes").len(), 7);
     }
 
@@ -136,22 +136,22 @@ mod tests {
         let golden = managed_fixture();
         // is_ValueError: the Rust error implements std::error::Error.
         assert_eq!(golden["is_ValueError"], true);
-        let err = ManagedRunnerUnavailable::new(ManagedRunnerReason::DISABLED, "");
+        let err = PidashAgentUnavailable::new(PidashAgentReason::DISABLED, "");
         let _: &dyn std::error::Error = &err;
 
         // default_detail_is_code: str(exc) is the code when detail is empty.
         assert_eq!(golden["default_detail_is_code"], true);
-        assert_eq!(err.to_string(), ManagedRunnerReason::DISABLED);
+        assert_eq!(err.to_string(), PidashAgentReason::DISABLED);
         assert_eq!(err.detail(), "");
 
         // code_attr + explicit_detail.
-        assert_eq!(golden["code_attr"], ManagedRunnerReason::DISABLED);
+        assert_eq!(golden["code_attr"], PidashAgentReason::DISABLED);
         assert_eq!(err.code(), golden["code_attr"].as_str().expect("code"));
-        let explicit = ManagedRunnerUnavailable::new(
-            ManagedRunnerReason::DISABLED,
+        let explicit = PidashAgentUnavailable::new(
+            PidashAgentReason::DISABLED,
             golden["explicit_detail"].as_str().expect("detail"),
         );
         assert_eq!(explicit.to_string(), "custom detail");
-        assert_eq!(explicit.code(), ManagedRunnerReason::DISABLED);
+        assert_eq!(explicit.code(), PidashAgentReason::DISABLED);
     }
 }

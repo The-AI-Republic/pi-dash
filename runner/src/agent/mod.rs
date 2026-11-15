@@ -441,10 +441,10 @@ impl AgentBridge {
                 .await?;
                 Ok(AgentBridge::Codex(b))
             }
-            AgentKind::Engine => {
-                // The built-in engine is Codex: the daemon supplies its
+            AgentKind::PidashAgent => {
+                // The Pi Dash Agent is Codex: the daemon supplies its
                 // binary, CODEX_HOME and auth helper (`engine::agent`).
-                let prepared = crate::engine::agent::prepare(runner)?;
+                let prepared = crate::pidash_agent::agent::prepare(runner)?;
                 let engine_settings = mode
                     .map(crate::approval::engine_thread_settings)
                     .unwrap_or_default();

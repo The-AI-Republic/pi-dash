@@ -991,7 +991,7 @@ pub fn profile_fn(
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+        let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
         pidash_services::run_creation::LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
@@ -1026,7 +1026,7 @@ pub async fn dispatch_deps(
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            managed: state.settings().managed_runner.clone(),
+            managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
             llm_profile: profile_fn(presence),
         },
@@ -1059,7 +1059,7 @@ pub async fn dispatch_deps_for_ids(
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            managed: state.settings().managed_runner.clone(),
+            managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
             llm_profile: profile_fn(presence),
         },

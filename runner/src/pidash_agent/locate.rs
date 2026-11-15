@@ -1,4 +1,4 @@
-//! Find the built-in engine for this `pidash`.
+//! Find the Pi Dash Agent for this `pidash`.
 //!
 //! The daemon resolves the engine once, at start ([`init_at_daemon_start`]),
 //! and keeps that path for its whole life ([`resolved`]). `pidash update`
@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::config::schema::EngineSection;
+use crate::config::schema::PidashAgentSection;
 
 /// Which install layout an engine was found in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub enum Layout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EngineSource {
+pub enum PidashAgentSource {
     /// `[engine] binary` from the config file.
     ConfigOverride,
     /// Found in an installed layout next to the executable.
@@ -45,13 +45,13 @@ pub enum EngineSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedEngine {
+pub struct ResolvedPidashAgent {
     /// Absolute path to the engine executable.
     pub binary: PathBuf,
     /// Engine version directory the binary lives in. `None` for the config
     /// override, whose version is whatever the developer pointed at.
     pub version: Option<String>,
-    pub source: EngineSource,
+    pub source: PidashAgentSource,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub enum LocateError {
     #[error("[engine] binary = {0:?} does not exist or is not a file")]
     OverrideMissing(PathBuf),
     #[error(
-        "built-in engine {version} not found; looked in: {}. Run `pidash engine install` to install it",
+        "Pi Dash Agent {version} not found; looked in: {}. Run `pidash engine install` to install it",
         display_paths(.searched)
     )]
     NotInstalled {
@@ -114,13 +114,13 @@ pub fn resolve_from(
     exe_paths: &[PathBuf],
     version: &str,
     windows: bool,
-) -> Result<ResolvedEngine, LocateError> {
+) -> Result<ResolvedPidashAgent, LocateError> {
     if let Some(binary) = override_binary {
         if binary.is_file() {
-            return Ok(ResolvedEngine {
+            return Ok(ResolvedPidashAgent {
                 binary: binary.to_path_buf(),
                 version: None,
-                source: EngineSource::ConfigOverride,
+                source: PidashAgentSource::ConfigOverride,
             });
         }
         return Err(LocateError::OverrideMissing(binary.to_path_buf()));
@@ -139,10 +139,10 @@ pub fn resolve_from(
             }
             let binary = dir.join(name);
             if binary.is_file() {
-                return Ok(ResolvedEngine {
+                return Ok(ResolvedPidashAgent {
                     binary,
                     version: Some(version.to_string()),
-                    source: EngineSource::Installed(layout),
+                    source: PidashAgentSource::Installed(layout),
                 });
             }
             searched.push(dir);
@@ -177,7 +177,7 @@ fn expand_home(path: &Path) -> PathBuf {
 }
 
 /// Resolve the engine for the running executable and this config.
-pub fn resolve(config: &EngineSection) -> Result<ResolvedEngine, LocateError> {
+pub fn resolve(config: &PidashAgentSection) -> Result<ResolvedPidashAgent, LocateError> {
     let override_binary = config.binary.as_deref().map(expand_home);
     resolve_from(
         override_binary.as_deref(),
@@ -187,7 +187,7 @@ pub fn resolve(config: &EngineSection) -> Result<ResolvedEngine, LocateError> {
     )
 }
 
-static RESOLVED: OnceLock<ResolvedEngine> = OnceLock::new();
+static RESOLVED: OnceLock<ResolvedPidashAgent> = OnceLock::new();
 
 /// Resolve the engine for this daemon process and keep the result.
 /// A missing engine is logged, not fatal: runners driving the user's own
@@ -196,8 +196,8 @@ static RESOLVED: OnceLock<ResolvedEngine> = OnceLock::new();
 /// binary. A failed resolve is not remembered: after the daemon installs a
 /// missing engine (`super::auto_install`) it calls this again.
 pub fn init_at_daemon_start(
-    config: &EngineSection,
-) -> Result<&'static ResolvedEngine, LocateError> {
+    config: &PidashAgentSection,
+) -> Result<&'static ResolvedPidashAgent, LocateError> {
     if let Some(engine) = RESOLVED.get() {
         return Ok(engine);
     }
@@ -207,12 +207,12 @@ pub fn init_at_daemon_start(
                 binary = %engine.binary.display(),
                 version = engine.version.as_deref().unwrap_or("override"),
                 source = ?engine.source,
-                "built-in engine resolved"
+                "Pi Dash Agent resolved"
             );
             Ok(RESOLVED.get_or_init(|| engine))
         }
         Err(err) => {
-            tracing::warn!(error = %err, "built-in engine unavailable");
+            tracing::warn!(error = %err, "Pi Dash Agent unavailable");
             Err(err)
         }
     }
@@ -220,7 +220,7 @@ pub fn init_at_daemon_start(
 
 /// The engine resolved for this daemon, if any. `None` before
 /// [`init_at_daemon_start`] has succeeded.
-pub fn resolved() -> Option<&'static ResolvedEngine> {
+pub fn resolved() -> Option<&'static ResolvedPidashAgent> {
     RESOLVED.get()
 }
 
@@ -251,7 +251,7 @@ mod tests {
         let got = resolve_from(None, &[exe], V, false).unwrap();
         assert_eq!(got.binary, binary);
         assert_eq!(got.version.as_deref(), Some(V));
-        assert_eq!(got.source, EngineSource::Installed(Layout::UnixLib));
+        assert_eq!(got.source, PidashAgentSource::Installed(Layout::UnixLib));
     }
 
     #[test]
@@ -268,7 +268,7 @@ mod tests {
 
         let got = resolve_from(None, &[exe], V, false).unwrap();
         assert_eq!(got.binary, binary);
-        assert_eq!(got.source, EngineSource::Installed(Layout::Sibling));
+        assert_eq!(got.source, PidashAgentSource::Installed(Layout::Sibling));
     }
 
     #[test]
@@ -309,7 +309,7 @@ mod tests {
 
         let got = resolve_from(None, &[exe], V, true).unwrap();
         assert_eq!(got.binary, binary);
-        assert_eq!(got.source, EngineSource::Installed(Layout::Sibling));
+        assert_eq!(got.source, PidashAgentSource::Installed(Layout::Sibling));
     }
 
     #[test]
@@ -399,7 +399,7 @@ mod tests {
         let got = resolve_from(Some(&dev), &[exe], V, false).unwrap();
         assert_eq!(got.binary, dev);
         assert_eq!(got.version, None);
-        assert_eq!(got.source, EngineSource::ConfigOverride);
+        assert_eq!(got.source, PidashAgentSource::ConfigOverride);
     }
 
     #[test]

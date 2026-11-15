@@ -47,13 +47,13 @@ pub mod startup {
 /// and the services extension seams the overlay implements.
 pub mod state {
     pub use pidash_api::desktop_gate::header_value;
-    pub use pidash_api::desktop_gate::DesktopCredential;
-    pub use pidash_api::desktop_gate::DesktopRequestGate;
+    pub use pidash_api::desktop_gate::PidashAgentDesktopCredential;
+    pub use pidash_api::desktop_gate::PidashAgentDesktopRequestGate;
     pub use pidash_api::state::AppState; // also imported by the overlay as `pidash_api::AppState`.
-    pub use pidash_services::extensions::AgentModelProfile;
     pub use pidash_services::extensions::AssistantModelSeam;
     pub use pidash_services::extensions::CredentialError;
     pub use pidash_services::extensions::CredentialUnavailable;
+    pub use pidash_services::extensions::PidashAgentProfile;
     pub use pidash_services::extensions::SeamFuture;
     pub use pidash_services::extensions::TitleError;
     pub use pidash_services::extensions::TitleRequest;
@@ -736,7 +736,7 @@ pub mod assistant {
     pub use pidash_services::assistant::retry::MAX_RETRIES;
     pub use pidash_services::assistant::retry::MAX_RETRY_DELAY_SECS;
     pub use pidash_services::assistant::retry::RETRY_AFTER_MAX_SECS;
-    pub use pidash_services::assistant::seams::agent_model_credential_for_user;
+    pub use pidash_services::assistant::seams::pidash_agent_credential_for_user;
     pub use pidash_services::assistant::ssrf::is_blocked;
     pub use pidash_services::assistant::ssrf::SystemResolver;
     pub use pidash_services::assistant::title::clean_title;
@@ -904,7 +904,7 @@ pub mod db {
     pub use pidash_db::app_project::models::project_member;
     pub use pidash_db::config::registry::ConfigRegistry;
     pub use pidash_db::config::registry::ConfigSource;
-    pub use pidash_db::config::settings::ManagedRunnerSettings;
+    pub use pidash_db::config::settings::PidashAgentSettings;
     pub use pidash_db::config::settings::RunnerSettings;
     pub use pidash_db::config::AssistantSettings;
     pub use pidash_db::config::NoOverlay;

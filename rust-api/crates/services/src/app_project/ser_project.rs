@@ -44,7 +44,7 @@
 //! [`cloud_agent_is_configured`](crate::run_creation::executor_policy::cloud_agent_is_configured),
 //! [`agent_executor_options`](crate::run_creation::executor_policy::agent_executor_options)
 //! (+ [`UserFlags`](crate::run_creation::executor_policy::UserFlags),
-//! [`ManagedAvailability`](crate::run_creation::executor_policy::ManagedAvailability),
+//! [`PidashAgentAvailability`](crate::run_creation::executor_policy::PidashAgentAvailability),
 //! [`ExecutorOption`](crate::run_creation::executor_policy::ExecutorOption)) and
 //! [`CloudAgentUnavailableBody`](crate::run_creation::pidash_agent_availability::CloudAgentUnavailableBody)
 //! (+
@@ -136,7 +136,7 @@
 //! Fixture: `rust-api/fixtures/app_project/FX-APROJ-01.serializers_project.json`
 //! (FX-APROJ-01).
 
-use crate::run_creation::executor_policy::{ExecutorOption, ManagedAvailability, UserFlags};
+use crate::run_creation::executor_policy::{ExecutorOption, PidashAgentAvailability, UserFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -728,7 +728,7 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 /// pod-work verdicts (`local_runner_available_exists` /
 /// `local_runner_exists`, online incl. paused for the exists leg —
 /// evaluated only when unavailable, as Python's `elif`), and
-/// `managed` the L4 `managed_runner_availability` verdict, all passed
+/// `managed` the L4 `pidash_agent_availability` verdict, all passed
 /// through verbatim. Rows are always
 /// `[cloud_agent, local_runner, managed_runner]`, each carrying
 /// `deprecated` (#2903: true for cloud/managed).
@@ -738,7 +738,7 @@ pub fn project_executor_options<F>(
     has_usable_llm_config: F,
     local_runner_available: bool,
     local_runner_exists: bool,
-    managed: ManagedAvailability,
+    managed: PidashAgentAvailability,
 ) -> [ExecutorOption; 3]
 where
     F: FnOnce() -> bool,
@@ -1848,8 +1848,8 @@ mod tests {
         panic!("key {key} not found at top level");
     }
 
-    fn managed_disabled() -> ManagedAvailability {
-        ManagedAvailability {
+    fn managed_disabled() -> PidashAgentAvailability {
+        PidashAgentAvailability {
             available: false,
             reason_code: "managed_runner_disabled".to_string(),
         }

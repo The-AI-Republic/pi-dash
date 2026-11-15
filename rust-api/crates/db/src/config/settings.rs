@@ -97,7 +97,7 @@ pub struct Settings {
     pub loop_tuning: LoopSettings,
     pub storage: StorageSettings,
     pub runner: RunnerSettings,
-    pub managed_runner: ManagedRunnerSettings,
+    pub pidash_agent: PidashAgentSettings,
     pub default_agent_executor: String,
     pub session: SessionSettings,
     pub urls: UrlSettings,
@@ -221,7 +221,7 @@ pub struct RunnerSettings {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ManagedRunnerSettings {
+pub struct PidashAgentSettings {
     pub enabled: bool,
     pub queued_max_age_secs: i64,
     pub graceful_stop_secs: i64,
@@ -1104,7 +1104,7 @@ impl Settings {
                     ConfigValue::from(90),
                 )?,
             },
-            managed_runner: ManagedRunnerSettings {
+            pidash_agent: PidashAgentSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
                 queued_max_age_secs: ctx.req_int(
                     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",

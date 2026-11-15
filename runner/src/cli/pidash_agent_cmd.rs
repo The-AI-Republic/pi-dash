@@ -1,10 +1,10 @@
-//! `pidash engine` — the built-in agent engine that ships with the CLI.
+//! `pidash engine` — the Pi Dash Agent engine that ships with the CLI.
 //!
 //! - `pidash engine install` places this release's `engine/<version>/`
 //!   directory next to `pidash`. The cargo-dist shell and PowerShell
 //!   installers only install executables onto `PATH` and drop the rest of
 //!   the archive, so the `install.sh` / `install.ps1` wrappers run this right
-//!   after them (see `crate::engine::install`). The MSI places the engine
+//!   after them (see `crate::pidash_agent::install`). The MSI places the engine
 //!   itself.
 //! - `pidash engine path` prints where the daemon would find the engine.
 //! - `pidash engine pause` / `resume` set the per-machine "Pause the built-in
@@ -18,29 +18,29 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::RUNNER_VERSION;
-use crate::engine;
+use crate::pidash_agent;
 use crate::util::paths::Paths;
 
 #[derive(Debug, Args)]
-pub struct EngineArgs {
+pub struct PidashAgentArgs {
     #[command(subcommand)]
-    pub command: EngineCommand,
+    pub command: PidashAgentCommand,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum EngineCommand {
-    /// Install the built-in engine of this pidash release next to pidash
+pub enum PidashAgentCommand {
+    /// Install the Pi Dash Agent of this pidash release next to pidash
     /// (downloads this release's archive and verifies its checksum).
     Install(InstallArgs),
     /// Print the engine binary the daemon would use, and exit non-zero if
     /// there is none.
     Path,
-    /// Pause the built-in engine on this computer: its runners take no new
+    /// Pause the Pi Dash Agent on this computer: its runners take no new
     /// work until `pidash engine resume`. Own-agent runners are unaffected.
     Pause,
-    /// Resume the built-in engine after `pidash engine pause`.
+    /// Resume the Pi Dash Agent after `pidash engine pause`.
     Resume,
-    /// Show the built-in engine's state on this computer.
+    /// Show the Pi Dash Agent's state on this computer.
     Status(StatusArgs),
 }
 
@@ -53,13 +53,13 @@ pub struct StatusArgs {
 
 /// `pidash __engine …`: internal verbs the engine runs.
 #[derive(Debug, Args)]
-pub struct EngineHelperArgs {
+pub struct PidashAgentHelperArgs {
     #[command(subcommand)]
-    pub command: EngineHelperCommand,
+    pub command: PidashAgentHelperCommand,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum EngineHelperCommand {
+pub enum PidashAgentHelperCommand {
     /// Print the current model token (the engine's auth helper).
     ModelToken,
 }
@@ -72,22 +72,22 @@ pub struct InstallArgs {
     pub release: Option<String>,
 }
 
-pub async fn run(args: EngineArgs, paths: &Paths) -> Result<()> {
+pub async fn run(args: PidashAgentArgs, paths: &Paths) -> Result<()> {
     match args.command {
-        EngineCommand::Install(args) => install(args).await,
-        EngineCommand::Path => path(paths),
-        EngineCommand::Pause => set_paused(paths, true).await,
-        EngineCommand::Resume => set_paused(paths, false).await,
-        EngineCommand::Status(a) => status(paths, a.json).await,
+        PidashAgentCommand::Install(args) => install(args).await,
+        PidashAgentCommand::Path => path(paths),
+        PidashAgentCommand::Pause => set_paused(paths, true).await,
+        PidashAgentCommand::Resume => set_paused(paths, false).await,
+        PidashAgentCommand::Status(a) => status(paths, a.json).await,
     }
 }
 
 /// `pidash __engine model-token`: ask the daemon over the local socket and
 /// print the token on stdout, the only thing the engine reads. Nothing is
 /// written to disk.
-pub async fn run_helper(args: EngineHelperArgs, paths: &Paths) -> Result<()> {
+pub async fn run_helper(args: PidashAgentHelperArgs, paths: &Paths) -> Result<()> {
     match args.command {
-        EngineHelperCommand::ModelToken => {
+        PidashAgentHelperCommand::ModelToken => {
             let token = fetch_model_token(paths).await?;
             println!("{token}");
             Ok(())
@@ -139,10 +139,10 @@ async fn set_paused(paths: &Paths, paused: bool) -> Result<()> {
     }
     if paused {
         println!(
-            "Paused the built-in engine on this computer. Its runners take no new work until `pidash engine resume`."
+            "Paused the Pi Dash Agent on this computer. Its runners take no new work until `pidash engine resume`."
         );
     } else {
-        println!("Resumed the built-in engine on this computer.");
+        println!("Resumed the Pi Dash Agent on this computer.");
     }
     if let Some(reason) = via_daemon.and_then(|st| st.auto_pause_reason) {
         println!("The server also paused it automatically: {reason}.");
@@ -168,7 +168,7 @@ async fn set_paused_direct(paths: &Paths, paused: bool) -> Result<()> {
                 .find(|t| t.starts_with("mt_"))
         })
         .context("this computer holds no daemon credential; run `pidash auth login`")?;
-    let api = engine::api::EngineApi::new(&cfg.daemon.cloud_url)?;
+    let api = pidash_agent::api::PidashAgentApi::new(&cfg.daemon.cloud_url)?;
     api.set_paused(&token, machine_id, paused)
         .await
         .map_err(|e| anyhow::anyhow!("the server did not change the engine pause: {e}"))?;
@@ -184,7 +184,7 @@ async fn status(paths: &Paths, json: bool) -> Result<()> {
             other => anyhow::bail!("unexpected daemon response: {other:?}"),
         },
         // No daemon: compute it the way the daemon would.
-        Err(_) => engine::provision::status_without_daemon(paths).await?,
+        Err(_) => pidash_agent::provision::status_without_daemon(paths).await?,
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&st)?);
@@ -240,13 +240,13 @@ fn describe_pause(st: &crate::ipc::protocol::EngineStatusInfo) -> String {
 
 async fn install(args: InstallArgs) -> Result<()> {
     let release = args.release.as_deref().unwrap_or(RUNNER_VERSION);
-    let root = engine::install::install_root_for_current_exe()?;
+    let root = pidash_agent::install::install_root_for_current_exe()?;
     // This release's engine version is known without downloading anything.
     if release == RUNNER_VERSION {
-        let version = engine::engine_version();
+        let version = pidash_agent::engine_version();
         if root
             .join(version)
-            .join(engine::ENGINE_BINARY_NAME)
+            .join(pidash_agent::ENGINE_BINARY_NAME)
             .is_file()
         {
             println!("engine {version} is already installed");
@@ -254,12 +254,12 @@ async fn install(args: InstallArgs) -> Result<()> {
         }
     }
     println!(
-        "installing the built-in engine of pidash v{release} into {}",
+        "installing the Pi Dash Agent of pidash v{release} into {}",
         root.display()
     );
-    let outcome = engine::install::install_release(release, &root)
+    let outcome = pidash_agent::install::install_release(release, &root)
         .await
-        .context("installing the built-in engine")?;
+        .context("installing the Pi Dash Agent")?;
     for v in &outcome.installed {
         println!("installed engine {v}");
     }
@@ -273,7 +273,7 @@ fn path(paths: &Paths) -> Result<()> {
     let section = crate::config::file::load_config_opt(paths)?
         .map(|c| c.engine)
         .unwrap_or_default();
-    let resolved = engine::locate::resolve(&section)?;
+    let resolved = pidash_agent::locate::resolve(&section)?;
     println!("{}", resolved.binary.display());
     Ok(())
 }

@@ -19,20 +19,20 @@ use crate::config::schema::{AgentKind, RunnerConfig};
 
 /// Launch context the engine manager publishes for this daemon process.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineLaunch {
+pub struct PidashAgentLaunch {
     /// The account's `CODEX_HOME`, holding a written `config.toml`.
     pub codex_home: PathBuf,
 }
 
-static LAUNCH: RwLock<Option<EngineLaunch>> = RwLock::new(None);
+static LAUNCH: RwLock<Option<PidashAgentLaunch>> = RwLock::new(None);
 
 /// Publish (or, with `None`, withdraw) the launch context. Set by the
 /// engine manager whenever it writes the engine config.
-pub fn set_launch(launch: Option<EngineLaunch>) {
+pub fn set_launch(launch: Option<PidashAgentLaunch>) {
     *LAUNCH.write().expect("engine launch lock poisoned") = launch;
 }
 
-pub fn launch() -> Option<EngineLaunch> {
+pub fn launch() -> Option<PidashAgentLaunch> {
     LAUNCH.read().expect("engine launch lock poisoned").clone()
 }
 
@@ -72,16 +72,16 @@ fn pidash_dir() -> Option<PathBuf> {
 
 /// The settings an engine runner spawns with, or why it cannot start.
 pub fn prepare(runner: &RunnerConfig) -> anyhow::Result<RunnerConfig> {
-    debug_assert_eq!(runner.agent.kind, AgentKind::Engine);
+    debug_assert_eq!(runner.agent.kind, AgentKind::PidashAgent);
     let engine = super::locate::resolved().ok_or_else(|| {
         anyhow::anyhow!(
-            "{}: the built-in engine was not found when the daemon started; run `pidash engine install` and restart the daemon",
+            "{}: the Pi Dash Agent was not found when the daemon started; run `pidash engine install` and restart the daemon",
             super::api::reason::ENGINE_NOT_INSTALLED
         )
     })?;
     let launch = launch().ok_or_else(|| {
         anyhow::anyhow!(
-            "{}: the built-in engine is not ready on this computer (no model profile yet); see `pidash status`",
+            "{}: the Pi Dash Agent is not ready on this computer (no model profile yet); see `pidash status`",
             super::api::reason::PROFILE_PENDING
         )
     })?;
@@ -110,7 +110,7 @@ mod tests {
                 working_dir: PathBuf::from("/tasks/acme/WEB"),
             },
             agent: AgentSection {
-                kind: AgentKind::Engine,
+                kind: AgentKind::PidashAgent,
             },
             codex: Default::default(),
             claude_code: Default::default(),
@@ -133,7 +133,7 @@ mod tests {
         );
         assert_eq!(out.codex.codex_home.as_deref(), Some(home.as_path()));
         assert!(out.codex.model_token_file.is_none());
-        assert_eq!(out.agent.kind, AgentKind::Engine);
+        assert_eq!(out.agent.kind, AgentKind::PidashAgent);
         // The agent environment exports this CODEX_HOME, never ~/.codex.
         let env = crate::agent::agent_env_for_config(&out);
         assert_eq!(env.codex_home.as_deref(), Some(home.as_path()));
@@ -155,13 +155,13 @@ mod tests {
             kind = "engine"
         "#;
         let r: RunnerConfig = toml::from_str(toml_text).unwrap();
-        assert_eq!(r.agent.kind, AgentKind::Engine);
+        assert_eq!(r.agent.kind, AgentKind::PidashAgent);
         let back = toml::to_string(&r).unwrap();
         assert!(back.contains("kind = \"engine\""), "{back}");
         assert!(!back.contains("codex_home"), "{back}");
         assert_eq!(
             <AgentKind as clap::ValueEnum>::from_str("engine", false).unwrap(),
-            AgentKind::Engine
+            AgentKind::PidashAgent
         );
     }
 }

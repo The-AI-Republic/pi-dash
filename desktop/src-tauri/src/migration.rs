@@ -35,7 +35,7 @@ use crate::daemon::DaemonPaths;
 
 /// One engine runner block of a legacy tree.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct LegacyEngineRunner {
+pub struct LegacyPidashAgentRunner {
     pub name: String,
     pub runner_id: Option<Uuid>,
     pub project: String,
@@ -51,7 +51,7 @@ pub struct LegacyTree {
     pub cloud_url: Option<String>,
     /// The legacy desktop machine (the merge endpoint's source).
     pub dev_machine_id: Option<Uuid>,
-    pub engine_runners: Vec<LegacyEngineRunner>,
+    pub engine_runners: Vec<LegacyPidashAgentRunner>,
 }
 
 /// Read one tree's `config.toml`. `None` when it is gone (already migrated)
@@ -70,10 +70,10 @@ fn read_tree(dir: &Path, workspace_hint: Option<&str>) -> Option<LegacyTree> {
         .and_then(|r| r.as_array())
         .cloned()
         .unwrap_or_default();
-    let engine_runners: Vec<LegacyEngineRunner> = blocks
+    let engine_runners: Vec<LegacyPidashAgentRunner> = blocks
         .iter()
         .filter_map(|b| {
-            Some(LegacyEngineRunner {
+            Some(LegacyPidashAgentRunner {
                 name: str_at(Some(b), "name")?,
                 runner_id: str_at(Some(b), "runner_id").and_then(|s| s.parse().ok()),
                 project: str_at(Some(b), "project_slug")?,
@@ -148,12 +148,12 @@ pub fn finish(
     let mut report = FinishReport::default();
 
     // Step 4: the signed-in account's engine home. Other accounts' homes stay.
-    let source = paths.legacy_engine_home(account)?;
+    let source = paths.legacy_pidash_agent_home(account)?;
     if source.is_dir() {
         // The daemon keys its engine home by its own recorded account and
         // uses `default` when it recorded none; follow it, so the history
         // lands where the engine reads it.
-        let target = daemon.engine_home(daemon_account);
+        let target = daemon.pidash_agent_home(daemon_account);
         move_merge(&source, &target)?;
         restrict_tree(&target);
         report.engine_home_moved_to = Some(target);
@@ -426,7 +426,7 @@ binary = "/old/bundle/pidash-agent-engine"
         std::fs::write(tree.join("data/runners/aa/identity.toml"), "id").unwrap();
         crate::app_paths::atomic_write(&paths.legacy_model_token, b"tok").unwrap();
         std::fs::write(paths.legacy_device_id(), "dev-id").unwrap();
-        let home = paths.legacy_engine_home("user-1").unwrap();
+        let home = paths.legacy_pidash_agent_home("user-1").unwrap();
         std::fs::create_dir_all(home.join("sessions/2026/10")).unwrap();
         std::fs::write(home.join("sessions/2026/10/rollout.jsonl"), "transcript").unwrap();
         std::fs::write(home.join("history.jsonl"), "history").unwrap();
@@ -467,7 +467,7 @@ binary = "/old/bundle/pidash-agent-engine"
     }
 
     #[test]
-    fn finish_moves_the_engine_home_deletes_credentials_and_keeps_task_folders() {
+    fn finish_moves_the_pidash_agent_home_deletes_credentials_and_keeps_task_folders() {
         let f = fixture();
         let report = finish(&f.paths, &f.daemon, &f.tree, "user-1", Some("user-1")).unwrap();
         let target = f.daemon.data_dir.join("engine/user-1/codex-home");
@@ -483,7 +483,7 @@ binary = "/old/bundle/pidash-agent-engine"
             !target.join("config.toml").exists(),
             "the daemon writes the engine config"
         );
-        assert!(!f.paths.legacy_engine_home("user-1").unwrap().exists());
+        assert!(!f.paths.legacy_pidash_agent_home("user-1").unwrap().exists());
         for gone in [
             f.tree.join("config.toml"),
             f.tree.join("credentials.toml"),
@@ -505,16 +505,16 @@ binary = "/old/bundle/pidash-agent-engine"
     /// A daemon that recorded no account reads `engine/default/`: the
     /// history goes there, not under the app's user id.
     #[test]
-    fn with_no_daemon_account_the_engine_home_goes_to_default() {
+    fn with_no_daemon_account_the_pidash_agent_home_goes_to_default() {
         let f = fixture();
         let report = finish(&f.paths, &f.daemon, &f.tree, "user-1", None).unwrap();
         assert_eq!(
             report.engine_home_moved_to.as_deref(),
-            Some(f.daemon.engine_home(None).as_path())
+            Some(f.daemon.pidash_agent_home(None).as_path())
         );
         assert!(
             f.daemon
-                .engine_home(None)
+                .pidash_agent_home(None)
                 .ends_with("engine/default/codex-home")
         );
     }
@@ -535,9 +535,9 @@ binary = "/old/bundle/pidash-agent-engine"
     }
 
     #[test]
-    fn other_accounts_engine_homes_stay() {
+    fn other_accounts_pidash_agent_homes_stay() {
         let f = fixture();
-        let other = f.paths.legacy_engine_home("user-2").unwrap();
+        let other = f.paths.legacy_pidash_agent_home("user-2").unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("history.jsonl"), "theirs").unwrap();
         finish(&f.paths, &f.daemon, &f.tree, "user-1", None).unwrap();
@@ -549,9 +549,9 @@ binary = "/old/bundle/pidash-agent-engine"
     }
 
     #[test]
-    fn an_existing_daemon_engine_home_is_merged_without_overwriting() {
+    fn an_existing_daemon_pidash_agent_home_is_merged_without_overwriting() {
         let f = fixture();
-        let target = f.daemon.engine_home(Some("user-1"));
+        let target = f.daemon.pidash_agent_home(Some("user-1"));
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("history.jsonl"), "daemon's own").unwrap();
         std::fs::write(target.join("config.toml"), "daemon config").unwrap();

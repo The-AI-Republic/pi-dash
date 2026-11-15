@@ -1,7 +1,7 @@
 //! Daemon-side handler for the local-chat IPC surface (PDASHOSS01-159,
 //! slice 1b).
 //!
-//! The desktop host drives the built-in agent engine *directly* over the
+//! The desktop host drives the Pi Dash Agent engine *directly* over the
 //! daemon's local IPC socket rather than relaying chat through the Pi Dash
 //! cloud. This module is the runner-side of that surface: it services the
 //! `Chat{Warm,Send,Cancel,Close,Decide}` requests added to `pidash-ipc` in
@@ -37,7 +37,7 @@
 //!
 //! - **A project runner** — the request names one (`runner`), or carries no
 //!   absolute `cwd`: the runner's agent, its folder and the AC6 guard above.
-//! - **The daemon's engine profile** ([`super::engine_chat::EngineChatProfile`])
+//! - **The daemon's engine profile** ([`super::pidash_agent_chat::PidashAgentChatProfile`])
 //!   — no `runner` selector and an absolute `cwd`: the machine-level built-in
 //!   engine, with no project runner and no shared busy flag, so it works with
 //!   zero or many runners and is never blocked by a run. Its folder must not
@@ -55,7 +55,7 @@ use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-use super::engine_chat::EngineChatProfile;
+use super::pidash_agent_chat::PidashAgentChatProfile;
 use super::protocol::Response;
 use crate::agent::{AgentBridge, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
@@ -276,7 +276,7 @@ pub(crate) struct ChatHost<'a> {
 enum Lane<'a> {
     Runner(&'a RunnerInstance),
     Engine {
-        profile: &'a EngineChatProfile,
+        profile: &'a PidashAgentChatProfile,
         /// `(runner name, working dir)` of every configured runner: a chat
         /// folder may not be inside one.
         runner_dirs: Vec<(String, PathBuf)>,
@@ -293,7 +293,7 @@ impl<'a> ChatHost<'a> {
     }
 
     pub(crate) fn engine(
-        profile: &'a EngineChatProfile,
+        profile: &'a PidashAgentChatProfile,
         runner_dirs: Vec<(String, PathBuf)>,
     ) -> Self {
         Self {
@@ -326,7 +326,7 @@ impl<'a> ChatHost<'a> {
         match &self.lane {
             Lane::Runner(inst) => resolve_chat_workspace(&inst.config, cwd),
             Lane::Engine { runner_dirs, .. } => {
-                super::engine_chat::resolve_engine_chat_folder(cwd, runner_dirs)
+                super::pidash_agent_chat::resolve_engine_chat_folder(cwd, runner_dirs)
             }
         }
     }
