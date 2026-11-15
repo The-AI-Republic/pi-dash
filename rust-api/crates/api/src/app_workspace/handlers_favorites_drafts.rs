@@ -64,7 +64,8 @@
 //!   `DraftIssue` table (`model=DraftIssue`, `draft.py:158`, `:185`, `:198`), so a
 //!   draft's creator passes at any workspace role (PDASHOSS01-320; patch/retrieve
 //!   used to read `Issue`, which made the bypass dead).
-//! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404);
+//! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404)
+//!   — fixed on Rust by NEWPIDASH-265 (DIFF-35: 404 `OBJECT_NOT_FOUND_BODY`);
 //!   the cycle activity's `project_id` is the string `"None"` (the route carries no
 //!   `project_id` kwarg); the module activity fires once per `module_ids` entry.
 //! * `description_binary` input is silently dropped everywhere (read-only `ModelField`);
@@ -7172,7 +7173,8 @@ async fn render_draft_to_issue_body(
 }
 
 /// W37 POST (`draft.py:205-312`): ADMIN+MEMBER gate, the draft lookup
-/// (miss → 500 — `None.project_id` raises `AttributeError`), the
+/// (miss → 404 `OBJECT_NOT_FOUND_BODY` since NEWPIDASH-265/DIFF-35 —
+/// Django 500s on `None.project_id` `AttributeError`), the
 /// project-required 400, `IssueCreateSerializer` validation + save (the
 /// advisory-locked sequence/sort legs), the `issue.activity.created`
 /// emit, the raw `cycle_id` branch (create + `cycle.activity.created`
@@ -7203,6 +7205,9 @@ async fn draft_to_issue(
     // `None.project_id` raises `AttributeError` → the generic 500.
     // NEWPIDASH-185 (DIFF-14): only the creator may publish (`draft_created_by`
     // check below) and the caller must be an active member of `draft_project`.
+    // NEWPIDASH-265 (DIFF-35, PB-0901): the miss answers 404
+    // `OBJECT_NOT_FOUND_BODY` instead of the ported 500, matching the
+    // drafts viewset's other missing-draft 404s.
     #[derive(Debug, FromQueryResult)]
     struct DraftConvertRow {
         project_id: Option<Uuid>,
@@ -7244,7 +7249,11 @@ async fn draft_to_issue(
     let Some((draft_project_opt, draft_workspace, draft_created_by, draft_updated_by, draft_state)) =
         draft
     else {
-        return Err(Denial::ServerError);
+        // NEWPIDASH-265 (DIFF-35): missing/soft-deleted draft is 404, not 500.
+        return Ok(json_response(
+            StatusCode::NOT_FOUND,
+            OBJECT_NOT_FOUND_BODY.to_owned(),
+        ));
     };
     // NEWPIDASH-185 (DIFF-14): scope to the caller — another user's draft
     // 404s (Django would have converted it).
