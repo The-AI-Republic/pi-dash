@@ -28,7 +28,6 @@
 //! | `AssistantModelSeam` | `ee/assistant/model_provider.py` | api `CeAssistantSeam` | platform credentials (OpenHub lane) |
 //! | `SttSeam` | `ee/assistant/stt_provider.py` | `ByoSttSeam` | OpenHub relay endpoint |
 //! | `CloudAgentModelSeam` | `ee/cloud_agent/model_provider.py` | `CreatorModelSeam` | admission/model routing |
-//! | `CloudAgentToolsetsSeam` | `ee/cloud_agent/toolsets.py` | `NoExtraToolsets` | gateway toolsets |
 //! | `DesktopGate` (in `pidash-auth`) | `ee/authentication/desktop.py` | `SessionDesktopGate` | OIDC `client` claim |
 //! | `UserSettingsSchema` (in `user_settings`) | `ee/settings/user_settings.py` | `CeUserSettings` | extended schema |
 
@@ -412,104 +411,6 @@ pub struct CreatorModelSeam;
 
 impl CloudAgentModelSeam for CreatorModelSeam {}
 
-/// A named extra toolset offered to a run beyond its immutable tool plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtraToolset {
-    pub name: String,
-}
-
-/// Which run the resolver builds toolsets for: identity plus the run's
-/// own `tool_plan.extra_toolsets` snapshot. The implementation reads
-/// whatever else it needs with its own handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolsetsRun {
-    pub run_id: Uuid,
-    pub creator_id: Uuid,
-    pub extra_toolsets: bool,
-}
-
-/// App tools entitled but unattachable: the drive appends this as an
-/// `extra_toolsets_unavailable` event (the "say what was dropped"
-/// obligation in the `toolsets.py` module docstring).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolsetsUnavailable {
-    pub provider: String,
-    pub reason: Option<String>,
-}
-
-/// One `resolve_extra_toolsets_for_run` answer: the toolsets plus, when
-/// the run was entitled to more than arrived, the report the drive
-/// appends. Never an error — extra tools are additive, so an outage
-/// costs the run its extra tools, never the run (the "degrade, never
-/// fail" obligation in the `toolsets.py` module docstring).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolsetsResolution {
-    pub toolsets: Vec<ExtraToolset>,
-    pub unavailable: Option<ToolsetsUnavailable>,
-}
-
-impl ToolsetsResolution {
-    /// No toolsets and nothing to report (the CE answer).
-    pub fn empty() -> Self {
-        Self {
-            toolsets: Vec::new(),
-            unavailable: None,
-        }
-    }
-}
-
-/// Overlay seam for `ee/cloud_agent/toolsets.py`.
-///
-/// A run's tools come from its immutable tool plan; deployments that can
-/// offer tools unknowable at plan time (discovered per-user, at connect
-/// time) attach them here instead — admitted only what the plan allows,
-/// degrading (never failing) on outage, and reporting what was dropped.
-///
-/// Boxed futures (not `impl Future`) keep the trait object-safe, so the
-/// binary carries one `Arc<dyn CloudAgentToolsetsSeam>` in its state and
-/// every creation/execution call site consults the same instance.
-pub trait CloudAgentToolsetsSeam: Debug + Send + Sync {
-    /// Whether the creator opted in to the extra toolsets
-    /// (`extra_toolsets_enabled_for`, `toolsets.py:23-32`). Read once at
-    /// run creation and snapshotted onto the plan, never consulted at
-    /// execution time. CE: nobody has — the CE settings schema declares
-    /// no such preference, so the creator is ignored and this is false.
-    /// Never fails: an unreadable preference degrades to off rather
-    /// than blocking run creation.
-    fn extra_toolsets_enabled(
-        &self,
-        creator_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-        let _ = creator_id;
-        Box::pin(async { false })
-    }
-
-    /// Additional toolsets for the run
-    /// (`resolve_extra_toolsets_for_run`, `toolsets.py:34-36`). Honors
-    /// the snapshot in `run` rather than re-reading any preference, so
-    /// a mid-flight change cannot alter a run already in progress.
-    /// CE: none.
-    fn extra_toolsets(
-        &self,
-        run: &ToolsetsRun,
-    ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
-        let _ = run;
-        Box::pin(async { ToolsetsResolution::empty() })
-    }
-
-    /// Name of the tool that fetches a deferred tool schema. CE: none, so
-    /// the prompt section naming it never renders.
-    fn schema_tool_name(&self) -> &'static str {
-        ""
-    }
-}
-
-/// CE cloud-agent toolsets: no extras.
-#[derive(Debug)]
-pub struct NoExtraToolsets;
-
-impl CloudAgentToolsetsSeam for NoExtraToolsets {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,19 +639,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ce_offers_no_extra_toolsets() {
-        let seam = NoExtraToolsets;
-        assert!(!seam.extra_toolsets_enabled(Uuid::nil()).await);
-        let run = ToolsetsRun {
-            run_id: Uuid::nil(),
-            creator_id: Uuid::nil(),
-            extra_toolsets: true,
-        };
-        assert_eq!(seam.extra_toolsets(&run).await, ToolsetsResolution::empty());
-        assert_eq!(seam.schema_tool_name(), "");
-    }
-
     /// A replacement seam behind the trait changes behaviour without
     /// touching callers — the overlay contract in miniature.
     #[derive(Debug)]
@@ -803,45 +691,6 @@ mod tests {
         }
     }
 
-    impl CloudAgentToolsetsSeam for OpenHubLikeSeam {
-        fn extra_toolsets_enabled(
-            &self,
-            _creator_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-            Box::pin(async { true })
-        }
-
-        fn extra_toolsets(
-            &self,
-            run: &ToolsetsRun,
-        ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
-            let snapshot = run.extra_toolsets;
-            Box::pin(async move {
-                if !snapshot {
-                    return ToolsetsResolution::empty();
-                }
-                ToolsetsResolution {
-                    toolsets: vec![ExtraToolset {
-                        name: "gateway".to_string(),
-                    }],
-                    unavailable: None,
-                }
-            })
-        }
-
-        fn schema_tool_name(&self) -> &'static str {
-            "acme_get_tool_schema"
-        }
-    }
-
-    fn title_request() -> TitleRequest {
-        TitleRequest {
-            user_id: user(),
-            description: "Fix the thing".to_string(),
-            byok: None,
-        }
-    }
-
     #[tokio::test]
     async fn replacement_seam_wins_behind_the_traits() {
         let seam = OpenHubLikeSeam;
@@ -863,30 +712,18 @@ mod tests {
             .expect("gateway credential");
         assert_eq!(token, "gateway-token");
         assert_eq!(expires_at, "2030-01-01T00:00:00Z");
+        fn title_request() -> TitleRequest {
+            TitleRequest {
+                user_id: user(),
+                description: "Fix the thing".to_string(),
+                byok: None,
+            }
+        }
         let title = seam
             .generate_title(title_request())
             .await
             .expect("cloud title");
         assert_eq!(title, "cloud title");
-        assert!(seam.extra_toolsets_enabled(Uuid::nil()).await);
-        let run = ToolsetsRun {
-            run_id: Uuid::nil(),
-            creator_id: Uuid::nil(),
-            extra_toolsets: true,
-        };
-        let resolved = seam.extra_toolsets(&run).await;
-        assert_eq!(resolved.toolsets.len(), 1);
-        assert!(resolved.unavailable.is_none());
-        assert_eq!(seam.schema_tool_name(), "acme_get_tool_schema");
-        // The snapshot still gates a replacement seam: a run admitted
-        // without extras resolves none even when the seam could offer.
-        let unsnapshotted = ToolsetsRun {
-            extra_toolsets: false,
-            ..run
-        };
-        assert_eq!(
-            seam.extra_toolsets(&unsnapshotted).await,
-            ToolsetsResolution::empty()
-        );
+        // The toolsets seam died in P4; model/credential/title survive.
     }
 }

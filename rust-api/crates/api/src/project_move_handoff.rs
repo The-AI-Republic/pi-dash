@@ -15,10 +15,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 use pidash_db::redis::client_from_settings;
 
-/// Redis-backed admission cache, unified in services (OVL-06):
-/// re-exported here so the direct-create tail and the v1 work-item
-/// actions keep their import path.
-pub(crate) use pidash_services::dispatch::admission::RedisAdmissionCache;
+// (P4: `RedisAdmissionCache` died with the cache family.)
 
 /// `complete_project_move_handoff(run_id)` (`service.py:644-732`):
 /// thin caller of the public jobs executor (OVL-06), which owns the
@@ -38,7 +35,6 @@ pub(crate) async fn complete_project_move_handoff(
         managed: settings.managed_runner.clone(),
         redis: client_from_settings(state.settings()),
         runner: settings.runner.clone(),
-        toolsets: state.toolsets().clone(),
         assistant_seam: state.assistant_seam().clone(),
     };
     let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
