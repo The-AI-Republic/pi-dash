@@ -20,7 +20,7 @@
 //! with the retired execute plane.
 //!
 //! Out of scope here (owned by siblings): `AgentExecutorKind` / `MACHINE_EXECUTORS` /
-//! `get_default_agent_executor` (L1, `pidash_types::dispatch`); `ManagedRunnerReason` /
+//! `get_default_agent_executor` (L1, `pidash_types::agent_runs`); `ManagedRunnerReason` /
 //! `ManagedRunnerUnavailable` (L1, reused, not redefined);
 //! `CloudAgentUnavailableAPI` (`cloud_agent/api.py`, L4 PIDASHCONV-485);
 //! `managed_runner_availability` (`managed_runner/policy.py`, L4 — arrives here as a
@@ -60,7 +60,7 @@
 
 use pidash_db::config::ManagedRunnerSettings;
 use pidash_db::entity::{dev_machine, pod, runner};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;

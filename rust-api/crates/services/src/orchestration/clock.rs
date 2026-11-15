@@ -47,7 +47,7 @@
 //! / outcome vocabulary / [`StateRef`] phase registry (`pidash_types::orchestration`),
 //! [`kind_for`](crate::prompting::recipes::kind_for) (`prompting::recipes`),
 //! budget/interval helpers on [`IssueAgentTicker`] (`pidash_db::tasks_ticker`),
-//! [`AgentRunStatus`] (`pidash_db::dispatch`). Events carry ids and handlers
+//! [`AgentRunStatus`] (`pidash_db::agent_runs`). Events carry ids and handlers
 //! take re-read rows — the stateless shape L1's docs prescribe.
 //!
 //! Fixture: FX-ORCH-05 (`rust-api/fixtures/orchestration/fx05_clock/`:
@@ -89,7 +89,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::tasks_ticker::{
     models::issue_agent_ticker::{
         IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,

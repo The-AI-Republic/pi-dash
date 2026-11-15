@@ -16,7 +16,7 @@
 //!
 //! Sibling L3+ issues add their own files under their own modules;
 //! `executor_kind` reuses the L1
-//! [`pidash_types::dispatch::AgentExecutorKind`] port (PIDASHCONV-482).
+//! [`pidash_types::agent_runs::AgentExecutorKind`] port (PIDASHCONV-482).
 //!
 //! Fixture id replayed by the unit tests alongside each module:
 //! `rust-api/fixtures/dispatch/fx-disp-02-models.golden.json` (FX-DISP-02).

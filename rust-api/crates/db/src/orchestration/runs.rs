@@ -13,16 +13,16 @@
 //!   parser and persist the outcome onto the run with a single `UPDATE`.
 //!
 //! Rows reuse the D-11 [`AgentRun`] read shape and [`AgentRunStatus`]
-//! (`pidash_db::dispatch`, never re-ported): the lookup `SELECT`s
+//! (`pidash_db::agent_runs`, never re-ported): the lookup `SELECT`s
 //! project [`READ_COLUMNS`] (22 columns) where Django selects the full
 //! 39-column row — same row-selection semantics, narrower projection.
 //! The fixture (`active_run.sql`) pins the 39-column Django text; the
 //! tests pin our projection against [`READ_COLUMNS`] and the
 //! `WHERE`/`ORDER BY`/`LIMIT` tails against the fixture.
 //!
-//! [`AgentRun`]: crate::dispatch::agent_run::AgentRun
-//! [`AgentRunStatus`]: crate::dispatch::status::AgentRunStatus
-//! [`READ_COLUMNS`]: crate::dispatch::agent_run::READ_COLUMNS
+//! [`AgentRun`]: crate::agent_runs::agent_run::AgentRun
+//! [`AgentRunStatus`]: crate::agent_runs::status::AgentRunStatus
+//! [`READ_COLUMNS`]: crate::agent_runs::agent_run::READ_COLUMNS
 //!
 //! Fixture: `rust-api/fixtures/orchestration/fx02_reads/` (FX-ORCH-02:
 //! `active_run.sql`, `active_run.rows.json`, `latest_prior_run.sql`,
@@ -38,12 +38,12 @@ use sea_orm::{
 };
 use serde_json::Value;
 
-use crate::dispatch::agent_run::{AgentRun, READ_COLUMNS};
-use crate::dispatch::status::AgentRunStatus;
+use crate::agent_runs::agent_run::{AgentRun, READ_COLUMNS};
+use crate::agent_runs::status::AgentRunStatus;
 use crate::entity::agent_run;
 use crate::orm_tx;
 use crate::runner_runs::agent_run::merge_error_details;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{parse, DoneSignal};
 
 /// The 7 statuses that occupy the single-active-run slot

@@ -1,23 +1,11 @@
 //! Admission, desktop permission, and configuration checks: D-11 L4 (stage 5).
 //!
-//! Port of `apps/api/pi_dash/cloud_agent/admission.py:15-76`,
-//! `apps/api/pi_dash/cloud_agent/api.py:5-8`,
-//! `apps/api/pi_dash/cloud_agent/checks.py:8-74`,
-//! `apps/api/pi_dash/managed_runner/policy.py:27-96`,
+//! Port of `apps/api/pi_dash/managed_runner/policy.py:27-96`,
 //! `apps/api/pi_dash/managed_runner/checks.py:20-50`, and
-//! `apps/api/pi_dash/managed_runner/permissions.py:12-28`:
+//! `apps/api/pi_dash/managed_runner/permissions.py:12-28` (the cloud
+//! admission, unavailable-API and configuration-check halves went with
+//! the retired cloud plane in P3/P4 of the agent naming work):
 //!
-//! * `CloudAgentAdmissionError` (`admission.py:15-19`) →
-//!   [`CloudAgentAdmissionError`].
-//! * `_take` / `_consume` (`admission.py:22-58`) → [`take_bucket`] (private) /
-//! * `enforce_creation_rate` (`admission.py:61-76`) →
-//!   [`enforce_creation_rate`] + [`admission_bucket`] /
-//!   [`admission_retry_after`] / [`workspace_admission_key`] /
-//!   [`user_admission_key`].
-//! * `CloudAgentUnavailableAPI` (`api.py:5-8`) →
-//!   [`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`] + [`CloudAgentUnavailableBody`].
-//! * `cloud_agent_configuration_check` (`checks.py:8-74`) →
-//!   [`cloud_agent_configuration_check`] (E001/E002/E005/E007/E008).
 //! * `managed_llm_profile` / `enrolled_managed_runners` /
 //!   `online_managed_runner` / `managed_runner_availability`
 //!   (`managed_runner/policy.py:27-96`) → the [`LlmProfile`] seam verdict +
@@ -32,11 +20,11 @@
 //! Translation notes:
 //!
 //! * Settings arrive as the central structs
-//!   (`pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings}`); no
+//!   (`pidash_db::config::ManagedRunnerSettings`); no
 //!   parallel settings struct is defined. `AgentExecutorKind` membership and
 //!   `ManagedRunnerReason` codes reuse L1; `ManagedAvailability`, `UserFlags`,
 //!   `READ_TOOLS` / `WRITE_TOOLS`, and the `managed_runner_is_enabled` switch
-//!   reuse L3 (`super::policy`).
+//!   reuse L3 (`super::executor_policy`).
 //! * `transaction.on_commit` has no ambient equivalent in services (Porting
 //!   guide: transactions are a wrapper collecting post-commit actions), so the
 //!   explicitly; dropping the sink without running it is the rollback path,
@@ -63,9 +51,9 @@
 //! overshoot (`admission.py:40-42`) and the +5s consume overhang (`:24`) are
 //! documented-by-design and translated as-is.
 
-use super::policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
+use super::executor_policy::{managed_runner_is_enabled, ManagedAvailability, UserFlags};
 use pidash_db::config::ManagedRunnerSettings;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------

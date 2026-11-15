@@ -39,9 +39,9 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::assistant::models::has_secret;
 use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, assistant_user_llm_config, issue_agent_ticker, issues, projects, states,
 };
@@ -51,10 +51,10 @@ use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
-use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
@@ -65,8 +65,8 @@ use super::creation_jobs::{
 use super::fire_tick_seam::{
     emit_logs, maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
 };
-use crate::dispatch::DispatchDecision;
 use crate::queue::enqueue;
+use crate::run_dispatch::DispatchDecision;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 // ---------------------------------------------------------------------------

@@ -36,11 +36,11 @@
 //!   verbatim) plus the three `cloud_agent.creation` calls
 //!   (`execution_fields`, `lock_cloud_creation_capacity`,
 //!   `dispatch_after_commit` — D-11 L6, merged jobs-side). Services code
-//!   must not call `jobs::dispatch` (the `jobs → services` edge is
+//!   must not call `jobs::run_dispatch` (the `jobs → services` edge is
 //!   load-bearing; calling back would cycle), so the jobs-side
 //!   `LiveCreationStore` (`pidash-jobs`, `orchestration/creation_jobs.rs`)
 //!   implements this trait by delegating those three methods to the
-//!   merged `jobs::dispatch` functions.
+//!   merged `jobs::run_dispatch` functions.
 //! * [`FinalizeAgentRunSeam`] — the one-method seam for the
 //!   `finalize_agent_run(run.id, FAILED, …)` call sites in this module.
 //!   Finalization is runner D-15 (downstream of D-12 — no edge, it would
@@ -94,16 +94,16 @@ use uuid::Uuid;
 
 use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::runner_runs::agent_run;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
-use crate::dispatch::UserFlags;
 use crate::prompting::{composer, context, recipes, work_types};
+use crate::run_creation::UserFlags;
 
 // ---------------------------------------------------------------------------
 // Reasons, triggers, literals
@@ -1686,7 +1686,7 @@ pub struct AdmissionError {
 }
 
 /// The executor-specific fields for one creation (`execution_fields`,
-/// `creation.py:11-89`): mirrors `jobs::dispatch::ExecutionFields`
+/// `creation.py:11-89`): mirrors `jobs::run_dispatch::ExecutionFields`
 /// without importing jobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionFields {
@@ -2258,7 +2258,7 @@ pub fn render_first_turn(
 /// shape; the SQL text for each lives in the adjacent `*_SQL` consts,
 /// which the pool implementation must execute verbatim. The three
 /// `cloud_agent.creation` calls are methods here (the jobs-side store
-/// delegates them to the merged `jobs::dispatch` functions) so the
+/// delegates them to the merged `jobs::run_dispatch` functions) so the
 /// Python control flow stays services-side in verbatim order.
 ///
 /// Native `async fn` in trait (stable since 1.75): no `async-trait`

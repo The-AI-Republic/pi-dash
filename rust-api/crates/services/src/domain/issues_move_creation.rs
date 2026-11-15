@@ -24,14 +24,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
-use crate::dispatch::execution::{
-    execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
-    ExecutionFieldsError, ExecutionInputs, ProjectScope,
-};
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
     CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
@@ -40,6 +36,10 @@ use crate::orchestration::creation::{
     RunView, RunnerView, StateView, TickerBudget,
 };
 use crate::prompting::{composer, context};
+use crate::run_creation::execution::{
+    execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
+    ExecutionFieldsError, ExecutionInputs, ProjectScope,
+};
 
 use super::issues_move::CreationDeps;
 use super::txn::TxnConn;
@@ -265,11 +265,11 @@ impl CreationSeam for SeaHandoffStore<'_> {
     async fn user_flags(
         &mut self,
         user_id: Uuid,
-    ) -> Result<crate::dispatch::UserFlags, CreationError> {
+    ) -> Result<crate::run_creation::UserFlags, CreationError> {
         let row = query_one(&self.conn, &orm::user_flags_select(user_id))
             .await?
             .ok_or_else(|| expected_row("user flags"))?;
-        Ok(crate::dispatch::UserFlags {
+        Ok(crate::run_creation::UserFlags {
             is_active: get(&row, "is_active")?,
             is_bot: get(&row, "is_bot")?,
         })
@@ -716,7 +716,7 @@ fn twin_map_state(row: &QueryResult) -> Result<StateView, CreationError> {
 }
 
 fn twin_map_execution_fields(
-    fields: crate::dispatch::execution::ExecutionFields,
+    fields: crate::run_creation::execution::ExecutionFields,
 ) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
         AgentExecutorKind::CloudAgent => Some(None),
@@ -1536,7 +1536,7 @@ mod tests {
         // The workspace mutex: live row locks, soft-deleted row misses.
         // (P3 step B: the queued-cloud count died with the cloud
         // creation path.)
-        use crate::dispatch::execution::workspace_lock_select;
+        use crate::run_creation::execution::workspace_lock_select;
         assert!(one(&conn, &workspace_lock_select(uid(0x10)))
             .await
             .is_some());

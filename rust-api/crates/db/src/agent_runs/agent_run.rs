@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use super::status::{AgentRunStatus, AgentRunTrigger};
 use crate::integrations::OnDelete;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
 /// Physical table (`Meta.db_table`, `models.py:1038`).
 pub const TABLE: &str = "agent_run";

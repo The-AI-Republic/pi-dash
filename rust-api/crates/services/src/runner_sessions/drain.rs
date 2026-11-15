@@ -128,7 +128,7 @@
 
 use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::agent_run::COLUMNS as AGENT_RUN_COLUMNS;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::envelopes::build_assign_msg;
 use sea_query::{
@@ -608,7 +608,7 @@ mod tests {
     use crate::runner_sessions::guards::{BUSY_STATUSES, RUNNER_COLUMNS};
     use chrono::TimeZone;
     use pidash_auth::permissions::runner::VISIBILITY_PRIVATE;
-    use pidash_types::dispatch::MACHINE_EXECUTORS;
+    use pidash_types::agent_runs::MACHINE_EXECUTORS;
     use sea_query::PostgresQueryBuilder;
     use serde_json::Value;
 
