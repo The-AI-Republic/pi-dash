@@ -103,7 +103,7 @@ pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
 use crate::dispatch::UserFlags;
-use crate::prompting::{composer, context, recipes};
+use crate::prompting::{composer, context, recipes, work_types};
 
 // ---------------------------------------------------------------------------
 // Reasons, triggers, literals
@@ -172,7 +172,7 @@ pub const OWNER_UNASSIGNED: Option<Uuid> = None;
 /// The issue projection every unit reads (`service.py` passes full issue
 /// rows; this projects the consumed columns). `$1` is the issue id.
 pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_id, parent_id, \
-    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, git_work_branch, workpad, name, \
+    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, work_type, git_work_branch, workpad, name, \
     description_stripped, priority, sequence_id, target_date FROM issues WHERE id = $1";
 
 /// The project projection (`service.py` reads `issue.project` for the
@@ -181,8 +181,8 @@ pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_i
 pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name, description, \
     repo_url, base_branch, default_agent_executor, project_lead_id, default_assignee_id, \
     agent_default_max_ticks, agent_default_interval_seconds, \
-    agent_review_default_interval_seconds, agent_test_default_interval_seconds \
-    FROM projects WHERE id = $1";
+    agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
+    default_work_type FROM projects WHERE id = $1";
 
 /// The state projection (registry reads `name` + `group` only). `$1` is
 /// the state id.
@@ -334,17 +334,18 @@ pub fn run_lock_sql() -> String {
 /// `JSONKeyTextField` `refusal_category` excluded). Fixed values
 /// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14` and
 /// `$15` (`pin_kind`, appended at the end) carry the caller-supplied
-/// fields in [`NewAgentRun`] order.
+/// fields in [`NewAgentRun`] order, and `$16` the `work_type` stamp
+/// (added after `phase_kind` in model order).
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, failure_reason, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '', '{}', $14, \
+    NULL, NULL, '', $11, NULL, $12, $16, $13, '[]', '', '{}', NULL, NULL, $9, '', '', '{}', $14, \
     NULL, NULL, NULL, $15)";
 
 /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
@@ -676,6 +677,7 @@ pub mod orm {
                 C::AssignedPodId,
                 C::AssignedRunnerId,
                 C::AgentExecutor,
+                C::WorkType,
                 C::GitWorkBranch,
                 C::Workpad,
                 C::Name,
@@ -708,6 +710,7 @@ pub mod orm {
                 C::AgentDefaultIntervalSeconds,
                 C::AgentReviewDefaultIntervalSeconds,
                 C::AgentTestDefaultIntervalSeconds,
+                C::DefaultWorkType,
             ])
             .from(projects::Entity)
             .and_where(Expr::col(C::Id).eq(project_id))
@@ -962,6 +965,7 @@ pub mod orm {
                 C::Trigger,
                 C::PromptManifest,
                 C::PhaseKind,
+                C::WorkType,
                 C::RunConfig,
                 C::RequiredCapabilities,
                 C::ThreadId,
@@ -1001,6 +1005,7 @@ pub mod orm {
                 Expr::value(row.trigger.as_str()),
                 none_json(),
                 Expr::value(row.phase_kind.as_str()),
+                Expr::value(row.work_type.as_str()),
                 Expr::value(row.run_config.clone()),
                 Expr::value(serde_json::json!([])),
                 Expr::value(""),
@@ -1463,6 +1468,9 @@ pub struct IssueView {
     pub priority: Option<String>,
     pub sequence_id: i32,
     pub target_date: Option<chrono::NaiveDate>,
+    /// `Issue.work_type`: the per-issue work-type override (NULL inherits
+    /// the project default, PDASHOSS01-234).
+    pub work_type: Option<String>,
 }
 
 /// The consumed `projects` projection ([`PROJECT_SELECT_SQL`]).
@@ -1483,6 +1491,8 @@ pub struct ProjectView {
     pub interval_impl: i64,
     pub interval_review: i64,
     pub interval_test: i64,
+    /// `Project.default_work_type` (PDASHOSS01-234).
+    pub default_work_type: String,
 }
 
 /// The consumed `states` projection ([`STATE_SELECT_SQL`]).
@@ -1661,6 +1671,10 @@ pub struct NewAgentRun {
     pub trigger: String,
     /// The handoff builder passes `""` (it stamps no kind).
     pub phase_kind: String,
+    /// The effective work type the run composes with (`_work_type_for_issue`,
+    /// PDASHOSS01-234): audit metadata stamped on every builder, including
+    /// the handoff.
+    pub work_type: String,
     pub run_config: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
@@ -1924,6 +1938,16 @@ pub enum ExecutionError {
 // ---------------------------------------------------------------------------
 // Pure units
 // ---------------------------------------------------------------------------
+
+/// The effective work type a run created for `issue` *now* composes with
+/// (`_work_type_for_issue`): stamped on `AgentRun.work_type` alongside
+/// `phase_kind` as audit metadata (PDASHOSS01-234); nothing routes on it.
+pub fn work_type_for_issue(issue: &IssueView, project: &ProjectView) -> &'static str {
+    work_types::effective_work_type(
+        issue.work_type.as_deref(),
+        Some(project.default_work_type.as_str()),
+    )
+}
 
 /// The prompt kind a run created for the issue *now* will render
 /// (`_phase_kind_for_issue`, `service.py:157-167`): stamped on
@@ -2222,6 +2246,8 @@ pub fn render_first_turn(
         project_id: project.id.to_string(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        issue_work_type: issue.work_type.clone(),
+        project_default_work_type: Some(project.default_work_type.clone()),
         repo,
         code_reviews: context::code_reviews_context(&bundle.reviews),
         parent: bundle.parent.clone(),
@@ -2290,6 +2316,7 @@ pub fn render_first_turn(
         user_id.as_deref(),
         executor_kind,
         tool_catalog_version,
+        Some(work_type_for_issue(issue, project)),
     )
     .map_err(|error| error.message().to_owned())?;
     let manifest = turn
@@ -2678,6 +2705,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config: run_config_for_issue(
                 project.repo_url.as_deref(),
                 project.base_branch.as_deref(),
@@ -2838,6 +2866,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config,
             now: req.now,
             pin_kind: pin_kind.clone(),
@@ -2979,6 +3008,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             tool_plan: execution.tool_plan.clone(),
             trigger: req.parent.trigger.clone(),
             phase_kind: String::new(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config,
             now: req.now,
             pin_kind,
@@ -3464,6 +3494,7 @@ mod tests {
             tool_plan: json!({}),
             trigger: "direct".to_owned(),
             phase_kind: String::new(),
+            work_type: "software".to_owned(),
             run_config: json!({}),
             now: now(),
         })
@@ -3518,6 +3549,7 @@ mod tests {
             priority: None,
             sequence_id: 1,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -3537,6 +3569,7 @@ mod tests {
             interval_impl: 10800,
             interval_review: 10800,
             interval_test: 10800,
+            default_work_type: "software".to_owned(),
         }
     }
 
@@ -4362,6 +4395,24 @@ mod tests {
     }
 
     #[test]
+    fn work_type_for_issue_follows_the_resolution_chain() {
+        let mut issue = issue_view();
+        let mut project = project_view();
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        project.default_work_type = "general".to_owned();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        issue.work_type = Some("software".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        // An unknown stored key falls through to the project default.
+        issue.work_type = Some("retired".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        // Blank project default with no override: the `general` net.
+        issue.work_type = None;
+        project.default_work_type = String::new();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+    }
+
+    #[test]
     fn handoff_marker_helpers() {
         let config = json!({"_project_move_handoff": {"target_project_id": "p"}});
         assert!(handoff_marker(&config).is_some());
@@ -4449,7 +4500,7 @@ mod tests {
             "FX6 C1",
             "In Progress (group: started)",
             "https://example.com/fx6.git",
-            "coding-task",
+            "Software delivery workflow (work type: software)",
         ] {
             assert!(turn.text.contains(marker), "missing {marker}");
         }
@@ -4573,6 +4624,9 @@ mod tests {
             row.phase_kind,
             case["after"]["phase_kind"].as_str().unwrap()
         );
+        // The effective work type is stamped alongside the kind
+        // (PDASHOSS01-234): no issue override → the project default.
+        assert_eq!(row.work_type, "software");
         assert_eq!(row.trigger, AgentRunTrigger::StateTransition.value());
         assert_eq!(row.executor_kind, AgentExecutorKind::LocalRunner);
         assert_eq!(row.tool_plan, json!({}));
@@ -4658,7 +4712,9 @@ mod tests {
         assert_eq!(inserted[0].phase_kind, "review");
         let created = outcome.created_run.unwrap();
         let manifest = &seam.saved_prompts.borrow()[&created].1;
-        assert_eq!(manifest.as_array().unwrap().len(), 10);
+        // The review recipe for `software`: 9 core sections plus the
+        // `software.context` and `software.review` slots.
+        assert_eq!(manifest.as_array().unwrap().len(), 11);
     }
 
     #[tokio::test]
@@ -5430,10 +5486,13 @@ mod tests {
         ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind,
-        // appended so no other bind moves.
+        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind
+        // (appended at the end), `$16` the work_type stamp after
+        // phase_kind.
         assert!(RUN_INSERT_SQL.contains("$14"));
         assert!(RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$16"));
+        assert!(RUN_INSERT_SQL.contains("work_type"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(!finalize_update_sql().contains("queue_position"));
         assert!(!RUN_INSERT_SQL.contains("queue_position"));

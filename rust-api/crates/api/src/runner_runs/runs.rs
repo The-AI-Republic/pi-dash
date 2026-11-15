@@ -780,6 +780,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         trigger: model.trigger,
         prompt_manifest: model.prompt_manifest,
         phase_kind: model.phase_kind,
+        work_type: model.work_type,
         run_config: model.run_config,
         required_capabilities: model.required_capabilities,
         thread_id: model.thread_id,
@@ -849,15 +850,16 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         trigger,
         prompt_manifest: row.try_get(base + 21)?,
         phase_kind: row.try_get(base + 22)?,
-        run_config: row.try_get(base + 23)?,
-        required_capabilities: row.try_get(base + 24)?,
-        thread_id: row.try_get(base + 25)?,
-        agent_metadata: row.try_get(base + 26)?,
-        lease_expires_at: row.try_get(base + 27)?,
-        done_payload: row.try_get(base + 28)?,
-        error_details: row.try_get(base + 29)?,
-        refusal_category: row.try_get(base + 30)?,
-        failure_reason: row.try_get(base + 31)?,
+        work_type: row.try_get(base + 23)?,
+        run_config: row.try_get(base + 24)?,
+        required_capabilities: row.try_get(base + 25)?,
+        thread_id: row.try_get(base + 26)?,
+        agent_metadata: row.try_get(base + 27)?,
+        lease_expires_at: row.try_get(base + 28)?,
+        done_payload: row.try_get(base + 29)?,
+        error_details: row.try_get(base + 30)?,
+        refusal_category: row.try_get(base + 31)?,
+        failure_reason: row.try_get(base + 32)?,
         llm_model: row.try_get(base + 32)?,
         usage: row.try_get(base + 33)?,
         input_tokens: row.try_get(base + 34)?,
@@ -2586,7 +2588,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 42);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
@@ -2678,7 +2680,7 @@ mod tests {
         tool_plan JSONB,
         terminal_hooks_applied_at TIMESTAMPTZ,
         terminal_capacity_released_at TIMESTAMPTZ, prompt TEXT,
-        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT,
+        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT, work_type TEXT,
         run_config JSONB, required_capabilities JSONB, thread_id TEXT,
         agent_metadata JSONB, lease_expires_at TIMESTAMPTZ,
         done_payload JSONB, error_details JSONB,

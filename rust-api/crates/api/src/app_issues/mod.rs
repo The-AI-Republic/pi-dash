@@ -2266,6 +2266,7 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "assigned_pod_id",
     "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "created_at",
     "updated_at",
     "created_by",

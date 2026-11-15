@@ -2191,6 +2191,11 @@
           "x-spec-enum-id": "8f45fd83eb28a6b7",
           "nullable": true
         },
+        "work_type": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 32
+        },
         "created_by": {
           "type": "string",
           "format": "uuid",
@@ -3004,6 +3009,11 @@
           "x-spec-enum-id": "8f45fd83eb28a6b7",
           "nullable": true
         },
+        "work_type": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 32
+        },
         "created_by": {
           "type": "string",
           "format": "uuid",
@@ -3481,6 +3491,11 @@
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7",
           "nullable": true
+        },
+        "work_type": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 32
         },
         "created_by": {
           "type": "string",
@@ -6068,6 +6083,11 @@
           "x-spec-enum-id": "8f45fd83eb28a6b7",
           "nullable": true
         },
+        "work_type": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 32
+        },
         "created_by": {
           "type": "string",
           "format": "uuid",
@@ -6810,6 +6830,10 @@
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7"
+        },
+        "default_work_type": {
+          "type": "string",
+          "maxLength": 32
         },
         "default_state": {
           "type": "string",
@@ -7594,6 +7618,10 @@
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7"
         },
+        "default_work_type": {
+          "type": "string",
+          "maxLength": 32
+        },
         "created_by": {
           "type": "string",
           "format": "uuid",
@@ -8193,6 +8221,10 @@
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7"
+        },
+        "default_work_type": {
+          "type": "string",
+          "maxLength": 32
         }
       },
       "required": [

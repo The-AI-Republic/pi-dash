@@ -644,6 +644,7 @@ fn map_source_row(row: &QueryResult) -> Result<SourceIssueRow, StoreError> {
         git_work_branch: get(row, "git_work_branch")?,
         created_via: get(row, "created_via")?,
         agent_executor: get(row, "agent_executor")?,
+        work_type: get(row, "work_type")?,
         created_by_id: get(row, "created_by_id")?,
         updated_by_id: get(row, "updated_by_id")?,
     })

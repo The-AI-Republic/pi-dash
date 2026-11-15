@@ -555,6 +555,8 @@ where
                 pin_kind: Set("locality".to_owned()),
                 prompt_manifest: Set(None),
                 phase_kind: Set(String::new()),
+                // No stamp on scheduler runs (the model default).
+                work_type: Set(String::new()),
                 run_config: Set(serde_json::json!({})),
                 required_capabilities: Set(serde_json::json!([])),
                 thread_id: Set(String::new()),

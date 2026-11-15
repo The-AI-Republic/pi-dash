@@ -208,6 +208,7 @@ pub mod project {
         "agent_test_default_interval_seconds",
         "agent_ticking_enabled",
         "default_agent_executor",
+        "default_work_type",
     ];
 
     /// Partial unique index names (`Meta.constraints`, `:233-249`).
@@ -515,6 +516,9 @@ pub mod project {
         pub agent_test_default_interval_seconds: i64,
         pub agent_ticking_enabled: bool,
         pub default_agent_executor: String,
+        /// `CharField(max_length=32, blank=True)`; NOT NULL, no DB default
+        /// (PDASHOSS01-234).
+        pub default_work_type: String,
     }
 
     /// Outcome of `Project.resolve` input classification
@@ -1650,6 +1654,7 @@ mod tests {
                 "agent_test_default_interval_seconds",
                 "agent_ticking_enabled",
                 "default_agent_executor",
+                "default_work_type",
             ]
         );
         assert_eq!(project::TABLE, "projects");

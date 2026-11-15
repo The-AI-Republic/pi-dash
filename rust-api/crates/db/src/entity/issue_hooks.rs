@@ -626,6 +626,7 @@ mod tests {
             assigned_pod_id: Set(None),
             assigned_runner_id: Set(None),
             agent_executor: Set(None),
+            work_type: Set(None),
         }
     }
 

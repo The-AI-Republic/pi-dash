@@ -23,11 +23,14 @@
 //!   (`revalidate_section_overrides.py:40-41`).
 //! * An already-flagged broken row stays flagged silently (no recount);
 //!   a clean flagged row only clears under `--clear`.
+//! * A core stage section override that renders cleanly but carries
+//!   software/git/PR wording is flagged with the neutrality detail
+//!   (`prompting::neutrality`, PDASHOSS01-234).
 //! * Validation runs against the initial snapshot: flagging only flips
 //!   `needs_attention`, which the validator never reads, so planning the
 //!   whole scan before writing matches Python's row-by-row loop exactly.
 
-use super::super::prompting::{composer, seed};
+use super::super::prompting::{composer, neutrality, seed};
 
 /// The three global templates the reseed commands own
 /// (`seed.py:29,99` + `models.py:20`).
@@ -202,6 +205,14 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
             ) {
                 broken = true;
                 detail = err.message().to_owned();
+            } else if let Some(issue) =
+                neutrality::override_neutrality_issue(&row.section_key, &row.body)
+            {
+                // A core stage section override carrying software/git/PR
+                // wording would leak into every work type
+                // (`revalidate_section_overrides.py`, PDASHOSS01-234).
+                broken = true;
+                detail = issue;
             }
         }
         let action = seed::decide_revalidate(broken, row.needs_attention, clear);
@@ -344,6 +355,33 @@ mod tests {
     }
 
     /// Unknown keys flag without rendering (`:40-41`); the literal
+    /// A renderable core-section override that still carries git/PR
+    /// wording is flagged with the neutrality detail; a work-type
+    /// section override with the same body is kept (PDASHOSS01-234).
+    #[test]
+    fn non_neutral_core_override_flags_with_neutrality_detail() {
+        let body = "Commit and push the branch, then open a PR.";
+        let mut work_type_row = active_override("software.execute", body);
+        work_type_row.id = "00000000-0000-0000-0000-000000000003".to_owned();
+        let plan = plan_revalidate(
+            &[active_override("implementation", body), work_type_row],
+            false,
+        );
+        assert_eq!(plan.flagged, 1);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
+        let line = plan.steps[0].line.as_deref().expect("flagged line");
+        assert!(
+            line.ends_with(
+                "override for core section 'implementation' carries work-type-specific wording \
+                 ('branch', 'Commit', 'push', 'PR'); core sections are shared by every work type, \
+                 so move that guidance into a work-type section (e.g. 'software.execute')"
+            ),
+            "{line}"
+        );
+        assert_eq!(plan.steps[1].action, seed::RevalidateAction::Keep);
+        assert_eq!(plan.steps[1].line, None);
+    }
+
     /// `None` user matches Python's f-string of `None`.
     #[test]
     fn unknown_section_key_flags_without_rendering() {

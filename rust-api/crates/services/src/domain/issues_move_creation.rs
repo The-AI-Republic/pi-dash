@@ -778,6 +778,7 @@ fn twin_map_issue(row: &QueryResult) -> Result<IssueView, CreationError> {
         assigned_pod_id: get(row, "assigned_pod_id")?,
         assigned_runner_id: get(row, "assigned_runner_id")?,
         agent_executor: get(row, "agent_executor")?,
+        work_type: get(row, "work_type")?,
         git_work_branch: get(row, "git_work_branch")?,
         workpad: get(row, "workpad")?,
         name: get(row, "name")?,
@@ -810,6 +811,7 @@ fn twin_map_project(row: &QueryResult) -> Result<ProjectView, CreationError> {
         interval_impl: i64::from(interval_impl),
         interval_review: i64::from(interval_review),
         interval_test: i64::from(interval_test),
+        default_work_type: row.try_get("", "default_work_type").map_err(twin_db)?,
     })
 }
 
@@ -1531,6 +1533,7 @@ mod tests {
             tool_plan: json!({"tools": ["a"]}),
             trigger: "state_transition".to_owned(),
             phase_kind: "implement".to_owned(),
+            work_type: "software".to_owned(),
             run_config: json!({"k": "v"}),
             now,
         }

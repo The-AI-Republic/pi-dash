@@ -35,8 +35,10 @@ PROMPTING_DIR = Path(
     )
 )
 SECTIONS_DIR = PROMPTING_DIR / "sections"
+WORK_TYPES_DIR = PROMPTING_DIR / "work_types"
 RECIPES_PATH = PROMPTING_DIR / "recipes.py"
 MIRROR_DIR = REPO / "rust-api/crates/services/src/prompting/sections"
+WORK_TYPES_MIRROR_DIR = REPO / "rust-api/crates/services/src/prompting/work_types"
 FIXTURES_DIR = REPO / "rust-api/fixtures/prompting"
 
 # Sections that render clean under an empty context in the Jinja2 sandbox
@@ -57,6 +59,14 @@ EMPTY_CONTEXT_CLEAN = [
     "scheduler-ending",
     "test-cycle",
 ]
+# Work-type sections (PDASHOSS01-234) that render clean under an empty
+# context, by namespaced key. The minijinja half folds them into its single
+# key-sorted ``EMPTY_CONTEXT_CLEAN`` list.
+EMPTY_CONTEXT_CLEAN_WORK_TYPES = [
+    "general.execute",
+    "general.review",
+    "general.test",
+]
 
 
 @pytest.fixture(scope="module")
@@ -75,24 +85,62 @@ def section_body(path: Path) -> str:
     return body.lstrip("\n").rstrip("\n") + "\n"
 
 
+def work_type_section_files():
+    """``(namespaced key, path)`` for every work-type slot file (the
+    ``work_type.md`` metadata files are not sections)."""
+    return [
+        (f"{path.parent.name}.{path.stem}", path)
+        for path in sorted(WORK_TYPES_DIR.glob("*/*.md"))
+        if path.name != "work_type.md"
+    ]
+
+
+def section_path(key: str) -> Path:
+    """Source file of a registry section: core ``sections/<key>.md`` or a
+    work-type ``work_types/<type>/<slot>.md`` for namespaced keys."""
+    if "." in key:
+        work_type, slot = key.split(".", 1)
+        return WORK_TYPES_DIR / work_type / f"{slot}.md"
+    return SECTIONS_DIR / f"{key}.md"
+
+
 def test_mirrors_are_byte_identical_to_sources():
     sources = sorted(SECTIONS_DIR.glob("*.md"))
-    assert len(sources) == 39
+    assert len(sources) == 38
     for source in sources:
         mirror = MIRROR_DIR / source.name
         assert mirror.is_file(), f"mirror missing for {source.name}"
         assert (
             mirror.read_bytes() == source.read_bytes()
         ), f"mirror diverged for {source.name}"
+    assert sorted(path.name for path in MIRROR_DIR.glob("*.md")) == [
+        source.name for source in sources
+    ], "mirror carries a section the Django tree no longer has"
+
+
+def test_work_type_mirrors_are_byte_identical_to_sources():
+    """Every ``work_types/<type>/*.md`` (slot sections and the
+    ``work_type.md`` metadata) is mirrored byte for byte, with no extras."""
+    sources = sorted(WORK_TYPES_DIR.glob("*/*.md"))
+    assert len(sources) == 9
+    relative = [source.relative_to(WORK_TYPES_DIR) for source in sources]
+    for rel, source in zip(relative, sources):
+        mirror = WORK_TYPES_MIRROR_DIR / rel
+        assert mirror.is_file(), f"mirror missing for {rel}"
+        assert mirror.read_bytes() == source.read_bytes(), f"mirror diverged for {rel}"
+    assert sorted(
+        path.relative_to(WORK_TYPES_MIRROR_DIR)
+        for path in WORK_TYPES_MIRROR_DIR.glob("*/*.md")
+    ) == relative
 
 
 def test_fixture_registry_matches_sources():
     fixture = json.loads((FIXTURES_DIR / "FIX-registry.json").read_text())
     assert fixture["bugs"] == []
     entries = fixture["data"]["registry"]["sections"]
-    assert fixture["data"]["registry"]["section_count"] == 39 == len(entries)
+    assert fixture["data"]["registry"]["section_count"] == 45 == len(entries)
     for entry in entries:
-        body = section_body(SECTIONS_DIR / f"{entry['key']}.md")
+        body = section_body(section_path(entry["key"]))
         assert len(body) == entry["body_len"], entry["key"]
         assert hashlib.sha256(body.encode()).hexdigest() == entry["body_sha256"], entry[
             "key"
@@ -102,6 +150,8 @@ def test_fixture_registry_matches_sources():
 def test_all_sections_parse(env):
     for path in sorted(SECTIONS_DIR.glob("*.md")):
         env.parse(section_body(path))  # raises on invalid syntax
+    for _key, path in work_type_section_files():
+        env.parse(section_body(path))
 
 
 def test_empty_context_render_agreement(env):
@@ -114,6 +164,14 @@ def test_empty_context_render_agreement(env):
             continue
         clean.append(path.stem)
     assert clean == EMPTY_CONTEXT_CLEAN
+    clean = []
+    for key, path in work_type_section_files():
+        try:
+            env.from_string(section_body(path)).render()
+        except Exception:
+            continue
+        clean.append(key)
+    assert clean == EMPTY_CONTEXT_CLEAN_WORK_TYPES
 
 
 def budget_block(body: str) -> str:
@@ -262,8 +320,29 @@ def test_recipe_goldens_match_sources():
         and isinstance(node.value, ast.Constant)
     }
 
+    # `SLOT_X = Slot("x")` (PDASHOSS01-234): work-type slots, encoded in
+    # the fixture as `{"slot": "x"}`.
+    slots = {
+        node.targets[0].id: node.value.args[0].value
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "Slot"
+    }
+
     class Resolve(ast.NodeTransformer):
         def visit_Name(self, node):
+            if node.id in slots:
+                return ast.copy_location(
+                    ast.Dict(
+                        keys=[ast.Constant(value="slot")],
+                        values=[ast.Constant(value=slots[node.id])],
+                    ),
+                    node,
+                )
             return ast.copy_location(ast.Constant(value=consts[node.id]), node)
 
     tables = {}
