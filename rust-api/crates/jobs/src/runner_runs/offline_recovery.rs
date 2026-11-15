@@ -655,12 +655,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             panic!("disabled sweep must not drain")
         }
-        fn dispatch_waiting(
-            &self,
-            _workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            panic!("disabled sweep must not dispatch")
-        }
         fn complete_project_move_handoff(
             &self,
             _run_id: Uuid,
