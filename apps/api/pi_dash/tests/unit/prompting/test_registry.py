@@ -16,8 +16,8 @@ from pi_dash.prompting.renderer import validate_syntax
 def test_registry_loaded_with_expected_sections():
     # 23 core sections (repo-context moved into the software work type as
     # software.context) + 15 locked Cloud Agent sections + 4 software
-    # work-type sections.
-    assert len(registry.REGISTRY) == 42
+    # work-type sections + 3 general work-type sections.
+    assert len(registry.REGISTRY) == 45
     for key in (
         "intro",
         "relationships",

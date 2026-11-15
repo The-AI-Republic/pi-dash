@@ -69,6 +69,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "name": "Sample Project",
                 "description": "Sample project description.",
             },
+            "work_type": {"key": "software", "title": "Software"},
             "repo": {
                 "url": "https://example.com/repo.git",
                 "base_branch": "main",
@@ -180,6 +181,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         },
         "workspace": {"slug": "sample-ws", "name": ""},
         "project": {"id": "", "identifier": "SAMPLE", "name": "", "description": ""},
+        "work_type": {"key": "general", "title": "General"},
         "repo": {
             "url": None,
             "base_branch": None,

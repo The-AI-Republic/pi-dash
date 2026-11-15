@@ -423,6 +423,11 @@ class PromptPreviewEndpoint(APIView):
         work_type, err = _resolve_work_type(raw_work_type)
         if err is not None:
             return err
+        if issue is not None:
+            # Honor the requested work type in the rendered text too, mirroring
+            # the ``run.kind`` override above.
+            wt = work_types.get_work_type(work_type)
+            context["work_type"] = {"key": wt.key, "title": wt.title}
 
         # Optional unsaved draft: render this section's draft body in place of
         # its resolved one, so an editor can preview before committing (§9.2).
