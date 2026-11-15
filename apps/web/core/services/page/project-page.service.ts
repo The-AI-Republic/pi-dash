@@ -182,9 +182,13 @@ export class ProjectPageService extends APIService {
       });
   }
 
+  /**
+   * Move a page, with its sub-pages, to another project of the workspace.
+   * Answers 204; refusals reject with the server's `{ error }` body.
+   */
   async move(workspaceSlug: string, projectId: string, pageId: string, newProjectId: string): Promise<void> {
     return this.post(`/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/move/`, {
-      new_project_id: newProjectId,
+      project_id: newProjectId,
     })
       .then((response) => response?.data)
       .catch((error) => {
