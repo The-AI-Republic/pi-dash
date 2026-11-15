@@ -30,6 +30,28 @@ def fail_world(seeder, daemon_world, machine_flow):
     contract database, and the server-created rows (comment, description, bot
     user) are removed afterwards — the seed tracker only knows seeded rows.
     """
+    # Purge leftover bot-authored comments first: a prior test in the same
+    # shared DB may have left issue_comments referencing the bot (SeedTracker
+    # does not purge issue_comments), which would FK-block the user delete
+    # below. Deleting the comments (and their descriptions) makes the delete
+    # hermetic as documented.
+    bot_id = seeder.db.fetchval(
+        "SELECT id FROM users WHERE username = %s", (AGENT_USERNAME,)
+    )
+    if bot_id is not None:
+        leftover = seeder.db.fetchall(
+            "SELECT description_id FROM issue_comments WHERE actor_id = %s",
+            (bot_id,),
+        )
+        seeder.db.execute(
+            "DELETE FROM issue_comments WHERE actor_id = %s", (bot_id,)
+        )
+        for _row in leftover:
+            if _row["description_id"] is not None:
+                seeder.db.execute(
+                    "DELETE FROM descriptions WHERE id = %s",
+                    (_row["description_id"],),
+                )
     seeder.db.execute("DELETE FROM users WHERE username = %s", (AGENT_USERNAME,))
     state = seeder.create_state(
         daemon_world["workspace"]["id"], daemon_world["project"]["id"]

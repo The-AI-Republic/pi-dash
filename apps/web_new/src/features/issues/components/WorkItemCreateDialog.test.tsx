@@ -1587,6 +1587,31 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
   });
 
+  it("closes silently when an untouched listing prefill is discarded (NEWPIDASH-143)", async () => {
+    const h = setup(
+      {},
+      {
+        initialValues: {
+          stateId: STATE_ID,
+          priority: "high",
+          assigneeIds: ["member-1"],
+          labelIds: ["label-1"],
+          targetDate: "2026-12-01",
+        },
+      }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
+  it("closes silently on Escape for an untouched listing prefill (NEWPIDASH-143)", async () => {
+    const h = setup({}, { initialValues: { stateId: STATE_ID } });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
   it("asks before discarding a dirty form and saves the sanitized draft", async () => {
     const user = userEvent.setup();
     const h = setup();

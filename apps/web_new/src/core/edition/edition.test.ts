@@ -8,9 +8,11 @@ import {
   ISSUE_DEDUPE_FLAG,
   PAGE_ASSISTANT_FLAG,
   PAGE_MOVE_FLAG,
+  PRICING_FREE_TOKENS_FLAG,
   isAppRailEnabled,
   isPageAssistantEnabled,
   isPageMoveEnabled,
+  isPricingFreeTokensEnabled,
   isSidebarToggleEnabled,
   edition,
 } from "./index.js";
@@ -85,6 +87,11 @@ describe("edition", () => {
     expect(isPageAssistantEnabled(edition)).toBe(false);
   });
 
+  it("leaves the pricing free-tokens flag absent (NEWPIDASH-157: OSS shows no token block)", () => {
+    expect(edition.flags[PRICING_FREE_TOKENS_FLAG]).toBeUndefined();
+    expect(isPricingFreeTokensEnabled(edition)).toBe(false);
+  });
+
   it("leaves the page cloud slots absent (PAGE-076-078: community renders nothing)", () => {
     expect(edition.slots?.["page.share"]).toBeUndefined();
     expect(edition.slots?.["page.collaborators"]).toBeUndefined();
@@ -139,5 +146,11 @@ describe("shell edition gates", () => {
     expect(isSidebarToggleEnabled(flags({ "sidebar-toggle": true }))).toBe(true);
     expect(isSidebarToggleEnabled(flags({ "sidebar-toggle": false }))).toBe(false);
     expect(isSidebarToggleEnabled(edition)).toBe(true);
+  });
+
+  it("enables the pricing free-tokens block only where the edition opts in", () => {
+    expect(isPricingFreeTokensEnabled(flags({}))).toBe(false);
+    expect(isPricingFreeTokensEnabled(flags({ "pricing-free-tokens": false }))).toBe(false);
+    expect(isPricingFreeTokensEnabled(flags({ "pricing-free-tokens": true }))).toBe(true);
   });
 });

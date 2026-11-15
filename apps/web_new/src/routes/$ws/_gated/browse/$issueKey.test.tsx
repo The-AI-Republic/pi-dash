@@ -285,6 +285,7 @@ interface BrowseExtras {
   memberRole?: number;
   doneState?: boolean;
   agent?: boolean;
+  withCodeReview?: boolean;
 }
 
 function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
@@ -426,7 +427,33 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
       body = JSON.stringify([]);
     } else if (url.endsWith(`/issues/${ISSUE_ID}/code-reviews/`)) {
       status = 200;
-      body = JSON.stringify([]);
+      body =
+        extras.withCodeReview === true
+          ? JSON.stringify([
+              {
+                id: "423e4567-e89b-12d3-a456-426614174003",
+                issue: ISSUE_ID,
+                provider: "github",
+                host_url: "https://github.com",
+                namespace: "octocat",
+                repo_name: "hello",
+                repo_external_id: "1",
+                external_id: "2",
+                external_iid: "1",
+                url: "https://github.com/octocat/hello/pull/1",
+                title: "octocat/hello#1",
+                state: "open",
+                merged: false,
+                draft: false,
+                remote_updated_at: null,
+                metadata: {},
+                created_at: "2026-10-18T00:00:00Z",
+                updated_at: "2026-10-18T00:00:00Z",
+                created_by: null,
+                created_by_detail: null,
+              },
+            ])
+          : JSON.stringify([]);
     } else if (url.includes("/api/instances/")) {
       status = 200;
       body = JSON.stringify({
@@ -668,6 +695,37 @@ describe("browse route", () => {
     const attach = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
     expect(attach).toBeDefined();
     expect(attach as HTMLElement).toBeDisabled();
+    clearCommands();
+    clearPalettePages();
+  });
+
+  it("keeps Code reviews read-only on an archived issue", async () => {
+    renderBrowse(true, undefined, {
+      details: "member",
+      me: true,
+      archivedIssue: true,
+      withCodeReview: true,
+    });
+    await findStrip();
+    // The archived item still lists the linked review, but the member
+    // must not see its attach form or per-row detach control: the widget
+    // receives writable (editable && not archived) as editable.
+    expect(await screen.findByText("Code reviews")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "octocat/hello#1" })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Paste a pull request or merge request URL")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Detach/ })).not.toBeInTheDocument();
+    const section = document.querySelector('[data-widget-root="Code reviews"]');
+    expect(section).not.toBeNull();
+    expect(within(section as HTMLElement).queryByRole("button", { name: "Attach" })).not.toBeInTheDocument();
+    clearCommands();
+    clearPalettePages();
+  });
+
+  it("keeps Code reviews writable on an open issue for a member", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, withCodeReview: true });
+    await findStrip();
+    expect(await screen.findByPlaceholderText("Paste a pull request or merge request URL")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Detach octocat\/hello#1/ })).toBeInTheDocument();
     clearCommands();
     clearPalettePages();
   });

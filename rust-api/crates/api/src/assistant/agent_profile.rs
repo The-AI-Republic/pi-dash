@@ -30,6 +30,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use pidash_db::redis::client_from_settings;
 use pidash_services::extensions::CredentialError;
 
 use crate::desktop_gate::header_value;
@@ -38,6 +39,36 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::{error_response, json_body, pool_of, request_actor, Denial};
+
+/// Fire post-commit drains for legacy pause flips.
+async fn drain_legacy_effects(
+    pool: &sqlx::PgPool,
+    state: &AppState,
+    effects: &pidash_services::runner_enroll::dispatch_rules::PauseEffects,
+) {
+    if effects.drain_pod_ids.is_empty() && effects.drain_runner_ids.is_empty() {
+        return;
+    }
+    let redis = client_from_settings(state.settings());
+    for pod_id in &effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner_id,
+        )
+        .await;
+    }
+}
 
 /// `users/me/ai-assistant/agent-profile/` (under the `api/` include).
 pub const PROFILE_PATH: &str = "/api/users/me/ai-assistant/agent-profile/";
@@ -154,19 +185,21 @@ async fn get_profile(
     // never fails the request.
     {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
-            &sea,
-            actor.id,
-            if available {
-                ""
-            } else if !enabled {
-                "engine_disabled"
-            } else {
-                "profile_unavailable"
-            },
-            chrono::Utc::now(),
-        )
-        .await;
+        let effects =
+            pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+                &sea,
+                actor.id,
+                if available {
+                    ""
+                } else if !enabled {
+                    "engine_disabled"
+                } else {
+                    "profile_unavailable"
+                },
+                chrono::Utc::now(),
+            )
+            .await;
+        drain_legacy_effects(&pool, &state, &effects).await;
     }
     // `""` exactly when available, else the seam's reason (or the
     // operator-switch code when the seam has none).
@@ -238,13 +271,15 @@ async fn post_token(
         Err(CredentialError::Classified { .. }) => None,
     } {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
-            &sea,
-            actor.id,
-            legacy_reason,
-            chrono::Utc::now(),
-        )
-        .await;
+        let effects =
+            pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+                &sea,
+                actor.id,
+                legacy_reason,
+                chrono::Utc::now(),
+            )
+            .await;
+        drain_legacy_effects(&pool, &state, &effects).await;
     }
     match result {
         Ok((token, expires_at)) => {
@@ -338,15 +373,18 @@ pub fn is_desktop_from_extension(
 async fn fetch_llm_has_key(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<bool, Denial> {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let row = pidash_db::entity::assistant_user_llm_config::Entity::find()
+    // `into_tuple`: with `select_only` the row holds one column, so decoding
+    // it as the full Model fails on every user who has a config row.
+    let key: Option<Option<Vec<u8>>> = pidash_db::entity::assistant_user_llm_config::Entity::find()
         .filter(pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(*user_id))
         .select_only()
         .column(pidash_db::entity::assistant_user_llm_config::Column::ApiKeyEncrypted)
+        .into_tuple()
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row
-        .map(|row| pidash_db::assistant::models::has_secret(&row.api_key_encrypted))
+    Ok(key
+        .map(|key| pidash_db::assistant::models::has_secret(&key))
         .unwrap_or(false))
 }
 
@@ -838,5 +876,38 @@ mod live_tests {
             body.get("detail").is_none(),
             "classified arm carries no detail key: {body}"
         );
+    }
+
+    /// A user with an `assistant_user_llm_config` row: the one-column
+    /// select decodes (it used to be decoded as the full Model and 500).
+    #[tokio::test]
+    async fn has_key_reads_a_users_config_row() {
+        let Some((state, _secret)) = live_state(None).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let without_row = seed_user(&pool).await;
+        assert_eq!(
+            fetch_llm_has_key(&pool, &without_row).await.ok(),
+            Some(false)
+        );
+        for (key, expected) in [(Some(b"sealed".to_vec()), true), (None, false)] {
+            let user_id = seed_user(&pool).await;
+            sqlx::query(
+                "INSERT INTO assistant_user_llm_config (provider_kind, base_url,
+                    model_name, api_key_encrypted, created_at, updated_at, user_id)
+                 VALUES ('openai', '', 'gpt', $1, now(), now(), $2)",
+            )
+            .bind(key)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("seed llm config");
+            assert_eq!(
+                fetch_llm_has_key(&pool, &user_id).await.ok(),
+                Some(expected)
+            );
+        }
     }
 }

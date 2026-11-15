@@ -349,6 +349,44 @@ test(
       expect(mine).toBeDefined();
       await deleteServerDraft(seed.workspaceSlug, mine!.id, session);
     });
+
+    await test.step("discarding an untouched prefilled opener just closes", async () => {
+      // NEWPIDASH-143: a kanban column's "+" prefills state (and friends);
+      // an untouched prefilled form is not dirty, so discard closes
+      // silently instead of offering a draft.
+      const before = await serverProjectUserProperties(seed.workspaceSlug, seed.projectId, session);
+      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+        display_filters: {
+          ...before.displayFilters,
+          layout: "kanban",
+          order_by: "sort_order",
+          sub_group_by: null,
+          show_empty_groups: true,
+          group_by: "state",
+        },
+        display_properties: before.displayProperties,
+      });
+      try {
+        // Reload so the board re-renders in kanban. openProjectIssuesSettled
+        // forces list layout on the oracle driver, so it cannot reach the
+        // kanban board.
+        await driver.boardReloadIssues();
+        await driver.kanbanOpenBoard();
+        await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
+        const column = (await driver.kanbanColumns())[0]?.name ?? "";
+        expect(column).not.toBe("");
+        await driver.kanbanHeaderCreate(column);
+        await expect.poll(() => driver.kanbanCreateModalVisible(), { timeout: 30_000 }).toBe(true);
+        await driver.clickModalDiscard();
+        await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+        expect(await driver.pageTextContains("Save this draft?")).toBe(false);
+      } finally {
+        await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+          display_filters: before.displayFilters,
+          display_properties: before.displayProperties,
+        });
+      }
+    });
   }
 );
 

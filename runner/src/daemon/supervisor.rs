@@ -1076,6 +1076,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     // work dir.
     let attach_working_dir = resolve_working_dir(inst);
     let inst_chat_active = inst.chat_active.clone();
+    let inst_engine = ctx.engine.clone();
     let h = tokio::spawn(async move {
         let run = RunnerLoop {
             runner_paths,
@@ -1093,6 +1094,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             current_run: None,
             current_chat: None,
             local_chat_active: inst_chat_active,
+            engine: inst_engine,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -1784,6 +1786,9 @@ struct RunnerLoop {
     /// assign lane consults it so a managed run and a local chat never modify
     /// the same working copy at the same time (issue AC6).
     local_chat_active: Arc<std::sync::atomic::AtomicBool>,
+    /// The machine's built-in engine, for the current profile lane the
+    /// free-quota classifier is tied to. Threaded into each `AssignWorker`.
+    engine: Arc<crate::engine::manager::EngineManager>,
 }
 
 struct CurrentRun {
@@ -2125,6 +2130,7 @@ impl RunnerLoop {
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
                     let out = self.out.clone();
+                    let engine = self.engine.clone();
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
                             runner_paths,
@@ -2134,6 +2140,7 @@ impl RunnerLoop {
                             approvals,
                             out,
                             cancel,
+                            engine,
                         };
                         if let Err(e) = worker
                             .run(run_id, prompt, repo_url, expected_codex_model)
@@ -3728,6 +3735,10 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
+    /// The machine's built-in engine, for the current profile lane the
+    /// free-quota classifier is tied to. Read live per event, so a profile
+    /// refresh mid-run still gates correctly.
+    engine: Arc<crate::engine::manager::EngineManager>,
 }
 
 struct RunMetadata {
@@ -3741,6 +3752,13 @@ struct RunMetadata {
 const APPROVAL_WATCHDOG_RECHECK: Duration = Duration::from_secs(30);
 
 impl AssignWorker {
+    /// The gateway lane of the machine's engine profile, for the free-quota
+    /// classifier. Empty when no profile has been fetched yet, which
+    /// classifies as nothing and keeps today's behaviour.
+    fn engine_lane(&self) -> String {
+        self.engine.profile().map(|p| p.lane).unwrap_or_default()
+    }
+
     async fn run_metadata(&self) -> RunMetadata {
         let snapshot = self.state.observability_snapshot().await;
         RunMetadata {
@@ -3940,105 +3958,153 @@ impl AssignWorker {
             prompt,
             model: expected_codex_model,
         };
-        // Race the startup handshake against cancel and shutdown: a cold
-        // engine may take up to `ENGINE_STARTUP_TIMEOUT` to answer, and a
-        // Cancel must not sit unobserved for that long. The `Notified` future
-        // is created before the race so a `notify_waiters()` that fires while
-        // startup is in flight is not missed.
-        let shutdown = self.state.shutdown_notified();
-        let shutdown_fut = shutdown.notified();
-        let started = tokio::select! {
-            biased;
-            _ = shutdown_fut => None,
-            _ = self.cancel.cancelled() => None,
-            r = within_startup_deadline(bridge.run_one_shot(&payload, &workspace_path)) => Some(r),
-        };
-        let Some(started) = started else {
-            // The handshake was abandoned mid-flight, so the bridge is
-            // discarded. On shutdown the daemon's drain reports the run as
-            // `DaemonRestart`; only an explicit cancel is reported here.
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
-            let cancelled = self.cancel.is_cancelled();
-            hist.append(&HistoryEntry::Footer {
-                ts: Utc::now(),
-                final_status: "cancelled".to_string(),
-                done_payload: None,
-                error: None,
-            })
-            .await
-            .ok();
-            self.state.set_current_run(None).await;
-            if cancelled {
-                self.send(ClientMsg::RunCancelled {
-                    run_id,
-                    cancelled_at: Utc::now(),
-                    tokens: None,
-                    model: None,
-                })
-                .await;
-            }
-            return Ok(());
-        };
-        let mut cursor = match started {
-            Ok(c) => c,
-            Err(e) => {
-                let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
+        // Free-quota retries: a busy/unavailable free lane backs off and
+        // restarts the turn instead of failing the run. Each attempt reuses
+        // the bridge (and its thread), so a retry is a new turn with the
+        // same prompt. One RunStarted is sent, on the first attempt.
+        let mut attempt: u32 = 0;
+        let status_label: String = loop {
+            // Race the startup handshake against cancel and shutdown: a cold
+            // engine may take up to `ENGINE_STARTUP_TIMEOUT` to answer, and a
+            // Cancel must not sit unobserved for that long. The `Notified` future
+            // is created before the race so a `notify_waiters()` that fires while
+            // startup is in flight is not missed.
+            let shutdown = self.state.shutdown_notified();
+            let shutdown_fut = shutdown.notified();
+            let started = tokio::select! {
+                biased;
+                _ = shutdown_fut => None,
+                _ = self.cancel.cancelled() => None,
+                r = within_startup_deadline(bridge.run_one_shot(&payload, &workspace_path)) => Some(r),
+            };
+            let Some(started) = started else {
+                // The handshake was abandoned mid-flight, so the bridge is
+                // discarded. On shutdown the daemon's drain reports the run as
+                // `DaemonRestart`; only an explicit cancel is reported here.
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+                let cancelled = self.cancel.is_cancelled();
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
-                    final_status: "failed".to_string(),
+                    final_status: "cancelled".to_string(),
                     done_payload: None,
-                    error: Some(detail.clone()),
+                    error: None,
                 })
                 .await
                 .ok();
-                self.send(ClientMsg::RunFailed {
+                self.state.set_current_run(None).await;
+                if cancelled {
+                    self.send(ClientMsg::RunCancelled {
+                        run_id,
+                        cancelled_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                }
+                return Ok(());
+            };
+            let mut cursor = match started {
+                Ok(c) => c,
+                Err(e) => {
+                    let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
+                    hist.append(&HistoryEntry::Footer {
+                        ts: Utc::now(),
+                        final_status: "failed".to_string(),
+                        done_payload: None,
+                        error: Some(detail.clone()),
+                    })
+                    .await
+                    .ok();
+                    self.send(ClientMsg::RunFailed {
+                        run_id,
+                        reason: self.crash_reason(),
+                        detail: Some(detail),
+                        ended_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                    bridge.shutdown(Duration::from_secs(5)).await.ok();
+                    self.state.set_current_run(None).await;
+                    return Ok(());
+                }
+            };
+            if attempt == 0 {
+                let run_model = cursor.model().map(ToOwned::to_owned);
+                self.state.set_model(run_model.clone()).await;
+                self.send(ClientMsg::RunStarted {
                     run_id,
-                    reason: self.crash_reason(),
-                    detail: Some(detail),
-                    ended_at: Utc::now(),
-                    tokens: None,
-                    model: None,
+                    thread_id: cursor.thread_id().to_string(),
+                    // Alias the session id to the thread id, mirroring the chat
+                    // bridge's warm path (`local_session_id: Some(thread_id)`): the
+                    // run path's only session handle today is the thread id. `agent_kind`
+                    // lets the cloud interpret it per-CLI. Both are recorded durably in
+                    // `agent_metadata`, which — unlike `thread_id` — survives a retry.
+                    local_session_id: cursor.thread_id().to_string(),
+                    agent_kind: cursor.agent_kind().to_string(),
+                    started_at: Utc::now(),
+                    model: run_model,
                 })
                 .await;
-                bridge.shutdown(Duration::from_secs(5)).await.ok();
-                self.state.set_current_run(None).await;
-                return Ok(());
+                hist.append(&HistoryEntry::Lifecycle {
+                    ts: Utc::now(),
+                    state: "started".to_string(),
+                    detail: Some(cursor.thread_id().to_string()),
+                })
+                .await?;
+            }
+
+            // Pump events until terminal (or a free-quota retry).
+            match self
+                .pump_events(&mut bridge, &mut cursor, &mut hist, &workspace_path)
+                .await?
+            {
+                Outcome::Done { status_label } => break status_label,
+                Outcome::Retry { code } => {
+                    if attempt >= crate::engine::free_quota::MAX_RETRIES {
+                        // The backoff budget is spent: fail with a clear
+                        // message instead of failing on the first busy notice.
+                        let detail = crate::engine::free_quota::retry_exhausted_detail(
+                            code,
+                            crate::engine::free_quota::MAX_RETRIES,
+                        );
+                        let enriched = self.build_failure_detail(&detail, &bridge).await;
+                        hist.append(&HistoryEntry::Footer {
+                            ts: Utc::now(),
+                            final_status: "failed".to_string(),
+                            done_payload: None,
+                            error: Some(enriched.clone()),
+                        })
+                        .await
+                        .ok();
+                        self.send(ClientMsg::RunFailed {
+                            run_id,
+                            reason: FailureReason::Internal,
+                            detail: Some(enriched),
+                            ended_at: Utc::now(),
+                            tokens: None,
+                            model: None,
+                        })
+                        .await;
+                        break "failed".to_string();
+                    }
+                    attempt += 1;
+                    let delay = crate::engine::free_quota::backoff(attempt);
+                    tracing::info!(%run_id, %code, attempt, ?delay, "free-quota backoff: retrying the turn");
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => break "cancelled".to_string(),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
             }
         };
-        let run_model = cursor.model().map(ToOwned::to_owned);
-        self.state.set_model(run_model.clone()).await;
-        self.send(ClientMsg::RunStarted {
-            run_id,
-            thread_id: cursor.thread_id().to_string(),
-            // Alias the session id to the thread id, mirroring the chat
-            // bridge's warm path (`local_session_id: Some(thread_id)`): the
-            // run path's only session handle today is the thread id. `agent_kind`
-            // lets the cloud interpret it per-CLI. Both are recorded durably in
-            // `agent_metadata`, which — unlike `thread_id` — survives a retry.
-            local_session_id: cursor.thread_id().to_string(),
-            agent_kind: cursor.agent_kind().to_string(),
-            started_at: Utc::now(),
-            model: run_model,
-        })
-        .await;
-        hist.append(&HistoryEntry::Lifecycle {
-            ts: Utc::now(),
-            state: "started".to_string(),
-            detail: Some(cursor.thread_id().to_string()),
-        })
-        .await?;
-
-        // Pump events until terminal.
-        let outcome = self
-            .pump_events(&mut bridge, &mut cursor, &mut hist, &workspace_path)
-            .await?;
 
         bridge.shutdown(Duration::from_secs(5)).await.ok();
 
         let summary = RunSummary {
             run_id,
             work_item_id: None,
-            status: outcome.status_label.clone(),
+            status: status_label.clone(),
             started_at: Utc::now(),
             ended_at: Some(Utc::now()),
             title: None,
@@ -4047,7 +4113,7 @@ impl AssignWorker {
         idx.upsert(summary);
         idx.save(&self.runner_paths).ok();
 
-        if outcome.status_label == "cancelled" {
+        if status_label == "cancelled" {
             let terminal_metadata = self.run_metadata().await;
             self.state.set_current_run(None).await;
             self.send(ClientMsg::RunCancelled {
@@ -4133,7 +4199,9 @@ impl AssignWorker {
                         Duration::from_secs(10),
                         bridge.next_events(cursor),
                     ).await;
-                    return Ok(Outcome { status_label: "cancelled".into() });
+                    return Ok(Outcome::Done {
+                        status_label: "cancelled".into(),
+                    });
                 }
                 _ = async {
                     match run_event_flush_deadline {
@@ -4165,7 +4233,9 @@ impl AssignWorker {
                             done_payload: None,
                             error: Some(detail),
                         }).await?;
-                        return Ok(Outcome { status_label: "failed".into() });
+                        return Ok(Outcome::Done {
+                            status_label: "failed".into(),
+                        });
                     };
                     if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
                         self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
@@ -4217,7 +4287,9 @@ impl AssignWorker {
                         done_payload: None,
                         error: Some(detail),
                     }).await?;
-                    return Ok(Outcome { status_label: "failed".into() });
+                    return Ok(Outcome::Done {
+                        status_label: "failed".into(),
+                    });
                 }
             }
         }
@@ -4442,33 +4514,64 @@ impl AssignWorker {
                 // five times over. Stop it on the first notice instead of
                 // logging it as history and waiting out the retries.
                 if let Some((status, text)) =
-                    crate::codex::gateway::gateway_refusal(&method, &params)
+                    crate::codex::gateway::gateway_will_retry_notice(&method, &params)
                 {
-                    let base = gateway_refusal_detail(status, text);
-                    bridge.interrupt().await.ok();
-                    let enriched = self.build_failure_detail(&base, bridge).await;
-                    run_events.flush_before_lifecycle(&self.out).await;
-                    let metadata = self.run_metadata().await;
-                    self.send(ClientMsg::RunFailed {
-                        run_id,
-                        reason: FailureReason::Internal,
-                        detail: Some(enriched.clone()),
-                        ended_at: Utc::now(),
-                        tokens: metadata.tokens,
-                        model: metadata.model,
-                    })
-                    .await;
-                    hist.append(&HistoryEntry::Footer {
-                        ts: Utc::now(),
-                        final_status: "failed".into(),
-                        done_payload: None,
-                        error: Some(enriched),
-                    })
-                    .await
-                    .ok();
-                    return Ok(Some(Outcome {
-                        status_label: "failed".into(),
-                    }));
+                    let mut base: Option<String> = None;
+                    match crate::engine::free_quota::classify(&self.engine_lane(), status, &text) {
+                        // OpenHub free-lane stop codes: the run fails with
+                        // the code's clear reason, keeping resets_at.
+                        Some(crate::engine::free_quota::Disposition::Stop(reason)) => {
+                            base = Some(reason);
+                        }
+                        // Free-lane retry codes: stop the engine's futile
+                        // rapid retry, back off, and restart the turn. The
+                        // run itself never fails on these notices.
+                        Some(crate::engine::free_quota::Disposition::Retry { code }) => {
+                            bridge.interrupt().await.ok();
+                            run_events.flush_before_lifecycle(&self.out).await;
+                            hist.append(&HistoryEntry::Lifecycle {
+                                ts: Utc::now(),
+                                state: "retrying".into(),
+                                detail: Some(format!(
+                                    "free-quota response ({code}): retrying the turn with backoff"
+                                )),
+                            })
+                            .await
+                            .ok();
+                            return Ok(Some(Outcome::Retry { code }));
+                        }
+                        None => {
+                            if crate::codex::gateway::is_gateway_refusal_status(status) {
+                                base = Some(gateway_refusal_detail(status, text));
+                            }
+                        }
+                    }
+                    if let Some(base) = base {
+                        bridge.interrupt().await.ok();
+                        let enriched = self.build_failure_detail(&base, bridge).await;
+                        run_events.flush_before_lifecycle(&self.out).await;
+                        let metadata = self.run_metadata().await;
+                        self.send(ClientMsg::RunFailed {
+                            run_id,
+                            reason: FailureReason::Internal,
+                            detail: Some(enriched.clone()),
+                            ended_at: Utc::now(),
+                            tokens: metadata.tokens,
+                            model: metadata.model,
+                        })
+                        .await;
+                        hist.append(&HistoryEntry::Footer {
+                            ts: Utc::now(),
+                            final_status: "failed".into(),
+                            done_payload: None,
+                            error: Some(enriched),
+                        })
+                        .await
+                        .ok();
+                        return Ok(Some(Outcome::Done {
+                            status_label: "failed".into(),
+                        }));
+                    }
                 }
                 hist.append(&HistoryEntry::CodexEvent {
                     ts: Utc::now(),
@@ -4558,7 +4661,7 @@ impl AssignWorker {
                             })
                             .await
                             .ok();
-                            return Ok(Some(Outcome {
+                            return Ok(Some(Outcome::Done {
                                 status_label: "cancelled".into(),
                             }));
                         }
@@ -4633,7 +4736,7 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                Ok(Some(Outcome {
+                Ok(Some(Outcome::Done {
                     status_label: "completed".into(),
                 }))
             }
@@ -4653,7 +4756,32 @@ impl AssignWorker {
                 let raw_base = detail
                     .clone()
                     .unwrap_or_else(|| "agent reported failure".to_string());
-                let base = clean_gateway_failure_detail(&raw_base);
+                // OpenHub free-quota codes in the terminal detail get the
+                // same treatment as on the willRetry notices: clear stop
+                // reasons, backoff retries. Anything else keeps the
+                // existing cleaning.
+                let disposition = crate::codex::gateway::gateway_status_text(&raw_base).and_then(
+                    |(status, text)| {
+                        crate::engine::free_quota::classify(&self.engine_lane(), status, &text)
+                    },
+                );
+                let base = match disposition {
+                    Some(crate::engine::free_quota::Disposition::Stop(reason)) => reason,
+                    Some(crate::engine::free_quota::Disposition::Retry { code }) => {
+                        run_events.flush_before_lifecycle(&self.out).await;
+                        hist.append(&HistoryEntry::Lifecycle {
+                            ts: Utc::now(),
+                            state: "retrying".into(),
+                            detail: Some(format!(
+                                "free-quota response ({code}): retrying the turn with backoff"
+                            )),
+                        })
+                        .await
+                        .ok();
+                        return Ok(Some(Outcome::Retry { code }));
+                    }
+                    None => clean_gateway_failure_detail(&raw_base),
+                };
                 let enriched = self.build_failure_detail(&base, bridge).await;
                 run_events.flush_before_lifecycle(&self.out).await;
                 let metadata = self.run_metadata().await;
@@ -4674,7 +4802,7 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                Ok(Some(Outcome {
+                Ok(Some(Outcome::Done {
                     status_label: "failed".into(),
                 }))
             }
@@ -4688,8 +4816,13 @@ impl AssignWorker {
     }
 }
 
-struct Outcome {
-    status_label: String,
+enum Outcome {
+    /// The run reached a terminal state (completed / failed / cancelled).
+    Done { status_label: String },
+    /// A free-quota notice wants the turn retried after a backoff, not a
+    /// failure. `code` names it (`free_lane_busy` /
+    /// `free_quota_unavailable`) for the exhausted-retries message.
+    Retry { code: &'static str },
 }
 
 /// Best-effort: if codex hands us a non-UUID approval id (it shouldn't, per
@@ -5430,10 +5563,17 @@ mod tests {
             let runner_paths = paths.for_runner(config.runner_id);
             runner_paths.ensure().unwrap();
             let (tx, mut rx) = mpsc::channel(16);
+            let engine_paths = paths.clone();
             let mut worker = AssignWorker {
                 runner_paths,
                 daemon_paths: paths,
                 runner_config: config.clone(),
+                engine: crate::engine::manager::EngineManager::new(
+                    None,
+                    engine_paths,
+                    WorkspaceTokens::default(),
+                    None,
+                ),
                 state: StateHandle::new(Config {
                     engine: Default::default(),
                     auth: Default::default(),
@@ -6141,15 +6281,15 @@ mod tests {
         assert!(drain_journal::load(&paths).is_empty());
     }
 
-    /// Drive one Raw error notice through `handle_bridge_event` and return the
-    /// outcome plus the RunFailed detail (if any). PIDESKAPP-162: the run
-    /// lane must fail on a 402/401 willRetry notice, not log it as history.
-    async fn run_error_notice_through_handler(
-        status: u64,
-        body_inner: &str,
-    ) -> (Option<String>, Option<String>) {
+    /// The rig for driving bridge events through `handle_bridge_event`:
+    /// a worker, a fake codex process, history and the outbound channel.
+    /// `lane` seeds the engine profile's gateway lane (`None` = no profile
+    /// fetched yet, i.e. no lane, so nothing classifies).
+    async fn notice_rig(lane: Option<&str>) -> NoticeRig {
         use crate::codex::app_server::AppServer;
         use crate::codex::bridge::Bridge;
+        use crate::config::schema::CliSection;
+        use crate::engine::test_server;
         use tokio::process::Command;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -6160,8 +6300,50 @@ mod tests {
         let config = runner_config("main", "WEB", wd.clone());
         let runner_paths = paths.for_runner(config.runner_id);
         runner_paths.ensure().unwrap();
-        let (tx, mut rx) = mpsc::channel(16);
-        let mut worker = AssignWorker {
+
+        let engine = match lane {
+            None => crate::engine::manager::EngineManager::new(
+                None,
+                paths_for(tmp.path()),
+                WorkspaceTokens::default(),
+                None,
+            ),
+            Some(lane) => {
+                let lane = lane.to_string();
+                let handler: test_server::Handler = Arc::new(move |req| {
+                    if req.path == crate::engine::api::PROFILE_PATH {
+                        (
+                            200,
+                            serde_json::json!({
+                                "available": true, "lane": lane,
+                                "base_url": "https://gw.example/v1", "model": "gpt-5.5",
+                                "reason_code": "", "engine_sign_in_state": "active"
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        (404, "{}".to_string())
+                    }
+                });
+                let server = test_server::start(handler).await;
+                let cli = CliSection {
+                    token: Some("mt_acme".into()),
+                    workspace_slug: Some("acme".into()),
+                    ..Default::default()
+                };
+                let manager = crate::engine::manager::EngineManager::new(
+                    Some(&server.url),
+                    paths_for(tmp.path()),
+                    WorkspaceTokens::from_cli(Some(&cli)),
+                    None,
+                );
+                manager.refresh_profile().await;
+                manager
+            }
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        let worker = AssignWorker {
             runner_paths: runner_paths.clone(),
             daemon_paths: paths.clone(),
             runner_config: config.clone(),
@@ -6176,18 +6358,101 @@ mod tests {
             approvals: ApprovalRouter::new(),
             out: RunnerOut::new(config.runner_id, tx),
             cancel: tokio_util::sync::CancellationToken::new(),
+            engine,
         };
         let run_id = uuid::Uuid::new_v4();
-        let mut hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();
+        let hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("while read _; do :; done");
         let server = AppServer::spawn_command(cmd)
             .await
             .expect("spawn fake codex");
-        let mut bridge = AgentBridge::Codex(Bridge::from_server(server, None));
-        let mut run_events = RunEventMirror::new(run_id);
-        let mut token_meter = crate::daemon::observability::RunTokenMeter::default();
+        let bridge = AgentBridge::Codex(Bridge::from_server(server, None));
+        NoticeRig {
+            worker,
+            bridge,
+            hist,
+            run_events: RunEventMirror::new(run_id),
+            token_meter: crate::daemon::observability::RunTokenMeter::default(),
+            rx,
+            run_id,
+            wd,
+            _tmp: tmp,
+        }
+    }
 
+    struct NoticeRig {
+        worker: AssignWorker,
+        bridge: AgentBridge,
+        hist: HistoryWriter,
+        run_events: RunEventMirror,
+        token_meter: crate::daemon::observability::RunTokenMeter,
+        rx: mpsc::Receiver<Envelope<ClientMsg>>,
+        run_id: uuid::Uuid,
+        wd: PathBuf,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl NoticeRig {
+        /// Drive one bridge event through the run lane.
+        async fn drive(&mut self, ev: BridgeEvent) -> Option<Outcome> {
+            self.worker
+                .handle_bridge_event(
+                    ev,
+                    &mut self.bridge,
+                    &mut self.hist,
+                    &self.wd,
+                    &mut self.run_events,
+                    &mut self.token_meter,
+                )
+                .await
+                .expect("handle event")
+        }
+
+        /// The RunFailed detail sent since the rig was built, if any
+        /// (RunEvents mirror frames are skipped).
+        async fn failed_detail(&mut self) -> Option<String> {
+            let deadline = std::time::Instant::now() + Duration::from_millis(400);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                let Ok(Some(msg)) = tokio::time::timeout(remaining, self.rx.recv()).await else {
+                    return None;
+                };
+                if let ClientMsg::RunFailed { detail, .. } = msg.body {
+                    return detail;
+                }
+            }
+        }
+    }
+
+    fn outcome_label(outcome: &Option<Outcome>) -> Option<String> {
+        match outcome {
+            Some(Outcome::Done { status_label }) => Some(status_label.clone()),
+            Some(Outcome::Retry { code }) => Some(format!("retry:{code}")),
+            None => None,
+        }
+    }
+
+    /// Drive one Raw error notice through `handle_bridge_event` and return
+    /// the outcome plus the RunFailed detail (if any). PIDESKAPP-162: the
+    /// run lane must fail on a 402/401 willRetry notice, not log it as
+    /// history. `None` lane = no profile, so the generic behaviour holds.
+    async fn run_error_notice_through_handler(
+        status: u64,
+        body_inner: &str,
+    ) -> (Option<String>, Option<String>) {
+        run_notice(None, status, body_inner).await
+    }
+
+    async fn run_notice(
+        lane: Option<&str>,
+        status: u64,
+        body_inner: &str,
+    ) -> (Option<String>, Option<String>) {
+        let mut rig = notice_rig(lane).await;
         let params = serde_json::json!({
             "willRetry": true,
             "error": {
@@ -6198,44 +6463,16 @@ mod tests {
             "threadId": "th_test",
             "turnId": "turn_1",
         });
-        let ev = BridgeEvent::Raw {
-            run_id,
-            method: "error".into(),
-            params,
-        };
-        let out = worker
-            .handle_bridge_event(
-                ev,
-                &mut bridge,
-                &mut hist,
-                &wd,
-                &mut run_events,
-                &mut token_meter,
-            )
-            .await
-            .expect("handle event");
-        let status_label = out.as_ref().map(|o| o.status_label.clone());
-        // Drain to RunFailed if one was sent, skipping RunEvents mirror frames.
-        let mut detail: Option<String> = None;
-        let deadline = std::time::Instant::now() + Duration::from_millis(400);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let Ok(Some(msg)) = tokio::time::timeout(remaining, rx.recv()).await else {
-                break;
-            };
-            match msg.body {
-                ClientMsg::RunFailed { detail: d, .. } => {
-                    detail = d;
-                    break;
-                }
-                ClientMsg::RunEvents { .. } => continue,
-                _ => continue,
-            }
-        }
-        bridge.shutdown(Duration::from_secs(1)).await.ok();
+        let out = rig
+            .drive(BridgeEvent::Raw {
+                run_id: rig.run_id,
+                method: "error".into(),
+                params,
+            })
+            .await;
+        let status_label = outcome_label(&out);
+        let detail = rig.failed_detail().await;
+        rig.bridge.shutdown(Duration::from_secs(1)).await.ok();
         (status_label, detail)
     }
 
@@ -6296,6 +6533,193 @@ mod tests {
             detail.is_none(),
             "no RunFailed may be sent for a retryable 503, got: {detail:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_lane_free_quota_exhausted_stops_with_resets_at() {
+        let body = r#"{"error":{"code":"free_quota_exhausted","limit":2000000,"plan":"free","resets_at":"2026-11-09T00:00:00Z"}}"#;
+        let details = format!(
+            "unexpected status 402 Payment Required: {body}, url: https://gateway.test/v1/responses, request id: req_1"
+        );
+        let (status, detail) = run_notice(Some("openhub"), 402, &details).await;
+        assert_eq!(status.as_deref(), Some("failed"));
+        let detail = detail.expect("RunFailed detail");
+        assert!(
+            detail.contains("daily free limit reached, resets at 2026-11-09T00:00:00Z"),
+            "detail must carry the clear reason with resets_at, got: {detail}"
+        );
+        assert!(
+            !detail.contains("url:") && !detail.contains("Reconnecting"),
+            "detail must not leak URL/Reconnecting, got: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_free_plan_paid_lane_blocked_needs_credit() {
+        let body = r#"{"error":{"code":"free_plan_paid_lane_blocked"}}"#;
+        let details = format!(
+            "unexpected status 402 Payment Required: {body}, url: https://gateway.test/v1/responses, request id: req_1"
+        );
+        let (status, detail) = run_notice(Some("openhub"), 402, &details).await;
+        assert_eq!(status.as_deref(), Some("failed"));
+        let detail = detail.expect("RunFailed detail");
+        assert!(
+            detail.contains("this model needs credit"),
+            "detail must name the credit need, got: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_wallet_empty_codes_stop_with_top_up() {
+        for code in ["insufficient_balance", "no_credit_account"] {
+            let body = format!(r#"{{"error":{{"code":"{code}"}}}}"#);
+            let details = format!(
+                "unexpected status 402 Payment Required: {body}, url: https://gateway.test/v1/responses, request id: req_1"
+            );
+            let (status, detail) = run_notice(Some("openhub"), 402, &details).await;
+            assert_eq!(status.as_deref(), Some("failed"), "{code}");
+            let detail = detail.expect("RunFailed detail");
+            assert!(
+                detail.contains("top up"),
+                "{code} must stop with a top-up reason, got: {detail}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_lane_free_lane_busy_retries_without_failing() {
+        let body = r#"{"error":{"code":"free_lane_busy"}}"#;
+        let details = format!(
+            "unexpected status 429 Too Many Requests: {body}, url: https://gateway.test/v1/responses, request id: req_1"
+        );
+        let (status, detail) = run_notice(Some("openhub"), 429, &details).await;
+        assert_eq!(status.as_deref(), Some("retry:free_lane_busy"));
+        assert!(
+            detail.is_none(),
+            "no RunFailed may be sent for a busy free lane, got: {detail:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_free_quota_unavailable_retries_without_failing() {
+        let body = r#"{"error":{"code":"free_quota_unavailable"}}"#;
+        let details = format!(
+            "unexpected status 503 Service Unavailable: {body}, url: https://gateway.test/v1/responses, request id: req_1"
+        );
+        let (status, detail) = run_notice(Some("openhub"), 503, &details).await;
+        assert_eq!(status.as_deref(), Some("retry:free_quota_unavailable"));
+        assert!(
+            detail.is_none(),
+            "no RunFailed may be sent for an unavailable free quota, got: {detail:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_free_lane_busy_once_still_finishes() {
+        let mut rig = notice_rig(Some("openhub")).await;
+        let params = serde_json::json!({
+            "willRetry": true,
+            "error": {
+                "message": "Reconnecting... 1/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 429}},
+                "additionalDetails": "unexpected status 429 Too Many Requests: {\"error\":{\"code\":\"free_lane_busy\"}}, url: https://gateway.test/v1/responses, request id: req_1",
+            },
+            "threadId": "th_test",
+            "turnId": "turn_1",
+        });
+        let out = rig
+            .drive(BridgeEvent::Raw {
+                run_id: rig.run_id,
+                method: "error".into(),
+                params,
+            })
+            .await;
+        assert_eq!(
+            outcome_label(&out).as_deref(),
+            Some("retry:free_lane_busy"),
+            "a busy notice must ask for a backoff retry, not a failure"
+        );
+        // The retried turn succeeds: the run finishes.
+        let out = rig
+            .drive(BridgeEvent::Completed {
+                run_id: rig.run_id,
+                done_payload: serde_json::json!({"conclusion": "success"}),
+            })
+            .await;
+        assert_eq!(outcome_label(&out).as_deref(), Some("completed"));
+        assert!(
+            rig.failed_detail().await.is_none(),
+            "a run that hit free_lane_busy once must not send RunFailed"
+        );
+        rig.bridge.shutdown(Duration::from_secs(1)).await.ok();
+    }
+
+    #[tokio::test]
+    async fn run_lane_free_codes_on_other_lanes_keep_today_behaviour() {
+        let exhausted = r#"{"error":{"code":"free_quota_exhausted","limit":2000000,"plan":"free","resets_at":"2026-11-09T00:00:00Z"}}"#;
+        let details = format!(
+            "unexpected status 402 Payment Required: {exhausted}, url: https://gateway.test/v1/responses, request id: req_1"
+        );
+        let (status, detail) = run_notice(Some("byok"), 402, &details).await;
+        assert_eq!(status.as_deref(), Some("failed"));
+        let detail = detail.expect("RunFailed detail");
+        assert!(
+            !detail.contains("daily free limit reached"),
+            "a non-openhub lane must keep the generic detail, got: {detail}"
+        );
+        let busy = r#"{"error":{"code":"free_lane_busy"}}"#;
+        let details = format!(
+            "unexpected status 429 Too Many Requests: {busy}, url: https://gateway.test/v1/responses, request id: req_1"
+        );
+        let (status, detail) = run_notice(Some("byok"), 429, &details).await;
+        assert!(status.is_none(), "other lanes stay Raw, got {status:?}");
+        assert!(
+            detail.is_none(),
+            "no RunFailed on other lanes, got {detail:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_terminal_exhausted_detail_gets_the_clear_reason() {
+        let mut rig = notice_rig(Some("openhub")).await;
+        let raw = "unexpected status 402 Payment Required: {\"error\":{\"code\":\"free_quota_exhausted\",\"limit\":2000000,\"plan\":\"free\",\"resets_at\":\"2026-11-09T00:00:00Z\"}}, url: https://gateway.test/v1/responses, request id: req_1";
+        let out = rig
+            .drive(BridgeEvent::Failed {
+                run_id: rig.run_id,
+                reason: FailureReason::Internal,
+                detail: Some(raw.to_string()),
+            })
+            .await;
+        assert_eq!(outcome_label(&out).as_deref(), Some("failed"));
+        let detail = rig.failed_detail().await.expect("RunFailed detail");
+        assert!(
+            detail.contains("daily free limit reached, resets at 2026-11-09T00:00:00Z"),
+            "terminal detail must get the clear reason, got: {detail}"
+        );
+        rig.bridge.shutdown(Duration::from_secs(1)).await.ok();
+    }
+
+    #[tokio::test]
+    async fn run_lane_terminal_busy_detail_retries() {
+        let mut rig = notice_rig(Some("openhub")).await;
+        let raw = "unexpected status 429 Too Many Requests: {\"error\":{\"code\":\"free_lane_busy\"}}, url: https://gateway.test/v1/responses, request id: req_1";
+        let out = rig
+            .drive(BridgeEvent::Failed {
+                run_id: rig.run_id,
+                reason: FailureReason::Internal,
+                detail: Some(raw.to_string()),
+            })
+            .await;
+        assert_eq!(
+            outcome_label(&out).as_deref(),
+            Some("retry:free_lane_busy"),
+            "a terminal busy failure must retry, not fail"
+        );
+        assert!(
+            rig.failed_detail().await.is_none(),
+            "no RunFailed may be sent for a busy terminal failure"
+        );
+        rig.bridge.shutdown(Duration::from_secs(1)).await.ok();
     }
 
     #[test]

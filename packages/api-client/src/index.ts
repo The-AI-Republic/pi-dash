@@ -916,20 +916,32 @@ export {
   OpenhubMarketplacePage,
   OpenhubOAuthStart,
   OpenhubStatus,
+  OpenhubUsageQuota,
+  OpenhubUsageQuotaApps,
+  OpenhubUsageQuotaLlm,
   appIconUrl,
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
+  getFreeQuota,
   getOpenhubStatus,
+  getUsageQuota,
   installApp,
+  isFreeModel,
+  isFreePlan,
+  isModelSelectableForPlan,
   listInstalledApps,
   listMarketplaceApps,
+  normalizeFreeQuota,
+  normalizePlanId,
   setAppActivation,
   startAppOAuth,
   submitAppApiKey,
   uninstallApp,
 } from "./contracts/openhub.js";
 export type { AppApiKeyInput, MarketplaceQuery } from "./contracts/openhub.js";
+export { FREE_QUOTA_PATH, FREE_QUOTA_STALE_TIME_MS } from "./contracts/openhub.js";
+export type { FreeQuota } from "./contracts/openhub.js";
 export {
   ARCHIVABLE_MODULE_STATUSES,
   MODULE_STATUSES,
@@ -1224,6 +1236,16 @@ export type {
 } from "./contracts/admin-loop.js";
 export { InstanceRunner, InstanceRunnerListResponse, listInstanceRunners } from "./contracts/admin-runners.js";
 export type { InstanceRunnerListQuery } from "./contracts/admin-runners.js";
+export {
+  RunnerModelCatalogResponse,
+  RunnerModelRow,
+  createRunnerModel,
+  deleteRunnerModel,
+  getModelCatalog,
+  listAdminRunnerModels,
+  updateRunnerModel,
+} from "./contracts/runner-models.js";
+export type { RunnerModelCreateInput, RunnerModelPatchInput } from "./contracts/runner-models.js";
 export {
   AdminMe,
   CloudAuthUser,

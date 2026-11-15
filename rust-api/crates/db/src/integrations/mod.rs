@@ -46,17 +46,17 @@ pub mod github_models;
 pub use git_models::{
     git_code_review_link::GitCodeReviewLink, git_comment_sync::GitCommentSync,
     git_issue_sync::GitIssueSync, git_provider_account::GitProviderAccount,
-    git_repository::GitRepository, git_repository_binding::GitRepositoryBinding,
-    git_webhook_delivery::GitWebhookDelivery, git_webhook_registration::GitWebhookRegistration,
-    CodeReviewState as GitCodeReviewState, GitAuthType, GitProvider, GitWebhookStatus,
+    git_provider_install_session::GitProviderInstallSession, git_repository::GitRepository,
+    git_repository_binding::GitRepositoryBinding, git_webhook_delivery::GitWebhookDelivery,
+    git_webhook_registration::GitWebhookRegistration, CodeReviewState as GitCodeReviewState,
+    GitAuthType, GitProvider, GitWebhookStatus,
 };
 pub use github_models::{
-    github_app_install_session::GithubAppInstallSession,
-    github_app_installation::GithubAppInstallation, github_comment_sync::GithubCommentSync,
-    github_issue_sync::GithubIssueSync, github_pull_request_link::GithubPullRequestLink,
-    github_repository::GithubRepository, github_repository_sync::GithubRepositorySync,
-    github_webhook_delivery::GithubWebhookDelivery, GithubAccountType, GithubRepositorySelection,
-    GithubSessionStatus, GithubWebhookStatus, PullRequestState,
+    github_comment_sync::GithubCommentSync, github_issue_sync::GithubIssueSync,
+    github_pull_request_link::GithubPullRequestLink, github_repository::GithubRepository,
+    github_repository_sync::GithubRepositorySync, github_webhook_delivery::GithubWebhookDelivery,
+    GithubAccountType, GithubRepositorySelection, GithubSessionStatus, GithubWebhookStatus,
+    PullRequestState,
 };
 
 /// Django-level FK delete behavior (ORM-emulated; the live FKs carry no

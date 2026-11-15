@@ -73,7 +73,7 @@ libclang-dev = '*'
 # Intel macOS uses GitHub's current x64 image. Windows builds run on the
 # MSVC image so cargo-dist can produce archives, PowerShell, and MSI installers.
 [dist.github-custom-runners]
-aarch64-apple-darwin = "macos-14"
+aarch64-apple-darwin = "macos-15"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
 aarch64-unknown-linux-musl = "ubuntu-22.04-arm"
 x86_64-apple-darwin = "macos-15-intel"

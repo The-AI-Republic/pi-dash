@@ -3282,7 +3282,7 @@ async fn member_leave_inner(
         let admins = pm_entity::Entity::find()
             .select_only()
             .column_as(
-                sea_orm::sea_query::Expr::col(pm_entity::Column::Id).count(),
+                sea_orm::sea_query::Expr::col((pm_entity::Entity, pm_entity::Column::Id)).count(),
                 "n",
             )
             .join(JoinType::InnerJoin, pm_entity::Relation::Workspaces.def())

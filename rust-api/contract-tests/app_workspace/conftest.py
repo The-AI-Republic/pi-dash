@@ -64,6 +64,14 @@ def clean_db(db):
                 # Labels carry a project FK; the duplicate-rows suite
                 # (PIDASHCONV-1372) seeds them directly.
                 "labels",
+                # Modules carry workspace/project FKs and module_issues
+                # references issues; the grouped-m2m None-bucket suite
+                # (NEWPIDASH-152) seeds them directly.
+                "module_issues",
+                "module_members",
+                "module_links",
+                "module_user_properties",
+                "modules",
                 "user_favorites",
                 "issues",
                 "draft_issue_assignees",

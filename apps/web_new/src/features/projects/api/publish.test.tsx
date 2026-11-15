@@ -126,7 +126,10 @@ function wrapper(): WrapperComponent {
 }
 
 beforeEach(() => vi.clearAllMocks());
-afterEach(() => resetAppClient());
+afterEach(() => {
+  resetAppClient();
+  vi.restoreAllMocks();
+});
 
 describe("publish form math", () => {
   it("detects a published board by its anchor", () => {
@@ -185,6 +188,16 @@ describe("publish form math", () => {
     expect(publishedBoardLink("abc")).toBe("https://app.example.test/issues/abc");
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it("refuses instead of building a tauri link when the platform refuses", () => {
+    vi.stubEnv("VITE_SPACE_BASE_URL", "");
+    vi.stubEnv("VITE_SPACE_BASE_PATH", "");
+    vi.spyOn(platform, "shareableUrl").mockImplementation(() => {
+      throw new Error("A hosted web origin is required to create a shareable link.");
+    });
+    expect(() => publishedBoardLink("abc")).toThrow("hosted web origin");
+    vi.unstubAllEnvs();
   });
 });
 

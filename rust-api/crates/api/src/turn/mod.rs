@@ -30,7 +30,7 @@
 //! `bin/pidash-api/src/inventory.rs`; the agent loop serves
 //! `assistant.run_turn` end to end.
 //!
-//! Local tools layer (PIDASHCONV-1113): the 17 local tool schemas +
+//! Local tools layer (PIDASHCONV-1113): the 18 local tool schemas +
 //! executors (`assistant/tools/*.py` port). Each layer merges as its own
 //! tested module and is exercised by its unit tests plus the assistant
 //! contract suite.

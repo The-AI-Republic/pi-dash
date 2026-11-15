@@ -149,6 +149,7 @@ mod tests {
             now: chrono::Utc::now(),
             jitter_secs: 0.0,
             created_by: None,
+            pod_once: false,
         };
         let outcome = found.fire(Uuid::nil(), request).await;
         assert!(matches!(outcome, Ok(FireOutcome::NoTransition)));

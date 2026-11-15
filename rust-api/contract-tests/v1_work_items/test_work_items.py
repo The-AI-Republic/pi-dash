@@ -46,6 +46,9 @@ ISSUE_ROW_KEYS = {
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "assignees",
     "labels",
 }

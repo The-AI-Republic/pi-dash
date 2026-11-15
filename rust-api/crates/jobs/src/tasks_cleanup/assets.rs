@@ -185,12 +185,14 @@ pub trait AssetStore: Send + Sync {
         &self,
         asset_id: Uuid,
     ) -> impl std::future::Future<Output = Result<Option<String>, String>> + Send;
-    /// `save(update_fields=["storage_metadata"])` (+ the `auto_now` bump).
+    /// `save(update_fields=["storage_metadata"])`: the named column
+    /// only — `update_fields` restricts the UPDATE to it, so the
+    /// `auto_now` `updated_at` (and `updated_by`) are not written
+    /// (PIDASHCONV-1731).
     fn save_storage_metadata(
         &self,
         asset_id: Uuid,
         metadata: Option<Value>,
-        now: DateTime<Utc>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
     /// `Page/Issue.objects.get(id)`, live rows only.
     fn entity(
@@ -324,16 +326,21 @@ impl LiveS3ObjectStore {
     /// I/O); [`ObjectStore::head_object`] executes it. Scheme/host are
     /// dummy: both arms resolve without them (the endpoint arm rides
     /// the EndpointUrl branch, the regional arm the Region branch).
-    fn signed_head_for(
+    async fn signed_head_for(
         &self,
         key: &str,
         amz_date: &str,
         date_stamp: &str,
     ) -> Result<pidash_storage::SignedRequest, String> {
         let storage = self.signing_storage();
-        pidash_storage::validate_storage(&storage)
+        let creds = pidash_storage::resolve_storage_credentials(&storage)
+            .await
             .map_err(|error| format!("s3 misconfigured: {error}"))?;
-        pidash_storage::sign_head(&storage, "", "", key, amz_date, date_stamp)
+        let mut resolved = storage.clone();
+        resolved.access_key_id = creds.access_key.clone();
+        resolved.secret_access_key = creds.secret_key.clone();
+        resolved.session_token = creds.session_token.clone();
+        pidash_storage::sign_head(&resolved, "", "", key, amz_date, date_stamp)
             .map_err(|error| format!("s3 head {key}: {error}"))
     }
 
@@ -341,7 +348,7 @@ impl LiveS3ObjectStore {
     /// mirrors the duplicate-path `copy_auth_headers`
     /// (`handlers_v2_project.rs`): empty-body PUT, signed headers
     /// `host;x-amz-content-sha256;x-amz-copy-source;x-amz-date`.
-    fn signed_copy_for(
+    async fn signed_copy_for(
         &self,
         src_key: &str,
         dst_key: &str,
@@ -349,9 +356,14 @@ impl LiveS3ObjectStore {
         date_stamp: &str,
     ) -> Result<SignedCopyRequest, String> {
         let storage = self.signing_storage();
-        pidash_storage::validate_storage(&storage)
+        let creds = pidash_storage::resolve_storage_credentials(&storage)
+            .await
             .map_err(|error| format!("s3 misconfigured: {error}"))?;
-        sign_copy_request(&storage, src_key, dst_key, amz_date, date_stamp)
+        let mut resolved = storage.clone();
+        resolved.access_key_id = creds.access_key.clone();
+        resolved.secret_access_key = creds.secret_key.clone();
+        resolved.session_token = creds.session_token.clone();
+        sign_copy_request(&resolved, src_key, dst_key, amz_date, date_stamp)
             .map_err(|error| format!("s3 copy {src_key}: {error}"))
     }
 
@@ -362,7 +374,7 @@ impl LiveS3ObjectStore {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = match self.signed_head_for(key, &amz_date, &date_stamp) {
+        let signed = match self.signed_head_for(key, &amz_date, &date_stamp).await {
             Ok(signed) => signed,
             Err(error) => return HeadAttempt::Config(error),
         };
@@ -372,14 +384,15 @@ impl LiveS3ObjectStore {
                 return HeadAttempt::Config(format!("s3 head {key}: transport failure: no client"))
             }
         };
-        let response = match client
+        let mut head_req = client
             .head(&signed.url)
             .header("Authorization", signed.authorization)
             .header("x-amz-date", signed.amz_date)
-            .header("x-amz-content-sha256", signed.content_sha256)
-            .send()
-            .await
-        {
+            .header("x-amz-content-sha256", signed.content_sha256);
+        if let Some(token) = &signed.security_token {
+            head_req = head_req.header("x-amz-security-token", token);
+        }
+        let response = match head_req.send().await {
             Ok(response) => response,
             Err(error) => {
                 return HeadAttempt::Transport(format!("s3 head {key}: transport failure: {error}"))
@@ -403,7 +416,10 @@ impl LiveS3ObjectStore {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = match self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp) {
+        let signed = match self
+            .signed_copy_for(src_key, dst_key, &amz_date, &date_stamp)
+            .await
+        {
             Ok(signed) => signed,
             Err(error) => return CopyAttempt::Config(error),
         };
@@ -479,7 +495,7 @@ impl LiveS3ObjectStore {
 /// `exponential`/`rand`/`growth_factor 2`). Measured against boto3
 /// 1.34.96 / botocore 1.34.162; the stub contract suite
 /// (`tasks_cleanup/test_s3_retry.py`) pins the attempt counts.
-const S3_MAX_ATTEMPTS: u32 = 5;
+pub(crate) const S3_MAX_ATTEMPTS: u32 = 5;
 
 /// One HEAD attempt's outcome. `Refused` is the swallowed `ClientError`
 /// (stored as NULL); `Transport` escapes to the task's broad `except`
@@ -528,7 +544,7 @@ fn s3_retryable_code(code: &str) -> bool {
 }
 
 /// The legacy retry decision for one service answer.
-fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
+pub(crate) fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
     if s3_retryable_status(status) {
         return true;
     }
@@ -536,7 +552,7 @@ fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
 }
 
 /// Extract the `<Code>` from an S3 error body, if any.
-fn s3_error_code(body: &str) -> Option<&str> {
+pub(crate) fn s3_error_code(body: &str) -> Option<&str> {
     let (_, after) = body.split_once("<Code>")?;
     let (code, _) = after.split_once("</Code>")?;
     let code = code.trim();
@@ -576,7 +592,7 @@ fn retry_backoff(failed_attempt: u32, rand01: f64) -> std::time::Duration {
 }
 
 /// Sleep the legacy backoff after failed attempt `n` (1-based).
-async fn sleep_backoff(failed_attempt: u32) {
+pub(crate) async fn sleep_backoff(failed_attempt: u32) {
     let rand01 = rand::random_range(0.0..1.0);
     tokio::time::sleep(retry_backoff(failed_attempt, rand01)).await;
 }
@@ -726,11 +742,23 @@ fn sign_copy_request(
     };
     let copy_source = format!("/{}/{}", storage.bucket_name, uri_encode_path(src_key));
     let payload_hash = pidash_storage::sha256_hex(&[]);
-    let signed_headers = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date";
-    let canonical = format!(
-        "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
-        endpoint.signed_host,
-    );
+    let has_token = !storage.session_token.is_empty();
+    let (signed_headers, canonical) = if has_token {
+        let signed = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date;x-amz-security-token";
+        let canonical = format!(
+            "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\nx-amz-security-token:{}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+            storage.session_token,
+        );
+        (signed.to_owned(), canonical)
+    } else {
+        let signed = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date".to_owned();
+        let canonical = format!(
+            "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (signed, canonical)
+    };
     let scope = format!("{date_stamp}/{}/s3/aws4_request", storage.region);
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_datetime}\n{scope}\n{}",
@@ -744,14 +772,21 @@ fn sign_copy_request(
         "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
         storage.access_key_id,
     );
+    let mut headers = vec![
+        ("x-amz-content-sha256".to_owned(), payload_hash),
+        ("x-amz-copy-source".to_owned(), copy_source),
+        ("x-amz-date".to_owned(), amz_datetime.to_owned()),
+        ("authorization".to_owned(), authorization),
+    ];
+    if has_token {
+        headers.push((
+            "x-amz-security-token".to_owned(),
+            storage.session_token.clone(),
+        ));
+    }
     Ok(SignedCopyRequest {
         url: format!("{}{dst_path}", endpoint.url_base),
-        headers: vec![
-            ("x-amz-content-sha256".to_owned(), payload_hash),
-            ("x-amz-copy-source".to_owned(), copy_source),
-            ("x-amz-date".to_owned(), amz_datetime.to_owned()),
-            ("authorization".to_owned(), authorization),
-        ],
+        headers,
     })
 }
 
@@ -885,12 +920,7 @@ pub async fn run_sweep<S: AssetStore>(
 /// UUID text (`ValidationError` → the broad `except`), an unbuildable
 /// client, a refused head (stored as `NULL`, like the `ClientError`), a
 /// failed head (the save is skipped, like the `BotoCoreError`).
-pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
-    store: &S,
-    s3: &O,
-    asset_id_raw: &str,
-    now: DateTime<Utc>,
-) {
+pub async fn run_metadata<S: AssetStore, O: ObjectStore>(store: &S, s3: &O, asset_id_raw: &str) {
     let asset_id = match Uuid::parse_str(asset_id_raw) {
         Ok(id) => id,
         Err(_) => {
@@ -920,7 +950,7 @@ pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
             return;
         }
     };
-    if let Err(error) = store.save_storage_metadata(asset_id, metadata, now).await {
+    if let Err(error) = store.save_storage_metadata(asset_id, metadata).await {
         tracing::warn!(%asset_id, %error, "metadata save failed: silent skip");
     }
 }
@@ -1180,17 +1210,12 @@ impl AssetStore for PgAssetStore {
         &self,
         asset_id: Uuid,
         metadata: Option<Value>,
-        now: DateTime<Utc>,
     ) -> Result<(), String> {
         let conn = pidash_db::pool::sea_orm_connection(&self.pool);
         file_assets::Entity::update_many()
             .col_expr(
                 file_assets::Column::StorageMetadata,
                 sea_orm::sea_query::Expr::value(metadata),
-            )
-            .col_expr(
-                file_assets::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now),
             )
             .filter(file_assets::Column::Id.eq(asset_id))
             .exec(&conn)
@@ -1505,7 +1530,7 @@ pub fn register_metadata<S: ObjectStore + 'static>(
                 .unwrap_or_default()
                 .to_string();
             let store = PgAssetStore::new(pool);
-            run_metadata(&store, s3.as_ref(), &asset_id, Utc::now()).await;
+            run_metadata(&store, s3.as_ref(), &asset_id).await;
             Ok(Verdict::Ack)
         })
     });
@@ -1731,12 +1756,10 @@ mod tests {
             &self,
             asset_id: Uuid,
             metadata: Option<Value>,
-            now: DateTime<Utc>,
         ) -> Result<(), String> {
             let mut state = self.state.lock().unwrap();
             let asset = state.assets.get_mut(&asset_id).ok_or("missing")?;
             asset.storage = metadata;
-            asset.updated_at = now;
             state.saves.push(format!("metadata:{asset_id}"));
             Ok(())
         }
@@ -2040,7 +2063,10 @@ mod tests {
                 uploaded: false,
                 deleted_at: None,
                 created_at: now,
-                updated_at: now,
+                // Distinct from the run time so the save's updated_at
+                // behaviour is observable (`save(update_fields)` never
+                // bumps it; PIDASHCONV-1731).
+                updated_at: utc(2020, 1, 1),
                 created_by: None,
                 workspace_id: ws,
                 user_id: None,
@@ -2064,22 +2090,26 @@ mod tests {
             down: false,
             client_ok: true,
         };
-        run_metadata(&store, &s3, &id.to_string(), now).await;
+        run_metadata(&store, &s3, &id.to_string()).await;
         {
             let state = store.state.lock().unwrap();
             assert_eq!(state.assets[&id].storage, Some(head.to_json()));
-            assert_eq!(state.assets[&id].updated_at, now);
+            assert_eq!(state.assets[&id].updated_at, utc(2020, 1, 1));
         }
 
         // Unknown head answers None → stored as NULL.
         let empty = FakeS3::up();
-        run_metadata(&store, &empty, &id.to_string(), now).await;
+        run_metadata(&store, &empty, &id.to_string()).await;
         assert_eq!(store.state.lock().unwrap().assets[&id].storage, None);
+        assert_eq!(
+            store.state.lock().unwrap().assets[&id].updated_at,
+            utc(2020, 1, 1)
+        );
 
         // Missing rows and bad UUIDs are silent: no further saves.
         let saves = store.state.lock().unwrap().saves.len();
-        run_metadata(&store, &empty, &Uuid::new_v4().to_string(), now).await;
-        run_metadata(&store, &empty, "not-a-uuid", now).await;
+        run_metadata(&store, &empty, &Uuid::new_v4().to_string()).await;
+        run_metadata(&store, &empty, "not-a-uuid").await;
         assert_eq!(store.state.lock().unwrap().saves.len(), saves);
     }
 
@@ -2118,7 +2148,7 @@ mod tests {
             down: true,
             ..FakeS3::up()
         };
-        run_metadata(&store, &down, &id.to_string(), now).await;
+        run_metadata(&store, &down, &id.to_string()).await;
         let state = store.state.lock().unwrap();
         assert_eq!(state.assets[&id].storage, Some(json!({})));
         assert!(state.saves.is_empty());
@@ -2157,7 +2187,7 @@ mod tests {
             client_ok: false,
             ..FakeS3::up()
         };
-        run_metadata(&store, &unbuilt, &id.to_string(), now).await;
+        run_metadata(&store, &unbuilt, &id.to_string()).await;
         let state = store.state.lock().unwrap();
         assert_eq!(state.assets[&id].storage, Some(json!({})));
         assert!(state.saves.is_empty());
@@ -2700,6 +2730,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "AKIDEXAMPLE".to_owned(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
+            session_token: String::new(),
             bucket_name: "examplebucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://localhost:4566".to_owned()),

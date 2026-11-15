@@ -855,7 +855,7 @@ pub async fn machine_session_poll(
     // poll that delivers the machine's control messages.
     if let Some(Value::Object(report)) = body.get("engine_state") {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        if let Err(error) = pidash_services::domain::engine_state::record_engine_state_report(
+        match pidash_services::domain::engine_state::record_engine_state_report(
             &sea,
             dev_machine_id,
             report,
@@ -863,11 +863,39 @@ pub async fn machine_session_poll(
         )
         .await
         {
-            tracing::error!(
-                dev_machine_id = %dev_machine_id,
-                error = %error,
-                "engine_state report failed"
-            );
+            Ok((_reason, effects)) => {
+                if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                    // Mirror Django's on_commit drains (dispatch_rules.py:208-217):
+                    // pause drains pods, resume drains each engine runner.
+                    let redis = client_from_settings(state.settings());
+                    for pod_id in &effects.drain_pod_ids {
+                        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                            &pool,
+                            redis.as_ref(),
+                            &state.settings().runner,
+                            *pod_id,
+                        )
+                        .await;
+                    }
+                    for runner_id in &effects.drain_runner_ids {
+                        let _ =
+                            pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                                &pool,
+                                redis.as_ref(),
+                                &state.settings().runner,
+                                *runner_id,
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    dev_machine_id = %dev_machine_id,
+                    error = %error,
+                    "engine_state report failed"
+                );
+            }
         }
     }
     let redis = client_from_settings(state.settings());

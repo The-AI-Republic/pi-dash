@@ -35,6 +35,22 @@ const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.3;
 const ZOOM_MAX: f64 = 3.0;
 
+/// Linux (WebKitGTK) undo/redo for plain text fields (PIDESKAPP-52).
+/// WebKitGTK leaves undo/redo to the embedder — Ctrl+Z / Ctrl+Shift+Z /
+/// Ctrl+Y reach the page but do nothing in an `<input>`/`<textarea>`,
+/// while cut/copy/paste/select-all, which WebKit implements itself, work.
+/// Tauri neither supplies the editing commands nor an Edit menu on any
+/// platform, so the script drives the browser's own edit commands for
+/// those fields. A `keydown` handler (never native menu accelerators) so
+/// Tiptap editors — which keep their own ProseMirror history and Mod+Z
+/// keymap — are never intercepted; Windows/macOS handle undo natively in
+/// their webviews and never load it.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux.
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_EDIT_FIX: &str = include_str!("linux_edit_fix.js");
+
 struct ZoomState(Mutex<f64>);
 
 /// Ctrl+NumpadPlus zoom-in on Linux and Windows (PIDESKAPP-51). The
@@ -579,6 +595,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // does get through (e.g. a redirect the policy hook didn't see),
         // bounce as soon as it finishes loading.
         .on_page_load(move |webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                // A new page is loading (reload, 401 bounce, theme-switch
+                // reload, sign-in exchange, …): the page that asked for
+                // the in-flight native requests is going away and cannot
+                // receive their responses, and its JS never gets to run
+                // its cleanup (e.g. NativeEventSource::close). Cancel
+                // them all here, so a reloaded stream is not orphaned
+                // until sign-out. SPA route changes load no new page and
+                // never reach this branch.
+                if webview.label() == "main" {
+                    webview.state::<desktop_http::DesktopHttp>().cancel_all();
+                }
+                return;
+            }
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
@@ -610,7 +640,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
-                .resizable(true);
+                .resizable(true)
+                // PIDESKAPP-87: Tauri's native handler replaces the webview
+                // drop target on Windows, so the shared UI's HTML5 drag and
+                // drop (board cards, reorder, file drops) never reaches the
+                // page. Nothing consumes Tauri's own drag events.
+                .disable_drag_drop_handler();
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             {
                 // PIDESKAPP-51: the numpad-plus accelerator can never fire
@@ -618,6 +653,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // script asks Rust to zoom in when the physical numpad
                 // key arrives. See the const.
                 window = window.initialization_script(ZOOM_FIX);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // PIDESKAPP-52: WebKitGTK leaves undo/redo to the embedder;
+                // the script drives them for plain fields. See the const.
+                window = window.initialization_script(LINUX_EDIT_FIX);
             }
             let open_app = app.handle().clone();
             window = window.on_new_window(move |url, _features| {
@@ -863,6 +904,22 @@ mod tests {
     }
 
     #[test]
+    fn main_window_disables_tauri_drag_drop_handler() {
+        // PIDESKAPP-87: Tauri's native handler replaces the WebView2 drop
+        // target on Windows, so HTML5 drag and drop never reaches the page.
+        // The window is built only in `setup`, so the builder call is the
+        // fix. The needle is concatenated so this test's own source does
+        // not satisfy the assertion.
+        let needle = concat!(".disable_drag_drop", "_handler()");
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains(needle),
+            "main window builder must call {needle}: the shared web UI drags \
+             board cards and drops files through HTML5 drag and drop"
+        );
+    }
+
+    #[test]
     fn baked_api_base_mismatch_compares_origins() {
         let api = Url::parse("http://localhost:8000").unwrap();
         assert_eq!(baked_api_base_mismatch(None, &api), None);
@@ -1088,6 +1145,43 @@ mod tests {
         assert!(
             !script.contains("NumpadSubtract"),
             "zoom-out stays out of scope"
+        );
+    }
+
+    #[test]
+    fn linux_edit_fix_drives_undo_redo_for_plain_fields_only() {
+        // PIDESKAPP-52: the script runs on every UI navigation, drives
+        // the browser's own edit commands for plain fields, and must
+        // never touch other elements — Tiptap editors keep their own
+        // ProseMirror history (and their own Mod+Z keymap), so anything
+        // not INPUT/TEXTAREA must be ignored. The script content is
+        // behaviorally covered by desktop/tests/test_linux_undo_fix.py;
+        // these assert the invariants it is built on.
+        let script = LINUX_EDIT_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("TEXTAREA") && script.contains("INPUT"),
+            "plain-field targets"
+        );
+        assert!(
+            script.contains("\"undo\"") && script.contains("\"redo\""),
+            "both directions"
+        );
+        assert!(
+            script.contains("KeyZ") && script.contains("KeyY"),
+            "Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_LINUX_EDIT_FIX__"),
+            "idempotency guard against double registration"
         );
     }
 

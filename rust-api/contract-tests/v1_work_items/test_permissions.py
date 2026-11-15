@@ -118,3 +118,51 @@ def test_member_of_nothing_is_denied(seeder, settings, world):
         base_url=settings.base_url, timeout=30, headers={"X-Api-Key": token["token"]}
     ) as client:
         assert client.get(issue_url(world)).status_code == 403
+
+
+def _role_client(seeder, settings, world, *, workspace_role, project_role):
+    import httpx
+
+    user = seeder.create_user()
+    seeder.create_workspace_member(world["workspace"]["id"], user["id"], role=workspace_role)
+    seeder.create_project_member(
+        world["workspace"]["id"], world["project"]["id"], user["id"], role=project_role
+    )
+    token = seeder.create_api_token(user["id"], world["workspace"]["id"])
+    return httpx.Client(
+        base_url=settings.base_url, timeout=30, headers={"X-Api-Key": token["token"]}
+    )
+
+
+def _labels_url(world, label_id=None):
+    url = (
+        f"/api/v1/workspaces/{world['workspace']['slug']}"
+        f"/projects/{world['project']['id']}/labels/"
+    )
+    return url if label_id is None else f"{url}{label_id}/"
+
+
+def test_workspace_guest_project_member_manages_labels(api, seeder, settings, world):
+    """PDASHOSS01-239: label create checks the project role like update and
+    delete — a workspace GUEST who is a project MEMBER manages labels."""
+    label_id = api.post(_labels_url(world), json={"name": "Seed", "color": "#000"}).json()["id"]
+    with _role_client(seeder, settings, world, workspace_role=5, project_role=15) as client:
+        created = client.post(_labels_url(world), json={"name": "Guest-made", "color": "#123456"})
+        assert created.status_code == 201, created.text
+        patched = client.patch(_labels_url(world, label_id), json={"name": "Renamed"})
+        assert patched.status_code == 200, patched.text
+        assert client.delete(_labels_url(world, label_id)).status_code == 204
+
+
+def test_project_guest_cannot_manage_labels(api, seeder, settings, world):
+    """PDASHOSS01-239: a workspace MEMBER who is only a project GUEST is
+    refused all three label writes, consistently."""
+    label_id = api.post(_labels_url(world), json={"name": "Keep", "color": "#000"}).json()["id"]
+    with _role_client(seeder, settings, world, workspace_role=15, project_role=5) as client:
+        created = client.post(_labels_url(world), json={"name": "Nope", "color": "#123456"})
+        assert created.status_code == 403, created.text
+        assert created.json() == {"detail": "You do not have permission to perform this action."}
+        assert client.patch(_labels_url(world, label_id), json={"name": "X"}).status_code == 403
+        assert client.delete(_labels_url(world, label_id)).status_code == 403
+    names = [row["name"] for row in api.get(_labels_url(world)).json()["results"]]
+    assert names == ["Keep"]

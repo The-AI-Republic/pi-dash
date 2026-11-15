@@ -12,6 +12,7 @@
 // composer; the cloud transport has neither verb, so neither shows.
 
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type { ChatSession } from "@pidash/api-client";
 
@@ -35,6 +36,7 @@ import { ChatApprovalMode } from "./ChatApprovalMode.js";
 import { ChatApprovalPrompt } from "./ChatApprovalPrompt.js";
 import { HistoryRemovalDialog, RenameChatDialog } from "./ChatHistoryManage.js";
 import { remainingSessions, selectionAfterDelete } from "./historyActions.js";
+import { chatKeys } from "./keys.js";
 import { supportsLocalHistory, useClearHistory, useDeleteChat, useRenameChat } from "./historyQueries.js";
 import {
   pendingApprovalFromEvent,
@@ -188,10 +190,24 @@ export function RunnerChatPage({
   // resumes, which can be after this page mounted; follow the seam so the
   // approval controls appear and sends take the local path from then on.
   const [surface, setSurface] = React.useState(() => chatTransportForRunner(runnerId));
+  const queryClient = useQueryClient();
+  const seamRef = React.useRef(surface);
   React.useEffect(() => {
-    setSurface(chatTransportForRunner(runnerId));
-    return subscribeChatTransport(() => setSurface(chatTransportForRunner(runnerId)));
-  }, [runnerId]);
+    const current = chatTransportForRunner(runnerId);
+    seamRef.current = current;
+    setSurface(current);
+    return subscribeChatTransport(() => {
+      const next = chatTransportForRunner(runnerId);
+      if (next === seamRef.current) return;
+      seamRef.current = next;
+      setSurface(next);
+      // A read answered before this seam arrived may have gone to the cloud
+      // path for a contact the seam that now answers owns, and a failed
+      // read is not polled back (DESK-009). Ask every chat read again now
+      // that the transport that answers this contact is in place.
+      void queryClient.invalidateQueries({ queryKey: chatKeys.all(workspaceSlug) });
+    });
+  }, [queryClient, runnerId, workspaceSlug]);
   const transport = surface;
   // The approval controls belong to the local engine and to the contact it
   // serves; the cloud transport has no decision verb, so cloud and web never

@@ -697,6 +697,7 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
     };
 
     let has_existing_logs: bool = page_logs_exist_query(page_id)
+        .into_tuple::<Uuid>()
         .one(&db)
         .await
         .map_err(|error| {

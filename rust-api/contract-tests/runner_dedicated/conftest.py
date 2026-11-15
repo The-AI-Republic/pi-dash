@@ -160,6 +160,22 @@ def other_project_runner(seeder, world, project2):
 
 
 @pytest.fixture()
+def pod2(seeder, world):
+    """A second, non-default pod in the same project."""
+    return seeder.create_pod(world["ws"]["id"], world["project"]["id"], name="dr-pod2")
+
+
+@pytest.fixture()
+def doomed_runner(seeder, world, pod2):
+    """An online runner in the non-default pod, to be revoked."""
+    runner = seeder.enroll_runner(
+        world["admin"]["id"], world["ws"]["id"], pod2["id"], "dr-doomed-token"
+    )
+    _online(seeder, runner["id"])
+    return runner
+
+
+@pytest.fixture()
 def dedicated_run(seeder, world, online_runner, dedicated_issue):
     run_id = _uid()
     seeder.db.execute(
@@ -168,11 +184,11 @@ def dedicated_run(seeder, world, online_runner, dedicated_issue):
             error_details, workspace_id, work_item_id, pod_id, created_by_id,
             llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason,
             tool_plan, phase_kind, agent_metadata, usage, pinned_runner_id,
-            pin_kind, created_at)
+            pin_kind, created_at, failure_reason)
            VALUES (%s,'queued','dedicated prompt','{}','{}','',
                    '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
                    '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
-                   %s,'dedicated',now())""",
+                   %s,'dedicated',now(),'')""",
         (
             run_id,
             world["ws"]["id"],
@@ -238,11 +254,11 @@ def merge_run(seeder, world, merge_world):
             error_details, workspace_id, work_item_id, pod_id, created_by_id,
             llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason,
             tool_plan, phase_kind, agent_metadata, usage, pinned_runner_id,
-            pin_kind, created_at)
+            pin_kind, created_at, failure_reason)
            VALUES (%s,'queued','merge prompt','{}','{}','',
                    '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
                    '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
-                   %s,'dedicated',now())""",
+                   %s,'dedicated',now(),'')""",
         (
             run_id,
             world["ws"]["id"],

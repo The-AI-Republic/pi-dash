@@ -274,6 +274,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -5792,6 +5793,18 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, {
       timeout: WebNewDriver.WAIT_MS,
     });
+  }
+
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    const buttons = this.page.locator('[data-widget-root="Code reviews"] [data-widget-row] button');
+    return (await buttons.count()) > 0;
   }
 
   async worklogCreateVisible(): Promise<boolean> {
@@ -16640,6 +16653,16 @@ export class WebNewDriver implements ParityDriver {
     return tabs;
   }
 
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The tab row is the element holding the "Scheduler views" navigation.
+    const row = this.schedulerTabs().locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
+  }
+
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
     await this.schedulerTabs().getByRole("link", { name: tab, exact: true }).click();
     if (tab === "List") {
@@ -20763,6 +20786,24 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesCyclesOpenPeek(name: string): Promise<void> {
     await this.openArchivedCyclePeek(name);
+  }
+  async archivesCyclesClickRow(name: string): Promise<void> {
+    // Row body click: archived rows render a button that opens the peek,
+    // live rows (not used here) would link to detail. Click the name's
+    // owning button and wait for the peek panel, as a user would.
+    const row = this.cycleRowRoot(name);
+    const nameLocator = row.getByText(name, { exact: true }).first();
+    const button = nameLocator.locator("xpath=ancestor::button[1]");
+    if ((await button.count()) > 0) {
+      await button.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      // Fallback for live rows (not expected on the archived tab): click the link.
+      await row.locator("a").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.waitForFunction(() => new URL(location.href).searchParams.has("peekCycle"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.archivedCyclePeekPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
@@ -29360,6 +29401,15 @@ export class WebNewDriver implements ParityDriver {
       .nth(index)
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebNewDriver.WAIT_MS });
+  }
+  async cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void> {
+    // No navigation wait: the no-assignee row carries no click action,
+    // so the scenario asserts the address stays on the list.
+    await this.cyclesHeroBreakdownCard()
+      .locator('[data-testid="hero-breakdown-entry"]')
+      .filter({ hasText: entryText })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/active-cycles`, { waitUntil: "domcontentloaded" });
@@ -51106,6 +51156,37 @@ export class WebNewDriver implements ParityDriver {
     return text === "" ? null : text;
   }
 
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the
+  // --- OSS oracle has no free-quota picker, so the old-app driver throws.
+  async cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    const value = (await select.count()) > 0 ? await select.inputValue() : "";
+    const options = select.locator("option");
+    const optionCount = await options.count();
+    const facts = [];
+    for (let index = 0; index < optionCount; index++) {
+      const option = options.nth(index);
+      facts.push({
+        value: (await option.getAttribute("value")) ?? "",
+        text: this.cloudNorm(await option.innerText()),
+        // Locator.isDisabled() reports false for a disabled <option>
+        // (probed: property true, attribute present, isDisabled false),
+        // so read the attribute the picker renders.
+        disabled: (await option.getAttribute("disabled")) !== null,
+      });
+    }
+    const noticeLocator = card.getByText("needs credit on the free plan", { exact: false }).first();
+    let notice: string | null = null;
+    if ((await noticeLocator.count()) > 0 && (await noticeLocator.isVisible().catch(() => false))) {
+      // The match is the notice <p> itself, whose own text is the notice.
+      notice = this.cloudNorm(await noticeLocator.innerText());
+    }
+    const topUp = card.getByRole("link", { name: "Top up" }).first();
+    const topUpHref = (await topUp.count()) > 0 ? ((await topUp.getAttribute("href")) ?? null) : null;
+    return { title, value, options: facts, notice, topUpHref };
+  }
+
   private cloudProfileTabLabels(): string[] {
     return [
       "Profile",
@@ -54074,6 +54155,54 @@ export class WebNewDriver implements ParityDriver {
     const row = this.page.getByText(name, { exact: true });
     if ((await row.count()) === 0) return false;
     return row.first().isVisible();
+  }
+
+  private viewsDetailMenuTrigger(): Locator {
+    return this.page.getByTestId("project-view-detail-menu-trigger");
+  }
+
+  async viewsDetailMenuOpen(): Promise<void> {
+    const trigger = this.viewsDetailMenuTrigger();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailMenuItems(): Promise<string[]> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
+  }
+
+  async viewsDetailMenuPick(item: string): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await menu.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsDetailMenuOpen();
+    await this.viewsDetailMenuPick("Copy link");
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsDetailMenuOpenNewTabHref(): Promise<string> {
+    await this.viewsDetailMenuOpen();
+    const menu = this.page.getByRole("menu");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
   }
 
   // --- Workspace views list, CRUD and detail (VIEW-029-040) ---------------

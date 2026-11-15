@@ -14,10 +14,13 @@ import * as React from "react";
 import { useRunnersArea } from "../area.js";
 import {
   AGENT_LABELS,
+  choicesForAgent,
   MODEL_CHOICES,
-  modelContribution,
+  modelContributionFrom,
+  preselectedId,
   RUNNER_AGENTS,
-  selectedModelLabel,
+  selectedModelLabelFrom,
+  type ModelChoice,
   type RunnerAgent,
 } from "./catalog.js";
 import { AddRunnerCommandPanel } from "./CommandPanel.js";
@@ -45,7 +48,13 @@ import {
   type ConnectedMachine,
   type RemoteState,
 } from "./model.js";
-import { createRunnerTransport, useAddRunnerMachines, useAddRunnerPods, useAddRunnerProjects } from "./queries.js";
+import {
+  createRunnerTransport,
+  useAddRunnerMachines,
+  useAddRunnerPods,
+  useAddRunnerProjects,
+  useRunnerModelCatalog,
+} from "./queries.js";
 import { runRemoteCreate } from "./remoteCreate.js";
 
 /** Build-time API base, baked by the harness as `VITE_API_BASE_URL`. */
@@ -96,6 +105,21 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   const machines = useAddRunnerMachines(workspaceSlug, area.workspaceId, open);
   const projects = useAddRunnerProjects(workspaceSlug, open);
   const pods = useAddRunnerPods(workspaceSlug, area.workspaceId, scopeProjectId, open);
+  // The model catalog (NEWPIDASH-169): grouped rows when the call
+  // succeeds, today's built-in list while pending and on failure. The
+  // Default sentinel always stays first.
+  const catalog = useRunnerModelCatalog(open);
+  const modelChoices = React.useMemo<ModelChoice[]>(() => {
+    const rows = catalog.data?.agents[values.agent];
+    return rows !== undefined ? choicesForAgent(rows) : MODEL_CHOICES[values.agent];
+  }, [catalog.data, values.agent]);
+  const preselectFor = React.useCallback(
+    (agent: RunnerAgent): string => {
+      const rows = catalog.data?.agents[agent];
+      return rows !== undefined ? preselectedId(rows) : defaultModelFor(agent);
+    },
+    [catalog.data]
+  );
 
   const connected = React.useMemo(() => connectedMachines(machines.data), [machines.data]);
   const connectedForPicker = React.useMemo<ConnectedMachine[]>(
@@ -186,8 +210,8 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   React.useEffect(() => {
     if (values.agent === lastAgent) return;
     setLastAgent(values.agent);
-    setValues((current) => ({ ...current, model: defaultModelFor(values.agent) }));
-  }, [lastAgent, values.agent]);
+    setValues((current) => ({ ...current, model: preselectFor(values.agent) }));
+  }, [lastAgent, preselectFor, values.agent]);
 
   function setField<K extends keyof AddRunnerValues>(key: K, value: AddRunnerValues[K]): void {
     setValues((current) => ({ ...current, [key]: value }));
@@ -207,7 +231,7 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   }
 
   function fieldsFor(V: AddRunnerValues): CommandFields {
-    const contribution = modelContribution(V.agent, V.model);
+    const contribution = modelContributionFrom(modelChoices, V.model);
     return {
       cloudUrl: resolvedOrigin.url,
       workspaceSlug,
@@ -344,8 +368,12 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
         <FormPanel
           values={values}
           errors={errors}
+          modelChoices={modelChoices}
           projectLocked={projectLocked}
-          projectOptions={(projects.data ?? []).map((project) => ({ id: project.identifier, label: project.name }))}
+          projectOptions={(projects.data ?? []).map((project) => ({
+            id: project.identifier,
+            label: project.name,
+          }))}
           projectsError={projects.isError}
           podOptions={[
             { id: DEFAULT_POD, label: DEFAULT_POD_LABEL },
@@ -378,6 +406,7 @@ function supportedOf(machine: DevMachine): readonly string[] | undefined {
 interface FormPanelProps {
   values: AddRunnerValues;
   errors: AddRunnerErrors;
+  modelChoices: ModelChoice[];
   projectLocked: boolean;
   projectOptions: ComboboxOption[];
   projectsError: boolean;
@@ -395,6 +424,7 @@ interface FormPanelProps {
 function FormPanel({
   values,
   errors,
+  modelChoices,
   projectLocked,
   projectOptions,
   projectsError,
@@ -417,7 +447,7 @@ function FormPanel({
     label: AGENT_LABELS[agent],
     disabled: gating.disabled.includes(agent),
   }));
-  const modelOptions: ComboboxOption[] = MODEL_CHOICES[values.agent].map((choice) => ({
+  const modelOptions: ComboboxOption[] = modelChoices.map((choice) => ({
     id: choice.id,
     label: choice.label,
   }));
@@ -517,7 +547,7 @@ function FormPanel({
           value={values.model}
           options={modelOptions}
           onChange={(id) => onField("model", id)}
-          triggerLabel={selectedModelLabel(values.agent, values.model)}
+          triggerLabel={selectedModelLabelFrom(modelChoices, values.model)}
         />
         <p className="text-meta text-(--text-muted)">
           Default model this runner&apos;s agent uses. The sentinel lets the agent pick its own.
@@ -615,7 +645,8 @@ function RemotePanel({ state, onClose, onDone, onBack, onManual }: RemotePanelPr
         ) : null}
         {state.phase === "error" ? (
           <p className="text-body text-(--danger)">
-            Could not create the runner{state.error === undefined || state.error === "" ? "." : `: ${state.error}`}
+            Could not create the runner
+            {state.error === undefined || state.error === "" ? "." : `: ${state.error}`}
           </p>
         ) : null}
         {state.phase === "timeout" ? (

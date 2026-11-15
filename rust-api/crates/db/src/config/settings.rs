@@ -189,6 +189,12 @@ pub struct StorageSettings {
     pub minio_endpoint_ssl: bool,
     pub access_key_id: String,
     pub secret_access_key: String,
+    /// `AWS_SESSION_TOKEN` for static temporary keys (e.g. STS, instance role
+    /// static copy). Empty for long-lived keys. For instance-role credentials
+    /// the per-request value comes from the credential provider, not this
+    /// boot-time copy; this field keeps the env-provided value for the
+    /// static-key path.
+    pub session_token: String,
     pub bucket_name: String,
     pub region: String,
     pub endpoint_url: Option<String>,
@@ -202,6 +208,7 @@ pub struct RunnerSettings {
     pub offline_threshold_secs: i64,
     pub offline_pin_release_secs: i64,
     pub offline_run_fail_secs: i64,
+    pub pin_auto_release_secs: i64,
     pub offline_stream_ttl_secs: i64,
     pub offline_stream_maxlen: i64,
     pub stream_min_retention_secs: i64,
@@ -229,6 +236,11 @@ pub struct CloudAgentSettings {
     pub writes_enabled: bool,
     pub github_tools_enabled: bool,
     pub disabled_tools: Vec<String>,
+    /// Queue every `cloud_agent.run_agent_run` job is enqueued on.
+    /// Default `celery`; set to `cloud_agent` after the dedicated
+    /// agent-worker pool is running (Phase 2 rollout). Kept as the
+    /// string queue label `NewJob` carries / workers claim on.
+    pub job_queue: String,
     pub reconcile_interval_secs: i64,
     pub model_request_timeout_secs: i64,
     pub execution_timeout_secs: i64,
@@ -1057,17 +1069,33 @@ impl Settings {
                 pr_lookups_per_run: ctx
                     .req_int("LOOP_PR_LOOKUPS_PER_RUN", ConfigValue::from(15))?,
             },
-            storage: StorageSettings {
-                use_minio: ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1,
-                // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
-                minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
-                access_key_id: ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?,
-                secret_access_key: ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?,
-                bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
-                region: ctx.s3_scope_region()?,
-                endpoint_url: s3_or_minio,
-                signed_url_expiration_secs: ctx
-                    .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
+            storage: {
+                // `USE_MINIO=1` keeps the local-dev placeholder defaults
+                // (`storage.py` parity); outside MinIO the registry empty
+                // default signals "no static keys" so the S3 clients fall
+                // through to the EC2 instance role (NEWPIDASH-204).
+                let use_minio = ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1;
+                StorageSettings {
+                    use_minio,
+                    // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
+                    minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
+                    access_key_id: if use_minio {
+                        ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?
+                    } else {
+                        ctx.req_string("AWS_ACCESS_KEY_ID", "")?
+                    },
+                    secret_access_key: if use_minio {
+                        ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?
+                    } else {
+                        ctx.req_string("AWS_SECRET_ACCESS_KEY", "")?
+                    },
+                    session_token: ctx.req_string("AWS_SESSION_TOKEN", "")?,
+                    bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
+                    region: ctx.s3_scope_region()?,
+                    endpoint_url: s3_or_minio,
+                    signed_url_expiration_secs: ctx
+                        .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
+                }
             },
             runner: RunnerSettings {
                 long_poll_interval_secs: {
@@ -1096,6 +1124,8 @@ impl Settings {
                     .req_int("RUNNER_OFFLINE_PIN_RELEASE_SECS", ConfigValue::from(300))?,
                 offline_run_fail_secs: ctx
                     .req_int("RUNNER_OFFLINE_RUN_FAIL_SECS", ConfigValue::from(3600))?,
+                pin_auto_release_secs: ctx
+                    .req_int("RUNNER_PIN_AUTO_RELEASE_SECS", ConfigValue::from(600))?,
                 offline_stream_ttl_secs: ctx
                     .req_int("OFFLINE_STREAM_TTL_SECS", ConfigValue::from(86400))?,
                 offline_stream_maxlen: ctx
@@ -1137,6 +1167,7 @@ impl Settings {
                 writes_enabled: ctx.flag_tri("CLOUD_AGENT_WRITES_ENABLED", "false")?,
                 github_tools_enabled: ctx.flag_tri("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true")?,
                 disabled_tools: ctx.csv_stripped("CLOUD_AGENT_DISABLED_TOOLS", "")?,
+                job_queue: ctx.req_string("CLOUD_AGENT_JOB_QUEUE", "celery")?,
                 reconcile_interval_secs: ctx.req_int(
                     "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
                     ConfigValue::from(30),
@@ -1332,6 +1363,7 @@ impl Settings {
             "RUNNER_OFFLINE_THRESHOLD_SECS",
             "RUNNER_OFFLINE_PIN_RELEASE_SECS",
             "RUNNER_OFFLINE_RUN_FAIL_SECS",
+            "RUNNER_PIN_AUTO_RELEASE_SECS",
             "OFFLINE_STREAM_TTL_SECS",
             "OFFLINE_STREAM_MAXLEN",
             "RUNNER_STREAM_MIN_RETENTION_SECS",
@@ -1437,6 +1469,9 @@ mod tests {
         assert_eq!(s.loop_tuning.max_writes, 10);
         assert_eq!(s.file_size_limit, 5242880);
         assert_eq!(s.email_backend, SMTP_BACKEND);
+        // Phase 2 (2.1): the agent job queue defaults to `celery` until
+        // both workers are running.
+        assert_eq!(s.cloud_agent.job_queue, "celery");
         // Non-Local profiles ignore an EMAIL_BACKEND env override, exactly
         // like common.py's hardcoded assignment.
         let s2 = Settings::from_map_with(
@@ -1497,6 +1532,17 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
+    }
+
+    #[test]
+    fn cloud_agent_job_queue_overrides_from_env() {
+        let s = Settings::from_map_with(
+            &vars(&[("CLOUD_AGENT_JOB_QUEUE", "cloud_agent")]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert_eq!(s.cloud_agent.job_queue, "cloud_agent");
     }
 
     #[test]

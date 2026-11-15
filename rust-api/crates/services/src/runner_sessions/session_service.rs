@@ -17,6 +17,8 @@
 //!   [`LIVE_STATE_SELECT_SQL`], [`LIVE_STATE_INSERT_SQL`],
 //!   [`live_state_update_sql`]. (`normalize_usage` is
 //!   [`super::usage::normalize_usage`], re-exported from D-15 L1.)
+//! * `apply_hello` stale-busy reconcile (`:149-164`, PDASHOSS01-231)
+//!   → [`should_release_on_open`], [`release_on_open_log`].
 //! * `mark_runner_online` / `mark_runner_offline`
 //!   (`:454-459`) → [`MARK_RUNNER_ONLINE_SQL`],
 //!   [`MARK_RUNNER_OFFLINE_SQL`].
@@ -626,6 +628,25 @@ pub fn parse_in_flight_id(in_flight: Option<&Value>) -> Option<String> {
         other => py_str(other),
     };
     parse_uuid_arg(&text).map(|id| id.to_string())
+}
+
+/// The `apply_hello` stale-busy reconcile gate (`:149-164`,
+/// PDASHOSS01-231): `if not body.get("in_flight_run")` — Python
+/// truthiness of the raw value, so any truthy value (even an
+/// unparseable id) skips the release. When it passes, the open
+/// transaction runs
+/// [`release_runner_if_idle_stmt`](super::drain::release_runner_if_idle_stmt)
+/// after the reaper and logs [`release_on_open_log`] when a row
+/// flipped. No drain is scheduled: dispatch still waits for the
+/// session's first poll.
+pub fn should_release_on_open(in_flight: Option<&Value>) -> bool {
+    !in_flight.is_some_and(py_truthy)
+}
+
+/// The info line `apply_hello` logs when the reconcile flipped a
+/// stale `busy` runner back to `online`.
+pub fn release_on_open_log(runner_id: &uuid::Uuid) -> String {
+    format!("session open released stale busy runner {runner_id} back to online")
 }
 
 /// The statuses the reaper may reap (`:197-204`): [`BUSY_STATUSES`]
@@ -1864,6 +1885,37 @@ mod tests {
     }
 
     #[test]
+    fn release_on_open_follows_python_truthiness() {
+        // Absent / falsy: release.
+        assert!(should_release_on_open(None));
+        for falsy in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(should_release_on_open(Some(&falsy)), "{falsy}");
+        }
+        // Truthy, parseable or not: keep busy.
+        for truthy in [
+            serde_json::json!("7f0a8e4c-2f0e-4a51-9c1e-3a3b2f1b9d10"),
+            serde_json::json!("bogus"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(["x"]),
+        ] {
+            assert!(!should_release_on_open(Some(&truthy)), "{truthy}");
+        }
+        let runner = uuid::Uuid::nil();
+        assert_eq!(
+            release_on_open_log(&runner),
+            "session open released stale busy runner 00000000-0000-0000-0000-000000000000 back to online"
+        );
+    }
+
+    #[test]
     fn in_flight_id_normalizes_or_ignores() {
         assert_eq!(parse_in_flight_id(None), None);
         assert_eq!(parse_in_flight_id(Some(&Value::Null)), None);
@@ -2289,8 +2341,15 @@ mod tests {
                 "ended_at",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
-                "error_details"
+                "failure_reason",
+                "error_details",
             ]
+        );
+        // The `finalize_agent_run` safety net (PDASHOSS01-183):
+        // `classify(error, error_code="heartbeat_reaped")`.
+        assert_eq!(
+            values.clauses[4].value,
+            SetValue::Text("runner_offline".to_string())
         );
         assert_eq!(
             values.clauses[0].value,
@@ -2298,7 +2357,7 @@ mod tests {
         );
         // `error` / `error_code` fold into one bag patch (PDASHOSS01-187).
         assert_eq!(
-            values.clauses[4].value,
+            values.clauses[5].value,
             SetValue::Json(serde_json::json!({
                 "message": detail.clone(),
                 "code": "heartbeat_reaped"
@@ -2338,9 +2397,10 @@ mod tests {
         assert_eq!(set_columns, columns);
         assert!(update.contains(&detail));
         assert!(update.contains("\"code\": \"heartbeat_reaped\""));
+        assert!(update.contains("'runner_offline'"));
         // The rendered D-15 UPDATE binds one param per clause, id last.
         let rendered = finalize_update_sql(&values);
-        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $6"));
+        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $7"));
         // Lock predicate for the reaper call: expected runner, no status.
         assert!(finalize_lock_passes(
             AgentRunStatus::Running,

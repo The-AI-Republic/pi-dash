@@ -446,6 +446,8 @@ export interface PendingUpdate {
   version: string;
   /** The release the app is running right now. */
   currentVersion: string;
+  /** The release notes from the update manifest, when the release carried any. */
+  notes?: string;
   /** True while the shell downloads and installs this release. */
   installing: boolean;
 }
@@ -499,9 +501,43 @@ export interface UpdaterApi {
   install(): Promise<void>;
   /**
    * Follow announcements of updates found while the app runs, including
-   * the re-announcement after a failed install. Returns the unsubscribe.
+   * the re-announcement after a failed install and a `null` announcement
+   * when the shell confirms the pending update was withdrawn. Returns the
+   * unsubscribe.
    */
-  onAvailable(callback: (update: PendingUpdate) => void): Unsubscribe;
+  onAvailable(callback: (update: PendingUpdate | null) => void): Unsubscribe;
+}
+
+/**
+ * One licence or notice text the desktop build bundles (DESK-028). The
+ * shell lists every file its build scripts stage, so a file this build did
+ * not include still appears, with `text` null, rather than vanishing.
+ */
+export interface BundledNotice {
+  /** File name inside the bundle's licence directory. */
+  file: string;
+  /** What the text covers, as the dialog heads it. */
+  component: string;
+  /** SPDX identifier of the licence. */
+  license: string;
+  /** The text verbatim, or null when this build did not stage the file. */
+  text: string | null;
+}
+
+/** What the About dialog shows: the running version and every bundled notice. */
+export interface AboutInfo {
+  version: string;
+  notices: BundledNotice[];
+}
+
+/**
+ * The desktop About surface (DESK-028). This is how the app shows the
+ * licence and notice texts it ships with; the web platform leaves it
+ * absent and renders no entry.
+ */
+export interface AboutApi {
+  /** Read the version and notice texts. Rejects when the shell cannot. */
+  load(): Promise<AboutInfo>;
 }
 
 /**
@@ -548,6 +584,8 @@ export interface Platform {
   localChat?: LocalChatApi;
   cliSetup?: CliSetupApi;
   updates?: UpdaterApi;
+  /** Version and bundled licence texts; absent on the web platform. */
+  about?: AboutApi;
   sessionTeardown?: SessionTeardownApi;
   /** Desktop shell sign-in support; absent on the web platform. */
   shellSignIn?: ShellSignInApi;

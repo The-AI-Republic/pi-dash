@@ -133,8 +133,47 @@ def _can_view_run(user, run: AgentRun) -> bool:
 
 
 def _can_cancel_run(user, run: AgentRun) -> bool:
-    """Cancellation is permitted for the same set as view."""
-    return _can_view_run(user, run)
+    """Cancellation is permitted for run creator, runner owner, work-item
+    creator/assignees, scheduler-binding project members, or workspace admins.
+
+    Unlike ``_can_view_run``, this bypasses the private-runner visibility gate
+    (``can_view_runner``) for issue-attached runs so the issue page "Abort run"
+    action works even when the run executes on another participant's PRIVATE
+    runner. The issue serializer's ``agent_status`` already surfaces the
+    active run to issue participants regardless of runner owner (see
+    ``_active_run_for``), so denying cancel for those same participants would
+    show a button that always 404s. The gate is retained for runs without a
+    work item (free runs) to preserve privacy for unattached private work;
+    unrelated members/admins remain denied on others' private runners.
+    """
+    if not is_workspace_member(user, run.workspace_id):
+        return False
+    if run.created_by_id == user.id:
+        return True
+    if run.runner_id is not None and run.runner.owner_id == user.id:
+        return True
+    if run.work_item_id is not None:
+        if run.work_item.created_by_id == user.id:
+            return True
+        from pi_dash.db.models.issue import IssueAssignee
+
+        if IssueAssignee.objects.filter(issue_id=run.work_item_id, assignee_id=user.id).exists():
+            return True
+    if run.scheduler_binding_id is not None:
+        from pi_dash.db.models.project import ProjectMember
+
+        if ProjectMember.objects.filter(
+            project_id=run.scheduler_binding.project_id,
+            member=user,
+            is_active=True,
+        ).exists():
+            return True
+    # Preserve the private-runner gate for remaining callers (unattached
+    # runs): a run on someone else's private machine is not cancellable by
+    # an unrelated member/admin who would also not be able to view it.
+    if run.runner_id is not None and not can_view_runner(user, run.runner):
+        return False
+    return is_workspace_admin(user, run.workspace_id)
 
 
 class AgentRunListEndpoint(APIView):
@@ -384,6 +423,9 @@ class AgentRunListEndpoint(APIView):
                         else None
                     ),
                 )
+                # The executor seam may already supply a pin (Cloud Agent
+                # supplies None). Merge the resolved direct-run target once.
+                execution.update(pinned_runner=pinned_runner, pin_kind=pin_kind)
                 run = AgentRun.objects.create(
                     workspace_id=ctx.workspace_id,
                     created_by=ctx.created_by,
@@ -393,8 +435,6 @@ class AgentRunListEndpoint(APIView):
                     run_config=request.data.get("run_config") or {},
                     required_capabilities=request.data.get("required_capabilities") or [],
                     work_item_id=ctx.work_item_id,
-                    pinned_runner=pinned_runner,
-                    pin_kind=pin_kind,
                     **execution,
                     # Owner stays NULL until assignment (design §5.3).
                 )

@@ -209,7 +209,7 @@
             "assignees": "None",
             "labels": "None"
           },
-          "note": "Key name is a misnomer (review fix): this probe passed a same-project parent, so it is valid \u2014 same as parent_same_project_ok. The wrong-project error string is pinned by parent_other_project."
+          "note": "Key name is a misnomer (review fix): this probe passed a same-project parent, so it is valid — same as parent_same_project_ok. The wrong-project error string is pinned by parent_other_project."
         },
         "parent_same_project_ok": {
           "valid": true,
@@ -383,6 +383,7 @@
         "url",
         "description_markdown",
         "assigned_runner_detail",
+        "dispatch_wait",
         "created_at",
         "updated_at",
         "deleted_at",
@@ -490,6 +491,7 @@
           "type_id",
           "url",
           "assigned_runner_detail",
+          "dispatch_wait",
           "created_at",
           "updated_at",
           "deleted_at",

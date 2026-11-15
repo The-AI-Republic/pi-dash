@@ -1244,6 +1244,7 @@ pub async fn move_to_project(
                 actor_id,
                 spec: FireSpec {
                     dispatch_immediate: moved.dispatch_immediate,
+                    pod_once: false,
                     created_by: Some(actor_id),
                     moved_by_run: None,
                     now: input.now,
@@ -1608,6 +1609,7 @@ mod tests {
                 writes_enabled: false,
                 github_tools_enabled: false,
                 disabled_tools: Vec::new(),
+                job_queue: "celery".to_string(),
                 reconcile_interval_secs: 0,
                 model_request_timeout_secs: 0,
                 execution_timeout_secs: 0,
@@ -1725,6 +1727,8 @@ mod tests {
                     actor_id: uid(1),
                     spec: FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(uid(1)),
                         moved_by_run: None,
                         now: Utc::now(),

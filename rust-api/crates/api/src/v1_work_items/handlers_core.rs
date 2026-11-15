@@ -1497,6 +1497,7 @@ async fn create_issue_inner(
             state.settings().urls.app_base_url.as_deref(),
         ),
     };
+    let pod_once = pidash_services::orchestration::creation::pod_once_requested(&parsed_body.value);
     let outcome = operations::issues::create(
         &deps,
         &ctx,
@@ -1504,6 +1505,7 @@ async fn create_issue_inner(
         operations::issues::CreateOptions {
             emit_activity: true,
             emit_model_activity: true,
+            pod_once,
         },
     )
     .await?;
@@ -1639,6 +1641,7 @@ async fn patch_issue_inner(
         current_instance: current_text,
         moved_by_run,
     };
+    let pod_once = pidash_services::orchestration::creation::pod_once_requested(&parsed_body.value);
     let outcome = operations::issues::update(
         &deps,
         &ctx,
@@ -1647,6 +1650,7 @@ async fn patch_issue_inner(
         &target,
         operations::issues::UpdateOptions {
             emit_activity: true,
+            pod_once,
         },
     )
     .await?;
@@ -1759,6 +1763,8 @@ async fn delete_issue_inner(
                     prev_state: prev_state_id,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(actor_id),
                         moved_by_run: None,
                         now: Utc::now(),
@@ -1884,6 +1890,8 @@ mod signal_tests {
             prev_state_id: Some(uid(3)),
             current_state_id: Some(uid(3)),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: Some(uid(7)),
             now,
             jitter_secs: 0.0,
@@ -1912,6 +1920,8 @@ mod signal_tests {
             prev_state_id: Some(uid(3)),
             current_state_id: Some(uid(4)),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: Some(uid(7)),
             now,
             jitter_secs: 0.0,

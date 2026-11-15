@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _harness import db, http  # noqa: E402
+from _harness.diffs import expect, is_rust  # noqa: E402
 
 KEY = "members"
 
@@ -221,3 +222,160 @@ def test_detail_non_canonical_spelling_404s(seed, conn):
     # Canonical control: the gate must not reject the spelling Django routes.
     got = http.get(seed["keys"][KEY], f"{proj_base(seed)}/members/{mid}/").json()
     assert got["id"] == user["id"]
+
+
+CLASS_DENIAL = {"detail": "You do not have permission to perform this action."}
+WS_ADMIN_TARGET = {"error": "You cannot update the role of a workspace admin"}
+SELF_ROLE = {"error": "You cannot update your own role"}
+ASSIGN_GUARD = {"error": "You cannot assign a role equal to or higher than your own"}
+EQUAL_TARGET = {"error": "You cannot update the role of a member with a role equal to or higher than your own"}
+GUEST_CAP = {"error": "You cannot add a user with role higher than the workspace role"}
+
+
+def _seed_matrix(seed, conn):
+    """Fresh NEWPIDASH-264 role matrix in the shared seed project.
+
+    proj_admin/ws_admin/member/ws_guest/proj_admin2 cover the app
+    `test_project_member_role_app.py` standings (ws MEMBER+proj ADMIN,
+    ws ADMIN+proj MEMBER, ws MEMBER+proj MEMBER, ws GUEST+proj GUEST,
+    second proj ADMIN for the equal-target guard). Per-test fresh rows
+    so Django's vulnerable writes never pollute another case.
+    """
+    tag = db.new_tag()
+    proj_admin = db.create_user(conn, tag + "pa", first_name="NEProjAdm")
+    ws_admin = db.create_user(conn, tag + "wa", first_name="NEWsAdm")
+    member_u = db.create_user(conn, tag + "mb", first_name="NEMember")
+    ws_guest = db.create_user(conn, tag + "wg", first_name="NEWsGuest")
+    proj_admin2 = db.create_user(conn, tag + "pb", first_name="NEProjAdm2")
+    db.add_workspace_member(conn, seed["ws_a"]["id"], proj_admin["id"], db.MEMBER)
+    db.add_workspace_member(conn, seed["ws_a"]["id"], ws_admin["id"], db.ADMIN)
+    db.add_workspace_member(conn, seed["ws_a"]["id"], member_u["id"], db.MEMBER)
+    db.add_workspace_member(conn, seed["ws_a"]["id"], ws_guest["id"], db.GUEST)
+    db.add_workspace_member(conn, seed["ws_a"]["id"], proj_admin2["id"], db.MEMBER)
+    m_pa = db.add_project_member(conn, seed["ws_a"]["id"], seed["project"]["id"], proj_admin["id"], db.ADMIN)
+    m_wa = db.add_project_member(conn, seed["ws_a"]["id"], seed["project"]["id"], ws_admin["id"], db.MEMBER)
+    m_mb = db.add_project_member(conn, seed["ws_a"]["id"], seed["project"]["id"], member_u["id"], db.MEMBER)
+    m_wg = db.add_project_member(conn, seed["ws_a"]["id"], seed["project"]["id"], ws_guest["id"], db.GUEST)
+    m_pb = db.add_project_member(conn, seed["ws_a"]["id"], seed["project"]["id"], proj_admin2["id"], db.ADMIN)
+    owner_row = db.fetch_one(
+        conn,
+        "SELECT id FROM project_members WHERE project_id = %s AND member_id = %s AND is_active = true",
+        (seed["project"]["id"], seed["owner"]["id"]),
+    )
+    return {
+        "pa_key": db.create_api_token(conn, proj_admin["id"], tag + "pa")["token"],
+        "wa_key": db.create_api_token(conn, ws_admin["id"], tag + "wa")["token"],
+        "m_pa": m_pa,
+        "m_wa": m_wa,
+        "m_mb": m_mb,
+        "m_wg": m_wg,
+        "m_pb": m_pb,
+        "owner_mid": owner_row["id"],
+    }
+
+
+def _role(conn, mid):
+    return db.fetch_one(conn, "SELECT role FROM project_members WHERE id = %s", (mid,))["role"]
+
+
+def test_patch_ws_admin_target_protected(seed, conn):
+    """NEWPIDASH-264 DIFF-24: proj Admin cannot change a ws admin's role."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["pa_key"], f"{proj_base(seed)}/members/{m['m_wa']['id']}/",
+                     json={"role": db.GUEST}, expect=expect("DIFF-24", django=200, rust=403))
+    if is_rust():
+        assert res.json() == WS_ADMIN_TARGET
+        assert _role(conn, m["m_wa"]["id"]) == db.MEMBER
+    else:
+        assert _role(conn, m["m_wa"]["id"]) == db.GUEST
+
+
+def test_patch_ws_admin_cannot_change_another_ws_admin(seed, conn):
+    """NEWPIDASH-264 DIFF-24: ws admin vs another ws admin body differs."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["wa_key"], f"{proj_base(seed)}/members/{m['owner_mid']}/",
+                     json={"role": db.GUEST}, expect=403)
+    assert res.json() == expect("DIFF-24", django=CLASS_DENIAL, rust=WS_ADMIN_TARGET)
+    if is_rust():
+        assert _role(conn, m["owner_mid"]) == db.ADMIN
+
+
+def test_patch_ws_admin_can_demote_non_admin(seed, conn):
+    """NEWPIDASH-264 DIFF-24: gate override lets ws-admin Member through."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["wa_key"], f"{proj_base(seed)}/members/{m['m_mb']['id']}/",
+                     json={"role": db.GUEST}, expect=expect("DIFF-24", django=403, rust=200))
+    if is_rust():
+        assert res.json()["role"] == db.GUEST
+        assert _role(conn, m["m_mb"]["id"]) == db.GUEST
+
+
+def test_patch_ws_admin_can_promote_to_admin(seed, conn):
+    """NEWPIDASH-264 DIFF-24: ws-admin Member promotes to project Admin."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["wa_key"], f"{proj_base(seed)}/members/{m['m_mb']['id']}/",
+                     json={"role": db.ADMIN}, expect=expect("DIFF-24", django=403, rust=200))
+    if is_rust():
+        assert res.json()["role"] == db.ADMIN
+        assert _role(conn, m["m_mb"]["id"]) == db.ADMIN
+
+
+def test_patch_project_admin_cannot_promote(seed, conn):
+    """NEWPIDASH-264 DIFF-24: assign equal-or-higher guard."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["pa_key"], f"{proj_base(seed)}/members/{m['m_mb']['id']}/",
+                     json={"role": db.ADMIN}, expect=expect("DIFF-24", django=200, rust=403))
+    if is_rust():
+        assert res.json() == ASSIGN_GUARD
+        assert _role(conn, m["m_mb"]["id"]) == db.MEMBER
+    else:
+        assert _role(conn, m["m_mb"]["id"]) == db.ADMIN
+
+
+def test_patch_project_admin_cannot_change_equal_target(seed, conn):
+    """NEWPIDASH-264 DIFF-24: equal-or-higher target guard."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["pa_key"], f"{proj_base(seed)}/members/{m['m_pb']['id']}/",
+                     json={"role": db.GUEST}, expect=expect("DIFF-24", django=200, rust=403))
+    if is_rust():
+        assert res.json() == EQUAL_TARGET
+        assert _role(conn, m["m_pb"]["id"]) == db.ADMIN
+    else:
+        assert _role(conn, m["m_pb"]["id"]) == db.GUEST
+
+
+def test_patch_project_admin_self_edit(seed, conn):
+    """NEWPIDASH-264 DIFF-24: self 400 for non-ws-admin."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["pa_key"], f"{proj_base(seed)}/members/{m['m_pa']['id']}/",
+                     json={"role": db.GUEST}, expect=expect("DIFF-24", django=200, rust=400))
+    if is_rust():
+        assert res.json() == SELF_ROLE
+        assert _role(conn, m["m_pa"]["id"]) == db.ADMIN
+    else:
+        assert _role(conn, m["m_pa"]["id"]) == db.GUEST
+
+
+def test_patch_guest_cap_project_admin(seed, conn):
+    """NEWPIDASH-264 DIFF-24: guest cap for proj Admin."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["pa_key"], f"{proj_base(seed)}/members/{m['m_wg']['id']}/",
+                     json={"role": db.MEMBER}, expect=expect("DIFF-24", django=200, rust=400))
+    if is_rust():
+        assert res.json() == GUEST_CAP
+        assert _role(conn, m["m_wg"]["id"]) == db.GUEST
+    else:
+        assert _role(conn, m["m_wg"]["id"]) == db.MEMBER
+
+
+def test_patch_guest_cap_ws_admin(seed, conn):
+    """NEWPIDASH-264 DIFF-24: guest cap for ws-admin (gate 403 vs cap 400)."""
+    m = _seed_matrix(seed, conn)
+    res = http.patch(m["wa_key"], f"{proj_base(seed)}/members/{m['m_wg']['id']}/",
+                     json={"role": db.MEMBER}, expect=expect("DIFF-24", django=403, rust=400))
+    if is_rust():
+        assert res.json() == GUEST_CAP
+        assert _role(conn, m["m_wg"]["id"]) == db.GUEST
+    else:
+        assert res.json() == CLASS_DENIAL
+        assert _role(conn, m["m_wg"]["id"]) == db.GUEST

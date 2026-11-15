@@ -354,6 +354,11 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// Resolver 404 for a `<uuid:...>` segment that misses the converter
+/// (global `handler404`, `pi_dash/urls.py:15` → `custom_404_view`):
+/// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
+/// the colon (PIDASHCONV-1713).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
@@ -384,6 +389,8 @@ pub enum Denial {
     NotFound,
     /// 404, `{"detail":"Project not found"}` (project-kwarg rewrite miss).
     ProjectNotFound,
+    /// 404, the URL resolver (`<uuid:...>` converter miss → `handler404`).
+    PageNotFound,
     /// 400, `{"detail": ...}` (`ParseError`, filter validation).
     BadDetail(String),
     /// 415, unsupported media type (DRF `UnsupportedMediaType`); the body
@@ -409,6 +416,7 @@ impl Denial {
             ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -807,63 +815,20 @@ pub fn filter_denial(error: pidash_db::filter::FilterError) -> Denial {
     Denial::BadFilter(message, code.to_owned())
 }
 
-/// A rich leaf's `IssueFilterSet` name: `field` plus the lookup suffix
-/// (`exact` has none).
-pub(crate) fn leaf_name(field: &str, lookup: pidash_db::filter::Lookup) -> String {
-    let suffix = match lookup {
-        pidash_db::filter::Lookup::Exact => return field.to_owned(),
-        pidash_db::filter::Lookup::In => "in",
-        pidash_db::filter::Lookup::Gt => "gt",
-        pidash_db::filter::Lookup::Gte => "gte",
-        pidash_db::filter::Lookup::Lt => "lt",
-        pidash_db::filter::Lookup::Lte => "lte",
-        pidash_db::filter::Lookup::Contains => "contains",
-        pidash_db::filter::Lookup::IContains => "icontains",
-        pidash_db::filter::Lookup::StartsWith => "startswith",
-        pidash_db::filter::Lookup::IStartsWith => "istartswith",
-        pidash_db::filter::Lookup::EndsWith => "endswith",
-        pidash_db::filter::Lookup::IEndsWith => "iendswith",
-        pidash_db::filter::Lookup::IExact => "iexact",
-        pidash_db::filter::Lookup::IsNull => "isnull",
-        pidash_db::filter::Lookup::Range => "range",
-    };
-    format!("{field}__{suffix}")
-}
-
-/// Compile one `filters`-param tree against `IssueFilterSet`: structure
-/// and shapes via the kernel tree, every leaf through
-/// [`pidash_db::filterset`] (the `_build_leaf_q` equivalent — the leaf
-/// dict goes to the FilterSet, not to bare columns). `tz` is the request
-/// user's zone, for naive datetime inputs.
+/// Compile one `filters`-param tree against `IssueFilterSet`, Django's
+/// way: a relation leaf under an odd `not` becomes `NOT EXISTS` (the
+/// `_build_leaf_q` leaf through the FilterSet, negated via
+/// `split_exclude`), relation leaves under `or` stay join predicates over
+/// LEFT joins, and plain occurrences are join predicates over INNER
+/// joins. Only the condition is returned here; kernels that promote
+/// joins call [`pidash_db::filterset::compile_tree`] directly for the
+/// per-alias INNER/LEFT classification. `tz` is the request user's zone,
+/// for naive datetime inputs.
 pub fn compile_filter_tree(
     tree: &pidash_db::filter::FilterTree,
     tz: &chrono_tz::Tz,
 ) -> Result<Condition, pidash_db::filter::FilterError> {
-    use pidash_db::filter::FilterTree;
-    match tree {
-        FilterTree::And(children) => {
-            let mut cond = Condition::all();
-            for child in children {
-                cond = cond.add(compile_filter_tree(child, tz)?);
-            }
-            Ok(cond)
-        }
-        FilterTree::Or(children) => {
-            let mut cond = Condition::any();
-            for child in children {
-                cond = cond.add(compile_filter_tree(child, tz)?);
-            }
-            Ok(cond)
-        }
-        FilterTree::Not(child) => Ok(compile_filter_tree(child, tz)?.not()),
-        FilterTree::Leaf(leaves) => {
-            let provided: Vec<(String, Value)> = leaves
-                .iter()
-                .map(|leaf| (leaf_name(&leaf.field, leaf.lookup), leaf.value.clone()))
-                .collect();
-            pidash_db::filterset::build_combined(&provided, tz)
-        }
-    }
+    Ok(pidash_db::filterset::compile_tree(tree, tz)?.condition)
 }
 
 /// The `filters` query param compiled to a [`Condition`], or `None` when
@@ -884,21 +849,54 @@ pub fn complex_filter(query: &QueryMap, tz: &chrono_tz::Tz) -> Result<Option<Con
     }
 }
 
+/// The relation aliases a rich filter tree references with a plain
+/// positive occurrence (outside any `or`/`not`) — the aliases whose join
+/// must be INNER. Text kernels call this alongside `complex_filter`
+/// (same `query`, same `tz`): `complex_filter` already surfaced every
+/// parse/compile error as a 400 before join emission runs, so a reparse
+/// failure here is unreachable in practice and yields the empty set.
+/// Aliases under `or` only take LEFT; aliases under an odd `not` are
+/// compiled to `NOT EXISTS` and need no join.
+pub fn rich_inner_aliases(
+    query: &QueryMap,
+    tz: &chrono_tz::Tz,
+) -> std::collections::BTreeSet<&'static str> {
+    let raw = query_last(query, "filters").unwrap_or_default();
+    if raw.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+    match pidash_db::filter::FilterTree::parse_param_opt(&raw) {
+        Ok(Some(tree)) => pidash_db::filterset::compile_tree(&tree, tz)
+            .map(|compiled| compiled.inner)
+            .unwrap_or_default(),
+        _ => std::collections::BTreeSet::new(),
+    }
+}
+
 /// The request user's zone for rich-filter compilation, for callers whose
 /// gate does not already carry one (cycle / module / profile lists).
-/// Loaded only when a `filters` param is present: unfiltered requests keep
-/// their current behavior. A bad zone or a missing user row is a 500 —
-/// Django blows up the same way in `TimezoneMixin.initial`, before the
-/// view body runs.
+/// Loaded when a `filters` param is present, or when any legacy
+/// `__date` filter (created_at / updated_at / completed_at) is present,
+/// since those truncate in the actor zone (`TimezoneMixin`). Unfiltered
+/// requests keep their current behavior. A bad zone or a missing user
+/// row is a 500 — Django blows up the same way in
+/// `TimezoneMixin.initial`, before the view body runs.
 pub async fn filters_timezone(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
     query: &QueryMap,
 ) -> Result<chrono_tz::Tz, Denial> {
-    if query_last(query, "filters")
-        .map(|raw| raw.is_empty())
-        .unwrap_or(true)
-    {
+    let need_rich = query_last(query, "filters")
+        .map(|raw| !raw.is_empty())
+        .unwrap_or(false);
+    let need_legacy = ["created_at", "updated_at", "completed_at"]
+        .iter()
+        .any(|key| {
+            query_last(query, key)
+                .map(|raw| !raw.is_empty())
+                .unwrap_or(false)
+        });
+    if !need_rich && !need_legacy {
         return Ok(chrono_tz::UTC);
     }
     let name = access::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
@@ -1084,6 +1082,7 @@ fn day_comparison(
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+        "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
         "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
         "start_date" => "issue.start_date".to_owned(),
         "target_date" => "issue.target_date".to_owned(),
@@ -1128,20 +1127,19 @@ fn legacy_text_sql(
         };
         let column = match term {
             "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+            "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
             "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
             "start_date" => "issue.start_date".to_owned(),
             "target_date" => "issue.target_date".to_owned(),
             _ => return Err(Denial::ServerError),
         };
-        // Explicit bounds must parse as dates: Django's `get_prep_value`
-        // raises `ValidationError` (400 invalid detail) on garbage.
-        if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-            return Err(Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()));
-        }
-        let holder = binder.bind_string(text.to_owned());
         if operator == "=" {
             // Single-value form on a date term: Django's `contains`
-            // lookup, i.e. LIKE with metacharacters escaped.
+            // lookup, i.e. LIKE with metacharacters escaped. No date
+            // validation: Django stores `<term>__contains=<token>` for a
+            // bare token and the ORM renders a text LIKE (Django 200),
+            // so garbage and partial dates such as `2026-11` match as
+            // text, not as a date.
             let escaped = text
                 .replace('\\', "\\\\")
                 .replace('%', "\\%")
@@ -1149,6 +1147,12 @@ fn legacy_text_sql(
             let holder = binder.bind_string(format!("%{escaped}%"));
             return Ok(format!("{column}::text LIKE {holder}"));
         }
+        // Explicit bounds must parse as dates: Django's `get_prep_value`
+        // raises `ValidationError` (400 invalid detail) on garbage.
+        if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+            return Err(Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()));
+        }
+        let holder = binder.bind_string(text.to_owned());
         let operator = if operator == ">=" { ">=" } else { "<=" };
         Ok(format!("{column} {operator} {holder}::date"))
     }
@@ -2260,6 +2264,7 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
     "created_at",
     "updated_at",
@@ -2847,6 +2852,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_updated_at_predicates_hit_the_updated_column() {
+        let mut binder = Binder::new();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let sql = legacy_sql(
+            &mut binder,
+            "updated_at__date__gte",
+            &FilterValue::Day(day),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
+        assert!(sql.starts_with("(issue.updated_at AT TIME ZONE $"), "{sql}");
+        assert!(sql.contains(")::date >= "), "{sql}");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql =
+            legacy_sql(&mut binder, "updated_at__date__lte", &text, &chrono_tz::UTC).expect("sql");
+        assert!(sql.contains("issue.updated_at"), "{sql}");
+        assert!(!sql.contains("created_at"), "{sql}");
+    }
+
+    #[test]
     fn logged_by_is_a_server_error_like_djangos_field_error() {
         let mut binder = Binder::new();
         let denial = legacy_sql(
@@ -2895,8 +2920,45 @@ mod tests {
         .expect("sql");
         assert_eq!(
             sql,
-            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $3"
+            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $2"
         );
+    }
+
+    #[test]
+    fn legacy_contains_bare_token_is_text_like_not_validated() {
+        // NEWPIDASH-196: bare tokens (no `;`) are `<term>__contains` and
+        // Django renders them as text LIKE (200), even for garbage or
+        // partial dates. Only explicit bounds validate.
+        for token in ["2026-11", "garbage", "2026", ""] {
+            let mut binder = Binder::new();
+            let sql = legacy_sql(
+                &mut binder,
+                "target_date__contains",
+                &FilterValue::Text(token.to_owned()),
+                &chrono_tz::UTC,
+            )
+            .expect("contains must not validate");
+            assert!(sql.contains("::text LIKE"), "contains should LIKE: {sql}");
+        }
+        // Explicit bounds still validate.
+        let mut binder = Binder::new();
+        let denial = legacy_sql(
+            &mut binder,
+            "target_date__gte",
+            &FilterValue::Text("garbage".to_owned()),
+            &chrono_tz::UTC,
+        )
+        .unwrap_err();
+        assert!(matches!(denial, Denial::BadError(_)));
+        let mut binder = Binder::new();
+        let denial = legacy_sql(
+            &mut binder,
+            "target_date__gte",
+            &FilterValue::Text("".to_owned()),
+            &chrono_tz::UTC,
+        )
+        .unwrap_err();
+        assert!(matches!(denial, Denial::BadError(_)));
     }
 
     #[test]
@@ -3017,6 +3079,17 @@ mod tests {
             filter_denial(E::EmptyRangeBounds("x".to_owned())),
             Denial::ServerError
         ));
+    }
+
+    #[test]
+    fn page_not_found_pins_the_resolver_404_bytes() {
+        // `custom_404_view` (`app/views/error_404.py`) returns
+        // `JsonResponse({"error": "Page not found."})`: `json.dumps`
+        // defaults, i.e. the space after the colon (PIDASHCONV-1713).
+        let (status, body) = Denial::PageNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"error": "Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
     }
 }
 

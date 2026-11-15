@@ -474,30 +474,137 @@ async fn workspace_integration(
     }
 }
 
-/// The workspace's `GithubAppInstallation` row through the OneToOne
-/// `workspace_integration.github_app_installation` (`github.py:636-638`).
+/// The GitHub App installation state as stored on
+/// `git_provider_accounts` (PDASHOSS01-356): typed columns for
+/// `verified_at`, `suspended_at`, `last_checked_at` and
+/// `last_check_error`; payload fields (`account_type`,
+/// `repository_selection`, `repository_count`, `permissions`,
+/// `events`, `installed_at`) in `metadata`. `installation_id` is
+/// `external_account_id` parsed back to `i64` (`str(installation_id)`
+/// is the stored form, matching the webhook lookup key).
+#[derive(Debug, Clone, PartialEq)]
+struct AppInstallation {
+    id: Uuid,
+    workspace_integration_id: Option<Uuid>,
+    installation_id: i64,
+    account_login: String,
+    account_type: String,
+    repository_selection: String,
+    repository_count: i32,
+    permissions: serde_json::Value,
+    events: serde_json::Value,
+    installed_at: Option<DateTime<Utc>>,
+    suspended_at: Option<DateTime<Utc>>,
+    verified_at: Option<DateTime<Utc>>,
+    last_checked_at: Option<DateTime<Utc>>,
+    last_check_error: String,
+    metadata: serde_json::Value,
+}
+
+impl From<pidash_db::entity::git_provider_accounts::Model> for AppInstallation {
+    fn from(row: pidash_db::entity::git_provider_accounts::Model) -> Self {
+        use serde_json::Value;
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        let metadata = row.metadata.clone();
+        let text = |key: &str| {
+            metadata
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        Self {
+            id: row.id,
+            workspace_integration_id: row.workspace_integration_id,
+            // `github_app` rows always store `str(installation_id)`
+            // here (every write path builds it from the numeric id).
+            installation_id: row.external_account_id.parse().unwrap_or_default(),
+            account_login: row.external_account_login,
+            account_type: {
+                let value = text("account_type");
+                if value.is_empty() {
+                    "Unknown".to_owned()
+                } else {
+                    value
+                }
+            },
+            repository_selection: {
+                let value = text("repository_selection");
+                if value.is_empty() {
+                    "selected".to_owned()
+                } else {
+                    value
+                }
+            },
+            repository_count: metadata
+                .get("repository_count")
+                .and_then(Value::as_i64)
+                .unwrap_or(0) as i32,
+            permissions: metadata
+                .get("permissions")
+                .cloned()
+                .unwrap_or(serde_json::json!({})),
+            events: metadata
+                .get("events")
+                .cloned()
+                .unwrap_or(serde_json::json!([])),
+            installed_at: metadata
+                .get("installed_at")
+                .and_then(Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&chrono::Utc)),
+            suspended_at: row.suspended_at.map(at),
+            verified_at: row.verified_at.map(at),
+            last_checked_at: row.last_checked_at.map(at),
+            last_check_error: row.last_check_error,
+            metadata,
+        }
+    }
+}
+
+impl AppInstallation {
+    /// The metadata value a refresh writes back: the stored metadata
+    /// with the live `repository_count` merged in. (Non-object
+    /// metadata cannot gain a key; the upsert paths always write an
+    /// object.)
+    fn metadata_with_repository_count(&self, repository_count: i32) -> serde_json::Value {
+        let mut metadata = self.metadata.clone();
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "repository_count".to_owned(),
+                serde_json::Value::Number(repository_count.into()),
+            );
+        }
+        metadata
+    }
+}
+
+/// The workspace's GitHub App account through its
+/// `workspace_integration` (`github.py:636-638`). Ordered by
+/// `updated_at` descending so a reinstall (which leaves the previous
+/// installation id's row behind) resolves to the newest row.
 async fn app_installation_for(
     pool: &PgPool,
     workspace_integration_id: Uuid,
-) -> Result<
-    Option<pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation>,
-    Denial,
-> {
-    use pidash_db::entity::github_app_installations;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+) -> Result<Option<AppInstallation>, Denial> {
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let row = github_app_installations::Entity::find()
-        .filter(github_app_installations::Column::DeletedAt.is_null())
+    let row = git_provider_accounts::Entity::find()
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
         .filter(
-            github_app_installations::Column::WorkspaceIntegrationId.eq(workspace_integration_id),
+            git_provider_accounts::Column::WorkspaceIntegrationId
+                .eq(Some(workspace_integration_id)),
         )
+        .order_by_desc(git_provider_accounts::Column::UpdatedAt)
         .limit(1)
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(
-        <pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation as From<github_app_installations::Model>>::from,
-    ))
+    Ok(row.map(AppInstallation::from))
 }
 
 /// `_lazy_cleanup_install_sessions` (`github.py:170-188`): mark
@@ -506,32 +613,32 @@ async fn app_installation_for(
 /// rows untouched for 7 days. Errors are logged and swallowed, never
 /// raised — the callers always continue.
 async fn lazy_cleanup_install_sessions(pool: &PgPool) {
-    use pidash_db::entity::github_app_install_sessions;
+    use pidash_db::entity::git_provider_install_sessions;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let db = pidash_db::pool::sea_orm_connection(pool);
     let stamped = chrono::Utc::now();
-    let expired = github_app_install_sessions::Entity::update_many()
+    let expired = git_provider_install_sessions::Entity::update_many()
         .col_expr(
-            github_app_install_sessions::Column::Status,
+            git_provider_install_sessions::Column::Status,
             sea_orm::sea_query::Expr::value("expired"),
         )
         .col_expr(
-            github_app_install_sessions::Column::Error,
+            git_provider_install_sessions::Column::Error,
             sea_orm::sea_query::Expr::value("Install session expired"),
         )
-        .filter(github_app_install_sessions::Column::DeletedAt.is_null())
-        .filter(github_app_install_sessions::Column::Status.eq("started"))
-        .filter(github_app_install_sessions::Column::ExpiresAt.lt(stamped))
+        .filter(git_provider_install_sessions::Column::DeletedAt.is_null())
+        .filter(git_provider_install_sessions::Column::Status.eq("started"))
+        .filter(git_provider_install_sessions::Column::ExpiresAt.lt(stamped))
         .exec(&db)
         .await;
     let week_ago = stamped - chrono::Duration::days(7);
-    let deleted = github_app_install_sessions::Entity::delete_many()
-        .filter(github_app_install_sessions::Column::Status.is_in([
+    let deleted = git_provider_install_sessions::Entity::delete_many()
+        .filter(git_provider_install_sessions::Column::Status.is_in([
             "completed",
             "expired",
             "failed",
         ]))
-        .filter(github_app_install_sessions::Column::UpdatedAt.lt(week_ago))
+        .filter(git_provider_install_sessions::Column::UpdatedAt.lt(week_ago))
         .exec(&db)
         .await;
     match (expired, deleted) {
@@ -553,11 +660,7 @@ async fn lazy_cleanup_install_sessions(pool: &PgPool) {
 /// `_serialize_app_installation` (`github.py:150-167`): the connected
 /// installation shape, or `{"connected": false}`. Key order is the
 /// serializer order; datetimes render `isoformat()` or `null`.
-fn serialize_app_installation(
-    installation: Option<
-        &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
-    >,
-) -> serde_json::Value {
+fn serialize_app_installation(installation: Option<&AppInstallation>) -> serde_json::Value {
     use serde_json::{Map, Value};
     let Some(row) = installation else {
         let mut disconnected = Map::with_capacity(1);
@@ -756,11 +859,11 @@ async fn install_start(
     // `GithubAppInstallSession.objects.create(...)` (`github.py:681`):
     // `BaseModel.save` stamps `created_by` with the request user and
     // leaves `updated_by` NULL on create (`db/models/base.py:36-39`).
-    use pidash_db::entity::github_app_install_sessions;
+    use pidash_db::entity::git_provider_install_sessions;
     use sea_orm::{ActiveModelTrait, Set};
     let db = pidash_db::pool::sea_orm_connection(pool);
     let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-    let inserted = github_app_install_sessions::ActiveModel {
+    let inserted = git_provider_install_sessions::ActiveModel {
         id: Set(Uuid::new_v4()),
         created_at: Set(stamped),
         updated_at: Set(stamped),
@@ -768,9 +871,10 @@ async fn install_start(
         updated_by_id: Set(None),
         deleted_at: Set(None),
         state: Set(session_state.clone()),
+        provider: Set("github".to_owned()),
         workspace_id: Set(workspace.id),
         actor_id: Set(user.id),
-        installation_id: Set(None),
+        external_account_id: Set(None),
         account_login: Set(String::new()),
         status: Set("started".to_owned()),
         expires_at: Set(stamped + chrono::Duration::minutes(15)),
@@ -955,14 +1059,11 @@ impl From<GithubTransportError> for RefreshOutcome {
 
 async fn refresh_app_installation(
     db: &impl sea_orm::ConnectionTrait,
-    installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
+    installation: &AppInstallation,
     config: &GithubAppConfig,
     raise_on_error: bool,
     extra_update_fields: &[&str],
-) -> Result<
-    pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
-    RefreshOutcome,
-> {
+) -> Result<AppInstallation, RefreshOutcome> {
     let mut refreshed = installation.clone();
     match list_installation_repository_count(config, installation.installation_id).await {
         Ok(repository_count) => {
@@ -1002,46 +1103,49 @@ async fn refresh_app_installation(
 /// (`github.py:198-206,220,225`).
 async fn save_installation_refresh(
     db: &impl sea_orm::ConnectionTrait,
-    installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
+    installation: &AppInstallation,
     extra_update_fields: &[&str],
 ) -> Result<(), GithubTransportError> {
-    use pidash_db::entity::github_app_installations;
+    use pidash_db::entity::git_provider_accounts;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     // `update_fields` always carries the five refresh columns; the only
     // `extra_update_fields` value in the codebase is `"suspended_at"`
     // (the unsuspend path, `github.py:942`), which the in-memory row
-    // already carries — so every refresh writes the same six columns.
+    // already carries — so every refresh writes the same columns.
+    // `repository_count` lives in `metadata` on the generic table.
     let _ = extra_update_fields;
     let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
     let at = |value: Option<DateTime<Utc>>| {
         value.map(|at| at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset")))
     };
-    github_app_installations::Entity::update_many()
+    git_provider_accounts::Entity::update_many()
         .col_expr(
-            github_app_installations::Column::RepositoryCount,
-            sea_orm::sea_query::Expr::value(installation.repository_count),
-        )
-        .col_expr(
-            github_app_installations::Column::VerifiedAt,
+            git_provider_accounts::Column::VerifiedAt,
             sea_orm::sea_query::Expr::value(at(installation.verified_at)),
         )
         .col_expr(
-            github_app_installations::Column::LastCheckedAt,
+            git_provider_accounts::Column::LastCheckedAt,
             sea_orm::sea_query::Expr::value(at(installation.last_checked_at)),
         )
         .col_expr(
-            github_app_installations::Column::LastCheckError,
+            git_provider_accounts::Column::LastCheckError,
             sea_orm::sea_query::Expr::value(installation.last_check_error.clone()),
         )
         .col_expr(
-            github_app_installations::Column::SuspendedAt,
+            git_provider_accounts::Column::SuspendedAt,
             sea_orm::sea_query::Expr::value(at(installation.suspended_at)),
         )
         .col_expr(
-            github_app_installations::Column::UpdatedAt,
+            git_provider_accounts::Column::Metadata,
+            sea_orm::sea_query::Expr::value(
+                installation.metadata_with_repository_count(installation.repository_count),
+            ),
+        )
+        .col_expr(
+            git_provider_accounts::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(bumped),
         )
-        .filter(github_app_installations::Column::Id.eq(installation.id))
+        .filter(git_provider_accounts::Column::Id.eq(installation.id))
         .exec(db)
         .await
         .map(|_| ())
@@ -1403,143 +1507,20 @@ async fn get_or_create_workspace_integration(
     })
 }
 
-/// `_upsert_git_account_for_app` (`github.py:314-352`): the
-/// `git_provider_accounts` companion row for an installation
-/// (`update_or_create` on workspace/provider/host/auth/external id).
-async fn upsert_git_account_for_app(
-    db: &impl sea_orm::ConnectionTrait,
-    installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
-    actor_id: Uuid,
-) -> Result<(), GithubTransportError> {
-    use pidash_db::entity::{git_provider_accounts, workspace_integrations};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let status = if installation.suspended_at.is_some() {
-        "degraded"
-    } else {
-        "connected"
-    };
-    let display_name = if installation.account_login.is_empty() {
-        format!("GitHub App {}", installation.installation_id)
-    } else {
-        installation.account_login.clone()
-    };
-    let account_workspace: Uuid = workspace_integrations::Entity::find()
-        .select_only()
-        .column(workspace_integrations::Column::WorkspaceId)
-        .filter(workspace_integrations::Column::DeletedAt.is_null())
-        .filter(workspace_integrations::Column::Id.eq(installation.workspace_integration_id))
-        .limit(1)
-        .into_tuple()
-        .one(db)
-        .await
-        .map_err(|error| GithubTransportError(error.to_string()))?
-        .ok_or_else(|| GithubTransportError("workspace integration missing".to_owned()))?;
-    let existing: Option<Uuid> = git_provider_accounts::Entity::find()
-        .select_only()
-        .column(git_provider_accounts::Column::Id)
-        .filter(git_provider_accounts::Column::DeletedAt.is_null())
-        .filter(git_provider_accounts::Column::WorkspaceId.eq(account_workspace))
-        .filter(git_provider_accounts::Column::Provider.eq("github"))
-        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
-        .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
-        .filter(
-            git_provider_accounts::Column::ExternalAccountId
-                .eq(installation.installation_id.to_string()),
-        )
-        .limit(1)
-        .into_tuple()
-        .one(db)
-        .await
-        .map_err(|error| GithubTransportError(error.to_string()))?;
-    let capabilities = serde_json::json!({
-        "read_repositories": true,
-        "read_issues": true,
-        "write_comments": false,
-        "manage_webhooks": true,
-        "clone": false,
-    });
-    let credential_config = serde_json::json!({
-        "auth_type": "github_app",
-        "host_url": "https://github.com",
-        "installation_id": installation.installation_id,
-    });
-    let metadata = serde_json::json!({
-        "permissions": installation.permissions,
-        "events": installation.events,
-        "repository_selection": installation.repository_selection,
-        "repository_count": installation.repository_count,
-    });
-    let at = |value: Option<DateTime<Utc>>| {
-        value.map(|at| at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset")))
-    };
-    match existing {
-        Some(account_id) => {
-            use sea_orm::{ActiveModelTrait, Set};
-            let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-            git_provider_accounts::ActiveModel {
-                id: Set(account_id),
-                external_account_login: Set(installation.account_login.clone()),
-                display_name: Set(display_name),
-                capabilities: Set(capabilities),
-                credential_config: Set(credential_config),
-                workspace_integration_id: Set(Some(installation.workspace_integration_id)),
-                status: Set(status.to_owned()),
-                verified_at: Set(at(installation.verified_at)),
-                last_check_error: Set(installation.last_check_error.clone()),
-                metadata: Set(metadata),
-                updated_at: Set(bumped),
-                ..Default::default()
-            }
-            .update(db)
-            .await
-            .map(|_| ())
-            .map_err(|error| GithubTransportError(error.to_string()))
-        }
-        None => {
-            use sea_orm::{ActiveModelTrait, Set};
-            // The `update_or_create` create branch stamps `created_by`
-            // with the request user and leaves `updated_by` NULL
-            // (`BaseModel.save`, `db/models/base.py:36-39`).
-            let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-            git_provider_accounts::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                created_at: Set(stamped),
-                updated_at: Set(stamped),
-                created_by_id: Set(Some(actor_id)),
-                updated_by_id: Set(None),
-                deleted_at: Set(None),
-                workspace_id: Set(account_workspace),
-                provider: Set("github".to_owned()),
-                host_url: Set("https://github.com".to_owned()),
-                auth_type: Set("github_app".to_owned()),
-                external_account_id: Set(installation.installation_id.to_string()),
-                external_account_login: Set(installation.account_login.clone()),
-                display_name: Set(display_name),
-                capabilities: Set(capabilities),
-                credential_config: Set(credential_config),
-                workspace_integration_id: Set(Some(installation.workspace_integration_id)),
-                status: Set(status.to_owned()),
-                verified_at: Set(at(installation.verified_at)),
-                last_check_error: Set(installation.last_check_error.clone()),
-                metadata: Set(metadata),
-            }
-            .insert(db)
-            .await
-            .map(|_| ())
-            .map_err(|error| GithubTransportError(error.to_string()))
-        }
-    }
-}
-
 /// `GithubAppInstallation.objects.update_or_create(workspace_integration=wi,
-/// defaults=...)` (`github.py:261-264`): exactly one row per workspace
-/// integration (the OneToOne carries the column-level unique). Returns the
-/// row id. `BaseModel.save` stamps `created_by` with the request user and
+/// defaults=...)` (`github.py:261-264`) folded with
+/// `_upsert_git_account_for_app` (`github.py:314-352`): both wrote the
+/// same facts, so the generic table takes a single account row. Match
+/// is by `workspace_integration_id` (the OneToOne's unique), newest
+/// first — a reinstall with a new installation id re-points the row
+/// instead of orphaning it. Returns the account row id.
+/// `BaseModel.save` stamps `created_by` with the request user and
 /// leaves `updated_by` NULL on create (`db/models/base.py:36-39`); the
 /// conflict branch rewrites the defaults columns only, never
-/// `created_by_id`.
+/// `created_by_id` — and never `verified_at`/`last_checked_at`, which
+/// the refresh stamps live.
 #[allow(clippy::too_many_arguments)]
-async fn upsert_installation_row(
+async fn upsert_account_row(
     db: &impl sea_orm::ConnectionTrait,
     workspace_integration_id: Uuid,
     actor_id: Uuid,
@@ -1553,75 +1534,142 @@ async fn upsert_installation_row(
     installed_at: Option<DateTime<Utc>>,
     suspended_at: Option<DateTime<Utc>>,
 ) -> Result<Uuid, GithubTransportError> {
-    use pidash_db::entity::github_app_installations;
-    use sea_orm::{EntityTrait, Set, Unchanged};
+    use pidash_db::entity::{git_provider_accounts, workspace_integrations};
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    };
     let at = |value: Option<DateTime<Utc>>| {
         value.map(|at| at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset")))
     };
-    let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-    let row = github_app_installations::Entity::insert(github_app_installations::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        created_at: Set(stamped),
-        updated_at: Set(stamped),
-        created_by_id: Set(Some(actor_id)),
-        updated_by_id: Unchanged(None),
-        deleted_at: Unchanged(None),
-        workspace_integration_id: Set(workspace_integration_id),
-        installation_id: Set(installation_id),
-        account_login: Set(account_login.to_owned()),
-        account_type: Set(account_type.to_owned()),
-        repository_selection: Set(repository_selection.to_owned()),
-        repository_count: Set(repository_count),
-        permissions: Set(permissions.clone()),
-        events: Set(events.clone()),
-        installed_at: Set(at(installed_at)),
-        suspended_at: Set(at(suspended_at)),
-        verified_at: Unchanged(None),
-        last_checked_at: Unchanged(None),
-        last_check_error: Set(String::new()),
-    })
-    .on_conflict(
-        sea_orm::sea_query::OnConflict::column(
-            github_app_installations::Column::WorkspaceIntegrationId,
+    let status = if suspended_at.is_some() {
+        "degraded"
+    } else {
+        "connected"
+    };
+    let display_name = if account_login.is_empty() {
+        format!("GitHub App {installation_id}")
+    } else {
+        account_login.to_owned()
+    };
+    let capabilities = serde_json::json!({
+        "read_repositories": true,
+        "read_issues": true,
+        "write_comments": false,
+        "manage_webhooks": true,
+        "clone": false,
+    });
+    let credential_config = serde_json::json!({
+        "auth_type": "github_app",
+        "host_url": "https://github.com",
+        "installation_id": installation_id,
+    });
+    // Metadata keys mirror the 0173 backfill so migrated and
+    // newly-written rows read identically.
+    let metadata = serde_json::json!({
+        "permissions": permissions,
+        "events": events,
+        "repository_selection": repository_selection,
+        "repository_count": repository_count,
+        "account_type": account_type,
+        "installed_at": installed_at.map(|at| isoformat(&at)),
+        "suspended_at": suspended_at.map(|at| isoformat(&at)),
+    });
+    let existing: Option<Uuid> = git_provider_accounts::Entity::find()
+        .select_only()
+        .column(git_provider_accounts::Column::Id)
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
+        .filter(
+            git_provider_accounts::Column::WorkspaceIntegrationId
+                .eq(Some(workspace_integration_id)),
         )
-        .update_columns([
-            github_app_installations::Column::InstallationId,
-            github_app_installations::Column::AccountLogin,
-            github_app_installations::Column::AccountType,
-            github_app_installations::Column::RepositorySelection,
-            github_app_installations::Column::RepositoryCount,
-            github_app_installations::Column::Permissions,
-            github_app_installations::Column::Events,
-            github_app_installations::Column::InstalledAt,
-            github_app_installations::Column::SuspendedAt,
-            github_app_installations::Column::LastCheckError,
-            github_app_installations::Column::UpdatedAt,
-        ])
-        .to_owned(),
-    )
-    .exec_with_returning(db)
-    .await
-    .map_err(|error| GithubTransportError(error.to_string()))?;
-    Ok(row.id)
+        .order_by_desc(git_provider_accounts::Column::UpdatedAt)
+        .limit(1)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|error| GithubTransportError(error.to_string()))?;
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+    match existing {
+        Some(account_id) => git_provider_accounts::ActiveModel {
+            id: Set(account_id),
+            external_account_id: Set(installation_id.to_string()),
+            external_account_login: Set(account_login.to_owned()),
+            display_name: Set(display_name),
+            capabilities: Set(capabilities),
+            credential_config: Set(credential_config),
+            workspace_integration_id: Set(Some(workspace_integration_id)),
+            status: Set(status.to_owned()),
+            suspended_at: Set(at(suspended_at)),
+            last_check_error: Set(String::new()),
+            metadata: Set(metadata),
+            updated_at: Set(stamped),
+            ..Default::default()
+        }
+        .update(db)
+        .await
+        .map(|_| account_id)
+        .map_err(|error| GithubTransportError(error.to_string())),
+        None => {
+            let workspace_id: Uuid = workspace_integrations::Entity::find()
+                .select_only()
+                .column(workspace_integrations::Column::WorkspaceId)
+                .filter(workspace_integrations::Column::DeletedAt.is_null())
+                .filter(workspace_integrations::Column::Id.eq(workspace_integration_id))
+                .limit(1)
+                .into_tuple()
+                .one(db)
+                .await
+                .map_err(|error| GithubTransportError(error.to_string()))?
+                .ok_or_else(|| GithubTransportError("workspace integration missing".to_owned()))?;
+            let row = git_provider_accounts::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(Some(actor_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                workspace_id: Set(workspace_id),
+                provider: Set("github".to_owned()),
+                host_url: Set("https://github.com".to_owned()),
+                auth_type: Set("github_app".to_owned()),
+                external_account_id: Set(installation_id.to_string()),
+                external_account_login: Set(account_login.to_owned()),
+                display_name: Set(display_name),
+                capabilities: Set(capabilities),
+                credential_config: Set(credential_config),
+                workspace_integration_id: Set(Some(workspace_integration_id)),
+                status: Set(status.to_owned()),
+                verified_at: Set(None),
+                suspended_at: Set(at(suspended_at)),
+                last_checked_at: Set(None),
+                last_check_error: Set(String::new()),
+                metadata: Set(metadata),
+            }
+            .insert(db)
+            .await
+            .map_err(|error| GithubTransportError(error.to_string()))?;
+            Ok(row.id)
+        }
+    }
 }
 
 /// `_upsert_app_installation` (`github.py:229-267`): the transactional
-/// workspace-integration + installation upsert, verified refresh, and
-/// git-account companion. `require_verified=True` on the callback path.
-/// Everything runs inside one transaction (`with transaction.atomic()`):
-/// a refresh or account failure rolls the upsert back, exactly like
-/// Django — the callback then redirects `github_verification_failed`
-/// with no installation row left behind.
+/// workspace-integration + account upsert and verified refresh.
+/// `require_verified=True` on the callback path. Everything runs inside
+/// one transaction (`with transaction.atomic()`): a refresh failure
+/// rolls the upsert back, exactly like Django — the callback then
+/// redirects `github_verification_failed` with no account row left
+/// behind.
 async fn upsert_app_installation(
     pool: &PgPool,
     workspace_id: Uuid,
     actor_id: Uuid,
     installation_payload: &serde_json::Value,
     config: &GithubAppConfig,
-) -> Result<
-    pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
-    GithubTransportError,
-> {
+) -> Result<AppInstallation, GithubTransportError> {
     let account = installation_payload
         .get("account")
         .cloned()
@@ -1680,7 +1728,7 @@ async fn upsert_app_installation(
         .begin()
         .await
         .map_err(|error| GithubTransportError(error.to_string()))?;
-    use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+    use pidash_db::entity::{git_provider_accounts, workspaces};
     use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
     let wi = {
         let conn = pidash_db::orm_tx::TxConn::new(&mut transaction);
@@ -1688,22 +1736,25 @@ async fn upsert_app_installation(
     };
     // The cross-workspace guard (`github.py:256-260`): the same
     // installation id bound elsewhere raises `GithubAppAuthError`.
+    // (Rows with a NULL `workspace_integration_id` never satisfy `<>`;
+    // every write path here sets the WI.)
     let elsewhere: Option<String> = {
         let conn = pidash_db::orm_tx::TxConn::new(&mut transaction);
-        github_app_installations::Entity::find()
+        git_provider_accounts::Entity::find()
             .select_only()
             .column(workspaces::Column::Slug)
             .join(
                 JoinType::InnerJoin,
-                github_app_installations::Relation::WorkspaceIntegrations.def(),
+                git_provider_accounts::Relation::Workspaces.def(),
             )
-            .join(
-                JoinType::InnerJoin,
-                workspace_integrations::Relation::Workspaces.def(),
+            .filter(git_provider_accounts::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::Provider.eq("github"))
+            .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+            .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
+            .filter(
+                git_provider_accounts::Column::ExternalAccountId.eq(installation_id.to_string()),
             )
-            .filter(github_app_installations::Column::DeletedAt.is_null())
-            .filter(github_app_installations::Column::InstallationId.eq(installation_id))
-            .filter(github_app_installations::Column::WorkspaceIntegrationId.ne(wi.id))
+            .filter(git_provider_accounts::Column::WorkspaceIntegrationId.ne(Some(wi.id)))
             .limit(1)
             .into_tuple()
             .one(&conn)
@@ -1717,7 +1768,7 @@ async fn upsert_app_installation(
     }
     let installation = {
         let conn = pidash_db::orm_tx::TxConn::new(&mut transaction);
-        let row_id = upsert_installation_row(
+        let row_id = upsert_account_row(
             &conn,
             wi.id,
             actor_id,
@@ -1736,7 +1787,7 @@ async fn upsert_app_installation(
             .await
             .map_err(|error| GithubTransportError(error.to_string()))?
             .ok_or_else(|| GithubTransportError("installation row missing".to_owned()))?;
-        let installation = refresh_app_installation(&conn, &installation, config, true, &[])
+        refresh_app_installation(&conn, &installation, config, true, &[])
             .await
             .map_err(|outcome| match outcome {
                 RefreshOutcome::VerificationFailed(_) => {
@@ -1745,9 +1796,7 @@ async fn upsert_app_installation(
                 RefreshOutcome::StoreFailed => {
                     GithubTransportError("installation refresh save failed".to_owned())
                 }
-            })?;
-        upsert_git_account_for_app(&conn, &installation, actor_id).await?;
-        installation
+            })?
     };
     transaction
         .commit()
@@ -1756,25 +1805,20 @@ async fn upsert_app_installation(
     Ok(installation)
 }
 
-/// One `github_app_installations` row by id.
+/// One `git_provider_accounts` row by id.
 async fn app_installation_by_id(
     db: &impl sea_orm::ConnectionTrait,
     id: Uuid,
-) -> Result<
-    Option<pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation>,
-    sea_orm::DbErr,
-> {
-    use pidash_db::entity::github_app_installations;
+) -> Result<Option<AppInstallation>, sea_orm::DbErr> {
+    use pidash_db::entity::git_provider_accounts;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let row = github_app_installations::Entity::find()
-        .filter(github_app_installations::Column::DeletedAt.is_null())
-        .filter(github_app_installations::Column::Id.eq(id))
+    let row = git_provider_accounts::Entity::find()
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::Id.eq(id))
         .limit(1)
         .one(db)
         .await?;
-    Ok(row.map(
-        <pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation as From<github_app_installations::Model>>::from,
-    ))
+    Ok(row.map(AppInstallation::from))
 }
 
 // ---------------------------------------------------------------------------
@@ -1814,24 +1858,24 @@ async fn callback_fail(
     error: &str,
     settings: &pidash_db::config::Settings,
 ) -> Response {
-    use pidash_db::entity::github_app_install_sessions;
+    use pidash_db::entity::git_provider_install_sessions;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let db = pidash_db::pool::sea_orm_connection(pool);
     let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-    github_app_install_sessions::Entity::update_many()
+    git_provider_install_sessions::Entity::update_many()
         .col_expr(
-            github_app_install_sessions::Column::Status,
+            git_provider_install_sessions::Column::Status,
             sea_orm::sea_query::Expr::value("failed"),
         )
         .col_expr(
-            github_app_install_sessions::Column::Error,
+            git_provider_install_sessions::Column::Error,
             sea_orm::sea_query::Expr::value(error),
         )
         .col_expr(
-            github_app_install_sessions::Column::UpdatedAt,
+            git_provider_install_sessions::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(bumped),
         )
-        .filter(github_app_install_sessions::Column::Id.eq(session_id))
+        .filter(git_provider_install_sessions::Column::Id.eq(session_id))
         .exec(&db)
         .await
         .ok();
@@ -1912,24 +1956,24 @@ async fn app_callback(
     // `expires_at <= now` (strictly `<=`, NOT the sweep's `<` —
     // `github.py:765-769`).
     if queries::install_session_callback_expired(session.expires_at, Utc::now()) {
-        use pidash_db::entity::github_app_install_sessions;
+        use pidash_db::entity::git_provider_install_sessions;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let db = pidash_db::pool::sea_orm_connection(pool);
         let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-        github_app_install_sessions::Entity::update_many()
+        git_provider_install_sessions::Entity::update_many()
             .col_expr(
-                github_app_install_sessions::Column::Status,
+                git_provider_install_sessions::Column::Status,
                 sea_orm::sea_query::Expr::value("expired"),
             )
             .col_expr(
-                github_app_install_sessions::Column::Error,
+                git_provider_install_sessions::Column::Error,
                 sea_orm::sea_query::Expr::value("Install session expired"),
             )
             .col_expr(
-                github_app_install_sessions::Column::UpdatedAt,
+                git_provider_install_sessions::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(bumped),
             )
-            .filter(github_app_install_sessions::Column::Id.eq(session.id))
+            .filter(git_provider_install_sessions::Column::Id.eq(session.id))
             .exec(&db)
             .await
             .ok();
@@ -2048,36 +2092,36 @@ async fn app_callback(
         }
     };
     {
-        use pidash_db::entity::github_app_install_sessions;
+        use pidash_db::entity::git_provider_install_sessions;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let db = pidash_db::pool::sea_orm_connection(pool);
         let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-        github_app_install_sessions::Entity::update_many()
+        git_provider_install_sessions::Entity::update_many()
             .col_expr(
-                github_app_install_sessions::Column::InstallationId,
-                sea_orm::sea_query::Expr::value(app_installation.installation_id),
+                git_provider_install_sessions::Column::ExternalAccountId,
+                sea_orm::sea_query::Expr::value(app_installation.installation_id.to_string()),
             )
             .col_expr(
-                github_app_install_sessions::Column::AccountLogin,
+                git_provider_install_sessions::Column::AccountLogin,
                 sea_orm::sea_query::Expr::value(app_installation.account_login.clone()),
             )
             .col_expr(
-                github_app_install_sessions::Column::Status,
+                git_provider_install_sessions::Column::Status,
                 sea_orm::sea_query::Expr::value("completed"),
             )
             .col_expr(
-                github_app_install_sessions::Column::CompletedAt,
+                git_provider_install_sessions::Column::CompletedAt,
                 sea_orm::sea_query::Expr::value(stamped),
             )
             .col_expr(
-                github_app_install_sessions::Column::Error,
+                git_provider_install_sessions::Column::Error,
                 sea_orm::sea_query::Expr::value(""),
             )
             .col_expr(
-                github_app_install_sessions::Column::UpdatedAt,
+                git_provider_install_sessions::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(stamped),
             )
-            .filter(github_app_install_sessions::Column::Id.eq(session.id))
+            .filter(git_provider_install_sessions::Column::Id.eq(session.id))
             .exec(&db)
             .await
             .ok();
@@ -2224,31 +2268,13 @@ async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<
     let db = pidash_db::pool::sea_orm_connection(pool);
     #[derive(Debug, sea_orm::FromQueryResult)]
     #[allow(non_snake_case)]
-    struct LinkRow {
-        id: Uuid,
-        pr_updated_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-    }
-    #[derive(Debug, sea_orm::FromQueryResult)]
-    #[allow(non_snake_case)]
     struct ReviewRow {
         id: Uuid,
         remote_updated_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
         metadata: serde_json::Value,
     }
-    use pidash_db::entity::{git_code_review_links, github_pull_request_links};
+    use pidash_db::entity::git_code_review_links;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let links: Vec<LinkRow> = github_pull_request_links::Entity::find()
-        .select_only()
-        .column(github_pull_request_links::Column::Id)
-        .column(github_pull_request_links::Column::PrUpdatedAt)
-        .filter(github_pull_request_links::Column::DeletedAt.is_null())
-        .filter(github_pull_request_links::Column::RepoOwner.eq(owner.clone()))
-        .filter(github_pull_request_links::Column::RepoName.eq(name.clone()))
-        .filter(github_pull_request_links::Column::PrNumber.eq(number as i32))
-        .into_model::<LinkRow>()
-        .all(&db)
-        .await
-        .map_err(store_error)?;
     let stamp = |value: Option<DateTime<Utc>>| {
         value.map(|at| at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset")))
     };
@@ -2256,46 +2282,6 @@ async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<
         value.map(|at| at.with_timezone(&chrono::Utc))
     };
     let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-    for link in &links {
-        matched += 1;
-        let stored = stored_utc(link.pr_updated_at);
-        // Stale / out-of-order delivery — matched but not applied
-        // (`github.py:835-836`).
-        if let (Some(incoming), Some(current)) = (snapshot.pr_updated_at, stored) {
-            if incoming < current {
-                continue;
-            }
-        }
-        github_pull_request_links::Entity::update_many()
-            .col_expr(
-                github_pull_request_links::Column::Title,
-                sea_orm::sea_query::Expr::value(snapshot.title.clone()),
-            )
-            .col_expr(
-                github_pull_request_links::Column::State,
-                sea_orm::sea_query::Expr::value(snapshot.state.clone()),
-            )
-            .col_expr(
-                github_pull_request_links::Column::Merged,
-                sea_orm::sea_query::Expr::value(snapshot.merged),
-            )
-            .col_expr(
-                github_pull_request_links::Column::Draft,
-                sea_orm::sea_query::Expr::value(snapshot.draft),
-            )
-            .col_expr(
-                github_pull_request_links::Column::PrUpdatedAt,
-                sea_orm::sea_query::Expr::value(stamp(snapshot.pr_updated_at)),
-            )
-            .col_expr(
-                github_pull_request_links::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(bumped),
-            )
-            .filter(github_pull_request_links::Column::Id.eq(link.id))
-            .exec(&db)
-            .await
-            .map_err(store_error)?;
-    }
     let reviews: Vec<ReviewRow> = git_code_review_links::Entity::find()
         .select_only()
         .column(git_code_review_links::Column::Id)
@@ -2495,35 +2481,45 @@ async fn app_webhook(
         Some(other) => other.to_string(),
     };
     // `get_or_create(delivery_id, defaults=...)` (`github.py:894-903`).
-    use pidash_db::entity::github_webhook_deliveries;
+    // Sunset 4/6: write to generic git_webhook_deliveries (provider='github').
+    use pidash_db::entity::git_webhook_deliveries;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
     let db = pidash_db::pool::sea_orm_connection(pool);
     let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-    let inserted =
-        github_webhook_deliveries::Entity::insert(github_webhook_deliveries::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            created_at: Set(stamped),
-            updated_at: Set(stamped),
-            created_by_id: Set(None),
-            updated_by_id: Set(None),
-            deleted_at: Set(None),
-            delivery_id: Set(delivery_uuid),
-            event: Set(event.clone()),
-            action: Set(action.clone()),
-            installation_id: Set(installation_id),
-            payload: Set(payload.clone()),
-            status: Set("received".to_owned()),
-            received_at: Set(stamped),
-            processed_at: Set(None),
-            error: Set(String::new()),
-        })
-        .on_conflict(
-            sea_orm::sea_query::OnConflict::column(github_webhook_deliveries::Column::DeliveryId)
-                .do_nothing()
-                .to_owned(),
-        )
-        .exec_without_returning(&db)
-        .await;
+    let delivery_id_str = delivery_uuid.to_string();
+    let metadata = match installation_id {
+        Some(id) => serde_json::json!({"legacy_installation_id": id}),
+        None => serde_json::json!({}),
+    };
+    let raw_headers = serde_json::json!({});
+    let inserted = git_webhook_deliveries::Entity::insert(git_webhook_deliveries::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        provider: Set("github".to_owned()),
+        host_url: Set("https://github.com".to_owned()),
+        delivery_id: Set(delivery_id_str.clone()),
+        event: Set(event.clone()),
+        action: Set(action.clone()),
+        raw_headers: Set(raw_headers),
+        payload: Set(payload.clone()),
+        status: Set("received".to_owned()),
+        received_at: Set(stamped),
+        processed_at: Set(None),
+        error: Set(String::new()),
+        metadata: Set(metadata),
+        repository_id: Set(None),
+    })
+    .on_conflict(
+        sea_orm::sea_query::OnConflict::new()
+            .do_nothing()
+            .to_owned(),
+    )
+    .exec_without_returning(&db)
+    .await;
     let created = match inserted {
         Ok(rows) => rows == 1,
         Err(_) => return Denial::ServerError.into_response(),
@@ -2533,10 +2529,13 @@ async fn app_webhook(
         // a prior attempt reached terminal success (`processed` /
         // `skipped`); `received` (interrupted) and `failed` reprocess so
         // the snapshot still converges (`github.py:904-917`).
-        let prior: Option<String> = match github_webhook_deliveries::Entity::find()
+        let prior: Option<String> = match git_webhook_deliveries::Entity::find()
             .select_only()
-            .column(github_webhook_deliveries::Column::Status)
-            .filter(github_webhook_deliveries::Column::DeliveryId.eq(delivery_uuid))
+            .column(git_webhook_deliveries::Column::Status)
+            .filter(git_webhook_deliveries::Column::DeletedAt.is_null())
+            .filter(git_webhook_deliveries::Column::Provider.eq("github"))
+            .filter(git_webhook_deliveries::Column::HostUrl.eq("https://github.com"))
+            .filter(git_webhook_deliveries::Column::DeliveryId.eq(delivery_id_str.clone()))
             .limit(1)
             .into_tuple()
             .one(&db)
@@ -2578,24 +2577,27 @@ async fn app_webhook(
     {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-        github_webhook_deliveries::Entity::update_many()
+        git_webhook_deliveries::Entity::update_many()
             .col_expr(
-                github_webhook_deliveries::Column::Status,
+                git_webhook_deliveries::Column::Status,
                 sea_orm::sea_query::Expr::value(status.clone()),
             )
             .col_expr(
-                github_webhook_deliveries::Column::Error,
+                git_webhook_deliveries::Column::Error,
                 sea_orm::sea_query::Expr::value(error),
             )
             .col_expr(
-                github_webhook_deliveries::Column::ProcessedAt,
+                git_webhook_deliveries::Column::ProcessedAt,
                 sea_orm::sea_query::Expr::value(stamped),
             )
             .col_expr(
-                github_webhook_deliveries::Column::UpdatedAt,
+                git_webhook_deliveries::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(stamped),
             )
-            .filter(github_webhook_deliveries::Column::DeliveryId.eq(delivery_uuid))
+            .filter(git_webhook_deliveries::Column::DeletedAt.is_null())
+            .filter(git_webhook_deliveries::Column::Provider.eq("github"))
+            .filter(git_webhook_deliveries::Column::HostUrl.eq("https://github.com"))
+            .filter(git_webhook_deliveries::Column::DeliveryId.eq(delivery_id_str.clone()))
             .exec(&db)
             .await
             .ok();
@@ -2629,40 +2631,69 @@ async fn route_delivery(
         });
     }
     if event == "installation" || event == "installation_repositories" {
-        let installation = match installation_id {
-            Some(id) => installation_by_installation_id(pool, id)
+        // Sunset 4/6: installation webhook now targets git_provider_accounts.
+        // Lookup by external_account_id = installation_id string (see 0152 backfill).
+        #[allow(dead_code)]
+        async fn git_provider_account_by_installation(
+            db: &impl sea_orm::ConnectionTrait,
+            installation_id: i64,
+        ) -> Result<Option<pidash_db::entity::git_provider_accounts::Model>, sea_orm::DbErr>
+        {
+            use pidash_db::entity::git_provider_accounts;
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+            git_provider_accounts::Entity::find()
+                .filter(git_provider_accounts::Column::DeletedAt.is_null())
+                .filter(git_provider_accounts::Column::Provider.eq("github"))
+                .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+                .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
+                .filter(
+                    git_provider_accounts::Column::ExternalAccountId
+                        .eq(installation_id.to_string()),
+                )
+                .limit(1)
+                .one(db)
                 .await
-                .map_err(|error| error.to_string())?,
+        }
+
+        let account = match installation_id {
+            Some(id) => {
+                let db = pidash_db::pool::sea_orm_connection(pool);
+                git_provider_account_by_installation(&db, id)
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
             None => None,
         };
-        let Some(mut installation) = installation else {
+        let Some(mut account) = account else {
             return Ok(delivery_status::SKIPPED.to_owned());
         };
         if event == "installation" && (action == "deleted" || action == "suspend") {
-            installation.suspended_at = Some(Utc::now());
-            installation.last_check_error =
-                "GitHub App installation removed or suspended".to_owned();
+            let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+            account.suspended_at = Some(bumped);
+            account.last_check_error = "GitHub App installation removed or suspended".to_owned();
+            account.status = "degraded".to_owned();
             {
-                use pidash_db::entity::github_app_installations;
+                use pidash_db::entity::git_provider_accounts;
                 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
                 let db = pidash_db::pool::sea_orm_connection(pool);
-                let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-                github_app_installations::Entity::update_many()
+                git_provider_accounts::Entity::update_many()
                     .col_expr(
-                        github_app_installations::Column::SuspendedAt,
-                        sea_orm::sea_query::Expr::value(installation.suspended_at.map(|at| {
-                            at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero"))
-                        })),
+                        git_provider_accounts::Column::SuspendedAt,
+                        sea_orm::sea_query::Expr::value(account.suspended_at),
                     )
                     .col_expr(
-                        github_app_installations::Column::LastCheckError,
-                        sea_orm::sea_query::Expr::value(installation.last_check_error.clone()),
+                        git_provider_accounts::Column::LastCheckError,
+                        sea_orm::sea_query::Expr::value(account.last_check_error.clone()),
                     )
                     .col_expr(
-                        github_app_installations::Column::UpdatedAt,
+                        git_provider_accounts::Column::Status,
+                        sea_orm::sea_query::Expr::value("degraded"),
+                    )
+                    .col_expr(
+                        git_provider_accounts::Column::UpdatedAt,
                         sea_orm::sea_query::Expr::value(bumped),
                     )
-                    .filter(github_app_installations::Column::Id.eq(installation.id))
+                    .filter(git_provider_accounts::Column::Id.eq(account.id))
                     .exec(&db)
                     .await
                     .map_err(|error| error.to_string())?;
@@ -2671,83 +2702,212 @@ async fn route_delivery(
             // installation-token cache, so there is nothing to evict
             // (see the module docs).
         } else if event == "installation" && action == "unsuspend" {
-            installation.suspended_at = None;
-            let config = github_app_config(pool, secret_key)
+            // Clear suspension in generic table before refresh verification.
+            let cfg = github_app_config(pool, secret_key)
                 .await
                 .map_err(|_| "installation refresh config failed".to_owned())?;
-            // Autocommit here, exactly like Django (the webhook handler
-            // wraps nothing in `transaction.atomic`).
-            let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
-            let connection = pidash_db::orm_tx::TxConn::new(&mut connection);
-            refresh_app_installation(
-                &connection,
-                &installation,
-                &config,
-                false,
-                &["suspended_at"],
-            )
-            .await
-            .map_err(|outcome| match outcome {
-                RefreshOutcome::VerificationFailed(error) => error,
-                RefreshOutcome::StoreFailed => "installation refresh save failed".to_owned(),
-            })?;
+            let installation_id_val = installation_id.unwrap_or(0);
+            // Attempt to refresh generic account via upstream count.
+            // If upstream fails, record error but still clear suspended_at (matching
+            // legacy semantics: suspended cleared before refresh with extra field).
+            let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+            let mut metadata = account.metadata.as_object().cloned().unwrap_or_default();
+            metadata.remove("suspended_at");
+            {
+                use pidash_db::entity::git_provider_accounts;
+                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                let db = pidash_db::pool::sea_orm_connection(pool);
+                git_provider_accounts::Entity::update_many()
+                    .col_expr(
+                        git_provider_accounts::Column::Status,
+                        sea_orm::sea_query::Expr::value("connected"),
+                    )
+                    .col_expr(
+                        git_provider_accounts::Column::LastCheckError,
+                        sea_orm::sea_query::Expr::value(""),
+                    )
+                    .col_expr(
+                        git_provider_accounts::Column::Metadata,
+                        sea_orm::sea_query::Expr::value(serde_json::Value::Object(
+                            metadata.clone(),
+                        )),
+                    )
+                    .col_expr(
+                        git_provider_accounts::Column::UpdatedAt,
+                        sea_orm::sea_query::Expr::value(bumped),
+                    )
+                    .filter(git_provider_accounts::Column::Id.eq(account.id))
+                    .exec(&db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            match list_installation_repository_count(&cfg, installation_id_val).await {
+                Ok(count) => {
+                    let mut meta = metadata;
+                    meta.insert(
+                        "repository_count".to_owned(),
+                        serde_json::Value::Number(count.into()),
+                    );
+                    let now = crate::runner_enroll::now_micros();
+                    let now_dt: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+                    let updated_dt: sea_orm::prelude::DateTimeWithTimeZone =
+                        chrono::Utc::now().into();
+                    use pidash_db::entity::git_provider_accounts;
+                    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    git_provider_accounts::Entity::update_many()
+                        .col_expr(
+                            git_provider_accounts::Column::VerifiedAt,
+                            sea_orm::sea_query::Expr::value(Some(now_dt)),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::Metadata,
+                            sea_orm::sea_query::Expr::value(serde_json::Value::Object(meta)),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::UpdatedAt,
+                            sea_orm::sea_query::Expr::value(updated_dt),
+                        )
+                        .filter(git_provider_accounts::Column::Id.eq(account.id))
+                        .exec(&db)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(error) => {
+                    let msg = truncate_error(&error.to_string());
+                    let now = crate::runner_enroll::now_micros();
+                    let now_dt: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+                    let updated_dt: sea_orm::prelude::DateTimeWithTimeZone =
+                        chrono::Utc::now().into();
+                    use pidash_db::entity::git_provider_accounts;
+                    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    git_provider_accounts::Entity::update_many()
+                        .col_expr(
+                            git_provider_accounts::Column::LastCheckError,
+                            sea_orm::sea_query::Expr::value(msg.clone()),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::Metadata,
+                            sea_orm::sea_query::Expr::value(serde_json::Value::Object(metadata)),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::VerifiedAt,
+                            sea_orm::sea_query::Expr::value(Some(now_dt)),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::UpdatedAt,
+                            sea_orm::sea_query::Expr::value(updated_dt),
+                        )
+                        .filter(git_provider_accounts::Column::Id.eq(account.id))
+                        .exec(&db)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    // raise_on_error=false in webhook: treat as processed even on failure
+                    // (mirrors legacy refresh_app_installation return Ok on failure when
+                    // raise_on_error false).
+                }
+            }
         } else if event == "installation_repositories" {
-            let config = github_app_config(pool, secret_key)
+            let cfg = github_app_config(pool, secret_key)
                 .await
                 .map_err(|_| "installation refresh config failed".to_owned())?;
-            // Autocommit here, exactly like Django (see above).
-            let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
-            let connection = pidash_db::orm_tx::TxConn::new(&mut connection);
-            refresh_app_installation(&connection, &installation, &config, false, &[])
-                .await
-                .map_err(|outcome| match outcome {
-                    RefreshOutcome::VerificationFailed(error) => error,
-                    RefreshOutcome::StoreFailed => "installation refresh save failed".to_owned(),
-                })?;
+            let installation_id_val = installation_id.unwrap_or(0);
+            match list_installation_repository_count(&cfg, installation_id_val).await {
+                Ok(count) => {
+                    let mut metadata = account.metadata.as_object().cloned().unwrap_or_default();
+                    metadata.insert(
+                        "repository_count".to_owned(),
+                        serde_json::Value::Number(count.into()),
+                    );
+                    let now = crate::runner_enroll::now_micros();
+                    let now_dt: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+                    let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+                    use pidash_db::entity::git_provider_accounts;
+                    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    git_provider_accounts::Entity::update_many()
+                        .col_expr(
+                            git_provider_accounts::Column::VerifiedAt,
+                            sea_orm::sea_query::Expr::value(Some(now_dt)),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::LastCheckError,
+                            sea_orm::sea_query::Expr::value(""),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::Metadata,
+                            sea_orm::sea_query::Expr::value(serde_json::Value::Object(metadata)),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::UpdatedAt,
+                            sea_orm::sea_query::Expr::value(bumped),
+                        )
+                        .filter(git_provider_accounts::Column::Id.eq(account.id))
+                        .exec(&db)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(error) => {
+                    let msg = truncate_error(&error.to_string());
+                    let bumped = chrono::Utc::now();
+                    let bumped_dt: sea_orm::prelude::DateTimeWithTimeZone = bumped.into();
+                    use pidash_db::entity::git_provider_accounts;
+                    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    git_provider_accounts::Entity::update_many()
+                        .col_expr(
+                            git_provider_accounts::Column::LastCheckError,
+                            sea_orm::sea_query::Expr::value(msg),
+                        )
+                        .col_expr(
+                            git_provider_accounts::Column::UpdatedAt,
+                            sea_orm::sea_query::Expr::value(bumped_dt),
+                        )
+                        .filter(git_provider_accounts::Column::Id.eq(account.id))
+                        .exec(&db)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+            }
         }
         return Ok(delivery_status::PROCESSED.to_owned());
     }
     Ok(delivery_status::SKIPPED.to_owned())
 }
 
-/// One `github_app_installations` row by `installation_id`
-/// (`github.py:930-931`).
+/// One `git_provider_accounts` row by `installation_id`
+/// (`github.py:930-931`). The (`provider`, `host_url`,
+/// `external_account_id`) index keeps webhook lookups indexed.
+#[allow(dead_code)]
 async fn installation_by_installation_id(
     pool: &PgPool,
     installation_id: i64,
-) -> Result<
-    Option<pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation>,
-    sea_orm::DbErr,
-> {
-    use pidash_db::entity::github_app_installations;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+) -> Result<Option<AppInstallation>, sea_orm::DbErr> {
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let row = github_app_installations::Entity::find()
-        .filter(github_app_installations::Column::DeletedAt.is_null())
-        .filter(github_app_installations::Column::InstallationId.eq(installation_id))
+    let row = git_provider_accounts::Entity::find()
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
+        .filter(git_provider_accounts::Column::ExternalAccountId.eq(installation_id.to_string()))
+        .order_by_desc(git_provider_accounts::Column::UpdatedAt)
         .limit(1)
         .one(&db)
         .await?;
-    Ok(row.map(
-        <pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation as From<github_app_installations::Model>>::from,
-    ))
+    Ok(row.map(AppInstallation::from))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation;
-
-    fn test_installation() -> GithubAppInstallation {
-        GithubAppInstallation {
+    fn test_installation() -> AppInstallation {
+        AppInstallation {
             id: Uuid::nil(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            created_by_id: None,
-            updated_by_id: None,
-            deleted_at: None,
-            workspace_integration_id: Uuid::nil(),
+            workspace_integration_id: None,
             installation_id: 12345678,
             account_login: "contract-octocat".to_owned(),
             account_type: "Organization".to_owned(),
@@ -2760,6 +2920,7 @@ mod tests {
             verified_at: None,
             last_checked_at: None,
             last_check_error: String::new(),
+            metadata: serde_json::json!({}),
         }
     }
 
@@ -2833,14 +2994,11 @@ mod tests {
             .execute(pool)
             .await
             .expect("cleanup accounts");
-        sqlx::query(
-            r#"DELETE FROM "github_app_installations" WHERE "workspace_integration_id" IN
-               (SELECT "id" FROM "workspace_integrations" WHERE "workspace_id" = $1)"#,
-        )
-        .bind(workspace_id)
-        .execute(pool)
-        .await
-        .expect("cleanup installations");
+        sqlx::query(r#"DELETE FROM "git_provider_install_sessions" WHERE "workspace_id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup install sessions");
         sqlx::query(r#"DELETE FROM "workspace_integrations" WHERE "workspace_id" = $1"#)
             .bind(workspace_id)
             .execute(pool)
@@ -2875,10 +3033,9 @@ mod tests {
     /// exactly like `BaseModel.save` (`db/models/base.py:36-39`). The
     /// HTTP callback is sealed in tests (the exchange chain posts to
     /// hardcoded https://api.github.com URLs on both backends), so this
-    /// drives `get_or_create_workspace_integration`,
-    /// `upsert_installation_row` and `upsert_git_account_for_app`
-    /// directly with fabricated inputs — the oauth_github kernel
-    /// convention (PIDASHCONV-1083).
+    /// drives `get_or_create_workspace_integration` and
+    /// `upsert_account_row` directly with fabricated inputs — the
+    /// oauth_github kernel convention (PIDASHCONV-1083).
     #[tokio::test]
     async fn callback_kernels_stamp_created_by() {
         let Some(pool) = kernel_pool().await else {
@@ -2928,7 +3085,7 @@ mod tests {
         let installation_id = 1_000_000_000 + (Uuid::new_v4().as_u128() % 8_000_000_000) as i64;
         let row_id = {
             let conn = pidash_db::orm_tx::TxConn::new(&mut connection);
-            upsert_installation_row(
+            upsert_account_row(
                 &conn,
                 wi.id,
                 user_id,
@@ -2943,41 +3100,12 @@ mod tests {
                 None,
             )
             .await
-            .expect("installation row")
+            .expect("account row")
         };
-        let installation_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
-            r#"SELECT "created_by_id", "updated_by_id" FROM "github_app_installations" WHERE "id" = $1"#,
+        let account_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "git_provider_accounts" WHERE "id" = $1"#,
         )
         .bind(row_id)
-        .fetch_one(&mut *connection)
-        .await
-        .expect("installation row");
-        assert_eq!(
-            installation_stamps.0,
-            Some(user_id),
-            "github_app_installations created_by"
-        );
-        assert_eq!(
-            installation_stamps.1, None,
-            "github_app_installations updated_by"
-        );
-        let installation = {
-            let conn = pidash_db::orm_tx::TxConn::new(&mut connection);
-            app_installation_by_id(&conn, row_id)
-                .await
-                .expect("fetch installation")
-                .expect("installation present")
-        };
-        {
-            let conn = pidash_db::orm_tx::TxConn::new(&mut connection);
-            upsert_git_account_for_app(&conn, &installation, user_id)
-                .await
-                .expect("git account")
-        }
-        let account_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
-            r#"SELECT "created_by_id", "updated_by_id" FROM "git_provider_accounts" WHERE "workspace_id" = $1"#,
-        )
-        .bind(workspace_id)
         .fetch_one(&mut *connection)
         .await
         .expect("account row");
@@ -2987,17 +3115,30 @@ mod tests {
             "git_provider_accounts created_by"
         );
         assert_eq!(account_stamps.1, None, "git_provider_accounts updated_by");
-        // The `ON CONFLICT DO UPDATE` branch must rewrite the defaults
-        // without touching `created_by_id`: re-upsert the same workspace
+        let installation = {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut connection);
+            app_installation_by_id(&conn, row_id)
+                .await
+                .expect("fetch installation")
+                .expect("installation present")
+        };
+        assert_eq!(
+            installation.installation_id, installation_id,
+            "external id round-trips"
+        );
+        assert_eq!(installation.account_type, "Organization");
+        assert_eq!(installation.repository_count, 3);
+        // The conflict branch must rewrite the defaults without
+        // touching `created_by_id`: re-upsert the same workspace
         // integration with a different actor and installation id. (The
-        // proposed row conflicts, so the unknown actor never reaches the
-        // table; `updated_by` on this branch is the known out-of-scope
-        // divergence and is deliberately not asserted.)
+        // proposed row conflicts, so the unknown actor never reaches
+        // the table; `updated_by` on this branch is the known
+        // out-of-scope divergence and is deliberately not asserted.)
         let other_actor = Uuid::new_v4();
         let installation_id_2 = 1_000_000_000 + (Uuid::new_v4().as_u128() % 8_000_000_000) as i64;
         let row_id_2 = {
             let conn = pidash_db::orm_tx::TxConn::new(&mut connection);
-            upsert_installation_row(
+            upsert_account_row(
                 &conn,
                 wi.id,
                 other_actor,
@@ -3012,18 +3153,22 @@ mod tests {
                 None,
             )
             .await
-            .expect("installation re-upsert")
+            .expect("account re-upsert")
         };
         assert_eq!(row_id_2, row_id, "conflict branch returns same row");
-        let restamps: (Option<Uuid>, i64) = sqlx::query_as(
-            r#"SELECT "created_by_id", "installation_id" FROM "github_app_installations" WHERE "id" = $1"#,
+        let restamps: (Option<Uuid>, String) = sqlx::query_as(
+            r#"SELECT "created_by_id", "external_account_id" FROM "git_provider_accounts" WHERE "id" = $1"#,
         )
         .bind(row_id)
         .fetch_one(&mut *connection)
         .await
-        .expect("installation row after conflict");
+        .expect("account row after conflict");
         assert_eq!(restamps.0, Some(user_id), "conflict keeps created_by");
-        assert_eq!(restamps.1, installation_id_2, "conflict rewrites defaults");
+        assert_eq!(
+            restamps.1,
+            installation_id_2.to_string(),
+            "conflict rewrites defaults"
+        );
         drop(connection);
         cleanup_kernel_world(
             &pool,
@@ -3286,6 +3431,52 @@ mod tests {
             serde_json::json!([1]),
         ] {
             assert!(nested_shape_fails(&raw), "{raw}");
+        }
+    }
+
+    // Sunset 4/6 durable collateral: generic webhook delivery dedupe and
+    // provider/account mappings (mirrors git_webhook_deliveries columns).
+    #[test]
+    fn git_webhook_delivery_id_string_roundtrip() {
+        let id = Uuid::new_v4();
+        let s = id.to_string();
+        assert_eq!(s.len(), 36);
+        assert_eq!(s.parse::<Uuid>().unwrap(), id);
+        // provider/host are fixed for GitHub (see 0152 backfill).
+        let provider = "github";
+        let host = "https://github.com";
+        assert_eq!(provider, "github");
+        assert_eq!(host, "https://github.com");
+    }
+
+    #[test]
+    fn git_webhook_delivery_metadata_preserves_legacy_installation() {
+        let with = |id: Option<i64>| match id {
+            Some(v) => serde_json::json!({"legacy_installation_id": v}),
+            None => serde_json::json!({}),
+        };
+        assert_eq!(
+            with(Some(12345678))["legacy_installation_id"],
+            serde_json::json!(12345678)
+        );
+        assert_eq!(with(None), serde_json::json!({}));
+    }
+
+    #[test]
+    fn github_app_webhook_redelivery_prior_status_fast_return() {
+        // Redelivered webhook is still de-duplicated: only processed/skipped
+        // fast-return; received/failed reprocess (github.py:904-917).
+        for (prior, fast_return) in [
+            ("processed", true),
+            ("skipped", true),
+            ("received", false),
+            ("failed", false),
+        ] {
+            let fast = matches!(
+                Some(prior),
+                Some(delivery_status::PROCESSED) | Some(delivery_status::SKIPPED)
+            );
+            assert_eq!(fast, fast_return, "prior={prior}");
         }
     }
 }

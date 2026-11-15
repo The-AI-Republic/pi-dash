@@ -474,6 +474,11 @@ pub trait ToolStore {
     /// PDASHOSS01-350).
     async fn has_blocking_run(&self, issue_id: &Uuid) -> Result<bool, StoreError>;
 
+    /// Whether the issue has an active run (`Issue.has_active_run`):
+    /// any run in the full `NON_TERMINAL_STATUSES` set (queued and
+    /// paused included). Distinct from the E8 blocking set.
+    async fn has_active_run(&self, issue_id: &Uuid) -> Result<bool, StoreError>;
+
     /// The `get_issue` execution detail (PDASHOSS01-350): the dedicated
     /// runner detail and the latest run's waiting object.
     async fn execution_detail(
@@ -1808,6 +1813,13 @@ impl ToolStore for PgToolStore {
             .map_err(orm_err)
     }
 
+    async fn has_active_run(&self, issue_id: &Uuid) -> Result<bool, StoreError> {
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        pidash_services::app_issues::serializers_create::has_active_run(&db, *issue_id)
+            .await
+            .map_err(orm_err)
+    }
+
     async fn execution_detail(
         &self,
         issue_id: &Uuid,
@@ -2985,6 +2997,8 @@ impl ToolStore for PgToolStore {
             prev_state_id: None,
             current_state_id: Some(to_state.id),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now: *now,
             jitter_secs: 0.0,
@@ -3850,6 +3864,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,

@@ -55,7 +55,17 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// merge #2801), runner 0029→0033 (`b790ee7fa` #1851, `09738d222` #1944,
 /// `04b6d3784` #386, `1998bc658` #447), then db 0170→0172 and runner
 /// 0033→0038 (c0ee3148b: #2903, #2910, #2912, #2907), then db 0172→0173 and
-/// runner 0038→0039 (PDASHOSS01-297 dedicated-runner assignment, `42f93b62b`):
+/// runner 0038→0039 (PDASHOSS01-297 dedicated-runner assignment, `42f93b62b`),
+/// then db 0173→0174 (PR #3144, `ea5db8e3d`): `db/0174` depends on
+/// `runner/0039` across apps, but Django's `leaf_nodes()` only counts
+/// same-app children, so `runner/0039` stays a leaf, then db 0174→0177
+/// (PDASHOSS01-356 github_* sunset 3/6 `45ab58e04`: `db/0177` on top of
+/// `db/0176` `e82eb916e` on top of `db/0175` `9361acbff` on top of
+/// `db/0174`): the linear db chain keeps one leaf, so Django (4.2 loader,
+/// verified live) still reports the same nine leaves with `db/0177`:
+/// PDASHOSS01-183 then adds `db/0178` (on top of `main`'s
+/// `db/0177_git_provider_app_columns`) and `runner/0040`→`0041`, so the leaves
+/// become `db/0178` and `runner/0041`:
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
@@ -64,11 +74,11 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0173_issue_assigned_runner"),
+    ("db", "0178_ticker_failure_disarm_reasons"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0039_issue_assigned_runner"),
+    ("runner", "0041_backfill_failure_reason"),
     ("sessions", "0001_initial"),
 ];
 
@@ -331,11 +341,11 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-                ("db", "0173_issue_assigned_runner"),
+                ("db", "0178_ticker_failure_disarm_reasons"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),
-                ("runner", "0039_issue_assigned_runner"),
+                ("runner", "0041_backfill_failure_reason"),
                 ("sessions", "0001_initial"),
             ]
         );

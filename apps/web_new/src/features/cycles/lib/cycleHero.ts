@@ -8,6 +8,8 @@
 
 import type { CycleDistribution, CycleProgress, IssueListItem } from "@pidash/api-client";
 
+import { instantToProjectDate, projectToday } from "./cycleDates.js";
+
 /** Issues count work items; points sum their estimates. */
 export type HeroMeasure = "issues" | "points";
 
@@ -108,47 +110,62 @@ export function heroBurndownPoints(
 /**
  * The chart plots only for a dated cycle that has started: undated
  * and future-start cycles show the chart placeholder instead.
+ * The start gate reads in the project's timezone date, matching the
+ * sidebar's `cycleProgressChartVisible` (§15, §17): the comparison
+ * is date-only in the project zone, not a raw browser-clock timestamp.
  */
 export function heroChartAvailable(
   startDate: string | null | undefined,
   endDate: string | null | undefined,
+  timeZone: string | null | undefined,
   now: Date = new Date()
 ): boolean {
   if (startDate === null || startDate === undefined || endDate === null || endDate === undefined) return false;
-  const start = new Date(startDate).getTime();
-  if (Number.isNaN(start)) return false;
-  return start <= now.getTime();
+  const start = instantToProjectDate(startDate, timeZone);
+  if (start === null) return false;
+  return start <= projectToday(timeZone, now);
 }
 
 export interface HeroAssigneeEntry {
-  id: string;
+  /** Null for the unassigned bucket, which has no filter id. */
+  id: string | null;
   name: string;
   avatar: string | null;
   count: number;
 }
 
-/** Assignee rows: display names with issue or estimate counts. Sparse server rows fall back to blanks. */
+/** Caption of the unassigned bucket (CYC-041). */
+export const HERO_NO_ASSIGNEE = "No assignee";
+
+/** Assignee rows: display names with issue or estimate counts. The unassigned row names itself. */
 export function heroAssigneeEntries(distribution: CycleDistribution, measure: HeroMeasure): HeroAssigneeEntry[] {
-  return distribution.assignees.map((row) => ({
-    id: row.assignee_id ?? "",
-    name: row.display_name ?? "",
-    avatar: row.avatar_url ?? null,
-    count: (measure === "points" ? row.total_estimates : row.total_issues) ?? 0,
-  }));
+  return distribution.assignees.map((row) => {
+    const id = row.assignee_id ?? null;
+    return {
+      id,
+      name: id === null ? HERO_NO_ASSIGNEE : (row.display_name ?? ""),
+      avatar: row.avatar_url ?? null,
+      count: (measure === "points" ? row.total_estimates : row.total_issues) ?? 0,
+    };
+  });
 }
 
 export interface HeroLabelEntry {
-  id: string;
+  /** Null for the unlabeled bucket, which has no filter id. */
+  id: string | null;
   name: string;
   color: string | null;
   count: number;
 }
 
-/** Label rows: names with dots and issue or estimate counts. Sparse server rows fall back to blanks. */
+/** Caption of the unlabeled bucket (CYC-041). */
+export const HERO_NO_LABELS = "No labels";
+
+/** Label rows: names with dots and issue or estimate counts. Unnamed rows read "No labels". */
 export function heroLabelEntries(distribution: CycleDistribution, measure: HeroMeasure): HeroLabelEntry[] {
   return distribution.labels.map((row) => ({
-    id: row.label_id ?? "",
-    name: row.label_name ?? "",
+    id: row.label_id ?? null,
+    name: row.label_name ?? HERO_NO_LABELS,
     color: row.color ?? null,
     count: (measure === "points" ? row.total_estimates : row.total_issues) ?? 0,
   }));
@@ -160,7 +177,7 @@ export interface HeroPriorityEntry {
   priority: string;
 }
 
-/** The urgent and high rows of the first issues page, in server order. */
+/** The urgent and high rows across the loaded filtered pages, in server order. */
 export function heroPriorityEntries(
   issues: readonly Pick<IssueListItem, "id" | "name" | "priority">[]
 ): HeroPriorityEntry[] {

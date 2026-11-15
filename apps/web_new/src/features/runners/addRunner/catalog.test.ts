@@ -8,14 +8,19 @@ import { describe, expect, it } from "vitest";
 
 import {
   AGENT_LABELS,
+  choicesForAgent,
   DEFAULT_MODEL_ID,
   DEFAULT_MODEL_LABEL,
   firstSupportedAgent,
   MODEL_CHOICES,
   modelContribution,
+  modelContributionFrom,
   PRESELECTED_MODEL,
+  preselectedId,
   RUNNER_AGENTS,
   selectedModelLabel,
+  selectedModelLabelFrom,
+  type CatalogRow,
 } from "./catalog.js";
 
 describe("agent list", () => {
@@ -41,7 +46,9 @@ describe("Claude Code catalog (RUN-049)", () => {
   });
 
   it("emits claude-opus-5-5 for the new entry", () => {
-    expect(modelContribution("claude-code", "claude-opus-5-5")).toEqual({ model: "claude-opus-5-5" });
+    expect(modelContribution("claude-code", "claude-opus-5-5")).toEqual({
+      model: "claude-opus-5-5",
+    });
   });
 
   it("leaves Cursor's list untouched by the new Claude entry", () => {
@@ -91,5 +98,61 @@ describe("machine gating", () => {
     expect(firstSupportedAgent([])).toBe("claude-code");
     expect(firstSupportedAgent(["grok", "codex"])).toBe("codex");
     expect(firstSupportedAgent(["unknown-agent"])).toBeNull();
+  });
+});
+
+describe("server catalog (NEWPIDASH-169)", () => {
+  const grokRows: CatalogRow[] = [
+    {
+      model: "grok-4.3",
+      label: "Grok 4.3",
+      reasoning_efforts: [],
+      sort_order: 0,
+      is_preselected: false,
+    },
+    {
+      model: "grok-new-1",
+      label: "Grok New 1",
+      reasoning_efforts: [],
+      sort_order: 1,
+      is_preselected: true,
+    },
+  ];
+  const codexRows: CatalogRow[] = [
+    {
+      model: "gpt-5.5",
+      label: "GPT-5.5",
+      reasoning_efforts: ["low", "high"],
+      sort_order: 0,
+      is_preselected: false,
+    },
+  ];
+
+  it("expands rows into choices with the sentinel first", () => {
+    const choices = choicesForAgent(grokRows);
+    expect(choices[0]).toEqual({ id: DEFAULT_MODEL_ID, label: DEFAULT_MODEL_LABEL });
+    expect(choices.slice(1)).toEqual([
+      { id: "grok-4.3", label: "Grok 4.3", model: "grok-4.3" },
+      { id: "grok-new-1", label: "Grok New 1", model: "grok-new-1" },
+    ]);
+  });
+
+  it("crosses effort rows and labels the effort", () => {
+    const choices = choicesForAgent(codexRows);
+    expect(choices.slice(1)).toEqual([
+      { id: "gpt-5.5:low", label: "GPT-5.5 (Low)", model: "gpt-5.5", reasoningEffort: "low" },
+      { id: "gpt-5.5:high", label: "GPT-5.5 (High)", model: "gpt-5.5", reasoningEffort: "high" },
+    ]);
+    expect(modelContributionFrom(choices, "gpt-5.5:high")).toEqual({
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+    });
+    expect(selectedModelLabelFrom(choices, "gpt-5.5:high")).toBe("GPT-5.5 (High)");
+  });
+
+  it("resolves the preselected row to its first expanded choice", () => {
+    expect(preselectedId(grokRows)).toBe("grok-new-1");
+    expect(preselectedId([{ ...codexRows[0]!, is_preselected: true }])).toBe("gpt-5.5:low");
+    expect(preselectedId([{ ...grokRows[0]!, is_preselected: false }])).toBe(DEFAULT_MODEL_ID);
   });
 });

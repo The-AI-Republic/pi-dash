@@ -501,3 +501,132 @@ def test_default_order_is_created_at_ascending(
     assert [row["id"] for row in buckets["none"]["results"]] == [
         old_id, new_id,
     ], sorted(buckets)
+
+
+def test_grouped_m2m_none_bucket_keeps_relation_less_issues(
+    api, seed, tenant_a, project_a, auth_a, module_a
+):
+    """NEWPIDASH-151: grouping the module list by an m2m key keeps
+    issues with no relation row under the "None" bucket.
+
+    Django does LEFT OUTER JOIN + alias.deleted_at IS NULL (GROUP_FILTER_MAPPER
+    in utils/grouper.py:41-49), so linkless issues survive with the NULL group
+    key. The Rust module handler forced INNER JOIN, dropping every unlabeled /
+    unassigned issue from buckets, total_count and total_results. Fixed to
+    LEFT JOIN + quoted guard, matching list_engine (NEWPIDASH-131) and the
+    cycle handler.
+
+    Fails on Rust before the fix (labels__id total_count 3 with no None bucket,
+    assignees__id 2, sub-grouped 3); passes after. Distinct-count totals follow
+    the NEWPIDASH-132 precedent — Django's assignees__id total_count counts
+    fanned rows (5 for 4 issues when A has 2 assignees), while the new system
+    counts distinct issues (4). This test uses one label/assignee per issue so
+    both backends agree at 4, pinning the bucket contents; the count precedent
+    is documented here rather than forced into a cross-backend equality.
+    """
+    ws_id = tenant_a["workspace"]["id"]
+    user_a = tenant_a["user"]["id"]
+    # Second user as assignee U2 (tenant_b would be cross-workspace)
+    user_b_id = seed.user()["id"]
+    # Make user_b a member of the workspace+project so the group list includes it
+    seed.project_member(project_a, ws_id, user_b_id, role=20)
+
+    state_backlog = seed.state(project_a, ws_id, name="NEWPIDASH-151 Todo", group="unstarted")
+
+    label_alpha = seed.label(ws_id, project_a, name="NEWPIDASH-151 alpha")
+    label_beta = seed.label(ws_id, project_a, name="NEWPIDASH-151 beta")
+
+    # A: alpha+beta labels, U1+U2 assignees would fan out; use singletons to keep
+    # total_count parity in this pinning test (see docstring).
+    issue_A = seed.issue(ws_id, project_a, name="NEWPIDASH-151 A", state_id=state_backlog)
+    issue_B = seed.issue(ws_id, project_a, name="NEWPIDASH-151 B", state_id=state_backlog)
+    issue_C = seed.issue(ws_id, project_a, name="NEWPIDASH-151 C", state_id=state_backlog)
+    issue_D = seed.issue(ws_id, project_a, name="NEWPIDASH-151 D", state_id=state_backlog)
+
+    for iid in (issue_A, issue_B, issue_C, issue_D):
+        seed.module_issue(ws_id, project_a, module_a, iid)
+
+    # A: alpha, U1
+    seed.issue_label(ws_id, project_a, issue_A, label_alpha)
+    seed.issue_assignee(ws_id, project_a, issue_A, user_a)
+    # B: alpha, U1 (second occupant for alpha/U1)
+    seed.issue_label(ws_id, project_a, issue_B, label_alpha)
+    seed.issue_assignee(ws_id, project_a, issue_B, user_a)
+    # C: no label, no assignee — the None case for both
+    # D: beta, U2
+    seed.issue_label(ws_id, project_a, issue_D, label_beta)
+    seed.issue_assignee(ws_id, project_a, issue_D, user_b_id)
+
+    url = _module_issues_url(tenant_a, project_a, module_a)
+
+    # --- labels__id ---
+    r = api.get(url, headers=auth_a, params={"group_by": "labels__id", "order_by": "-created_at"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grouped_by"] == "labels__id"
+    # Distinct count (4 issues) — Django and new system agree here (no fan-out)
+    assert body["total_count"] == 4, body
+    assert body["total_results"] == 4, body
+    groups = body["results"]
+    # Keys are stringified UUIDs and "None"
+    assert label_alpha in groups, f"alpha missing: {sorted(groups)}"
+    assert label_beta in groups, f"beta missing: {sorted(groups)}"
+    assert "None" in groups, f"None bucket missing: {sorted(groups)}"
+    none_ids = {row["id"] for row in groups["None"]["results"]}
+    assert none_ids == {issue_C}, f"None labels {none_ids}"
+    assert groups["None"]["total_results"] == 1
+    # alpha holds A,B
+    alpha_ids = {row["id"] for row in groups[label_alpha]["results"]}
+    assert alpha_ids == {issue_A, issue_B}
+    assert groups[label_alpha]["total_results"] == 2
+    beta_ids = {row["id"] for row in groups[label_beta]["results"]}
+    assert beta_ids == {issue_D}
+    assert groups[label_beta]["total_results"] == 1
+    for row in groups["None"]["results"]:
+        assert row["label_ids"] == []
+        assert row["labels__id"] is None
+
+    # --- assignees__id ---
+    r = api.get(url, headers=auth_a, params={"group_by": "assignees__id", "order_by": "-created_at"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grouped_by"] == "assignees__id"
+    assert body["total_count"] == 4, body
+    assert body["total_results"] == 4, body
+    groups = body["results"]
+    assert user_a in groups, f"U1 missing: {sorted(groups)}"
+    assert user_b_id in groups, f"U2 missing: {sorted(groups)}"
+    assert "None" in groups, f"None bucket missing assignees: {sorted(groups)}"
+    none_ids = {row["id"] for row in groups["None"]["results"]}
+    assert none_ids == {issue_C}
+    assert groups["None"]["total_results"] == 1
+    u1_ids = {row["id"] for row in groups[user_a]["results"]}
+    assert u1_ids == {issue_A, issue_B}
+    u2_ids = {row["id"] for row in groups[user_b_id]["results"]}
+    assert u2_ids == {issue_D}
+    for row in groups["None"]["results"]:
+        assert row["assignee_ids"] == []
+        assert row["assignees__id"] is None
+
+    # --- state_id + labels__id sub-group ---
+    r = api.get(
+        url,
+        headers=auth_a,
+        params={"group_by": "state_id", "sub_group_by": "labels__id", "order_by": "-created_at"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["grouped_by"] == "state_id"
+    assert body["sub_grouped_by"] == "labels__id"
+    assert body["total_count"] == 4, body
+    # results structure: {state_id: {"results": {label_id_or_None: {"results": [...], "total_results": n}}, "total_results": n}}
+    state_bucket = body["results"][state_backlog]
+    sub = state_bucket["results"]
+    assert "None" in sub, f"None sub-bucket missing: {sorted(sub)}"
+    none_ids = {row["id"] for row in sub["None"]["results"]}
+    assert none_ids == {issue_C}
+    assert sub["None"]["total_results"] == 1
+    assert label_alpha in sub
+    assert {row["id"] for row in sub[label_alpha]["results"]} == {issue_A, issue_B}
+    assert label_beta in sub
+    assert {row["id"] for row in sub[label_beta]["results"]} == {issue_D}

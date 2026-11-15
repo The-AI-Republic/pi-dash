@@ -47,6 +47,15 @@ enum Mode {
         /// Jobs to run side by side.
         #[arg(long, default_value_t = 4)]
         concurrency: u32,
+        /// Queue label to claim (Phase 2 D3): `celery` for the general
+        /// worker, `cloud_agent` for the dedicated agent worker.
+        #[arg(long, default_value = "celery")]
+        queue: String,
+        /// Disable the beat scheduler loop (Phase 2): agent workers run
+        /// with this so Python beat stays the sole periodic firer while
+        /// coexistence holds. Queue maintenance still runs.
+        #[arg(long)]
+        no_scheduler: bool,
     },
     /// Run a Django management-command port (D-37 ops).
     Ops {
@@ -76,10 +85,12 @@ async fn serve(bind: &str) -> MainResult {
         .await
 }
 
-async fn worker(concurrency: u32) -> MainResult {
+async fn worker(concurrency: u32, queue: String, no_scheduler: bool) -> MainResult {
     pidash_api::startup::WorkerBuilder::from_env()
         .await?
         .with_concurrency(concurrency)
+        .with_queue(queue)
+        .with_scheduler(!no_scheduler)
         .run()
         .await
 }
@@ -114,7 +125,11 @@ fn main() -> MainResult {
         .build()?;
     match cli.mode {
         Mode::Serve { bind } => runtime.block_on(serve(&bind)),
-        Mode::Worker { concurrency } => runtime.block_on(worker(concurrency)),
+        Mode::Worker {
+            concurrency,
+            queue,
+            no_scheduler,
+        } => runtime.block_on(worker(concurrency, queue, no_scheduler)),
         Mode::Ops { command } => runtime.block_on(pidash_ops::run(command)),
         Mode::Routes { json } => {
             if json {
@@ -244,7 +259,7 @@ mod tests {
         let worker =
             Cli::try_parse_from(["pidash-api", "worker", "--concurrency", "2"]).expect("worker");
         match worker.mode {
-            Mode::Worker { concurrency } => assert_eq!(concurrency, 2),
+            Mode::Worker { concurrency, .. } => assert_eq!(concurrency, 2),
             _ => panic!("wrong mode"),
         }
     }

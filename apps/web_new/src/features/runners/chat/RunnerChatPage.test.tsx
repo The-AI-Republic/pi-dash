@@ -6,7 +6,7 @@
 // comes from props, history is listed and selectable, selection reaches
 // the address, warm-up runs for the resolving conversation, and the
 // header/composer follow the live state.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render as renderRaw, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,6 +56,14 @@ import { makeRunner, makeSession, testClient, wrapper } from "./harness.js";
 import { RUNNER_CHAT_PAGE_TITLE, RunnerChatPage, runnerChatDocumentTitle } from "./RunnerChatPage.js";
 import { APPROVAL_MODE_COPY, approvalModeKey } from "./approvalCopy.js";
 import { getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
+import { chatKeys } from "./keys.js";
+
+// The page reads and re-asks chat queries through the query client, so
+// every render sits inside one; a caller that needs to inspect that client
+// passes its own wrapper and wins as the inner provider.
+function render(ui: React.ReactElement, options: Parameters<typeof renderRaw>[1] = {}) {
+  return renderRaw(ui, { wrapper: wrapper(testClient()), ...options });
+}
 
 const runner = makeRunner();
 const openSession = makeSession({ id: "open", last_message_at: "2026-10-18T11:00:00Z" });
@@ -969,5 +977,60 @@ describe("RunnerChatPage on-machine history (DESK-009)", () => {
     await userEvent.click(within(history()).getByRole("button", { name: "Clear history" }));
     const dialog = screen.getByRole("dialog", { name: "Clear the on-machine history?" });
     for (const button of within(dialog).getAllByRole("button")) expect(button).toBeDisabled();
+  });
+});
+
+describe("RunnerChatPage transport seam (DESK-009)", () => {
+  // A page can mount before the desktop bootstrap installs the transport
+  // that answers the bundled engine, so its first reads go to the cloud
+  // path and fail. Once the seam changes, every chat read is asked again.
+  const localSeam = (): ChatTransport => ({
+    subscribeChatEvents: vi.fn(() => () => undefined),
+    sendChatMessage: vi.fn(),
+    cancelChat: vi.fn(async () => ({ ok: true })),
+    closeChat: vi.fn(async () => openSession),
+    ownsRunner: () => true,
+  });
+
+  function renderWithClient() {
+    const client = testClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const view = render(
+      <RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />,
+      { wrapper: wrapper(client) }
+    );
+    return { client, invalidate, view };
+  }
+
+  it("re-reads the chat history when a transport arrives after mount", () => {
+    const { invalidate } = renderWithClient();
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => setChatTransport(localSeam()));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: chatKeys.all("acme") });
+  });
+
+  it("stays quiet when the seam is replaced by an equal transport", () => {
+    setChatTransport(null);
+    const { invalidate } = renderWithClient();
+    act(() => setChatTransport(null));
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when the new transport does not serve this contact", () => {
+    const { invalidate } = renderWithClient();
+    act(() =>
+      setChatTransport({
+        ...localSeam(),
+        ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      })
+    );
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("stops listening once the page goes away", () => {
+    const { invalidate, view } = renderWithClient();
+    view.unmount();
+    act(() => setChatTransport(localSeam()));
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });

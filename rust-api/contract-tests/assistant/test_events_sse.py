@@ -22,6 +22,7 @@ import pytest
 
 from _harness.config import base_url
 from _harness.db import db_cursor
+from _harness.diffs import expect, is_rust
 from _harness.worlds import soft_delete_member
 
 from .conftest import threads_url
@@ -157,6 +158,11 @@ def test_sse_soft_deleted_active_member_is_404(world, member):
 def test_sse_live_tail_relays_publish_verbatim(world, member):
     """Live tail: a Redis publish on the thread channel arrives as a
     verbatim ``data:`` frame.
+
+    DIFF-29 (NEWPIDASH-268, PB-0983): Django relays the publish through
+    the Python bytes-repr (``b'...'``), which the client's JSON.parse
+    drops; Rust relays the publish as clean JSON verbatim like the
+    replay path.
     """
     redis_url = os.environ.get("CONTRACT_REDIS_URL")
     if not redis_url:
@@ -190,7 +196,13 @@ def test_sse_live_tail_relays_publish_verbatim(world, member):
             if frames or time.monotonic() > end:
                 break
     assert len(frames) == 1, f"expected the relayed publish, got {frames!r}"
-    assert frames[0] == f"event: chat.event\ndata: b'{payload}'"
+    assert frames[0] == expect(
+        "DIFF-29",
+        django=f"event: chat.event\ndata: b'{payload}'",
+        rust=f"event: chat.event\ndata: {payload}",
+    )
+    if is_rust():
+        assert _data_payload(frames[0]) == {"seq": 99, "kind": "done"}
 
 
 def test_sse_bad_after_falls_back_to_zero(world, member):

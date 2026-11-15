@@ -63,8 +63,6 @@
 //!   Django, not the builder.
 //! * QUIRK-pop-mutates (`:197`): a missing/non-dict `issue` key raises
 //!   (`AttributeError`) → the 500 envelope (verified live).
-//! * QUIRK-updated_at-filter (`utils/issue_filters.py`): `updated_at`
-//!   filters `created_at` (owned by [`super::filters`]).
 //! * Dead `allow_triage_state`/`project_id` serializer context (`:215`):
 //!   accepted and ignored — the app `validate` reads `allow_triage_state`
 //!   but the 3-key subset never carries `state`, and `update` never reads
@@ -90,8 +88,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    deploy_boards, file_assets, git_issue_syncs, github_issue_syncs, intake_issues, issues,
-    projects, states, workspaces,
+    deploy_boards, file_assets, git_issue_syncs, intake_issues, issues, projects, states,
+    workspaces,
 };
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
@@ -288,6 +286,8 @@ fn write_ctx(actor: &Actor, board: &Board) -> WriteCtx {
 fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
     domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(*actor_id),
         moved_by_run: None,
         now,
@@ -1444,6 +1444,10 @@ fn render_app_detail(
     map.insert("type".to_string(), opt_uuid(&issue.type_id));
     map.insert("assigned_pod".to_string(), opt_uuid(&issue.assigned_pod_id));
     map.insert(
+        "assigned_runner".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
+    );
+    map.insert(
         "assignees".to_string(),
         detail.assignee_ids.iter().map(uuid_string).collect(),
     );
@@ -1469,13 +1473,17 @@ fn render_app_issue_create(
     if issue.description_binary.is_some() {
         return Err(Denial::ServerError.into_response());
     }
-    let mut map = serde_json::Map::with_capacity(48);
+    let mut map = serde_json::Map::with_capacity(49);
     map.insert("id".to_string(), uuid_string(&issue.id));
     map.insert("state_id".to_string(), opt_uuid(&issue.state_id));
     map.insert("parent_id".to_string(), opt_uuid(&issue.parent_id));
     map.insert(
         "assigned_pod_id".to_string(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert("project_id".to_string(), uuid_string(&issue.project_id));
     map.insert("workspace_id".to_string(), uuid_string(&issue.workspace_id));
@@ -1621,7 +1629,7 @@ fn render_issue_snapshot(
     is_epic: bool,
 ) -> serde_json::Value {
     let issue = &detail.issue;
-    let mut map = serde_json::Map::with_capacity(24);
+    let mut map = serde_json::Map::with_capacity(25);
     map.insert("id".to_string(), uuid_string(&issue.id));
     map.insert(
         "name".to_string(),
@@ -1677,6 +1685,10 @@ fn render_issue_snapshot(
         opt_uuid(&issue.assigned_pod_id),
     );
     map.insert(
+        "assigned_runner_id".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
+    );
+    map.insert(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
@@ -1707,7 +1719,7 @@ fn render_issue_snapshot(
 
 /// Whether the issue is git-synced (`app/serializers/issue.py:63-76`):
 /// empty `external_source` short-circuits before any query; otherwise a
-/// `GitIssueSync`/`GithubIssueSync` row decides.
+/// `GitIssueSync` row decides (git-only after PDASHOSS01-354).
 async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1723,17 +1735,7 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
         .one(&db)
         .await
         .map_err(pidash_db::orm_tx::into_sqlx)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = github_issue_syncs::Entity::find()
-        .filter(github_issue_syncs::Column::DeletedAt.is_null())
-        .filter(github_issue_syncs::Column::IssueId.eq(issue.id))
-        .limit(1)
-        .one(&db)
-        .await
-        .map_err(pidash_db::orm_tx::into_sqlx)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// `get_is_epic` (`app/serializers/issue.py:1109-1112`): false when the

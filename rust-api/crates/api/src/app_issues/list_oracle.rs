@@ -14,8 +14,9 @@ use sqlx::Row;
 
 use super::reads_oracle::{archive_scope_where, ARCHIVE_JOINS};
 use super::{
-    bind_all, complex_filter, legacy_sql, query_last, render_condition, with_order_joins, Binder,
-    Denial, FilterLayers, FilteredSet, Gate, OrderKey, QueryMap, INVALID_DETAIL_BODY_MSG,
+    bind_all, complex_filter, legacy_sql, query_last, render_condition, rich_inner_aliases,
+    with_order_joins, Binder, Denial, FilterLayers, FilteredSet, Gate, OrderKey, QueryMap,
+    INVALID_DETAIL_BODY_MSG,
 };
 use super::{min_order_subquery, order_key, parse_datetime_param};
 
@@ -50,8 +51,9 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters (`GROUP_FILTER_MAPPER`): grouped by this raw field
-/// forces an INNER join on that relation with the deleted guard.
+/// M2M group filters (`GROUP_FILTER_MAPPER` in `utils/grouper.py`):
+/// grouping by this raw field guards its join's `deleted_at` over the
+/// LEFT join (linkless issues keep the NULL group key).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -263,28 +265,52 @@ pub fn filtered_set(
         fragments.push(complex_sql);
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     if let Some((fragment, binds)) = extra {
         fragments.push(binder.splice(&fragment, binds));
     }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`.
+    // Over the LEFT join that keeps linkless issues (NULL group key,
+    // the "None" bucket) while rows whose only links are soft-deleted
+    // drop out, exactly like Django.
+    for key in [group_by, sub_group_by].into_iter().flatten() {
+        let alias = match key {
+            "labels__id" => "label_issue",
+            "assignees__id" => "issue_assignee",
+            "issue_module__module_id" => "issue_module",
+            _ => continue,
+        };
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
+    }
     let where_sql = fragments.join(" AND ");
-    // INNER when referenced by a positive condition or m2m-grouped
-    // (Django's `filter()` join); LEFT when every reference is an
-    // `IS [NOT] NULL` test (Django's `__isnull` join) or unreferenced.
+    // INNER when referenced positively (Django's `filter()` join): a
+    // plain positive rich occurrence or a positive legacy predicate.
+    // A rich `or`-only alias joins LEFT (Django LEFT-OUTERs disjuncts),
+    // an `IS [NOT] NULL`-only alias takes LEFT (Django's `__isnull`
+    // join, the m2m group key included), and a `not`'d alias lives only
+    // in `NOT EXISTS` subqueries (Django `split_exclude`) — the `__e_`
+    // subquery alias never matches the `"alias".` scan below.
     // Joined tables carry no soft-delete guard: `filter()` never applies a
     // related manager to a join, so `filter(labels__in=...)` matches
     // soft-deleted link rows and `labels__isnull=False` keeps issues whose
     // only links are deleted.
+    let rich_inner = if layers.rich {
+        rich_inner_aliases(query, &gate.timezone)
+    } else {
+        Default::default()
+    };
     let mut joins = String::new();
     let mut referenced = Vec::new();
     if layers.rich || layers.legacy {
         for (table, alias, key_column) in RELATION_JOINS {
             let marker = format!("\"{alias}\".");
             let mentioned = where_sql.contains(&marker);
-            let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+            let legacy_positive =
+                legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
             let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-            let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+            let inner = rich_inner.contains(alias) || legacy_positive;
             if used {
                 referenced.push(*alias);
             }
@@ -411,41 +437,38 @@ async fn sub_total_pairs(
     Ok(out)
 }
 
-/// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
-/// carry complete SQL; the default branch resolves the raw param without
-/// the paginator's `NULLS LAST` or forced tiebreak.
-fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<(String, String), Denial> {
+/// `ORDER BY` for the unpaginated flat endpoint, as an expression:
+/// `(expr, descending, created_at tiebreak, order joins)`. Mirrors
+/// [`super::list_engine::flat_order_key`]: the flat list selects the
+/// expr as `__order_key` and orders by the alias so the statement is
+/// valid under `DISTINCT` (Django `issues/list/` ends with
+/// `.distinct()`).
+fn flat_order_key_sql(
+    order_spec: &OrderSpec,
+    orig_param: &str,
+) -> Result<(String, bool, bool, String), Denial> {
     let out = order_spec.out_param.as_str();
-    if out == "priority_order"
-        || out == "-priority_order"
-        || out == "state_order"
-        || out == "-state_order"
-    {
-        return Ok((order_spec.order_by_sql.clone(), String::new()));
+    if out == "priority_order" || out == "-priority_order" {
+        let expr = pidash_services::app_issues::priority_case_sql();
+        return Ok((expr, false, true, String::new()));
+    }
+    if out == "state_order" || out == "-state_order" {
+        let expr = pidash_services::app_issues::state_case_sql(r#"state."group""#);
+        return Ok((expr, false, true, String::new()));
     }
     if out == "min_values" || out == "-min_values" {
-        let descending = out.starts_with('-');
         let sub = min_order_subquery(orig_param.trim_start_matches('-'))?;
-        return Ok((
-            format!(
-                "{sub} {}, created_at DESC",
-                if descending { "DESC" } else { "ASC" }
-            ),
-            String::new(),
-        ));
+        return Ok((sub, out.starts_with('-'), true, String::new()));
     }
     // The flat `FROM` always carries the unfiltered `issue_cycle`
     // bridge join, which the cycle-name traversal reuses like Django.
     let key = order_key(out, orig_param, Some("issue_cycle"), false)?;
-    let mut sql = format!(
-        "{expr} {}",
-        if key.descending { "DESC" } else { "ASC" },
-        expr = key.expr,
-    );
-    if !orig_param.contains("created_at") {
-        sql.push_str(", created_at DESC");
-    }
-    Ok((sql, key.joins))
+    Ok((
+        key.expr.clone(),
+        key.descending,
+        !orig_param.contains("created_at"),
+        key.joins.clone(),
+    ))
 }
 
 /// The `IssueDetailEndpoint.get` permission subquery: the issue survives
@@ -549,17 +572,37 @@ fn archive_filtered_set(
         fragments.push(complex_sql);
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
+    }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`.
+    // Over the LEFT join that keeps linkless issues (NULL group key,
+    // the "None" bucket) while rows whose only links are soft-deleted
+    // drop out, exactly like Django.
+    for key in [group_by, sub_group_by].into_iter().flatten() {
+        let alias = match key {
+            "labels__id" => "label_issue",
+            "assignees__id" => "issue_assignee",
+            "issue_module__module_id" => "issue_module",
+            _ => continue,
+        };
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
+    // Same INNER/LEFT rule as `filtered_set`: plain positive rich
+    // occurrence or positive legacy predicate → INNER; `or`-only,
+    // `IS NULL`-only and group-key aliases → LEFT; `not`'d aliases sit
+    // in `NOT EXISTS` subqueries and never promote a join.
+    let rich_inner = rich_inner_aliases(query, &gate.timezone);
     let mut joins = String::new();
     let mut referenced = Vec::new();
     for (table, alias, key_column) in RELATION_JOINS {
         let marker = format!("\"{alias}\".");
         let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+        let legacy_positive =
+            legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+        let inner = rich_inner.contains(alias) || legacy_positive;
         if used {
             referenced.push(*alias);
         }
@@ -684,12 +727,17 @@ pub(crate) fn flat_list_sql(
     order_spec: &OrderSpec,
     orig_param: &str,
 ) -> Result<String, Denial> {
-    let (order_clause, order_joins) = flat_order_sql(order_spec, orig_param)?;
+    let (expr, descending, tiebreak, order_joins) = flat_order_key_sql(order_spec, orig_param)?;
     let selects = annotation_selects(true, None, false, true, true);
     let row_where = with_order_joins(&filtered.from_where, &order_joins);
-    Ok(format!(
-        "SELECT {selects} {row_where} ORDER BY {order_clause}"
-    ))
+    let mut sql = format!(
+        "SELECT DISTINCT {selects}, ({expr}) AS __order_key {row_where} ORDER BY __order_key {}",
+        if descending { "DESC" } else { "ASC" },
+    );
+    if tiebreak {
+        sql.push_str(", created_at DESC");
+    }
+    Ok(sql)
 }
 
 pub(crate) fn serializer_sql(filtered: &FilteredSet) -> String {
@@ -697,14 +745,13 @@ pub(crate) fn serializer_sql(filtered: &FilteredSet) -> String {
         issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
         issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
         issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id,
+        issue.assigned_runner_id,
         issue.agent_executor, issue.created_at, issue.updated_at,
         issue.created_by_id AS created_by, issue.updated_by_id AS updated_by,
         issue.is_draft, issue.archived_at,
         (CASE WHEN issue.external_source IS NULL OR issue.external_source = '' THEN FALSE
-         ELSE (EXISTS (SELECT 1 FROM git_issue_syncs g
-                       WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
-            OR EXISTS (SELECT 1 FROM github_issue_syncs gh
-                       WHERE gh.issue_id = issue.id AND gh.deleted_at IS NULL))
+         ELSE EXISTS (SELECT 1 FROM git_issue_syncs g
+                      WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
          END) AS is_synced"#;
     format!(
         "SELECT {selects} {} ORDER BY issue.created_at DESC",
@@ -999,7 +1046,6 @@ pub(crate) mod live {
         "cycles",
         "issue_types",
         "git_issue_syncs",
-        "github_issue_syncs",
     ];
 
     pub(crate) fn uid(n: u128) -> uuid::Uuid {
@@ -1366,7 +1412,7 @@ pub(crate) mod live {
             ));
         }
         sql.push(format!(
-            "INSERT INTO github_issue_syncs (id, issue_id, deleted_at) VALUES (gen_random_uuid(), {}, NULL)",
+            "INSERT INTO git_issue_syncs (id, issue_id, deleted_at) VALUES (gen_random_uuid(), {}, NULL)",
             q(100)
         ));
         sql.push(format!(

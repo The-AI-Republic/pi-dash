@@ -881,17 +881,17 @@ pub async fn dev_machine_revoke(
     }
     // The engine credential goes with the machine (`:207`, #2910):
     // revoking the machine signs the engine out with it.
-    if pidash_services::domain::engine_credential::revoke_engine_credential(
+    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
         &pidash_db::orm_tx::TxConn::new(&mut tx),
         machine_id,
         "machine_removed",
         now,
     )
     .await
-    .is_err()
     {
-        return server_error();
-    }
+        Ok((_revoked, effects)) => effects,
+        Err(_) => return server_error(),
+    };
     // Locked active-runner list (`:199`).
     let runner_rows =
         match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
@@ -946,6 +946,28 @@ pub async fn dev_machine_revoke(
     }
     if tx.commit().await.is_err() {
         return server_error();
+    }
+    // Post-commit: the revoke's pause flip drains pods (Django on_commit).
+    if !revoke_effects.drain_pod_ids.is_empty() || !revoke_effects.drain_runner_ids.is_empty() {
+        let redis = pidash_db::redis::client_from_settings(state.settings());
+        for pod_id in &revoke_effects.drain_pod_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *pod_id,
+            )
+            .await;
+        }
+        for runner_id in &revoke_effects.drain_runner_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *runner_id,
+            )
+            .await;
+        }
     }
     for bundle in bundles {
         if fire_bundle(&pool, &state, bundle, Some(user_id))
@@ -1024,17 +1046,17 @@ pub async fn dev_machine_engine_sign_out(
             Err(response) => return response,
         }
     };
-    if pidash_services::domain::engine_credential::revoke_engine_credential(
+    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
         &TxConn::new(&mut tx),
         machine_id,
         "signed_out",
         now_micros(),
     )
     .await
-    .is_err()
     {
-        return server_error();
-    }
+        Ok((_revoked, effects)) => effects,
+        Err(_) => return server_error(),
+    };
     // `refresh_from_db`: re-read the row so the render sees the
     // sign-in state's new value.
     let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
@@ -1045,6 +1067,28 @@ pub async fn dev_machine_engine_sign_out(
     };
     if tx.commit().await.is_err() {
         return server_error();
+    }
+    // Post-commit drains for the pause flip.
+    if !revoke_effects.drain_pod_ids.is_empty() || !revoke_effects.drain_runner_ids.is_empty() {
+        let redis = pidash_db::redis::client_from_settings(state.settings());
+        for pod_id in &revoke_effects.drain_pod_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *pod_id,
+            )
+            .await;
+        }
+        for runner_id in &revoke_effects.drain_runner_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *runner_id,
+            )
+            .await;
+        }
     }
     // The engine keys ride the serializers (`DevMachineSerializer`'s
     // `engine_sign_in_state` + `engine_credential_expires_at`, folded

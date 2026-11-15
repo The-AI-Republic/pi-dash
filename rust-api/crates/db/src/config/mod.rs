@@ -60,6 +60,14 @@ pub struct DbConfig {
 impl DbConfig {
     /// Name of the environment variable holding the connection URL.
     pub const ENV_VAR: &str = "DATABASE_URL";
+    /// Environment variable holding the pool size, read at startup
+    /// (default 10). Workers set it to 20 for the agent worker and 10
+    /// for the general worker; unset keeps today's behaviour. The
+    /// scheduler session and the job listener each hold a connection
+    /// outside job work, so the pool must be comfortably above 2.
+    pub const MAX_CONNECTIONS_ENV: &str = "DATABASE_MAX_CONNECTIONS";
+    /// Default pool size when `DATABASE_MAX_CONNECTIONS` is unset or invalid.
+    pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
     /// Parse and validate a connection URL.
     ///
@@ -82,10 +90,21 @@ impl DbConfig {
         })
     }
 
+    /// Pool size from `DATABASE_MAX_CONNECTIONS`: unset, empty, unparsable,
+    /// or zero fall back to `DEFAULT_MAX_CONNECTIONS` (10). Mirrors the
+    /// lenient numeric parsing used elsewhere for infra tunables.
+    pub fn max_connections_from_env() -> u32 {
+        std::env::var(Self::MAX_CONNECTIONS_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(Self::DEFAULT_MAX_CONNECTIONS)
+    }
+
     /// Read the configuration from the environment.
     pub fn from_env() -> Result<Self, ConfigError> {
         let url = std::env::var(Self::ENV_VAR).map_err(|_| ConfigError::MissingUrl)?;
-        Self::new(url, 10)
+        Self::new(url, Self::max_connections_from_env())
     }
 
     /// The connection URL, for the pool builder only.
@@ -163,5 +182,37 @@ mod tests {
     fn redaction_leaves_credential_free_urls_alone() {
         let plain = DbConfig::new("postgresql:///pidash_contract", 5).expect("valid");
         assert_eq!(plain.redacted_url(), "postgresql:///pidash_contract");
+    }
+
+    #[test]
+    fn max_connections_from_env_reads_configured_pool() {
+        let _guard = crate::config::env_lock();
+        let saved = std::env::var(DbConfig::MAX_CONNECTIONS_ENV).ok();
+        std::env::set_var(DbConfig::MAX_CONNECTIONS_ENV, "20");
+        assert_eq!(DbConfig::max_connections_from_env(), 20);
+        // Empty/blank/invalid falls back to the default (10).
+        std::env::set_var(DbConfig::MAX_CONNECTIONS_ENV, "  ");
+        assert_eq!(
+            DbConfig::max_connections_from_env(),
+            DbConfig::DEFAULT_MAX_CONNECTIONS
+        );
+        std::env::set_var(DbConfig::MAX_CONNECTIONS_ENV, "not-a-number");
+        assert_eq!(
+            DbConfig::max_connections_from_env(),
+            DbConfig::DEFAULT_MAX_CONNECTIONS
+        );
+        std::env::set_var(DbConfig::MAX_CONNECTIONS_ENV, "0");
+        assert_eq!(
+            DbConfig::max_connections_from_env(),
+            DbConfig::DEFAULT_MAX_CONNECTIONS
+        );
+        match saved {
+            Some(value) => std::env::set_var(DbConfig::MAX_CONNECTIONS_ENV, value),
+            None => std::env::remove_var(DbConfig::MAX_CONNECTIONS_ENV),
+        }
+        assert_eq!(
+            DbConfig::max_connections_from_env(),
+            DbConfig::DEFAULT_MAX_CONNECTIONS
+        );
     }
 }

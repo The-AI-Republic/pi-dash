@@ -163,7 +163,10 @@ export function boardFormDirty(form: BoardForm, board: ProjectDeployBoardStatus 
 /**
  * The public address for a published board. The spaces app owns the
  * destination; this dialog only builds the outbound link from the same
- * base-path configuration the stack ships with.
+ * base-path configuration the stack ships with. Without a configured
+ * spaces origin the link resolves through the active platform, so desktop
+ * hands out the hosted app's address and a build with no hosted origin
+ * refuses instead of handing out a `tauri://` address nothing can open.
  */
 export function publishedBoardLink(anchor: string): string {
   const configured = (import.meta.env.VITE_SPACE_BASE_URL as string | undefined) ?? "";

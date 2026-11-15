@@ -67,6 +67,7 @@ import {
 } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 import { desktopChatSessions, desktopEmit, desktopInvocations, installDesktopMock } from "../tauri-mock";
+import { appendedTurns, invocationCount, sessionToSendInto } from "../../helpers/desktop-chat";
 
 /** Synthetic chat id the desktop build serves over local IPC. */
 const BUILTIN_CHAT_ID = "pidash-builtin";
@@ -714,14 +715,21 @@ function shownChatSession(driver: ParityDriver): string | null {
  * the chat auto-creates a session through warm-up without selecting it,
  * and a "New chat" click races that create (the control is busy while it
  * runs), so legs wait for the auto-created row and click it instead of
- * pressing New chat into an empty state.
+ * pressing New chat into an empty state. An address left over from a
+ * conversation the store no longer carries (a clear removes every row) is
+ * stale, not a pick: the row is clicked so the leg always sends into a
+ * session the on-machine store holds.
  */
 async function ensureChatSelected(driver: ParityDriver): Promise<string> {
   await expect
     .poll(async () => (await desktopChatSessions(driver.page)).length, RUNTIME_POLL)
     .toBeGreaterThanOrEqual(1);
-  const current = shownChatSession(driver);
-  if (current !== null) return current;
+  const stored = await desktopChatSessions(driver.page);
+  const kept = sessionToSendInto(
+    shownChatSession(driver),
+    stored.map((session) => session.id)
+  );
+  if (kept !== null) return kept;
   const history = driver.page.getByTestId("runner-chat-history");
   await history.getByText("Mocked chat", { exact: true }).first().click();
   await expect.poll(() => shownChatSession(driver), RUNTIME_POLL).not.toBeNull();
@@ -738,8 +746,17 @@ async function sendChatMessage(driver: ParityDriver, text: string): Promise<void
  * the draft is restored beside it, the user turn reaches the on-machine
  * store but no send does — and the stored turn renders once the
  * transcript refetches (a failed send invalidates nothing, so reload).
+ *
+ * The proof is this leg's own append: a cumulative count lets an earlier
+ * leg's append stand in for a send that stored nothing, so the helper
+ * compares the count before the send and requires the exact turn to be
+ * recorded for the session the leg is sending into.
  */
 async function sendChatMessageStored(driver: ParityDriver, text: string): Promise<void> {
+  const sessionId = shownChatSession(driver);
+  expect(sessionId).not.toBeNull();
+  const before = await desktopInvocations(driver.page, "chat_append_event");
+  const sendsBefore = invocationCount(await desktopInvocations(driver.page, "chat_send"), "chat_send");
   await sendChatMessage(driver, text);
   await expect.poll(() => driver.pageText(), RUNTIME_POLL).toContain(NEW_NO_MODEL_TEXT);
   await expect
@@ -747,8 +764,10 @@ async function sendChatMessageStored(driver: ParityDriver, text: string): Promis
     .toContain(text);
   await expect
     .poll(async () => (await desktopInvocations(driver.page, "chat_append_event")).length, RUNTIME_POLL)
-    .toBeGreaterThanOrEqual(1);
-  expect(await desktopInvocations(driver.page, "chat_send")).toEqual([]);
+    .toBeGreaterThan(before.length);
+  const after = await desktopInvocations(driver.page, "chat_append_event");
+  expect(appendedTurns(after, sessionId as string, text)).toBe(appendedTurns(before, sessionId as string, text) + 1);
+  expect(invocationCount(await desktopInvocations(driver.page, "chat_send"), "chat_send")).toBe(sendsBefore);
   await driver.page.reload();
   await expect
     .poll(async () => (await driver.desktopRuntimeChatBubbles()).map((bubble) => bubble.text).join("\n"), RUNTIME_POLL)
@@ -833,16 +852,48 @@ async function desk002Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
       expect(keys.session.filter((key) => key.startsWith("pidash-managed-workspaces:"))).toEqual([]);
     });
 
-    await test.step("no Run control exists yet to press (tripwire for the RUN area)", async () => {
-      // The readiness gate itself (prepareAgentRun's early return and its
-      // project connection) is unit-covered; the press half of this row
-      // needs a Run control on the issue detail, which this build has not
-      // got. This pins the gap so the day the control lands the leg fails
-      // and grows the press proof instead of silently staying partial.
-      await expect.poll(() => driver.page.getByTestId("issue-run-ai").count(), RUNTIME_POLL).toBe(0);
+    await test.step("pressing Run dispatches through the cloud path with no local traffic", async () => {
+      // The work item carries the project default (no managed pin — the
+      // server refuses one on this stack, DESK-004), so preparation reads
+      // the issue and project and returns early; the run then posts
+      // through the cloud dispatch like on a plain browser (RUN-046).
+      const selectionBefore = await serverDeskRuntimeIssueExecutor(
+        seed.workspaceSlug,
+        seed.projectId,
+        issue.id,
+        session
+      );
+      const dispatch = await driver.issueRunAiDispatch();
+      const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
+      // Each app keeps its own dispatch copy (NEWFRONT-557); the new app
+      // names the queued outcome, which still attaches exactly one run.
+      if (dispatch.toast !== null && /run started/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else if (dispatch.toast !== null && /run queued/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else {
+        expect(dispatch.toast).toMatch(/couldn't start the run/i);
+        expect(attached).toHaveLength(0);
+      }
+      expect(dispatch.requestUrls.some((url) => url.includes("/api/runners/runs/"))).toBe(true);
+      // The press prepared nothing locally: no enrollment post, no daemon
+      // set-up verb, and the executor selection is left untouched.
+      expect(dispatch.requestUrls.filter((url) => url.includes("/desktop-enroll/"))).toEqual([]);
+      for (const command of ["daemon_engine_runner_add", "daemon_install_service", "install_pidash_cli"]) {
+        expect(await desktopInvocations(driver.page, command)).toEqual([]);
+      }
+      expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toEqual(
+        selectionBefore
+      );
     });
   } finally {
-    await runsDeleteRuns(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => undefined);
+    // deleteIssue nulls work_item instead of cascading, so attached runs
+    // from the press are captured and deleted first — or the success path
+    // leaks one run per attempt.
+    const leftovers = (await recentRuns(session))
+      .filter((row) => row["work_item"] === issue.id)
+      .map((row) => row["id"] as string);
+    await runsDeleteRuns(leftovers);
     await deleteIssue(seed.workspaceSlug, seed.projectId, issue.id, session);
   }
 
@@ -1270,8 +1321,16 @@ async function desk009Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   });
 
   await test.step("history survives a reload from the on-machine store", async () => {
-    await ensureChatSelected(driver);
+    // The clear left no row and the address points at a conversation the
+    // store no longer has; the leg sends into the freshly auto-created one
+    // and proves that exact turn survives the reload.
+    const sessionId = await ensureChatSelected(driver);
     await sendChatMessageStored(driver, "surviving turn");
+    // The on-machine store still holds the conversation the leg sent into,
+    // and the history lists it once — with the turn on it (the helper above
+    // proved the append and the reloaded transcript).
+    const stored = await desktopChatSessions(driver.page);
+    expect(stored.map((session) => session.id)).toContain(sessionId);
     await expect
       .poll(
         () => driver.page.getByTestId("runner-chat-history").getByText("Mocked chat", { exact: true }).count(),

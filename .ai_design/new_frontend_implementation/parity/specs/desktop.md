@@ -772,6 +772,10 @@ Native commands by family (names and payloads read from
   installing flag), install update (no payload; success restarts the app).
   The daily scheduler announces over the updater-available event. Serves
   DESK-010/014/015/016/017/018.
+- About: about read (no payload; answers the app version plus one entry
+  per licence or notice file the build scripts stage — file name, the
+  component it covers, its SPDX identifier, and the text or null when this
+  build did not stage it). Serves DESK-028.
 
 ## 15. Coverage checklist
 
@@ -797,6 +801,8 @@ backend contracts as observed from the old call sites):
 - Native lifecycle, chat, history, HTTP, tool and updater commands:
   DESK-001/002/003/010/026, DESK-006/007/008, DESK-009, DESK-020,
   DESK-021, DESK-016/017/018.
+- Overlay About button and the native about read (added late by
+  PIDESKAPP-203; missed by the first pass of this checklist): DESK-028.
 - No source mapped to zero rows. No `bug:` rows: nothing observed
   contradicted its evident intent; the gate marks any such scenario if
   the desktop build disagrees. Easy-to-miss behaviors keep their own

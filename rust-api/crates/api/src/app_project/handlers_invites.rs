@@ -3058,19 +3058,17 @@ fn render_project_favorite(row: &FavoriteListRow, entity: Option<&Value>) -> Str
     };
     let entity_json = entity.map(|value| value.to_string());
     format!(
-        "{{\"id\":{},\"entity_type\":{},\"entity_identifier\":{},\"name\":{},\"is_folder\":{},\
-         \"sort_order\":null,\"parent\":{},\"sequence\":{},\"project\":{},\"workspace\":{},\
-         \"entity\":{}}}",
+        "{{\"id\":{},\"entity_type\":{},\"entity_identifier\":{},\"entity_data\":{},\"name\":{},\"is_folder\":{},\"sequence\":{},\"parent\":{},\"workspace_id\":{},\"project_id\":{}}}",
         json_string(&row.id.to_string()),
         json_string(&row.entity_type),
         opt_uuid(row.entity_identifier),
+        entity_json.unwrap_or_else(|| "null".to_owned()),
         opt_string(row.name.as_deref()),
         row.is_folder,
-        opt_uuid(row.parent_id),
         favorite_json_float(row.sequence),
-        opt_uuid(row.project_id),
+        opt_uuid(row.parent_id),
         json_string(&row.workspace_id.to_string()),
-        entity_json.unwrap_or_else(|| "null".to_owned()),
+        opt_uuid(row.project_id),
     )
 }
 

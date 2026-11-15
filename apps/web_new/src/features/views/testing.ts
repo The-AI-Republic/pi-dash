@@ -49,6 +49,49 @@ export function makeMember(memberId: string = VIEWS_OWNER_ID): WorkspaceMember {
   };
 }
 
+export function makeMemberWithName(memberId: string, displayName: string): WorkspaceMember {
+  const base = makeMember(memberId);
+  return {
+    ...base,
+    member: {
+      ...base.member,
+      display_name: displayName,
+      first_name: displayName.split(" ")[0] ?? displayName,
+      last_name: displayName.split(" ").slice(1).join(" ") ?? "",
+    },
+  };
+}
+
+export interface ProjectMemberRow {
+  id: string;
+  role: number;
+  member: string;
+  project: string;
+  original_role: number;
+  created_at: string;
+}
+
+let __pmCounter = 0;
+
+export function makeProjectMember(
+  userId: string,
+  projectId: string = "223e4567-e89b-12d3-a456-426614174001",
+  overrides: Partial<ProjectMemberRow> = {}
+): ProjectMemberRow {
+  // Valid UUID v4-shaped row for each membership; the filter key is `member`.
+  __pmCounter += 1;
+  const id = `10000000-0000-4000-8000-${String(__pmCounter).padStart(12, "0")}`;
+  return {
+    id,
+    role: 15,
+    member: userId,
+    project: projectId,
+    original_role: 15,
+    created_at: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 export function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
 }

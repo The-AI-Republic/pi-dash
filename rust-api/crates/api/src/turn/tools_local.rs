@@ -1,4 +1,4 @@
-//! Local tool executors: the 17 `assistant/tools/*.py` tools as
+//! Local tool executors: the 18 `assistant/tools/*.py` tools as
 //! `ToolStore` operations (PIDASHCONV-1113).
 //!
 //! Each executor mirrors its Python tool line for line: scope checks
@@ -1454,7 +1454,7 @@ pub async fn execute_update_issue<S: ToolStore>(
         .await?;
         if pod_touched
             && target_pod != issue.assigned_pod_id
-            && store.has_blocking_run(&issue.id).await?
+            && store.has_active_run(&issue.id).await?
         {
             return Err(ToolFailure::retry(
                 "cannot reassign pod while the issue has an active run",
@@ -3304,6 +3304,10 @@ mod tests {
         }
 
         async fn has_blocking_run(&self, _issue_id: &Uuid) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        async fn has_active_run(&self, _issue_id: &Uuid) -> Result<bool, StoreError> {
             Ok(false)
         }
 

@@ -896,17 +896,17 @@ async function desk025Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     await driver.openWorkspaceHome(seed.workspaceSlug);
     await expect.poll(() => driver.sidebarLinkTexts(), POLL_60).toContain("Home");
     // The god-mode route refuses the desktop target, so both spellings
-    // reach the generic catch-all; the (unlanded) spaces subtree matches
-    // the workspace scope first and lands on its own not-found. No admin
-    // surface renders anywhere.
+    // reach the generic catch-all; a spaces path with no board match falls
+    // through to the subtree splat, which renders the same shared
+    // catch-all. No admin surface renders anywhere.
     for (const route of ["/god-mode", "/god-mode/"]) {
       await driver.visit(route);
       await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_NOT_FOUND_HEADING);
       expect(await driver.pageText()).toContain(NEW_NOT_FOUND_HOME);
     }
     await driver.visit("/spaces/parity-anchor/");
-    await expect.poll(() => driver.pageText(), POLL_60).toContain("Workspace not found");
-    expect(await driver.pageText()).toContain("Go Home");
+    await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_NOT_FOUND_HEADING);
+    expect(await driver.pageText()).toContain(NEW_NOT_FOUND_HOME);
   });
 
   await test.step("a genuinely unknown path renders the app not-found page", async () => {

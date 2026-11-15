@@ -24,6 +24,11 @@ export const AgentProfile = z.object({
   available: z.boolean(),
   reason_code: z.string(),
   graceful_stop_seconds: z.number(),
+  /**
+   * Where the user adds model credit. Empty when the server names no
+   * place; the chat transcript still shows the gateway's message.
+   */
+  top_up_url: z.optional(z.string()),
 });
 export type AgentProfile = z.infer<typeof AgentProfile>;
 

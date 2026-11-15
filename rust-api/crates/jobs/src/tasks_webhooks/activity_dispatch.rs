@@ -100,7 +100,8 @@ use uuid::Uuid;
 
 use pidash_db::entity::{
     comment_reactions, cycles, estimate_points, estimates, issue_activities, issue_comments,
-    issue_reactions, issue_subscribers, issues, labels, modules, projects, states, users,
+    issue_reactions, issue_subscribers, issues, labels, modules, pod, projects, runner, states,
+    users,
 };
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::Pools;
@@ -121,7 +122,7 @@ use pidash_services::tasks_webhooks::activity_misc::{
 };
 use pidash_services::tasks_webhooks::activity_tracks::{
     DescriptionLatest, EstimatePointRef, IssueActivityDraft, IssueSubscriberDraft, LabelRef,
-    ParentRef, StateRef, TrackFrame, UserRef,
+    ParentRef, PodRef, RunnerRef, StateRef, TrackFrame, UserRef,
 };
 
 use crate::queue::{enqueue, NewJob};
@@ -437,7 +438,12 @@ fn issue_ref_statement(ids: &[Uuid]) -> SelectStatement {
 /// `EstimatePoint.objects.filter(pk=...).first()` plus `estimate.type`
 /// (`:444-453,469`; `db_table = "estimate_points"`, joined to
 /// `"estimates"` like the `new_estimate.estimate` follow — no scope on the
-/// joined table, exactly as the ORM follow has none).
+/// joined table, exactly as the ORM follow has none). Deliberate deviation
+/// (NEWPIDASH-273, DIFF-22): the snapshot also returns soft-deleted points
+/// (no `deleted_at` guard), so the delete-without-replacement worker call —
+/// which runs after `old_estimate_point.delete()` tombstones the point —
+/// still resolves the old side for the `removed` field/value instead of
+/// missing it the way the live-only Django lookup does.
 fn estimate_points_statement(ids: &[Uuid]) -> SelectStatement {
     let ep = Alias::new("ep");
     let e = Alias::new("e");
@@ -456,8 +462,7 @@ fn estimate_points_statement(ids: &[Uuid]) -> SelectStatement {
             Expr::col((ep.clone(), estimate_points::Column::EstimateId))
                 .equals((e.clone(), estimates::Column::Id)),
         )
-        .and_where(Expr::col((ep.clone(), estimate_points::Column::Id)).is_in(ids.to_vec()))
-        .and_where(Expr::col((ep.clone(), estimate_points::Column::DeletedAt)).is_null());
+        .and_where(Expr::col((ep.clone(), estimate_points::Column::Id)).is_in(ids.to_vec()));
     stmt
 }
 
@@ -904,6 +909,18 @@ struct CreatedIssueRow {
 }
 
 #[derive(Debug, Clone, FromQueryResult)]
+struct RunnerRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct PodRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
 struct CommentReactionRow {
     id: Uuid,
     comment_id: Uuid,
@@ -946,7 +963,7 @@ fn scalar_id(payload: Option<&Value>, key: &str) -> Option<String> {
     })
 }
 
-/// The snapshot bundle the update dispatcher feeds the twelve `track_*`
+/// The snapshot bundle the update dispatcher feeds the `track_*`
 /// helpers through [`UpdateResolvers`], plus the side-write keys.
 struct UpdateSnapshots {
     parents: HashMap<String, ParentRef>,
@@ -954,6 +971,8 @@ struct UpdateSnapshots {
     labels: HashMap<String, LabelRef>,
     users: HashMap<String, UserRef>,
     estimates: HashMap<String, EstimatePointRef>,
+    runners: HashMap<String, RunnerRef>,
+    pods: HashMap<String, PodRef>,
     latest: Option<(Uuid, DescriptionLatest)>,
 }
 
@@ -1154,6 +1173,78 @@ async fn fetch_update_snapshots(
             );
         }
     }
+    // Runner ids (`assigned_runner_id or assigned_runner`, both sides)
+    // — `filter(pk=...).first()`, invalid UUIDs coerce to `None` in the
+    // planner (not fatal), so unparseable ids simply miss here.
+    let mut runner_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_runner_id", "assigned_runner"] {
+            if let Some(id) = scalar_id(payload, key) {
+                runner_ids.insert(id);
+            }
+        }
+    }
+    let runner_list: Vec<String> = runner_ids.into_iter().collect();
+    let mut runners = HashMap::new();
+    if !runner_list.is_empty() {
+        let parsed = parse_snapshot_ids(&runner_list);
+        if !parsed.is_empty() {
+            let models = runner::Entity::find()
+                .select_only()
+                .columns([runner::Column::Id, runner::Column::Name])
+                .filter(runner::Column::Id.is_in(parsed))
+                .into_model::<RunnerRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                runners.insert(
+                    key.clone(),
+                    RunnerRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
+    // Pod ids (`assigned_pod_id or assigned_pod`, both sides) — same
+    // shape, scoped to non-deleted pods.
+    let mut pod_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_pod_id", "assigned_pod"] {
+            if let Some(id) = scalar_id(payload, key) {
+                pod_ids.insert(id);
+            }
+        }
+    }
+    let pod_list: Vec<String> = pod_ids.into_iter().collect();
+    let mut pods = HashMap::new();
+    if !pod_list.is_empty() {
+        let parsed = parse_snapshot_ids(&pod_list);
+        if !parsed.is_empty() {
+            let models = pod::Entity::find()
+                .select_only()
+                .columns([pod::Column::Id, pod::Column::Name])
+                .filter(pod::Column::Id.is_in(parsed))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_model::<PodRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                pods.insert(
+                    key.clone(),
+                    PodRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
     // Latest activity for `track_description` (`:89`). `actor_id`
     // stringifies like `str(...)` (`None` → `"None"`); a null `field`
     // behaves as not-`"description"`, rendered as `""`. A missing issue
@@ -1185,6 +1276,8 @@ async fn fetch_update_snapshots(
         labels,
         users,
         estimates,
+        runners,
+        pods,
         latest,
     })
 }
@@ -1412,6 +1505,8 @@ async fn collect_rows(
                 label: &|id| snapshots.labels.get(id).cloned(),
                 user: &|id| snapshots.users.get(id).cloned(),
                 estimate: &|id| snapshots.estimates.get(id).cloned(),
+                runner: &|id| snapshots.runners.get(id).cloned(),
+                pod: &|id| snapshots.pods.get(id).cloned(),
                 description_latest: snapshots.latest.as_ref().map(|(_, latest)| latest.clone()),
             };
             let outcome = plan_update_issue(requested, current, frame, &resolvers).map_err(fail)?;
@@ -1813,14 +1908,16 @@ async fn fetch_issue_refs(
         let identifier: String = row.try_get("", "identifier").map_err(|error| {
             DispatchError::Log(format!("relation snapshot: {}", into_sqlx(error)))
         })?;
-        let sequence_id: i64 = row.try_get("", "sequence_id").map_err(|error| {
+        // `issues.sequence_id` is Django `IntegerField` (`INT4`): decode
+        // as `i32` (NEWPIDASH-198) and widen for `IssueRef`.
+        let sequence_id: i32 = row.try_get("", "sequence_id").map_err(|error| {
             DispatchError::Log(format!("relation snapshot: {}", into_sqlx(error)))
         })?;
         map.insert(
             key,
             IssueRef {
                 identifier,
-                sequence_id,
+                sequence_id: i64::from(sequence_id),
             },
         );
     }
@@ -2455,10 +2552,9 @@ mod tests {
         assert!(estimate_sql.contains("\"estimates\""), "{estimate_sql}");
         assert!(estimate_sql.contains("\"value\""), "{estimate_sql}");
         assert!(estimate_sql.contains("\"estimate_type\""), "{estimate_sql}");
-        assert!(
-            estimate_sql.contains("\"deleted_at\" IS NULL"),
-            "{estimate_sql}"
-        );
+        // NEWPIDASH-273 (DIFF-22): tombstoned points still resolve so the
+        // delete-clear history keeps its field/value (no deleted_at scope).
+        assert!(!estimate_sql.contains("deleted_at"), "{estimate_sql}");
         let latest_sql = latest_activity_query(id)
             .build(DbBackend::Postgres)
             .to_string();
@@ -2762,6 +2858,116 @@ mod tests {
             return None;
         }
         Some(pool)
+    }
+
+    /// NEWPIDASH-198: `fetch_issue_refs` decodes `issues.sequence_id`
+    /// (Django `IntegerField`, Postgres `INT4`) for the relation
+    /// snapshots. Pre-fix it read the column as `i64` (`INT8`) and sqlx
+    /// refused every relation activity with `mismatched types`, so no
+    /// `blocked_by`/`blocking`/`relates_to`/`duplicate` row was written.
+    /// Seeds a Django-migrated user → workspace → project → two issues
+    /// and pins both `identifier-sequence_id` labels.
+    #[tokio::test]
+    async fn live_fetch_issue_refs_decodes_int4_sequence_id() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let now = Utc::now();
+        let user = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let issue_a = Uuid::new_v4();
+        let issue_b = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password, first_name, last_name, \
+             display_name, avatar, created_location, last_location, last_login_ip, \
+             last_login_medium, last_login_uagent, last_logout_ip, user_timezone, token, \
+             is_active, is_bot, is_email_valid, is_email_verified, is_managed, \
+             is_password_autoset, is_password_expired, is_password_reset_required, \
+             is_staff, is_superuser, created_at, updated_at, date_joined) \
+             VALUES ($1, $2, $3, '!', '', '', '', '', '', '', '', 'email', '', '', 'UTC', \
+             $4, true, false, false, false, false, false, false, false, false, false, \
+             $5, $5, $5)",
+        )
+        .bind(user)
+        .bind(format!("n198-{}", &user.to_string()[..8]))
+        .bind(format!("n198-{}@example.com", &user.to_string()[..8]))
+        .bind(Uuid::new_v4().to_string())
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, background_color, \
+             owner_id, slug, timezone) \
+             VALUES ($1, $2, $2, $3, '#f6c8dB', $4, $5, 'UTC')",
+        )
+        .bind(ws)
+        .bind(now)
+        .bind("n198 ws")
+        .bind(user)
+        .bind(format!("n198-{}", &ws.to_string()[..8]))
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, created_at, updated_at, name, identifier, description, \
+             network, module_view, cycle_view, issue_views_view, page_view, intake_view, \
+             is_time_tracking_enabled, is_issue_type_enabled, is_default, \
+             guest_view_all_features, members_can_edit_states, archive_in, close_in, \
+             logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
+             agent_default_max_ticks, agent_review_default_interval_seconds, \
+             agent_test_default_interval_seconds, agent_ticking_enabled, \
+             default_agent_executor, workspace_id) \
+             VALUES ($1, $2, $2, $3, 'T198', '', 2, false, false, false, true, false, false, \
+             false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, \
+             10800, true, 'local_runner', $4)",
+        )
+        .bind(project)
+        .bind(now)
+        .bind("n198 proj")
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        for (issue, sequence_id) in [(issue_a, 6), (issue_b, 7)] {
+            sqlx::query(
+                "INSERT INTO issues (id, created_at, updated_at, name, description_json, \
+                 priority, sequence_id, project_id, workspace_id, description_html, \
+                 sort_order, is_draft, git_work_branch, workpad, complexity_score) \
+                 VALUES ($1, $2, $2, $3, '{}', 'none', $4, $5, $6, '<p></p>', 65535, false, \
+                 '', '', 0)",
+            )
+            .bind(issue)
+            .bind(now)
+            .bind("n198 issue")
+            .bind(sequence_id)
+            .bind(project)
+            .bind(ws)
+            .execute(&pool)
+            .await
+            .expect("seed issue");
+        }
+        let refs = fetch_issue_refs(&pool, &[issue_a.to_string(), issue_b.to_string()])
+            .await
+            .expect("relation snapshot decodes INT4 sequence_id");
+        assert_eq!(refs.len(), 2, "both relation labels resolve");
+        assert_eq!(refs[&issue_a.to_string()].label(), "T198-6");
+        assert_eq!(refs[&issue_b.to_string()].label(), "T198-7");
+        for issue in [issue_a, issue_b] {
+            sqlx::query("DELETE FROM issues WHERE id = $1")
+                .bind(issue)
+                .execute(&pool)
+                .await
+                .expect("cleanup issue");
+        }
+        for (table, id) in [("projects", project), ("workspaces", ws), ("users", user)] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE id = $1"))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup graph row");
+        }
     }
 
     /// `bulk_insert` is one multi-row `INSERT` and returns the inputs' own

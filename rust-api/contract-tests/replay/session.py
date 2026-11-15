@@ -116,6 +116,16 @@ class Request:
     # either side changing fails loudly. Pinned tasks are excluded
     # from the job multiset compare.
     known_absent_jobs: dict = field(default_factory=dict)
+    # Known Django-extra jobs for THIS request only:
+    # [(task, fix_issue, dj_match)]. Django emits one extra job that
+    # Rust intentionally does not (sunset dual-delete legacy jobs,
+    # PDASHOSS01-355): each pin consumes exactly one exactly-matching
+    # Django-normalised job, else it fails loudly (Django stopped
+    # emitting it or its bytes changed — remove or update the pin;
+    # Rust started emitting it — the leftover Rust job fails as a
+    # rust-only divergence). Unlike known_absent_jobs the pinned task
+    # DOES compare for the shared jobs; this only excuses the surplus.
+    known_django_extra_jobs: list = field(default_factory=list)
     # Volatile JSON body subtrees for THIS request only: [pointer, ...]
     # (``/``-separated). Each pointer must resolve on BOTH sides (a
     # missing side fails loudly, so this never silently excuses a
@@ -319,6 +329,35 @@ class Session:
     def __post_init__(self):
         if not self.requests:
             raise ValueError(f"session {self.name}: no requests")
+
+
+def render_pin_node(node, context: dict[str, str]):
+    """Literal-preserving template render for pin values.
+
+    Like :func:`render_template`, but only placeholders the context
+    actually defines are substituted; everything else — normalised
+    ``{row:<table>}`` stubs, dict-repr braces, unknown names — stays
+    literal. Pin values are matched strings (a ``{row:...}`` cell stub
+    is one), so strict formatting would misfire; unknown placeholders
+    are rejected statically by the manifest test instead.
+    """
+    if isinstance(node, str):
+        rendered = node
+        for key, replacement in context.items():
+            token = "{%s}" % key
+            if token in rendered:
+                rendered = rendered.replace(token, str(replacement))
+        return rendered
+    if isinstance(node, dict):
+        return {
+            render_pin_node(k, context): render_pin_node(v, context)
+            for k, v in node.items()
+        }
+    if isinstance(node, list):
+        return [render_pin_node(item, context) for item in node]
+    if isinstance(node, tuple):
+        return tuple(render_pin_node(item, context) for item in node)
+    return node
 
 
 def render_template(node, context: dict[str, str]):

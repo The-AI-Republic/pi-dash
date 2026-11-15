@@ -1322,7 +1322,7 @@ def _asset_row(conn, asset_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             'SELECT id, asset, is_uploaded, storage_metadata,'
-            ' created_by_id, updated_by_id FROM "file_assets"'
+            ' created_by_id, updated_by_id, updated_at FROM "file_assets"'
             " WHERE id = %s::uuid AND deleted_at IS NULL",
             (str(asset_id),),
         )
@@ -1554,6 +1554,62 @@ def test_metadata_task_stores_head_dict(db_conn, broker_url):
     assert meta["ContentType"] == "application/octet-stream"
     assert meta["ETag"], "missing ETag"
     assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]
+
+
+def test_metadata_task_leaves_updated_at_unchanged(db_conn, broker_url):
+    """Metadata task: save(update_fields) writes storage_metadata only.
+
+    PIDASHCONV-1731 oracle. Django (``storage_metadata_task.py:24``)
+    runs ``asset.save(update_fields=["storage_metadata"])``: the UPDATE
+    sets only that column — the ``auto_now`` ``updated_at`` is neither
+    recomputed nor written. Seeds an asset with a known old
+    ``updated_at``, publishes ``get_asset_object_metadata``, and asserts
+    ``storage_metadata`` is written while ``updated_at`` stays put. The
+    Rust replay pins the identical assertion (red while the Rust save
+    also stamps ``updated_at``).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"meta1731-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1731-metadata-updated-at-probe!"
+    key = f"{ws_id}/meta1731-{tag}.png"
+    s3_helpers.s3_put_key(bucket, key, body)
+    assert s3_helpers.s3_key_exists(bucket, key)
+    seeded_updated_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": key,
+            "attributes": {"name": f"meta1731-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": str(chain["project"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+            "updated_at": seeded_updated_at.isoformat(),
+        },
+    )
+    asset_id = str(asset["id"])
+    assert _asset_row(db_conn, asset_id)["updated_at"] == seeded_updated_at
+    celery_wire.publish(METADATA_TASK, kwargs={"asset_id": asset_id})
+    assert wait_for(
+        lambda: (_asset_row(db_conn, asset_id) or {}).get("storage_metadata") != {},
+        what="metadata task saved storage_metadata",
+    )
+    row = _asset_row(db_conn, asset_id)
+    assert row["storage_metadata"] is not None and row["storage_metadata"] != {}, (
+        "storage_metadata was not written"
+    )
+    assert row["updated_at"] == seeded_updated_at, (
+        f"updated_at moved from {seeded_updated_at} to {row['updated_at']}"
+    )
 
 
 def test_soft_delete_draftissue_cascades(db_conn, broker_url):

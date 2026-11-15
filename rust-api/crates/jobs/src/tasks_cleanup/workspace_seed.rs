@@ -1930,6 +1930,8 @@ impl SeedStore for PgSeedStore {
             prev_state_id: None,
             current_state_id: Some(state_id),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now,
             jitter_secs: 0.0,

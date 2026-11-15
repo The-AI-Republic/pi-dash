@@ -144,6 +144,7 @@ pub struct NewProject<'a> {
     pub agent_test: i32,
     pub agent_ticking: bool,
     pub default_executor: &'a str,
+    pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
@@ -217,8 +218,9 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         agent_ticking_enabled: Set(p.agent_ticking),
         default_agent_executor: Set(p.default_executor.to_owned()),
         members_can_edit_states: Set(p.members_can_edit_states),
-        // Django field default (db 0173 drops the DB default).
-        dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
+        // Django field default (db 0173 drops the DB default); the
+        // writable project serializers may override it on create.
+        dedicated_runner_lost_action: Set(p.dedicated_runner_lost_action.to_owned()),
     }
 }
 
@@ -553,6 +555,7 @@ pub struct ProjectUpdate<'a> {
     pub agent_test: i32,
     pub agent_ticking: bool,
     pub default_executor: &'a str,
+    pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
     pub workspace_id: Uuid,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -627,6 +630,10 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
         )
         .col_expr(C::AgentTickingEnabled, Expr::value(upd.agent_ticking))
         .col_expr(C::DefaultAgentExecutor, Expr::value(upd.default_executor))
+        .col_expr(
+            C::DedicatedRunnerLostAction,
+            Expr::value(upd.dedicated_runner_lost_action),
+        )
         .col_expr(
             C::MembersCanEditStates,
             Expr::value(upd.members_can_edit_states),
@@ -2809,6 +2816,7 @@ mod tests {
             agent_test: 4,
             agent_ticking: false,
             default_executor: "x",
+            dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
             workspace_id: ws,
             deleted_at: None,
@@ -2819,8 +2827,8 @@ mod tests {
         let update = sql(&project_update_stmt(id, &upd));
         assert_eq!(
             update.matches(" = ").count(),
-            44 + 1,
-            "44 setters plus the id filter"
+            45 + 1,
+            "45 setters plus the id filter"
         );
         assert!(update.contains(&format!("\"created_by_id\" = '{actor}'")));
         assert!(update.contains("\"deleted_at\" = NULL"));
@@ -3329,6 +3337,7 @@ mod tests {
             agent_test: 10800,
             agent_ticking: true,
             default_executor: "local_runner",
+            dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: true,
             created_by: actor,
             created_at: now,
@@ -3458,6 +3467,7 @@ mod tests {
             agent_test: 4,
             agent_ticking: false,
             default_executor: "x",
+            dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
             workspace_id: ws,
             deleted_at: None,

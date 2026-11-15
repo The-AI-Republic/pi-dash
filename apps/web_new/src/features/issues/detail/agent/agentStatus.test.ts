@@ -157,6 +157,17 @@ describe("selectAbortableRun", () => {
     expect(selectAbortableRun(statusFixture())).toBeNull();
     expect(selectAbortableRun(null)).toBeNull();
   });
+
+  it("treats cloud RUNNING with a cancel stamp as already stopping (PDASHOSS01-351)", () => {
+    const cloudStopping = runFixture({
+      status: "running",
+      executor_kind: "cloud_agent",
+      cancel_requested_at: "2026-05-01T11:55:00Z",
+    });
+    expect(selectAbortableRun(statusFixture({ active_run: cloudStopping }))).toBeNull();
+    const cloudActive = runFixture({ status: "running", executor_kind: "cloud_agent" });
+    expect(selectAbortableRun(statusFixture({ active_run: cloudActive }))).toBe(cloudActive);
+  });
 });
 
 describe("formatAge", () => {
@@ -259,6 +270,16 @@ describe("runStatusView", () => {
     expect(named.detail).toBe("Runner runner-1");
     const bare = runStatusView(runFixture({ status: "cancel_requested", runner_name: null }), null, 1, NOW);
     expect(bare.detail).toContain("confirming the stop");
+  });
+
+  it("shows Stopping for cloud RUNNING with a cancel stamp (PDASHOSS01-351)", () => {
+    const view = runStatusView(
+      runFixture({ status: "running", executor_kind: "cloud_agent", cancel_requested_at: "2026-05-01T11:55:00Z" }),
+      null,
+      1,
+      NOW
+    );
+    expect(view).toMatchObject({ title: "Stopping the agent run", badge: "Stopping", tone: "warning" });
   });
 
   it("covers awaiting_approval with and without live detail", () => {

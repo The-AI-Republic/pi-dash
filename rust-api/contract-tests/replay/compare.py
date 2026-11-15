@@ -1414,6 +1414,7 @@ def normalise_celery_message(
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
         kwargs = _sub_process_logs_scalars(kwargs, flat)
         kwargs = _blank_process_logs_echo(kwargs, ctx)
+        kwargs = _canonical_process_logs_diff20(kwargs, side)
     args, kwargs = _blank_row_refs(args, kwargs, task, side, ctx)
     args, kwargs = _blank_value_diffs(args, kwargs, task, side, ctx)
     args, kwargs = _blank_db_values(args, kwargs, task, side, ctx)
@@ -1449,6 +1450,7 @@ def normalise_queue_row(row: dict, ctx: CompareContext) -> dict:
         args, kwargs = _blank_topology_hosts(args), _blank_topology_hosts(kwargs)
         kwargs = _sub_process_logs_scalars(kwargs, flat)
         kwargs = _blank_process_logs_echo(kwargs, ctx)
+        kwargs = _canonical_process_logs_diff20(kwargs, "rust")
     args, kwargs = _blank_row_refs(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_value_diffs(args, kwargs, task, "rust", ctx)
     args, kwargs = _blank_db_values(args, kwargs, task, "rust", ctx)
@@ -1582,12 +1584,78 @@ def _blank_process_logs_echo(kwargs, ctx: CompareContext):
     return kwargs
 
 
+def _is_hashed_token_id(value) -> bool:
+    """Whether a token_identifier has the DIFF-20 Rust hash shape.
+
+    First 32 hex chars of SHA-256 (NEWPIDASH-231, DIFF-20). Django raw
+    tokens always carry an `mt_` prefix, so they never collide.
+    """
+    return (
+        isinstance(value, str)
+        and len(value) == 32
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _canonical_process_logs_diff20(kwargs, side):
+    """Canonicalise the deliberate DIFF-20 process_logs divergence.
+
+    NEWPIDASH-231 (DIFF-20, old bug fixed): the Rust APITokenLogMiddleware
+    never logs/stores the raw API key — token_identifier is a 32-hex
+    SHA-256 truncation, sensitive header values are [REDACTED], and
+    bodies are dropped — while Django still stores the raw key, raw
+    headers and decoded bodies. Normalise both sides so replay stays
+    green without masking a leak regression:
+    - token_identifier: the Rust 32-hex truncation and the Django raw
+      value both become the volatile placeholder. A Rust raw key (not
+      32-hex) or an already-hashed Django value is left in place and
+      fails the compare loudly (leak regression, or PDASHOSS01-371
+      landed and this comparer needs updating).
+    - headers: redact sensitive values on the Django side (Rust is
+      already redacted); every other header still compares strictly.
+    - body/response_body: placeholder on both sides. Rust stores no
+      bodies by design, so the logged echo can never equal Django's;
+      the echo check retires here (echo_free_pass precedent: blank
+      wholesale when the copy is uncomparable by design). Restoring
+      bodies must restore replay handling here.
+    """
+    import copy
+
+    if not isinstance(kwargs, dict):
+        return kwargs
+    sections = [
+        section
+        for section in ("log_data", "mongo_log")
+        if isinstance(kwargs.get(section), dict)
+    ]
+    if not sections:
+        return kwargs
+    kwargs = copy.deepcopy(kwargs)
+    for section in sections:
+        node = kwargs[section]
+        tok = node.get("token_identifier")
+        if isinstance(tok, str):
+            hashed = _is_hashed_token_id(tok)
+            if hashed == (side == "rust"):
+                node["token_identifier"] = effects.VOLATILE_PLACEHOLDER
+        hdrs = node.get("headers")
+        if isinstance(hdrs, str):
+            node["headers"] = effects.SENSITIVE_HEADER_VALUE_RE.sub(
+                r"\1" + effects.REDACTED_HEADER_VALUE + r"\2", hdrs
+            )
+        for field in ("body", "response_body"):
+            if field in node:
+                node[field] = effects.VOLATILE_PLACEHOLDER
+    return kwargs
+
+
 def compare_jobs(
     dj_jobs: list[dict],
     rs_jobs: list[dict],
     known_absent: dict | None = None,
     known_shapes: list | None = None,
     gap_ctx: dict | None = None,
+    django_extra: list | None = None,
 ) -> str | None:
     """Compare normalised job multisets (order-insensitive, ETA-tolerant).
 
@@ -1600,9 +1668,14 @@ def compare_jobs(
     landed or behavior changed — remove or update the pin).
     Several pins may share a task name (PIDASHCONV-913: one destroy
     emitting two same-task enqueues); unmatched leftovers still go
-    through the multiset compare below.
+    through the multiset compare below. ``django_extra`` ([(task,
+    fix_issue, dj_match)]) is the one-sided counterpart: each pin
+    consumes exactly one exactly-matching Django job (sunset
+    dual-delete legacy surpluses Rust intentionally does not emit,
+    PDASHOSS01-355); a matching Rust job is never consumed and fails
+    as a rust-only leftover, and a missing Django job fails loudly.
     """
-    from .session import render_template
+    from .session import render_pin_node
 
     known_absent = known_absent or {}
     for task, issue in known_absent.items():
@@ -1622,12 +1695,26 @@ def compare_jobs(
     rs_jobs = [j for j in rs_jobs if j["task"] not in known_absent]
     dj_pool = list(dj_jobs)
     rs_pool = list(rs_jobs)
+    for task, issue, dj_match in django_extra or []:
+        dj_want = render_pin_node(dj_match, gap_ctx or {})
+        dj_hit = next(
+            (j for j in dj_pool if j["task"] == task and j == dj_want), None
+        )
+        if dj_hit is None:
+            dj_have = [j for j in dj_pool if j["task"] == task]
+            return (
+                f"known-django-extra pin {task} ({issue}): Django stopped "
+                "emitting the extra legacy job or its bytes changed — "
+                "remove or update the pin. "
+                f"no emitted job matches {dj_want!r:.400}; "
+                f"got {dj_have!r:.400}"
+            )
+        dj_pool.remove(dj_hit)
     for task, issue, dj_match, rs_match in known_shapes or []:
-        try:
-            dj_want = render_template(dj_match, gap_ctx or {})
-            rs_want = render_template(rs_match, gap_ctx or {})
-        except KeyError as exc:
-            return f"known-shape pin {task} ({issue}): unrenderable match: {exc}"
+        # Literal-preserving render: matches carry normalised
+        # {row:<table>} stubs strict formatting would choke on.
+        dj_want = render_pin_node(dj_match, gap_ctx or {})
+        rs_want = render_pin_node(rs_match, gap_ctx or {})
         dj_hit = next(
             (j for j in dj_pool if j["task"] == task and j == dj_want), None
         )

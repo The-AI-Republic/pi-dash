@@ -32,6 +32,8 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::runner_enroll::dispatch_rules::PauseEffects;
+
 /// The engine credential's `ec_` prefix (`ENGINE_CREDENTIAL_PREFIX`).
 pub const ENGINE_CREDENTIAL_PREFIX: &str = "ec_";
 
@@ -210,12 +212,13 @@ fn is_sign_out_reason(reason: &str) -> bool {
 }
 
 /// What [`issue_engine_credential`] minted: the plaintext (returned once),
-/// the row, and the expiry.
+/// the row, the expiry, and the post-commit drains for the sign-in clear.
 #[derive(Debug, Clone)]
 pub struct IssuedEngineCredential {
     pub raw: String,
     pub id: Uuid,
     pub expires_at: DateTime<Utc>,
+    pub pause_effects: PauseEffects,
 }
 
 /// A credential failure. `code` is the wire code; `credential` carries the
@@ -472,8 +475,8 @@ pub async fn issue_engine_credential(
     // The engine has a valid credential again: clear the sign-in pause
     // (`set_engine_auto_pause_reason(machine, NONE)` in Django, no keep /
     // only_from: it clears whatever the row holds).
-    if machine.engine_auto_pause_reason == PAUSE_ENGINE_SIGN_IN_REQUIRED {
-        crate::domain::engine_state::set_engine_auto_pause_reason(
+    let pause_effects = if machine.engine_auto_pause_reason == PAUSE_ENGINE_SIGN_IN_REQUIRED {
+        let (_changed, effects) = crate::domain::engine_state::set_engine_auto_pause_reason(
             db,
             machine_id,
             PAUSE_NONE,
@@ -483,7 +486,10 @@ pub async fn issue_engine_credential(
         )
         .await
         .map_err(|error| IssueError::Database(error.into_sqlx()))?;
-    }
+        effects
+    } else {
+        PauseEffects::default()
+    };
     tracing::info!(
         user_id = %user_id,
         dev_machine_id = %machine_id,
@@ -495,6 +501,7 @@ pub async fn issue_engine_credential(
         raw,
         id,
         expires_at,
+        pause_effects,
     })
 }
 
@@ -504,13 +511,14 @@ pub async fn issue_engine_credential(
 /// sign-out reason, which stays `never` (#2912). On a new-path,
 /// non-revoked, unpaused machine with a history of having the engine,
 /// pause with `engine_sign_in_required`. Returns whether a live
-/// credential was revoked; an absent machine returns `False`.
+/// credential was revoked and the post-commit drains for the pause flip;
+/// an absent machine returns `(false, default)`.
 pub async fn revoke_engine_credential(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     reason: &str,
     now: DateTime<Utc>,
-) -> Result<bool, RevokeError> {
+) -> Result<(bool, PauseEffects), RevokeError> {
     let Some(state) = state_for_revoke_reason(reason) else {
         return Err(RevokeError::UnknownReason(reason.to_owned()));
     };
@@ -518,7 +526,7 @@ pub async fn revoke_engine_credential(
         .await
         .map_err(RevokeError::Database)?
     else {
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     };
     let revoked = engine_credential::Entity::update_many()
         .col_expr(engine_credential::Column::RevokedAt, Expr::value(at(now)))
@@ -536,7 +544,7 @@ pub async fn revoke_engine_credential(
     if !had_engine && is_sign_out_reason(reason) {
         // Never turned on: a sign-out (the full `pidash auth logout`)
         // leaves it `never`, so the app still offers "Turn on".
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     }
     dev_machine::Entity::update_many()
         .col_expr(dev_machine::Column::EngineSignInState, Expr::value(state))
@@ -549,12 +557,13 @@ pub async fn revoke_engine_credential(
         .exec(db)
         .await
         .map_err(|error| RevokeError::Database(into_sqlx(error)))?;
+    let mut pause_effects = PauseEffects::default();
     if had_engine
         && !is_legacy_desktop(&machine.provisioning)
         && machine.revoked_at.is_none()
         && machine.engine_auto_pause_reason.is_empty()
     {
-        crate::domain::engine_state::set_engine_auto_pause_reason(
+        let (_changed, effects) = crate::domain::engine_state::set_engine_auto_pause_reason(
             db,
             machine_id,
             PAUSE_ENGINE_SIGN_IN_REQUIRED,
@@ -564,6 +573,7 @@ pub async fn revoke_engine_credential(
         )
         .await
         .map_err(|error| RevokeError::Database(error.into_sqlx()))?;
+        pause_effects = effects;
     }
     tracing::info!(
         dev_machine_id = %machine_id,
@@ -572,18 +582,18 @@ pub async fn revoke_engine_credential(
         revoked,
         "engine_credential.revoked",
     );
-    Ok(revoked > 0)
+    Ok((revoked > 0, pause_effects))
 }
 
 /// `revoke_engine_credentials_for_user(user, reason=user_signed_out)`:
 /// revoke every machine holding one of the user's live credentials
 /// (sign-out everywhere). Returns how many machines had a live credential
-/// revoked.
+/// revoked and the aggregated post-commit drains for the pause flips.
 pub async fn revoke_engine_credentials_for_user(
     db: &impl ConnectionTrait,
     user_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<u64, RevokeError> {
+) -> Result<(u64, PauseEffects), RevokeError> {
     let machine_ids: Vec<Uuid> = engine_credential::Entity::find()
         .filter(engine_credential::Column::UserId.eq(user_id))
         .filter(engine_credential::Column::RevokedAt.is_null())
@@ -597,12 +607,22 @@ pub async fn revoke_engine_credentials_for_user(
         .map(|(id,)| id)
         .collect();
     let mut count = 0;
+    let mut merged = PauseEffects::default();
     for machine_id in machine_ids {
-        if revoke_engine_credential(db, machine_id, "user_signed_out", now).await? {
+        let (revoked, inner) =
+            revoke_engine_credential(db, machine_id, "user_signed_out", now).await?;
+        if revoked {
             count += 1;
+            merged.drain_pod_ids.extend(inner.drain_pod_ids);
+            merged.drain_runner_ids.extend(inner.drain_runner_ids);
+        } else {
+            // Even when not counted (already revoked / never), a pause flip
+            // could still have happened; preserve its drains.
+            merged.drain_pod_ids.extend(inner.drain_pod_ids);
+            merged.drain_runner_ids.extend(inner.drain_runner_ids);
         }
     }
-    Ok(count)
+    Ok((count, merged))
 }
 
 /// `authenticate_engine_credential(raw)`: resolve a presented `ec_`

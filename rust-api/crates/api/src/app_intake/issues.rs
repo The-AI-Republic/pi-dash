@@ -563,9 +563,9 @@ pub async fn fetch_issue_annotated(
         )
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(
@@ -772,9 +772,9 @@ pub async fn fetch_detail(
         .join(JoinType::InnerJoin, bridge_entity::Relation::Issues1.def())
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(
@@ -1811,7 +1811,7 @@ pub struct IssueObjectValidation {
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
 /// `serializers/issue.py:63-76`): empty `external_source` short-circuits
-/// before any query.
+/// before any query. Git-only after PDASHOSS01-354.
 pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1819,9 +1819,10 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
     if source.is_empty() {
         return Ok(false);
     }
-    // No `is_synced` annotation rides these handlers, so the sync tables
-    // decide.
-    use pidash_db::entity::{git_issue_syncs as git_entity, github_issue_syncs as gh_entity};
+    // No `is_synced` annotation rides these handlers, so the sync table
+    // decides (generic `git_issue_syncs`, provider='github' rows included;
+    // legacy GitHub tables sunset, PDASHOSS01-354).
+    use pidash_db::entity::git_issue_syncs as git_entity;
     let db = sea_conn(pool);
     let git = git_entity::Entity::find()
         .filter(git_entity::Column::IssueId.eq(issue.id))
@@ -1831,18 +1832,7 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = gh_entity::Entity::find()
-        .filter(gh_entity::Column::IssueId.eq(issue.id))
-        .select_only()
-        .column(gh_entity::Column::IssueId)
-        .into_tuple::<Uuid>()
-        .one(&db)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// Table names for the sync probes above live behind Django model
@@ -2881,33 +2871,43 @@ pub async fn blocker_summary(
                     )
                     .add(rel_entity::Column::WorkspaceId.eq(*workspace_id))
                     .add(
-                        Condition::any().add(
-                            Condition::all()
-                                .add(
-                                    Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
+                        Condition::any()
+                            .add(
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
                                         .eq(*issue_id),
-                                )
-                                .add(
-                                    Expr::col((
-                                        rel_entity::Entity,
-                                        rel_entity::Column::RelatedIssueId,
-                                    ))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                                )
-                                .add(rel_entity::Column::RelationType.eq("blocked_by")),
-                        ),
-                    )
-                    .add(
-                        Condition::all()
-                            .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::RelatedIssueId))
-                                    .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocked_by")),
                             )
                             .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                            )
-                            .add(rel_entity::Column::RelationType.eq("blocking")),
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocking")),
+                            ),
                     ),
             )
             .to_owned(),
@@ -3092,10 +3092,16 @@ pub async fn render_agent_status(
         .await
         .map_err(|_| Denial::ServerError)?;
     let run_count = runs.count;
+    let total_tokens = runs.total_tokens;
     let latest_row = runs.latest.as_ref().map(RenderedAgentRun::detail_row);
     let active_row = runs.active.as_ref().map(RenderedAgentRun::detail_row);
-    let status =
-        agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
+    let status = agent_status_to_representation(
+        ticker,
+        active_row.as_ref(),
+        latest_row.as_ref(),
+        run_count,
+        total_tokens,
+    );
     match status {
         None => Ok(serde_json::Value::Null),
         Some(view) => serde_json::to_value(&view).map_err(|_| Denial::ServerError),
@@ -3207,7 +3213,7 @@ pub async fn render_issue_detail(
     let status = render_agent_status(pool, issue, ticker_view).await?;
     let summary = blocker_summary(pool, &issue.id, &issue.workspace_id).await?;
     let is_epic = fetch_is_epic(pool, issue.type_id).await?;
-    let mut map = serde_json::Map::with_capacity(31);
+    let mut map = serde_json::Map::with_capacity(33);
     map.insert(
         "id".to_owned(),
         serde_json::Value::String(issue.id.to_string()),
@@ -3253,6 +3259,10 @@ pub async fn render_issue_detail(
     map.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_owned(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert(
         "agent_executor".to_owned(),
@@ -3304,6 +3314,18 @@ pub async fn render_issue_detail(
     map.insert(
         "has_open_blockers".to_owned(),
         serde_json::Value::Bool(summary.has_open),
+    );
+    // `assigned_runner_detail` last (`IssueDetailSerializer.Meta.fields`,
+    // design §14.1): the shared access helper, null when pod-assigned.
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &sea_conn(pool),
+        issue.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    map.insert(
+        "assigned_runner_detail".to_owned(),
+        assigned_runner_detail.unwrap_or(serde_json::Value::Null),
     );
     Ok(serde_json::Value::Object(map))
 }
@@ -4902,6 +4924,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -4946,19 +4969,16 @@ fn compile_text_predicate(
     };
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
         _ => return Ok(None),
     };
-    // Explicit bounds must parse as dates: Django's `get_prep_value`
-    // raises `ValidationError` (400 invalid detail) on garbage.
-    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
-    }
     if operator == "=" {
-        // Single-value form on a date term: Django's `contains`
-        // lookup, i.e. LIKE with metacharacters escaped.
+        // Bare token: Django __contains is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates). The single-value form
+        // LIKEs the date text with metacharacters escaped.
         let escaped = text
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -4966,6 +4986,11 @@ fn compile_text_predicate(
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
+    }
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
     }
     let holder = placeholder(next);
     binds.push(OwnedBind::Text(text.to_owned()));
@@ -5575,6 +5600,8 @@ fn write_ctx(
 fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
     domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(*actor_id),
         moved_by_run: None,
         now,
@@ -6833,6 +6860,8 @@ struct CreatedRows {
     type_id: Option<Uuid>,
     is_epic: bool,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
+    assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -6901,9 +6930,9 @@ async fn render_created_detail(
         .column_as(label_ids_annotation(), "label_ids")
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(JoinType::LeftJoin, il_entity::Relation::Labels.def())
@@ -6928,9 +6957,9 @@ async fn render_created_detail(
         .join(JoinType::LeftJoin, ia_entity2::Relation::Users3.def())
         .join(
             JoinType::LeftJoin,
-            pm_entity::Entity::belongs_to(pidash_db::entity::users::Entity)
-                .from(pm_entity::Column::MemberId)
-                .to(pidash_db::entity::users::Column::Id)
+            pidash_db::entity::users::Entity::belongs_to(pm_entity::Entity)
+                .from(pidash_db::entity::users::Column::Id)
+                .to(pm_entity::Column::MemberId)
                 .into(),
         )
         .group_by(issue_entity::Column::Id)
@@ -6968,6 +6997,13 @@ async fn render_created_detail(
         type_id: created_type_id,
         is_epic: created_is_epic,
         assigned_pod_id: m.assigned_pod_id,
+        assigned_runner_id: m.assigned_runner_id,
+        assigned_runner_detail: crate::app_issues::access::fetch_assigned_runner_detail(
+            &db,
+            m.assigned_runner_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
@@ -7008,7 +7044,7 @@ async fn render_created_detail(
 /// them; ticker/runs/relations are null/empty on a fresh row.
 /// `type_id` and `is_epic` always render (NEWFRONT-984).
 fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_json::Value {
-    let mut issue = serde_json::Map::with_capacity(31);
+    let mut issue = serde_json::Map::with_capacity(33);
     issue.insert("id".to_owned(), uuid_string(&rows.issue_id));
     issue.insert(
         "name".to_owned(),
@@ -7059,6 +7095,10 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     issue.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&rows.assigned_pod_id),
+    );
+    issue.insert(
+        "assigned_runner_id".to_owned(),
+        opt_uuid(&rows.assigned_runner_id),
     );
     issue.insert(
         "agent_executor".to_owned(),
@@ -7113,6 +7153,12 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         "has_open_blockers".to_owned(),
         serde_json::Value::Bool(false),
     );
+    issue.insert(
+        "assigned_runner_detail".to_owned(),
+        rows.assigned_runner_detail
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
+    );
     serde_json::Value::Object(issue)
 }
 
@@ -7165,6 +7211,26 @@ mod tests {
             app_origin(&state).as_deref(),
             Some("https://app.example.invalid")
         );
+    }
+
+    #[test]
+    fn updated_at_predicates_hit_the_issue_updated_column() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let (mut binds, mut next) = (Vec::new(), 1);
+        let sql = compile_predicate(
+            "issue__updated_at__date__gte",
+            &FilterValue::Day(day),
+            &mut binds,
+            &mut next,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
+            .expect("compiles")
+            .expect("known key");
+        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
     }
 
     #[test]

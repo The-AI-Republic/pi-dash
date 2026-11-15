@@ -1,14 +1,7 @@
 {
   "EmailNotificationLog_shape": "same + issue.project_id, issue.workspace_slug, activity_time=activity.created_at; triggered_by=actor, receiver=subscriber, entity_identifier=issue_id, entity_name='issue'",
   "Notification_shape": {
-    "data.issue": [
-      "id",
-      "name",
-      "identifier",
-      "sequence_id",
-      "state_name",
-      "state_group"
-    ],
+    "data.issue": ["id", "name", "identifier", "sequence_id", "state_name", "state_group"],
     "data.issue_activity": [
       "id",
       "verb",
@@ -68,11 +61,10 @@
   },
   "preference_reads": "UserNotificationPreference.objects.get(user_id=...) per subscriber and per mention_id (DoesNotExist -> outer except, nothing persisted)",
   "send_email_rules": [
-    "field==state and preference.state_change",
-    "field==state and preference.issue_completed and completed-State row exists for new_identifier",
-    "field==comment and preference.comment",
-    "preference.property_change (catch-all)",
-    "else False"
+    "field==state -> preference.state_change or (preference.issue_completed and completed-State row exists for new_identifier)",
+    "field==comment -> preference.comment",
+    "otherwise (including null field) -> preference.property_change",
+    "NEWPIDASH_271_DIFF_28: Django's bare elif preference.property_change at notification_task.py:346 let property_change rescue comment/state fields, so those toggles did not gate independently; Rust gates each topic independently."
   ],
   "skips": [
     "activity issue_detail.id != issue_id",

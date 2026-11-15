@@ -692,7 +692,10 @@ fn python_str(value: Option<&Value>) -> (String, Value) {
 }
 
 /// `UUIDField.to_python` for FK writes (`django/db/models/fields.py`):
-/// `None`/null stays NULL; strings must parse (else `ValidationError` →
+/// `None`/null stays NULL; `""` also stores NULL
+/// (`ForeignKey.get_db_prep_save`: `value == ""` → `None` for a UUID
+/// target — the comment composer sends `entity_identifier: ""` for a new
+/// comment); other strings must parse (else `ValidationError` →
 /// the 400 envelope); ints/bools coerce via `uuid.UUID(int=...)`
 /// (negative or over-wide values reject); every other JSON shape rejects.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
@@ -701,6 +704,7 @@ fn python_str(value: Option<&Value>) -> (String, Value) {
 fn coerce_uuid_or_400(value: Option<&Value>) -> Result<Option<Uuid>, Response> {
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.is_empty() => Ok(None),
         Some(Value::String(s)) => s.parse::<Uuid>().map(Some).map_err(|_| valid_detail()),
         Some(Value::Number(n)) => {
             let int = n
@@ -1136,6 +1140,9 @@ async fn post_project_asset(
     }
     let issue_display: Option<String> = match data.get("entity_identifier") {
         None | Some(Value::Null) => None,
+        // `""` stores NULL, so `asset_url` renders `None` (the model
+        // property interpolates the stored FK, not the raw input).
+        Some(Value::String(s)) if s.is_empty() => None,
         Some(v) => Some(python_str(Some(v)).0),
     };
     let asset_url = asset_url_for(
@@ -1145,7 +1152,12 @@ async fn post_project_asset(
         issue_display.as_deref(),
         &asset_id,
     );
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
@@ -1409,7 +1421,12 @@ async fn get_project_asset(
         Some(Value::String(s)) => Filename::Name(s.clone()),
         Some(_) => return server_error(),
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
@@ -1864,7 +1881,12 @@ async fn post_duplicate_asset(
     // client never reads the request Host (`storage.py:50-57`: the
     // `request.get_host()` branch needs `not is_server`), so a missing
     // Host falls through instead of 500ing.
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let host = host_of(&headers).unwrap_or_default();
     if endpoint_parts(storage, &scheme_of(&headers), &host, false, true).is_err() {
         return server_error();
@@ -2163,7 +2185,12 @@ async fn download_lookup(
         Some(Value::String(s)) => Filename::Name(s.clone()),
         Some(_) => return server_error(),
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(headers) else {
         return server_error();
     };
@@ -2397,7 +2424,7 @@ fn presigned_get_url(
     let disposition = disposition_value(&filename);
     // Auth params in botocore's insertion order
     // (`SigV4QueryAuth._modify_request_before_signing`).
-    let auth_params = [
+    let mut auth_params = vec![
         ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
         ("X-Amz-Credential".to_owned(), credential),
         ("X-Amz-Date".to_owned(), amz_date.clone()),
@@ -2405,8 +2432,14 @@ fn presigned_get_url(
             "X-Amz-Expires".to_owned(),
             storage.signed_url_expiration_secs.to_string(),
         ),
-        ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
     ];
+    if !storage.session_token.is_empty() {
+        auth_params.push((
+            "X-Amz-Security-Token".to_owned(),
+            storage.session_token.clone(),
+        ));
+    }
+    auth_params.push(("X-Amz-SignedHeaders".to_owned(), "host".to_owned()));
     // The canonical query sorts everything (signing input); the URL
     // keeps operation params before auth params (botocore: "The spec is
     // particular about this").
@@ -2496,6 +2529,22 @@ fn presigned_post(
         py_json_string(&credential),
         py_json_string(&amz_date),
     );
+    // NEWPIDASH-204: session token for temporary (role) credentials — must be
+    // in both the policy conditions and the returned fields, like boto3.
+    let (conditions, token_field) = if !storage.session_token.is_empty() {
+        let escaped = py_json_string(&storage.session_token);
+        let base = conditions.trim_end_matches(']');
+        let new_conditions = format!("{}, {{\"x-amz-security-token\": {}}}]", base, escaped);
+        (
+            new_conditions,
+            Some((
+                "x-amz-security-token".to_owned(),
+                storage.session_token.clone(),
+            )),
+        )
+    } else {
+        (conditions, None)
+    };
     let policy_json = format!(
         "{{\"expiration\": {}, \"conditions\": {conditions}}}",
         py_json_string(&expiration),
@@ -2531,6 +2580,9 @@ fn presigned_post(
     fields.insert("x-amz-credential".to_owned(), Value::String(credential));
     fields.insert("x-amz-date".to_owned(), Value::String(amz_date));
     fields.insert("policy".to_owned(), Value::String(policy_b64));
+    if let Some((k, v)) = token_field {
+        fields.insert(k, Value::String(v));
+    }
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
@@ -2689,6 +2741,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "access-key".to_owned(),
             secret_access_key: "secret-key".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
@@ -3160,8 +3213,16 @@ mod tests {
             coerce_uuid_or_400(Some(&Value::from(id.to_string()))).expect("str"),
             Some(id)
         );
+        // Empty string stores NULL (Django ForeignKey.get_db_prep_save:
+        // `""` → None for a UUID target) — the comment composer's
+        // new-comment grant sends "".
+        assert!(coerce_uuid_or_400(Some(&Value::from("")))
+            .expect("empty")
+            .is_none());
         // Garbage strings reject (Django `ValidationError` → 400).
         assert!(coerce_uuid_or_400(Some(&Value::from("nope"))).is_err());
+        // Whitespace is not empty: it still rejects.
+        assert!(coerce_uuid_or_400(Some(&Value::from(" "))).is_err());
         // Small ints coerce via `uuid.UUID(int=...)`.
         assert_eq!(
             coerce_uuid_or_400(Some(&Value::from(5))).expect("int"),

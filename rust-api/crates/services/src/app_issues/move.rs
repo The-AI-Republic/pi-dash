@@ -278,7 +278,7 @@ impl MoveOptions {
 pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\"";
 
 /// `agent_run` columns in `_meta` order (the `HandoffRunRow` projection).
-pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
+pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"failure_reason\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
 
 /// Locked re-fetch (`:182-184`): the source-issue fetch with
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
@@ -1276,11 +1276,18 @@ fn dumps_number(n: &serde_json::Number) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
+    // Beyond i64/u64. The workspace build unifies
+    // `serde_json/arbitrary_precision` (from pidash-api), so an integer
+    // literal keeps its exact digits here; Python ints are unbounded, so
+    // `json.dumps` echoes them verbatim — never route them through `f64`.
+    // Only float-syntax literals (`.`, `e`, `E`) take the `repr` path.
+    let token = n.to_string();
+    if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        return token;
+    }
     match n.as_f64() {
         Some(f) => dumps_float(f),
-        // Unreachable without `arbitrary_precision`: every Number is
-        // i64, u64 or f64.
-        None => n.to_string(),
+        None => token,
     }
 }
 
@@ -1664,6 +1671,7 @@ async fn render_current_instance<S: MoveStore>(
         assigned_pod: pod_s.as_deref(),
         assigned_runner: runner_s.as_deref(),
         assigned_runner_detail: runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let input = RepresentationInput {
         row: &row,
@@ -3316,6 +3324,38 @@ mod tests {
         ] {
             assert_eq!(py_dumps(&serde_json::json!(input)), expected, "{input}");
         }
+    }
+
+    #[test]
+    fn dumps_big_integers() {
+        // Python ints are unbounded: `json.dumps(IssueSerializer(issue).
+        // data, cls=DjangoJSONEncoder)` (`issue_move.py:159`) echoes the
+        // exact digits past u64/i64. The workspace build unifies
+        // `serde_json/arbitrary_precision` (from pidash-api), so the
+        // literal survives parsing and must echo verbatim
+        // (PIDASHCONV-1733) — never route it through `f64`.
+        let parse = |text: &str| {
+            let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+            py_dumps(&value)
+        };
+        assert_eq!(
+            parse(
+                r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#,
+            ),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#
+        );
+        // Float-syntax literals still take the float path (`repr`).
+        assert_eq!(
+            parse(r#"{"e": 1e19, "f": 100.00}"#),
+            r#"{"e": 1e+19, "f": 100.0}"#
+        );
+        // i64/u64 edges still echo exactly.
+        assert_eq!(
+            parse(
+                r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#,
+            ),
+            r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#
+        );
     }
 
     // -- SQL shape ----------------------------------------------------------

@@ -1087,6 +1087,18 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_prompt_documents_run_yield_without_the_ticking_clock() {
+        // A scheduler run may report its outcome (PDASHOSS01-276) but has no
+        // issue clock: the scheduler variant must not offer --stop-ticking as
+        // something that does anything, nor carry the issue-run wording.
+        let body = composed_text(recipes::KIND_SCHEDULER);
+        assert!(body.contains("pidash run yield --outcome"));
+        assert!(body.contains(r#""run_kind": "scheduler""#));
+        assert!(body.contains("`--stop-ticking` is accepted and ignored"));
+        assert!(!body.contains("the issue's ticking clock"));
+    }
+
+    #[test]
     fn waiting_on_external_applies_in_every_stage() {
         for kind in [
             recipes::KIND_CODING_TASK,

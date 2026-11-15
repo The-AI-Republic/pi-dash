@@ -1400,6 +1400,27 @@ fn project_lock_query(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::pr
         .lock_exclusive()
 }
 
+/// The transition target lookup (`State.objects.get(pk=..., project_id=...)`
+/// in `tools.py:320-345`): the live, non-triage state row in the run's
+/// project, projecting every `IssueStateView` field (`id`, `name`,
+/// `group`) so the `FromQueryResult` decode succeeds. Extracted so a
+/// unit test can pin the projection.
+fn transition_state_query(
+    target_id: Uuid,
+    project_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::states::Entity> {
+    use pidash_db::entity::states as st_entity;
+    st_entity::Entity::find()
+        .filter(st_entity::Column::Id.eq(target_id))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+        .select_only()
+        .column(st_entity::Column::Id)
+        .column(st_entity::Column::Name)
+        .column(st_entity::Column::Group)
+}
+
 /// `pidash_create_project_issue` (`tools.py:345-371`) through
 /// `Issue.save` (`db/models/issue.py:267-341`): lock the scheduler
 /// project, resolve the default/backlog state (plus the save-time
@@ -1564,6 +1585,8 @@ async fn op_create_project_issue(
     // Inert: the fire is skipped (the caller drives it post-commit).
     let fire = domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(scope.creator_id),
         moved_by_run: None,
         now,
@@ -2221,6 +2244,8 @@ async fn fire_create_transition(
         prev_state_id: None,
         current_state_id: Some(current_state_id),
         dispatch_immediate: true,
+        pod_once: false,
+
         moved_by_run: None,
         now,
         // Caller-drawn jitter (L5 quirk-5): none, like the v1 create
@@ -2410,15 +2435,8 @@ async fn op_transition_current_issue<'a>(
             }),
         );
     };
-    use pidash_db::entity::{issues as issue_entity, states as st_entity};
-    let target = st_entity::Entity::find()
-        .filter(st_entity::Column::Id.eq(target_id))
-        .filter(st_entity::Column::ProjectId.eq(scope.project_id))
-        .filter(st_entity::Column::DeletedAt.is_null())
-        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
-        .select_only()
-        .column(st_entity::Column::Id)
-        .column(st_entity::Column::Name)
+    use pidash_db::entity::issues as issue_entity;
+    let target = transition_state_query(target_id, scope.project_id)
         .into_model::<IssueStateView>()
         .one(&tx_conn(&mut tx))
         .await
@@ -2484,8 +2502,9 @@ async fn op_transition_current_issue<'a>(
     }
     // The orchestration states: `None` when stateless (or on a dangling
     // from-pointer, the `select_related` miss). The target group comes
-    // from a second read — the ported target lookup projects id+name
-    // only.
+    // from a second read — the ported target lookup projects id+name+group
+    // (decoding `IssueStateView`), and this re-read supplies the fresh
+    // orchestration view plus the TOCTOU existence check below.
     let from_state = match from_state_id {
         Some(id) => match state_view_tx(&mut tx, id).await {
             Ok(view) => view,
@@ -2628,7 +2647,7 @@ fn member_pool_stmt(creator_id: Uuid, workspace_slug: &str) -> sea_orm::sea_quer
         states as st_entity, workspaces as ws_entity,
     };
     sea_orm::sea_query::Query::select()
-        .expr_as(Expr::col(i_entity::Column::Id), "id")
+        .expr_as(Expr::col((i_entity::Entity, i_entity::Column::Id)), "id")
         .from(i_entity::Entity)
         .join(
             JoinType::LeftJoin,
@@ -2758,6 +2777,12 @@ async fn resolve_tx<C: sea_orm::ConnectionTrait>(
             .filter(i_entity::Column::SequenceId.eq(sequence));
     }
     let row = query
+        .select_only()
+        .column(i_entity::Column::Id)
+        .column(i_entity::Column::WorkspaceId)
+        .column(i_entity::Column::ProjectId)
+        .column(i_entity::Column::SequenceId)
+        .column_as(proj_entity::Column::Identifier, "identifier")
         .limit(1)
         .into_model::<ResolvedIssueRow>()
         .one(conn)
@@ -3089,7 +3114,10 @@ async fn grouped_tx(
     scope: &ToolScope,
     source: &rel::ResolvedIssue,
 ) -> Result<Value, ToolExecError> {
-    use pidash_db::entity::{issue_relations as rel_entity, issues as i_entity};
+    use pidash_db::entity::{
+        issue_relations as rel_entity, issues as i_entity, projects as proj_entity,
+        states as st_entity,
+    };
     let rows = rel_entity::Entity::find()
         .filter(
             sea_orm::sea_query::Condition::any()
@@ -3141,6 +3169,13 @@ async fn grouped_tx(
                     .into(),
             )
             .join(JoinType::InnerJoin, i_entity::Relation::Projects.def())
+            .select_only()
+            .column(i_entity::Column::Id)
+            .column(i_entity::Column::SequenceId)
+            .column(i_entity::Column::Name)
+            .column_as(proj_entity::Column::Identifier, "project_identifier")
+            .column_as(st_entity::Column::Name, "state_name")
+            .column_as(st_entity::Column::Group, "state_group")
             .into_model::<GroupedIssueRow>()
             .all(&tx_conn(&mut *tx))
             .await
@@ -3283,17 +3318,20 @@ struct GithubOpCtx {
     default_branch: Option<String>,
 }
 
-/// `_github_context` (`tools.py:516-554`): the binding load (`.get()`
-/// miss is `GitRepositoryBinding.DoesNotExist`), the verification
-/// verdict, the installation lookup, and the installation client.
-async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx, ToolExecError> {
+/// The GitHub binding lookup (`tools.py:516-554`): the live binding
+/// for the run's project joined to its repository and provider
+/// account, projecting every [`GithubBindingRow`] field so the
+/// `FromQueryResult` decode succeeds. Extracted so a unit test can
+/// pin the projection.
+fn github_binding_query(
+    project_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::git_repository_bindings::Entity> {
     use pidash_db::entity::{
         git_provider_accounts as acc_entity, git_repositories as repo_entity,
-        git_repository_bindings as bind_entity, github_app_installations as inst_entity,
+        git_repository_bindings as bind_entity,
     };
-    let db = sea_conn(&ctx.pool);
-    let row = bind_entity::Entity::find()
-        .filter(bind_entity::Column::ProjectId.eq(scope.project_id))
+    bind_entity::Entity::find()
+        .filter(bind_entity::Column::ProjectId.eq(project_id))
         .filter(bind_entity::Column::DeletedAt.is_null())
         .join(
             JoinType::InnerJoin,
@@ -3309,7 +3347,33 @@ async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx,
                 .to(acc_entity::Column::Id)
                 .into(),
         )
+        .select_only()
+        .column_as(bind_entity::Column::WorkspaceId, "binding_workspace_id")
+        .column_as(repo_entity::Column::Provider, "repo_provider")
+        .column_as(repo_entity::Column::HostUrl, "repo_host_url")
+        .column_as(repo_entity::Column::Namespace, "repo_namespace")
+        .column_as(repo_entity::Column::Name, "repo_name")
+        .column_as(repo_entity::Column::DefaultBranch, "repo_default_branch")
+        .column_as(acc_entity::Column::WorkspaceId, "account_workspace_id")
+        .column_as(acc_entity::Column::Provider, "account_provider")
+        .column_as(acc_entity::Column::HostUrl, "account_host_url")
+        .column_as(acc_entity::Column::AuthType, "account_auth_type")
+        .column_as(acc_entity::Column::Status, "account_status")
+        .column_as(acc_entity::Column::VerifiedAt, "account_verified_at")
+        .column_as(
+            acc_entity::Column::WorkspaceIntegrationId,
+            "account_workspace_integration_id",
+        )
         .limit(1)
+}
+
+/// `_github_context` (`tools.py:516-554`): the binding load (`.get()`
+/// miss is `GitRepositoryBinding.DoesNotExist`), the verification
+/// verdict, the installation lookup, and the installation client.
+async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx, ToolExecError> {
+    use pidash_db::entity::git_provider_accounts as acc_entity;
+    let db = sea_conn(&ctx.pool);
+    let row = github_binding_query(scope.project_id)
         .into_model::<GithubBindingRow>()
         .one(&db)
         .await
@@ -3338,20 +3402,26 @@ async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx,
     plan::check_github_binding(&verdict)?;
     let row_workspace_integration_id = row.account_workspace_integration_id;
     let installation_id = if let Some(integration) = row_workspace_integration_id {
-        let row = inst_entity::Entity::find()
-            .filter(inst_entity::Column::WorkspaceIntegrationId.eq(integration))
-            .filter(inst_entity::Column::SuspendedAt.is_null())
-            .filter(inst_entity::Column::VerifiedAt.is_not_null())
-            .filter(inst_entity::Column::DeletedAt.is_null())
-            .order_by_desc(inst_entity::Column::CreatedAt)
+        // `tools.py:543-549`: the workspace's installation, unsuspended
+        // and verified. On the generic table the `github_app` filters
+        // keep PAT accounts (which share the WI) out of the pick.
+        let row = acc_entity::Entity::find()
+            .filter(acc_entity::Column::WorkspaceIntegrationId.eq(Some(integration)))
+            .filter(acc_entity::Column::Provider.eq("github"))
+            .filter(acc_entity::Column::HostUrl.eq("https://github.com"))
+            .filter(acc_entity::Column::AuthType.eq("github_app"))
+            .filter(acc_entity::Column::SuspendedAt.is_null())
+            .filter(acc_entity::Column::VerifiedAt.is_not_null())
+            .filter(acc_entity::Column::DeletedAt.is_null())
+            .order_by_desc(acc_entity::Column::CreatedAt)
             .limit(1)
             .select_only()
-            .column(inst_entity::Column::InstallationId)
-            .into_tuple::<i64>()
+            .column(acc_entity::Column::ExternalAccountId)
+            .into_tuple::<String>()
             .one(&db)
             .await
             .map_err(orm_error)?;
-        row
+        row.and_then(|external_id| external_id.parse::<i64>().ok())
     } else {
         None
     };
@@ -4111,6 +4181,61 @@ mod tests {
             "lock must exclude soft-deleted projects: {sql}"
         );
         assert!(sql.contains("FOR UPDATE"), "lock takes the row lock: {sql}");
+    }
+
+    /// The transition target lookup projects every `IssueStateView`
+    /// field (`id`, `name`, `group`) in the run's project, excluding
+    /// soft-deleted and triage states — otherwise SeaORM's
+    /// `FromQueryResult` fails the decode and every transition call
+    /// ends the run `provider_error` (NEWPIDASH-173).
+    #[test]
+    fn transition_state_query_projects_issue_state_view() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = transition_state_query(Uuid::nil(), Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""states"."id", "states"."name", "states"."group""#),
+            "transition lookup must select id, name and group: {sql}"
+        );
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "lookup must exclude soft-deleted states: {sql}"
+        );
+    }
+
+    /// The GitHub binding lookup projects every `GithubBindingRow`
+    /// alias (`binding_workspace_id`, `repo_*`, `account_*`) under
+    /// `select_only()` — without them SeaORM selects only the
+    /// binding's own columns and the decode fails with
+    /// `no column found for name: binding_workspace_id`, so every
+    /// GitHub tool call errors before reaching GitHub (NEWPIDASH-187).
+    #[test]
+    fn github_binding_query_selects_binding_row_aliases() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = github_binding_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        for alias in [
+            "binding_workspace_id",
+            "repo_provider",
+            "repo_host_url",
+            "repo_namespace",
+            "repo_name",
+            "repo_default_branch",
+            "account_workspace_id",
+            "account_provider",
+            "account_host_url",
+            "account_auth_type",
+            "account_status",
+            "account_verified_at",
+            "account_workspace_integration_id",
+        ] {
+            assert!(
+                sql.contains(alias),
+                "binding lookup must select alias {alias}: {sql}"
+            );
+        }
     }
 
     /// The CPython `uuid.UUID(hex=...)` acceptance battery (probed on

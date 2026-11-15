@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::dispatch::dispatch_waiting;
 use crate::orchestration::runner_seams::{
-    complete_project_move_handoff_live, disarm_on_terminal_signal as disarm_executor,
+    complete_project_move_handoff_live, disarm_on_terminal_signal_deferred as disarm_executor,
     maybe_apply_deferred_pause_live,
 };
 use crate::runner_runs::sweeps_chat::{
@@ -175,11 +175,11 @@ impl RunnerRunsSeams for RunnerSeams {
     fn disarm_on_terminal_signal(
         &self,
         run_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
         Box::pin(async move {
             disarm_executor(&self.pool, run_id)
                 .await
-                .map(|_| ())
+                .map(|outcome| outcome.clear_run_thread_id)
                 .map_err(|error| error.to_string())
         })
     }

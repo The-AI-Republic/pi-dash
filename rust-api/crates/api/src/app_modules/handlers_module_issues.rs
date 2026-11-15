@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -91,8 +91,8 @@ use pidash_services::app_modules::tasks;
 use super::gates;
 use crate::app_issues::{
     complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
-    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
-    FilteredSet, QueryMap,
+    multi_map, order_key, page_denial, query_last, render_condition, rich_inner_aliases, shape_row,
+    Binder, Denial, FilteredSet, QueryMap,
 };
 use pidash_db::entity::{module_issues, modules, project_members, projects, workspaces};
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
@@ -100,6 +100,8 @@ use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
 };
 
+use super::handlers_modules::{is_noncanonical_uuid, proxy_segment};
+pub(crate) use crate::paginator::unquote_sort_order;
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
@@ -654,8 +656,11 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// M2M group keys LEFT-join their bridge with an
+/// `alias."deleted_at" IS NULL` guard (`GROUP_FILTER_MAPPER` in
+/// `utils/grouper.py:41-49` is Django's LEFT OUTER JOIN + `isnull`
+/// filter, so linkless rows keep the NULL group key that feeds the
+/// "None" bucket — NEWPIDASH-151).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -769,7 +774,7 @@ fn module_filtered_set(
         }
     }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     // Guest creator scoping (`issue.py:139-140`): one `WHERE` fragment
     // covers the rows and every total (flat and grouped), like Django's
@@ -778,9 +783,12 @@ fn module_filtered_set(
         let holder = binder.bind_uuid(creator);
         fragments.push(format!("issue.created_by_id = {holder}"));
     }
-    // M2M group filters scope their relation to live bridges
-    // (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`, applied by
-    // `issue_queryset_grouper` for the grouped paths).
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`. The
+    // predicate sits in WHERE over the LEFT join, so issues whose links
+    // are all soft-deleted drop out while linkless issues stay NULL (the
+    // short aliases carry no guard). Quoted so the nullable scan below
+    // sees the `IS NULL` test (cycle-handler precedent).
     for group in [group_by, sub_group_by].into_iter().flatten() {
         let alias = match group {
             "assignees__id" => "issue_assignee",
@@ -788,7 +796,7 @@ fn module_filtered_set(
             "issue_module__module_id" => "issue_module",
             _ => continue,
         };
-        fragments.push(format!("{alias}.deleted_at IS NULL"));
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
     // The scope bridge always joins (one live row per issue in scope: the
@@ -800,16 +808,22 @@ fn module_filtered_set(
     // window `__rn` differs per fanned row), inflating the window.
     let mut joins = String::from(" JOIN module_issues AS bridge ON bridge.issue_id = issue.id");
     let mut referenced = vec!["bridge"];
+    // INNER only on a plain positive reference (rich positive occurrence
+    // or positive legacy predicate); a rich `or`-only alias joins LEFT
+    // (Django LEFT-OUTERs disjuncts) and a `not`'d alias stays in
+    // `NOT EXISTS` with no join.
+    let rich_inner = rich_inner_aliases(query, tz);
     for (table, alias) in RELATION_JOINS {
         let marker = format!("\"{alias}\".");
         let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+        let legacy_positive =
+            legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
         if !used {
             continue;
         }
         referenced.push(*alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+        let inner = rich_inner.contains(alias) || legacy_positive;
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
@@ -855,7 +869,14 @@ async fn module_issue_list(
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
@@ -1093,35 +1114,6 @@ fn module_shape_map(row: &Map<String, Value>, fields: &[String]) -> Map<String, 
             module_shape_json_value(field, value, &timezone),
         );
     }
-    out
-}
-
-/// Unquote `sort_order` in serialized grouped rows: Django renders the
-/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
-/// a string for the grouping kernels (which never do math on it). The
-/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
-/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
-/// splicing the quotes is exact.
-fn unquote_sort_order(results_json: &str) -> String {
-    let mut out = String::with_capacity(results_json.len());
-    let mut rest = results_json;
-    let marker = "\"sort_order\":\"";
-    while let Some(start) = rest.find(marker) {
-        let (head, tail) = rest.split_at(start + marker.len());
-        out.push_str(&head[..head.len() - 1]);
-        match tail.find('"') {
-            Some(end) => {
-                out.push_str(&tail[..end]);
-                rest = &tail[end + 1..];
-            }
-            None => {
-                out.push_str(tail);
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
     out
 }
 
@@ -1537,8 +1529,15 @@ async fn create_module_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1615,8 +1614,15 @@ async fn create_issue_modules(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:issue_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1922,7 +1928,14 @@ async fn module_issue_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:issue_id>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;

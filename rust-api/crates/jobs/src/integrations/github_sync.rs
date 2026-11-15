@@ -175,8 +175,7 @@ use super::git_sync::{
     advisory_lock_key, completion_base_url, completion_body, completion_error_text,
     default_pod_query, default_state_query, json_truthy, next_link, parse_remote_dt,
     parse_single_id_arg, pidash_issue_url, retry_countdown_secs, safe_render, save_state_query,
-    stamp_binding_error, stamp_binding_success, strip_html_text, take_advisory_lock,
-    truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
+    strip_html_text, take_advisory_lock, truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
 };
 use crate::issue_transition::{comment_sync_transition, fire_sync_transition};
 use crate::pyformat::format_eta;
@@ -1789,6 +1788,49 @@ pub async fn sync_all_repos(pool: &PgPool) -> Result<usize, String> {
     Ok(ids.len())
 }
 
+/// Legacy settlement stamps (`github_sync_task.py:322-335`): success
+/// stamps both outcome columns, faults write only `last_sync_error`
+/// (`save(update_fields=[...])` — no `updated_at` touch either way).
+/// These UPDATE `github_repository_syncs` (the legacy table), not
+/// `git_repository_bindings`: reusing the `git_sync` binding helpers
+/// here silently settles into the wrong table (NEWPIDASH-164).
+pub async fn stamp_repo_success(
+    db: &impl ConnectionTrait,
+    sync_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sea_orm::DbErr> {
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    github_repository_syncs::Entity::update_many()
+        .col_expr(
+            github_repository_syncs::Column::LastSyncedAt,
+            sea_orm::sea_query::Expr::value(stamped),
+        )
+        .col_expr(
+            github_repository_syncs::Column::LastSyncError,
+            sea_orm::sea_query::Expr::value(""),
+        )
+        .filter(github_repository_syncs::Column::Id.eq(sync_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn stamp_repo_error(
+    db: &impl ConnectionTrait,
+    sync_id: Uuid,
+    text: &str,
+) -> Result<(), sea_orm::DbErr> {
+    github_repository_syncs::Entity::update_many()
+        .col_expr(
+            github_repository_syncs::Column::LastSyncError,
+            sea_orm::sea_query::Expr::value(text),
+        )
+        .filter(github_repository_syncs::Column::Id.eq(sync_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 /// Full-scan sync of one repo (`sync_one_repo`,
 /// `github_sync_task.py:274-335`): unknown ids and disabled switches ack
 /// silently; missing credentials and provider 4xx faults record and ack;
@@ -1834,7 +1876,7 @@ pub async fn sync_one_repo(
     if scan.token.is_empty() {
         // `decrypt_data` fails closed to `""`, which takes the
         // missing-credential path (`github_sync_task.py:287-290`).
-        if let Err(error) = stamp_binding_error(&db, scan.sync_id, MISSING_TOKEN_ERROR).await {
+        if let Err(error) = stamp_repo_error(&db, scan.sync_id, MISSING_TOKEN_ERROR).await {
             return Ok(Verdict::Fail {
                 error: format!("{SYNC_ONE_REPO_TASK}: fault record failed: {error}"),
             });
@@ -1880,7 +1922,7 @@ pub async fn sync_one_repo(
     // like any error outside the guarded `try`.
     match run_scan(pool, transports, &scan, &now, hook).await {
         Ok(()) => {
-            if let Err(error) = stamp_binding_success(&db, scan.sync_id, now).await {
+            if let Err(error) = stamp_repo_success(&db, scan.sync_id, now).await {
                 return Ok(Verdict::Fail {
                     error: format!("{SYNC_ONE_REPO_TASK}: success stamp failed: {error}"),
                 });
@@ -1889,7 +1931,7 @@ pub async fn sync_one_repo(
         }
         Err(ScanFault::Recordable(error)) => {
             let text = scan_error_text(&error);
-            if let Err(error) = stamp_binding_error(&db, scan.sync_id, &text).await {
+            if let Err(error) = stamp_repo_error(&db, scan.sync_id, &text).await {
                 return Ok(Verdict::Fail {
                     error: format!("{SYNC_ONE_REPO_TASK}: fault record failed: {error}"),
                 });
@@ -1898,7 +1940,7 @@ pub async fn sync_one_repo(
         }
         Err(ScanFault::Unexpected(message)) => {
             let text = truncate_chars(&message, 1000);
-            if let Err(error) = stamp_binding_error(&db, scan.sync_id, &text).await {
+            if let Err(error) = stamp_repo_error(&db, scan.sync_id, &text).await {
                 return Ok(Verdict::Fail {
                     error: format!("{SYNC_ONE_REPO_TASK}: fault record failed: {error}"),
                 });
