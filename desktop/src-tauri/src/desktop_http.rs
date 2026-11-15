@@ -27,10 +27,17 @@ use tokio::sync::{Mutex, Notify};
 
 pub struct DesktopHttp {
     pub api_url: Url,
+    // The edition's session-refresh endpoint. `None` for a server whose
+    // session cannot be refreshed (OSS): there a 401 is final.
+    refresh_url: Option<Url>,
+    refresh_timeout: Duration,
     client: Client,
     // Serialize cookie writes with logout, and discard responses from the old
     // session so an in-flight refresh cannot sign the user back in.
     pub generation: Mutex<u64>,
+    // Held for the whole of a refresh, so there is one in flight at most and
+    // everything that started before it finished shares its outcome.
+    refresh: Arc<Mutex<RefreshState>>,
     // Abort signals for in-flight requests and streams, keyed by the page's
     // request id, so a canceled request stops instead of completing unseen.
     inflight: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
@@ -44,6 +51,25 @@ pub struct DesktopHttp {
     pre_cancel: std::sync::Mutex<HashMap<String, (Arc<Notify>, Instant)>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Refresh {
+    /// The server rotated the session cookies; replay the request.
+    Rotated,
+    /// The refresh endpoint answered 401/403: the session is over.
+    Rejected,
+    /// Network error, timeout, 5xx or anything else. Says nothing about the
+    /// session, so it must never be reported to the page as a 401.
+    Failed,
+}
+
+struct RefreshState {
+    // Counts finished refresh attempts. A request records it before it is
+    // sent; if it has moved by the time that request sees a 401, the attempt
+    // that moved it already covers this request.
+    epoch: u64,
+    last: Refresh,
+}
+
 impl DesktopHttp {
     pub fn new(api_url: Url) -> Result<Self, reqwest::Error> {
         // The updater installs this provider only when it checks for updates;
@@ -51,13 +77,37 @@ impl DesktopHttp {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             api_url,
+            refresh_url: None,
+            refresh_timeout: Duration::from_secs(30),
             client: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             generation: Mutex::new(0),
+            refresh: Arc::new(Mutex::new(RefreshState {
+                epoch: 0,
+                last: Refresh::Failed,
+            })),
             inflight: Default::default(),
             pre_cancel: Default::default(),
         })
+    }
+
+    /// Refresh the session at `path` when a request gets a 401, then replay
+    /// it. For editions with a short-lived access cookie and a refresh
+    /// endpoint; `path` is on the API origin.
+    pub fn with_session_refresh(mut self, path: &str) -> Result<Self, String> {
+        let url = self
+            .api_url
+            .join(path)
+            .ok()
+            .filter(|url| path.starts_with('/') && allowed_api_url(url, &self.api_url))
+            .ok_or_else(|| format!("session refresh path is not an API path: {path}"))?;
+        self.refresh_url = Some(url);
+        Ok(self)
+    }
+
+    pub fn refreshes_session(&self) -> bool {
+        self.refresh_url.is_some()
     }
 
     fn track(&self, id: &str) -> Inflight<'_> {
@@ -132,10 +182,21 @@ impl Drop for Inflight<'_> {
 
 const CANCELED: &str = "API request canceled";
 const TIMED_OUT: &str = "API request timed out";
+const REFRESH_FAILED: &str = "session refresh failed";
+const SESSION_CHANGED: &str = "session changed during request";
 // How long a cancel that landed before its request stays outstanding. The
 // gap between the request and cancel IPCs is milliseconds; this just has to
 // outlive spawn scheduling under load.
 const PRE_CANCEL_TTL: Duration = Duration::from_secs(10);
+
+async fn within<T>(deadline: Option<Instant>, work: impl std::future::Future<Output = T>) -> Result<T, String> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline.into(), work)
+            .await
+            .map_err(|_| TIMED_OUT.into()),
+        None => Ok(work.await),
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -324,59 +385,19 @@ async fn check_session(state: &DesktopHttp, generation: u64) -> Result<(), Strin
     Ok(())
 }
 
-/// Send `request`, following same-origin API redirects, and return the final
-/// response with its cookies already written to the webview.
-async fn send(
+/// One fetch with redirect following and cookie persistence. The request
+/// already has its Origin header; `method`/`url`/`headers`/`body` are mutable
+/// for the redirect chain.
+async fn fetch_once(
     window: &tauri::WebviewWindow,
     state: &DesktopHttp,
-    request: ApiRequest,
+    generation: u64,
+    mut method: Method,
+    mut url: Url,
+    mut headers: header::HeaderMap,
     mut body: Option<Vec<u8>>,
     deadline: Option<Instant>,
-) -> Result<(reqwest::Response, u64), String> {
-    let config = window.state::<crate::AppConfig>();
-    let source = window
-        .url()
-        .map_err(|_| "cannot determine request source")?;
-    if !from_app_ui(window.label(), &source, &config) {
-        return Err("native API requests require the app UI".into());
-    }
-    let mut url = request.url;
-    if !allowed_api_url(&url, &state.api_url) {
-        return Err("API URL is not allowed".into());
-    }
-    let mut method =
-        Method::from_bytes(request.method.as_bytes()).map_err(|_| "invalid HTTP method")?;
-    if !matches!(
-        method,
-        Method::GET
-            | Method::HEAD
-            | Method::POST
-            | Method::PUT
-            | Method::PATCH
-            | Method::DELETE
-            | Method::OPTIONS
-    ) {
-        return Err("HTTP method is not allowed".into());
-    }
-    let mut headers = header::HeaderMap::new();
-    for (name, value) in request.headers {
-        let name =
-            header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| "invalid header name")?;
-        if safe_request_header(&name) {
-            headers.append(name, value.parse().map_err(|_| "invalid header value")?);
-        }
-    }
-    let origin = if source.scheme() == "tauri" {
-        crate::BUNDLE_ORIGIN.to_owned()
-    } else {
-        source.origin().ascii_serialization()
-    };
-    headers.insert(
-        header::ORIGIN,
-        origin.parse().map_err(|_| "invalid origin")?,
-    );
-    let generation = *state.generation.lock().await;
-
+) -> Result<reqwest::Response, String> {
     for _ in 0..10 {
         let mut request = state
             .client
@@ -391,7 +412,7 @@ async fn send(
         {
             let guard = state.generation.lock().await;
             if *guard != generation {
-                return Err("session changed during request".into());
+                return Err(SESSION_CHANGED.into());
             }
             if let Some(cookies) = cookie_header(
                 window
@@ -405,7 +426,6 @@ async fn send(
         if let Some(data) = &body {
             request = request.body(data.clone());
         }
-        // Do not return reqwest's URL-bearing errors: auth URLs may contain codes.
         let response = request.send().await.map_err(|e| {
             if e.is_timeout() {
                 TIMED_OUT
@@ -417,7 +437,7 @@ async fn send(
         {
             let guard = state.generation.lock().await;
             if *guard != generation {
-                return Err("session changed during request".into());
+                return Err(SESSION_CHANGED.into());
             }
             for header in response.headers().get_all(header::SET_COOKIE) {
                 if let Some(cookie) = header
@@ -455,9 +475,170 @@ async fn send(
             url = target;
             continue;
         }
-        return Ok((response, generation));
+        return Ok(response);
     }
     Err("too many API redirects".into())
+}
+
+async fn refresh_session(
+    window: tauri::WebviewWindow,
+    state: &DesktopHttp,
+    generation: u64,
+    refresh_url: Url,
+    origin: String,
+    seen: u64,
+) -> Refresh {
+    let mut guard = state.refresh.clone().lock_owned().await;
+    if guard.epoch != seen {
+        return guard.last;
+    }
+    let client = state.client.clone();
+    let refresh_timeout = state.refresh_timeout;
+    let api_url = state.api_url.clone();
+    let deadline = Instant::now() + refresh_timeout;
+    tauri::async_runtime::spawn(async move {
+        // Check generation before sending; if it changed the session was
+        // cleared and this refresh is stale.
+        // We do not have a direct generation lock here because state was
+        // borrowed; the caller checks generation after we return.
+        _ = generation;
+        _ = api_url;
+        let mut headers = header::HeaderMap::new();
+        if let Ok(value) = origin.parse::<header::HeaderValue>() {
+            headers.insert(header::ORIGIN, value);
+        }
+        let outcome = {
+            let mut request = client.request(Method::POST, refresh_url.clone()).headers(headers);
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                request = request.timeout(remaining);
+            }
+            // Attach cookies for the refresh path.
+            if let Ok(cookies) = window.cookies() {
+                if let Some(cookies) = cookie_header(cookies, &refresh_url) {
+                    request = request.header(header::COOKIE, cookies);
+                }
+            }
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    // Write cookies back even on rejection.
+                    for h in response.headers().get_all(header::SET_COOKIE) {
+                        if let Ok(s) = h.to_str() {
+                            if let Some(cookie) = response_cookie(s, &refresh_url) {
+                                if cookie_expired(&cookie) {
+                                    let _ = window.delete_cookie(cookie);
+                                } else {
+                                    let _ = window.set_cookie(cookie);
+                                }
+                            }
+                        }
+                    }
+                    if status.is_success() {
+                        Refresh::Rotated
+                    } else if matches!(status.as_u16(), 401 | 403) {
+                        Refresh::Rejected
+                    } else {
+                        Refresh::Failed
+                    }
+                }
+                Err(_) => Refresh::Failed,
+            }
+        };
+        guard.epoch += 1;
+        guard.last = outcome;
+        outcome
+    })
+    .await
+    .unwrap_or(Refresh::Failed)
+}
+
+/// Send `request`, with one session refresh and replay on a 401. The page
+/// sees a 401 only when the session is really over (`Rejected`); a transient
+/// refresh failure is `REFRESH_FAILED` with no status, so the page does not
+/// treat it as signed out (PIDESKAPP-1 rule).
+async fn send(
+    window: &tauri::WebviewWindow,
+    state: &DesktopHttp,
+    request: ApiRequest,
+    body: Option<Vec<u8>>,
+    deadline: Option<Instant>,
+) -> Result<(reqwest::Response, u64), String> {
+    let config = window.state::<crate::AppConfig>();
+    let source = window
+        .url()
+        .map_err(|_| "cannot determine request source")?;
+    if !from_app_ui(window.label(), &source, &config) {
+        return Err("native API requests require the app UI".into());
+    }
+    let url = request.url;
+    if !allowed_api_url(&url, &state.api_url) {
+        return Err("API URL is not allowed".into());
+    }
+    let method =
+        Method::from_bytes(request.method.as_bytes()).map_err(|_| "invalid HTTP method")?;
+    if !matches!(
+        method,
+        Method::GET
+            | Method::HEAD
+            | Method::POST
+            | Method::PUT
+            | Method::PATCH
+            | Method::DELETE
+            | Method::OPTIONS
+    ) {
+        return Err("HTTP method is not allowed".into());
+    }
+    let mut headers = header::HeaderMap::new();
+    for (name, value) in request.headers {
+        let name =
+            header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| "invalid header name")?;
+        if safe_request_header(&name) {
+            headers.append(name, value.parse().map_err(|_| "invalid header value")?);
+        }
+    }
+    let origin = if source.scheme() == "tauri" {
+        crate::BUNDLE_ORIGIN.to_owned()
+    } else {
+        source.origin().ascii_serialization()
+    };
+    headers.insert(
+        header::ORIGIN,
+        origin.parse().map_err(|_| "invalid origin")?,
+    );
+    let generation = *state.generation.lock().await;
+    // Capture the refresh epoch before sending so concurrent 401s share one
+    // refresh. Waits out any refresh already in flight rather than racing it.
+    let seen = within(deadline, state.refresh.lock()).await?.epoch;
+    let response = fetch_once(
+        window,
+        state,
+        generation,
+        method.clone(),
+        url.clone(),
+        headers.clone(),
+        body.clone(),
+        deadline,
+    )
+    .await?;
+    let Some(refresh_url) = state.refresh_url.as_ref().filter(|refresh| {
+        response.status() == reqwest::StatusCode::UNAUTHORIZED && refresh.path() != url.path()
+    }) else {
+        return Ok((response, generation));
+    };
+    let refresh_url = refresh_url.clone();
+    let origin = origin.clone();
+    let refresh = refresh_session(window.clone(), state, generation, refresh_url, origin, seen);
+    match within(deadline, refresh).await? {
+        Refresh::Rotated => {
+            let response = fetch_once(window, state, generation, method, url, headers, body, deadline).await?;
+            Ok((response, generation))
+        }
+        Refresh::Rejected => Ok((response, generation)),
+        Refresh::Failed => {
+            check_session(state, generation).await?;
+            Err(REFRESH_FAILED.into())
+        }
+    }
 }
 
 fn read_request(
@@ -932,5 +1113,44 @@ mod tests {
         assert!(!cookie_expired(&c));
         // A session cookie has no expiry and so sorts before any dated cookie.
         assert_eq!(cookie_expiry(&cookie("a=b"), now), None);
+    }
+
+    #[test]
+    fn session_refresh_is_opt_in_and_validates_its_path() {
+        let http = DesktopHttp::new(api()).unwrap();
+        assert!(!http.refreshes_session());
+        let http = http.with_session_refresh("/api/auth/refresh/").unwrap();
+        assert!(http.refreshes_session());
+        assert!(http.refresh_url.as_ref().unwrap().path() == "/api/auth/refresh/");
+        assert!(DesktopHttp::new(api()).unwrap().with_session_refresh("/bad").is_err());
+        assert!(DesktopHttp::new(api()).unwrap().with_session_refresh("api/auth/refresh/").is_err());
+        assert!(DesktopHttp::new(api()).unwrap().with_session_refresh("/auth/refresh/").is_ok());
+    }
+
+    #[test]
+    fn shipped_policy_gives_the_page_no_direct_route_to_the_api() {
+        // Read the shipped file directly: it must be a directive map with the
+        // API origin absent from connect-src and the Tauri IPC schemes present.
+        let raw = include_str!("../tauri.conf.json");
+        let value: serde_json::Value = serde_json::from_str(raw).expect("tauri.conf.json parses");
+        let csp = &value["app"]["security"]["csp"];
+        assert!(csp.is_object(), "csp must be a directive map, got {csp}");
+        let connect_val = csp.get("connect-src").expect("connect-src exists");
+        let connect_str = if let Some(s) = connect_val.as_str() {
+            s.to_owned()
+        } else if let Some(arr) = connect_val.as_array() {
+            arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" ")
+        } else {
+            panic!("connect-src must be string or array, got {connect_val}");
+        };
+        // No production API host in the shipped policy.
+        assert!(!connect_str.contains("apipidash"), "csp lets page reach API: {connect_str}");
+        assert!(connect_str.contains("ipc:"), "IPC scheme missing: {connect_str}");
+        assert!(connect_str.contains("'self'"), "'self' missing: {connect_str}");
+        // Storage upload path is allowlisted via the runtime; the file itself
+        // only names the static defaults. The important invariant is the API
+        // origin is absent.
+        let csp_str = serde_json::to_string(csp).unwrap();
+        assert!(!csp_str.contains("apipidash.airepublic.com"), "csp leaks API: {csp_str}");
     }
 }

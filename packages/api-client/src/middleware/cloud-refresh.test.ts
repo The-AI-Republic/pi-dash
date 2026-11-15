@@ -152,4 +152,42 @@ describe("createCloudRefreshMiddleware", () => {
     expect(response.status).toBe(401);
     expect(next).toHaveBeenCalledTimes(1);
   });
+
+  it("stands down when the desktop binary already refreshed in Rust", async () => {
+    vi.stubGlobal("window", { __PIDASH_NATIVE_SESSION__: { refresh: true, strict: true } });
+    try {
+      const next = vi.fn(async (_request: MiddlewareContext) => answer(401, "https://api.test/api/issues/"));
+      const middleware = createCloudRefreshMiddleware();
+      const response = await middleware(call("https://api.test/api/issues/"), next as Next);
+      // A 401 from Rust is final (session dead): the middleware must not run a
+      // second rotation, and must hand the 401 to the outer expiry layer.
+      expect(response.status).toBe(401);
+      expect(next).toHaveBeenCalledTimes(1);
+      const seen = next.mock.calls[0]?.[0] as MiddlewareContext;
+      expect(seen.url).toBe("https://api.test/api/issues/");
+      expect(seen.url).not.toContain(CLOUD_REFRESH_PATH);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still rotates when the desktop binary does not advertise native refresh", async () => {
+    vi.stubGlobal("window", { __PIDASH_NATIVE_SESSION__: { refresh: false, strict: true } });
+    try {
+      const seen: MiddlewareContext[] = [];
+      const next = vi.fn(async (request: MiddlewareContext) => {
+        seen.push(request);
+        if (request.url.endsWith(CLOUD_REFRESH_PATH)) return answer(200, request.url);
+        return seen.filter((e) => !e.url.endsWith(CLOUD_REFRESH_PATH)).length > 1
+          ? answer(200, request.url)
+          : answer(401, request.url);
+      });
+      const middleware = createCloudRefreshMiddleware();
+      const response = await middleware(call("https://api.test/api/issues/"), next as Next);
+      expect(response.status).toBe(200);
+      expect(seen).toHaveLength(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
