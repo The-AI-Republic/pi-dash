@@ -647,16 +647,15 @@ class Runner:
             rendered_pins = []
             for pin in self._cell_pins:
                 table, issue, match, column, dj_value, rs_value = pin
-                try:
-                    rendered_pins.append((
-                        table, issue,
-                        session_model.render_template(dict(match), gap_ctx),
-                        column,
-                        session_model.render_template(dj_value, gap_ctx),
-                        session_model.render_template(rs_value, gap_ctx),
-                    ))
-                except KeyError:
-                    continue
+                # Literal-preserving render: pin values carry normalised
+                # {row:<table>} stubs strict formatting would choke on.
+                rendered_pins.append((
+                    table, issue,
+                    session_model.render_pin_node(dict(match), gap_ctx),
+                    column,
+                    session_model.render_pin_node(dj_value, gap_ctx),
+                    session_model.render_pin_node(rs_value, gap_ctx),
+                ))
             ctx.cell_diffs = rendered_pins
         dj_ctx = _side_ctx(0)
 
@@ -692,6 +691,7 @@ class Runner:
             absent,
             req.known_job_shapes,
             self._gap_ctx(sess, captures),
+            req.known_django_extra_jobs,
         )
         if error is not None:
             raise Divergence(f"{label}: {error}")

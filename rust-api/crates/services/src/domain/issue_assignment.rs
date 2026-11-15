@@ -330,17 +330,26 @@ pub async fn check_assignment_code(
     Ok(("", ""))
 }
 
+/// E8 blocking statuses: `NON_TERMINAL_STATUSES` minus `QUEUED` and
+/// `PAUSED_AWAITING_INPUT`. Mirrors Django
+/// `apps/api/pi_dash/runner/services/issue_assignment.py:184-197` and `:524-541`.
+pub fn e8_blocking_statuses() -> Vec<&'static str> {
+    crate::runner_sessions::guards::NON_TERMINAL_STATUSES
+        .iter()
+        .filter(|s| **s != AgentRunStatus::Queued && **s != AgentRunStatus::PausedAwaitingInput)
+        .map(|s| s.value())
+        .collect()
+}
+
 /// True when the issue has a run in a non-terminal status other than
-/// QUEUED / PAUSED_AWAITING_INPUT (the E8 blocking set). `paused_awaiting_input`
-/// is not an `AgentRunStatus` member in Rust types; it is read by value.
+/// QUEUED / PAUSED_AWAITING_INPUT (the E8 blocking set).
 pub async fn has_blocking_run(
     db: &impl ConnectionTrait,
     issue_id: Uuid,
 ) -> Result<bool, sea_orm::DbErr> {
-    let blocking = crate::runner_sessions::guards::NON_TERMINAL_STATUSES
-        .iter()
-        .filter(|s| **s != AgentRunStatus::Queued)
-        .map(|s| s.value().to_owned())
+    let blocking = e8_blocking_statuses()
+        .into_iter()
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     let found = agent_run::Entity::find()
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
@@ -2406,6 +2415,14 @@ async fn fail_queued_run(
         status: sea_orm::Set(AgentRunStatus::Failed.value().to_owned()),
         error_details: sea_orm::Set(details),
         ended_at: sea_orm::Set(Some(now.into())),
+        // `finalize_agent_run`'s safety net (PDASHOSS01-183): every FAILED
+        // row carries a canonical `failure_reason`, classified from the
+        // cloud-side error + code like the Django writers these mirror.
+        failure_reason: sea_orm::Set(
+            pidash_types::runner_runs::classify_failure(error, "", error_code)
+                .value()
+                .to_owned(),
+        ),
         ..Default::default()
     };
     if let Some(payload) = done_payload {
@@ -3055,6 +3072,24 @@ mod tests {
             merged_into_id: None,
             merge_result: serde_json::json!({}),
         }
+    }
+
+    #[test]
+    fn e8_blocking_statuses_matches_django() {
+        // Django apps/api/pi_dash/runner/services/issue_assignment.py:184-197
+        // and :524-541: blocking = NON_TERMINAL minus {QUEUED, PAUSED_AWAITING_INPUT}.
+        // The Django list is pinned in NON_TERMINAL order.
+        assert_eq!(
+            super::e8_blocking_statuses(),
+            vec![
+                "assigned",
+                "waiting_for_worktree",
+                "running",
+                "cancel_requested",
+                "awaiting_approval",
+                "awaiting_reauth",
+            ]
+        );
     }
 
     #[test]

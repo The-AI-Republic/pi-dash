@@ -49,7 +49,7 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 ## FX-OPENAPI-03 annotation-vocab inventory
 
-- `FX-OPENAPI-03.vocab.json` — `pi_dash/utils/openapi/parameters.py:17-607`
+- `FX-OPENAPI-03.vocab.json` — `pi_dash/utils/openapi/parameters.py:17-610`
   (38 `OpenApiParameter` constants: 18 path / 20 query; UUID 16, STR 18,
   BOOL 1, INT 3), `responses.py:17-490` (39 `OpenApiResponse` constants +
   `create_paginated_response` `:358-405`: 12-key envelope shape and example

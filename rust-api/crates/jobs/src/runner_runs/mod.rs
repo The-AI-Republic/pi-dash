@@ -9,6 +9,8 @@
 //!   PIDASHCONV-540).
 //! * [`offline_recovery`] — the `70d684af` offline-runner recovery
 //!   pair (PIDASHCONV-1063, stage 8 drift).
+//! * [`unsatisfiable_pins`] — the unsatisfiable-pin recovery beat task
+//!   (PDASHOSS01-233).
 //!
 //! Beat entries stay Django-owned (F-09 transcription already covers the
 //! schedule); this layer ports task bodies only. Like the mail tasks,
@@ -20,6 +22,7 @@ pub mod engine_pause;
 pub mod offline_recovery;
 pub mod sweeps_chat;
 pub mod sweeps_runs;
+pub mod unsatisfiable_pins;
 
 pub use engine_pause::{register_engine_pause_tasks, PAUSE_ENGINES_TASK};
 pub use offline_recovery::{
@@ -35,11 +38,15 @@ pub use sweeps_runs::{
     register_sweeps_runs_tasks, EXPIRE_TASK, MARK_OFFLINE_TASK, SWEEP_IDLE_TASK, SWEEP_STALE_TASK,
     SWEEP_STREAMS_TASK,
 };
+pub use unsatisfiable_pins::{
+    register_unsatisfiable_pins_tasks, RECONCILE_UNSATISFIABLE_PINS_TASK,
+};
 
 /// Every Celery task name this domain owns (L6a + L6b + the `70d684af`
 /// offline-recovery pair + the engine-credential expiry sweep + the
-/// dedicated-runner sweep pair, in `tasks.py` order).
-pub const TASK_NAMES: [&str; 16] = [
+/// dedicated-runner sweep pair + the unsatisfiable-pin task, in
+/// `tasks.py` order).
+pub const TASK_NAMES: [&str; 17] = [
     EXPIRE_TASK,
     MARK_OFFLINE_TASK,
     PAUSE_ENGINES_TASK,
@@ -47,6 +54,7 @@ pub const TASK_NAMES: [&str; 16] = [
     FAIL_RUNS_TASK,
     SWEEP_IDLE_TASK,
     SWEEP_STALE_TASK,
+    RECONCILE_UNSATISFIABLE_PINS_TASK,
     SWEEP_STREAMS_TASK,
     SWEEP_RUN_MESSAGE_DEDUPE_TASK,
     SWEEP_CHAT_MESSAGE_DEDUPE_TASK,

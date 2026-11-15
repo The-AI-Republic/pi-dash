@@ -838,6 +838,26 @@ describe("IssuePeek modes", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
     expect(await screen.findByRole("complementary", { name: "Properties" })).toBeInTheDocument();
   });
+
+  it("places Properties above Activity in narrow layout (NEWPIDASH-233)", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const user = userEvent.setup();
+    renderPeek({ details: {} });
+    const properties = await screen.findByRole("region", { name: "Properties" });
+    const activity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(properties.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    await user.click(screen.getByRole("button", { name: "Display mode" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
+    const fullLayout = await screen.findByTestId("peek-full-layout");
+    expect(fullLayout).toHaveStyle({ gridTemplateAreas: '"main" "sidebar" "activity"' });
+    const fullProperties = screen.getByRole("complementary", { name: "Properties" });
+    const fullActivity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(fullProperties.compareDocumentPosition(fullActivity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
 });
 
 describe("IssuePeek close", () => {

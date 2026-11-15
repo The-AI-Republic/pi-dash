@@ -63,6 +63,7 @@ pub mod offline_recovery;
 pub mod pod_match;
 pub mod pubsub;
 pub mod session_service;
+pub mod unsatisfiable_pins;
 pub mod usage;
 
 pub use drain::{

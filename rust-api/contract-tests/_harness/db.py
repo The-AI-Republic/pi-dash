@@ -1202,7 +1202,7 @@ def _utcnow_iso() -> str:
 
 _TABLE_DEFAULTS: dict[str, dict[str, object]] = {
     "projects": {"dedicated_runner_lost_action": "fail_to_backlog"},
-    "agent_run": {"pin_kind": "locality"},
+    "agent_run": {"pin_kind": "locality", "failure_reason": ""},
 }
 
 

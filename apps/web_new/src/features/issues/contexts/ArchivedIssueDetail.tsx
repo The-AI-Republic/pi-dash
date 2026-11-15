@@ -8,7 +8,8 @@
 // quick-action menu, and the shared detail composition with every write
 // surface locked. The body reads the archive-scoped detail once; a
 // missing record shows the shared not-found state with a way back to
-// the live list.
+// the live list. Narrow stacking orders Properties between the
+// description and comments, matching the live detail (NEWPIDASH-233).
 
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -17,6 +18,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useDocumentHead } from "../../../shared/shell/document.js";
+import { useNarrowViewport } from "../../../shared/shell/narrowViewport.js";
 import { ArchivesDetailFrame } from "../../archives/index.js";
 import { useProjectRow } from "../../auth/index.js";
 import { CommentThread } from "../comments/CommentThread.js";
@@ -94,6 +96,7 @@ export function ArchivedIssueDetail({
 }: ArchivedIssueDetailProps): React.ReactElement {
   const detail = useQuery(archivedIssueQueryOptions(getAppClient(), workspaceSlug, projectId, issueId));
   const project = useProjectRow(workspaceSlug, projectId);
+  const narrow = useNarrowViewport();
   const record = detail.data ?? null;
   const identifier = project.data?.identifier ?? null;
   // The short key needs the loaded record; until then the trail ends at
@@ -103,6 +106,19 @@ export function ArchivedIssueDetail({
   // (parity/specs/archives.md §1.4); the key is absent until it loads.
   const title = crumb === undefined || record === null ? "Archived work item" : `${crumb} ${record.name}`;
   useDocumentHead({ title, robots: "noindex, nofollow" });
+
+  const gridStyle: React.CSSProperties = narrow
+    ? {
+        gridTemplateAreas: '"main" "sidebar" "activity"',
+        gridTemplateColumns: "minmax(0,1fr)",
+        gap: "var(--space-8)",
+      }
+    : {
+        gridTemplateAreas: '"main sidebar" "activity sidebar"',
+        gridTemplateColumns: "minmax(0,1fr) 20rem",
+        rowGap: "var(--space-6)",
+        columnGap: "var(--space-8)",
+      };
 
   return (
     <ArchivesDetailFrame
@@ -157,25 +173,20 @@ export function ArchivedIssueDetail({
               projectIdentifier={identifier ?? ""}
             />
           </div>
-          <div className="flex min-w-0 flex-col gap-(--space-8) md:flex-row">
-            <DetailMainColumn
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              issue={archivedIssueForDetail(record, null)}
-              editable={false}
-              activity={
-                <CommentThread
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  issueId={record.id}
-                  archived
-                  published={false}
-                  assigneeIds={[]}
-                  memberRole={project.data?.member_role ?? null}
-                />
-              }
-            />
-            <section aria-label="Properties" className="flex min-w-0 flex-col gap-(--space-4) md:w-80 md:shrink-0">
+          <div data-testid="archived-detail-layout" className="grid gap-(--space-8)" style={gridStyle}>
+            <div className="min-w-0" style={{ gridArea: "main" }}>
+              <DetailMainColumn
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                issue={archivedIssueForDetail(record, null)}
+                editable={false}
+              />
+            </div>
+            <section
+              aria-label="Properties"
+              className="flex min-w-0 flex-col gap-(--space-4) md:w-80 md:shrink-0"
+              style={{ gridArea: "sidebar" }}
+            >
               <p className="text-meta font-medium text-(--text-muted)">Properties</p>
               <IssuePropertiesSidebar
                 workspaceSlug={workspaceSlug}
@@ -184,6 +195,17 @@ export function ArchivedIssueDetail({
                 editable={false}
               />
             </section>
+            <div data-slot="activity" className="min-w-0" style={{ gridArea: "activity" }}>
+              <CommentThread
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                issueId={record.id}
+                archived
+                published={false}
+                assigneeIds={[]}
+                memberRole={project.data?.member_role ?? null}
+              />
+            </div>
           </div>
         </div>
       )}

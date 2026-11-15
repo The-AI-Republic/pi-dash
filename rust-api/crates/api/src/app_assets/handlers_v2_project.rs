@@ -1152,7 +1152,12 @@ async fn post_project_asset(
         issue_display.as_deref(),
         &asset_id,
     );
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
@@ -1416,7 +1421,12 @@ async fn get_project_asset(
         Some(Value::String(s)) => Filename::Name(s.clone()),
         Some(_) => return server_error(),
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(&headers) else {
         return server_error();
     };
@@ -1871,7 +1881,12 @@ async fn post_duplicate_asset(
     // client never reads the request Host (`storage.py:50-57`: the
     // `request.get_host()` branch needs `not is_server`), so a missing
     // Host falls through instead of 500ing.
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let host = host_of(&headers).unwrap_or_default();
     if endpoint_parts(storage, &scheme_of(&headers), &host, false, true).is_err() {
         return server_error();
@@ -2170,7 +2185,12 @@ async fn download_lookup(
         Some(Value::String(s)) => Filename::Name(s.clone()),
         Some(_) => return server_error(),
     };
-    let storage = &state.settings().storage;
+    let storage_owned =
+        match pidash_storage::resolve_storage_settings(&state.settings().storage).await {
+            Ok(s) => s,
+            Err(_) => return server_error(),
+        };
+    let storage = &storage_owned;
     let Some(host) = host_of(headers) else {
         return server_error();
     };
@@ -2404,7 +2424,7 @@ fn presigned_get_url(
     let disposition = disposition_value(&filename);
     // Auth params in botocore's insertion order
     // (`SigV4QueryAuth._modify_request_before_signing`).
-    let auth_params = [
+    let mut auth_params = vec![
         ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
         ("X-Amz-Credential".to_owned(), credential),
         ("X-Amz-Date".to_owned(), amz_date.clone()),
@@ -2412,8 +2432,14 @@ fn presigned_get_url(
             "X-Amz-Expires".to_owned(),
             storage.signed_url_expiration_secs.to_string(),
         ),
-        ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
     ];
+    if !storage.session_token.is_empty() {
+        auth_params.push((
+            "X-Amz-Security-Token".to_owned(),
+            storage.session_token.clone(),
+        ));
+    }
+    auth_params.push(("X-Amz-SignedHeaders".to_owned(), "host".to_owned()));
     // The canonical query sorts everything (signing input); the URL
     // keeps operation params before auth params (botocore: "The spec is
     // particular about this").
@@ -2503,6 +2529,22 @@ fn presigned_post(
         py_json_string(&credential),
         py_json_string(&amz_date),
     );
+    // NEWPIDASH-204: session token for temporary (role) credentials — must be
+    // in both the policy conditions and the returned fields, like boto3.
+    let (conditions, token_field) = if !storage.session_token.is_empty() {
+        let escaped = py_json_string(&storage.session_token);
+        let base = conditions.trim_end_matches(']');
+        let new_conditions = format!("{}, {{\"x-amz-security-token\": {}}}]", base, escaped);
+        (
+            new_conditions,
+            Some((
+                "x-amz-security-token".to_owned(),
+                storage.session_token.clone(),
+            )),
+        )
+    } else {
+        (conditions, None)
+    };
     let policy_json = format!(
         "{{\"expiration\": {}, \"conditions\": {conditions}}}",
         py_json_string(&expiration),
@@ -2538,6 +2580,9 @@ fn presigned_post(
     fields.insert("x-amz-credential".to_owned(), Value::String(credential));
     fields.insert("x-amz-date".to_owned(), Value::String(amz_date));
     fields.insert("policy".to_owned(), Value::String(policy_b64));
+    if let Some((k, v)) = token_field {
+        fields.insert(k, Value::String(v));
+    }
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
@@ -2696,6 +2741,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "access-key".to_owned(),
             secret_access_key: "secret-key".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,

@@ -184,11 +184,11 @@ def dedicated_run(seeder, world, online_runner, dedicated_issue):
             error_details, workspace_id, work_item_id, pod_id, created_by_id,
             llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason,
             tool_plan, phase_kind, agent_metadata, usage, pinned_runner_id,
-            pin_kind, created_at)
+            pin_kind, created_at, failure_reason)
            VALUES (%s,'queued','dedicated prompt','{}','{}','',
                    '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
                    '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
-                   %s,'dedicated',now())""",
+                   %s,'dedicated',now(),'')""",
         (
             run_id,
             world["ws"]["id"],
@@ -254,11 +254,11 @@ def merge_run(seeder, world, merge_world):
             error_details, workspace_id, work_item_id, pod_id, created_by_id,
             llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason,
             tool_plan, phase_kind, agent_metadata, usage, pinned_runner_id,
-            pin_kind, created_at)
+            pin_kind, created_at, failure_reason)
            VALUES (%s,'queued','merge prompt','{}','{}','',
                    '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
                    '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
-                   %s,'dedicated',now())""",
+                   %s,'dedicated',now(),'')""",
         (
             run_id,
             world["ws"]["id"],

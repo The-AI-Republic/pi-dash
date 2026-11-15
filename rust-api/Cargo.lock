@@ -3245,12 +3245,17 @@ dependencies = [
 name = "pidash-storage"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "chrono",
  "hmac 0.12.1",
  "pidash-db",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

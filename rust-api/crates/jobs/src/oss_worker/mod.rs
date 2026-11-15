@@ -38,6 +38,7 @@
 //! step — the inventory suite, not this module, pins the
 //! worker-owned set.
 
+pub mod aws_credentials;
 pub mod execute_seams;
 pub mod kms_transport;
 pub mod model_runtime;
@@ -421,6 +422,11 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::runner_runs::register_offline_recovery_tasks(
         registry,
         ctx.pools.primary().clone(),
+        runner_seams.clone(),
+    );
+    crate::runner_runs::register_unsatisfiable_pins_tasks(
+        registry,
+        ctx.pools.primary().clone(),
         runner_seams,
     );
     crate::runner_runs::register_engine_pause_tasks(registry, ctx.pools.primary().clone());
@@ -631,7 +637,7 @@ mod tests {
             crate::tasks_export::ISSUE_EXPORT_TASK,
             crate::tasks_export::ANALYTIC_EXPORT_TASK,
         ]);
-        assert_eq!(expected.len(), 79, "worker-owned count drifted");
+        assert_eq!(expected.len(), 80, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

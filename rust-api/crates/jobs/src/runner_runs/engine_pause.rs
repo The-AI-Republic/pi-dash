@@ -98,7 +98,7 @@ mod tests {
             PAUSE_ENGINES_BEAT_NAME,
             "runner-pause-engines-with-expired-credentials"
         );
-        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 16);
+        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 17);
         assert!(crate::runner_runs::is_runner_runs_task(PAUSE_ENGINES_TASK));
     }
 

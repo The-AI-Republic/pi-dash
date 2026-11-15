@@ -2714,6 +2714,27 @@ pub fn description_page_txn_job(
     ))
 }
 
+/// True when a validated description PATCH would write byte-identical
+/// content to the stored row (DIFF-27, NEWPIDASH-272): the live collab
+/// server's close-store (`apps/live/.../database.ts::storeDocument`) PATCHes
+/// an unchanged document on every disconnect, and both Django
+/// (`BaseModel.save` stamps `updated_by` unconditionally) and the port
+/// stamped the viewer, flipping "Edited by" on reload. Rust now skips the
+/// `UPDATE` — and with it the `updated_by`/`updated_at` bump — when the
+/// final binary/HTML/JSON equal the stored values. Real edits still stamp.
+/// `serde_json::Value` object equality is order-insensitive, so JSON key
+/// order does not count as a change.
+pub fn is_description_noop(
+    final_binary: &Option<Vec<u8>>,
+    final_html: &str,
+    final_json: &Option<Value>,
+    stored_binary: &Option<Vec<u8>>,
+    stored_html: &str,
+    stored_json: &Option<Value>,
+) -> bool {
+    final_binary == stored_binary && final_html == stored_html && final_json == stored_json
+}
+
 /// `PATCH .../pages/<page_id>/description/` (`PagesDescriptionViewSet.partial_update`,
 /// `base.py:521-575`).
 pub async fn description_partial_update(
@@ -2806,49 +2827,67 @@ pub async fn description_partial_update(
     // when the final HTML is empty, else the MLStripper `strip_tags`).
     // Django's `save()` writes every column, so the UPDATE is static with
     // computed values.
+    let stored_binary = page.description_binary.clone();
+    let stored_html = page.description_html.clone();
+    let stored_json = page.description_json.clone();
     let final_binary = patch.binary.or(page.description_binary);
     let final_html = patch.html.unwrap_or(page.description_html);
     let final_json: Option<Value> = match patch.json {
         Some(value) => value,
-        None => page.description_json,
+        None => stored_json.clone(),
     };
-    let final_stripped: Option<String> =
-        pidash_db::app_pages::strip::sync_description_stripped(Some(final_html.as_str()));
-    let desc_now = chrono::Utc::now();
-    // Django's `save()` writes every column, so the UPDATE carries every
-    // value, static with computed values (as observed). `update_many`
-    // (not an `ActiveModel`) so a NULL `description_json` stays NULL —
-    // the entity field is non-optional, but the column allows NULL.
-    let desc_updated = pages::Entity::update_many()
-        .col_expr(
-            pages::Column::DescriptionBinary,
-            sea_orm::sea_query::Expr::value(final_binary),
-        )
-        .col_expr(
-            pages::Column::DescriptionHtml,
-            sea_orm::sea_query::Expr::value(final_html.as_str()),
-        )
-        .col_expr(
-            pages::Column::DescriptionJson,
-            sea_orm::sea_query::Expr::value(final_json),
-        )
-        .col_expr(
-            pages::Column::DescriptionStripped,
-            sea_orm::sea_query::Expr::value(final_stripped),
-        )
-        .col_expr(
-            pages::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(desc_now.fixed_offset()),
-        )
-        .col_expr(
-            pages::Column::UpdatedById,
-            sea_orm::sea_query::Expr::value(Some(gate.user_id)),
-        )
-        .filter(pages::Column::Id.eq(page_id))
-        .exec(&orm(pool))
-        .await;
-    if desc_updated.is_err() {
-        return Denial::ServerError.into_response();
+    // DIFF-27 (NEWPIDASH-272): a PATCH that would store identical content
+    // is a live close-store no-op, not a user edit — skip the UPDATE so
+    // `updated_by`/`updated_at` keep the last real editor. Job publishes
+    // below still run as before (PB-0473); the version body already no-ops
+    // when the HTML is unchanged.
+    let no_op = is_description_noop(
+        &final_binary,
+        final_html.as_str(),
+        &final_json,
+        &stored_binary,
+        stored_html.as_str(),
+        &stored_json,
+    );
+    if !no_op {
+        let final_stripped: Option<String> =
+            pidash_db::app_pages::strip::sync_description_stripped(Some(final_html.as_str()));
+        let desc_now = chrono::Utc::now();
+        // Django's `save()` writes every column, so the UPDATE carries every
+        // value, static with computed values (as observed). `update_many`
+        // (not an `ActiveModel`) so a NULL `description_json` stays NULL —
+        // the entity field is non-optional, but the column allows NULL.
+        let desc_updated = pages::Entity::update_many()
+            .col_expr(
+                pages::Column::DescriptionBinary,
+                sea_orm::sea_query::Expr::value(final_binary),
+            )
+            .col_expr(
+                pages::Column::DescriptionHtml,
+                sea_orm::sea_query::Expr::value(final_html.as_str()),
+            )
+            .col_expr(
+                pages::Column::DescriptionJson,
+                sea_orm::sea_query::Expr::value(final_json),
+            )
+            .col_expr(
+                pages::Column::DescriptionStripped,
+                sea_orm::sea_query::Expr::value(final_stripped),
+            )
+            .col_expr(
+                pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(desc_now.fixed_offset()),
+            )
+            .col_expr(
+                pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(gate.user_id)),
+            )
+            .filter(pages::Column::Id.eq(page_id))
+            .exec(&orm(pool))
+            .await;
+        if desc_updated.is_err() {
+            return Denial::ServerError.into_response();
+        }
     }
     // Publishes observe the post-save state (`base.py:556-572`): the
     // conditional `page_transaction`, then the unconditional
@@ -6594,6 +6633,100 @@ mod read_tests {
         // Missing keys render null (annotation-backed keys on plain rows).
         let empty = shape_row(&Map::new(), &["label_ids"], &utc());
         assert_eq!(empty, r#"{"label_ids":null}"#);
+    }
+}
+
+#[cfg(test)]
+mod description_noop_tests {
+    use super::is_description_noop;
+    use serde_json::json;
+
+    #[test]
+    fn identical_triple_is_noop() {
+        let binary = Some(vec![1u8, 2, 3]);
+        let html = "<p>hi</p>";
+        let json = Some(json!({"ops": []}));
+        assert!(is_description_noop(
+            &binary, html, &json, &binary, html, &json
+        ));
+    }
+
+    #[test]
+    fn empty_and_null_are_noop() {
+        let none_binary: Option<Vec<u8>> = None;
+        let none_json: Option<serde_json::Value> = None;
+        assert!(is_description_noop(
+            &none_binary,
+            "<p></p>",
+            &none_json,
+            &none_binary,
+            "<p></p>",
+            &none_json
+        ));
+    }
+
+    #[test]
+    fn json_key_order_is_not_a_change() {
+        let a = Some(json!({"a": 1, "b": [1, 2]}));
+        let b = Some(json!({"b": [1, 2], "a": 1}));
+        let none_binary: Option<Vec<u8>> = None;
+        assert!(is_description_noop(
+            &none_binary,
+            "<p></p>",
+            &a,
+            &none_binary,
+            "<p></p>",
+            &b
+        ));
+    }
+
+    #[test]
+    fn any_field_differs_is_not_noop() {
+        let binary = Some(vec![1u8]);
+        let other_binary = Some(vec![2u8]);
+        let html = "<p>hi</p>";
+        let json = Some(json!({"ops": []}));
+        assert!(!is_description_noop(
+            &other_binary,
+            html,
+            &json,
+            &binary,
+            html,
+            &json
+        ));
+        assert!(!is_description_noop(
+            &binary,
+            "<p>bye</p>",
+            &json,
+            &binary,
+            html,
+            &json
+        ));
+        assert!(!is_description_noop(
+            &binary,
+            html,
+            &Some(json!({"ops": [1]})),
+            &binary,
+            html,
+            &json
+        ));
+        let none_binary: Option<Vec<u8>> = None;
+        assert!(!is_description_noop(
+            &binary,
+            html,
+            &json,
+            &none_binary,
+            html,
+            &json
+        ));
+        assert!(!is_description_noop(
+            &none_binary,
+            html,
+            &None,
+            &none_binary,
+            html,
+            &Some(json!({}))
+        ));
     }
 }
 

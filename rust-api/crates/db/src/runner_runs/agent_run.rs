@@ -3,7 +3,7 @@
 //! Agent run model (D-15, stage 5).
 //!
 //! Ports `AgentRun` (`apps/api/pi_dash/runner/models.py:872-1161`):
-//! all 39 columns/defaults/constraints/indexes (`Meta`,
+//! all 41 columns/defaults/constraints/indexes (`Meta`,
 //! `:1037-1102`), the `save` pod-resolution order + owner→created_by
 //! mirror (`:1104-1134`), the token pseudo-fields as
 //! `(usage->>key)::bigint` reads (`:1024-1026`,
@@ -78,6 +78,7 @@ pub const COLUMNS: &[&str] = &[
     "done_payload",
     "error_details",
     "refusal_category",
+    "failure_reason",
     "llm_model",
     "usage",
     "input_tokens",
@@ -104,6 +105,10 @@ pub const PHASE_KIND_MAX_LENGTH: usize = 32;
 pub const WORK_TYPE_MAX_LENGTH: usize = 32;
 /// `thread_id` bound (`models.py:992`, `max_length=128`).
 pub const THREAD_ID_MAX_LENGTH: usize = 128;
+/// `failure_reason` bound (`models.py`, PDASHOSS01-183, `max_length=64`,
+/// `db_index=True`). The canonical taxonomy lives in
+/// `pidash_types::runner_runs::failure`; not declared as `choices`.
+pub const FAILURE_REASON_MAX_LENGTH: usize = 64;
 /// `llm_model` bound (`models.py:1015`, `max_length=128`).
 pub const LLM_MODEL_MAX_LENGTH: usize = 128;
 
@@ -123,7 +128,8 @@ pub const DEFAULT_DISPATCH_ATTEMPTS: i32 = 0;
 pub const DEFAULT_TRIGGER: AgentRunTrigger = AgentRunTrigger::Direct;
 /// Shared `default=""` for `cancel_reason` (`models.py:961`),
 /// `prompt` (`models.py:966`), `phase_kind` (`models.py:989`),
-/// `thread_id` (`models.py:992`) and `llm_model`; also what the
+/// `thread_id` (`models.py:992`), `failure_reason` (PDASHOSS01-183)
+/// and `llm_model` (`models.py:1015`); also what the
 /// `error_code` / `error` / `refusal_category` reads return for an
 /// absent `error_details` key.
 pub const EMPTY_TEXT: &str = "";
@@ -469,6 +475,9 @@ pub struct AgentRun {
     pub done_payload: Option<serde_json::Value>,
     pub error_details: serde_json::Value,
     pub refusal_category: String,
+    /// Canonical failure taxonomy value; non-empty exactly when
+    /// `status == FAILED` (PDASHOSS01-183).
+    pub failure_reason: String,
     pub llm_model: String,
     pub usage: serde_json::Value,
     pub input_tokens: Option<i64>,
@@ -505,7 +514,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 41);
+        assert_eq!(COLUMNS.len(), 42);
     }
 
     #[test]
@@ -692,6 +701,7 @@ mod tests {
             "phase_kind",
             "work_type",
             "thread_id",
+            "failure_reason",
             "llm_model",
         ] {
             assert_eq!(
@@ -708,6 +718,7 @@ mod tests {
             ("phase_kind", PHASE_KIND_MAX_LENGTH),
             ("work_type", WORK_TYPE_MAX_LENGTH),
             ("thread_id", THREAD_ID_MAX_LENGTH),
+            ("failure_reason", FAILURE_REASON_MAX_LENGTH),
             ("llm_model", LLM_MODEL_MAX_LENGTH),
         ] {
             assert_eq!(

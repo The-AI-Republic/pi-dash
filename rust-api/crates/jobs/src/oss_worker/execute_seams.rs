@@ -325,7 +325,10 @@ impl ExecuteSeams for LiveExecuteSeams {
                 // (`ERROR_DETAILS_COLUMN`); `refusal_category` is a
                 // generated column. Only `llm_model` is an own column.
                 "error_code" | "error" => update,
-                "refusal_category" | "llm_model" => {
+                // `failure_reason` is the taxonomy safety net
+                // `plan_finalize_values` appends to every FAILED row
+                // (PDASHOSS01-183).
+                "refusal_category" | "llm_model" | "failure_reason" => {
                     let text = match &clause.value {
                         pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
                         pidash_services::runner_runs::SetValue::Null => String::new(),
@@ -334,6 +337,10 @@ impl ExecuteSeams for LiveExecuteSeams {
                     match clause.column {
                         "refusal_category" => update.col_expr(
                             run_entity::Column::RefusalCategory,
+                            sea_orm::sea_query::Expr::value(text),
+                        ),
+                        "failure_reason" => update.col_expr(
+                            run_entity::Column::FailureReason,
                             sea_orm::sea_query::Expr::value(text),
                         ),
                         _ => update.col_expr(

@@ -1136,6 +1136,7 @@ mod tests {
                 access_token_ttl_secs: 900,
                 offline_threshold_secs: 90,
                 offline_pin_release_secs: 60,
+                pin_auto_release_secs: 600,
                 offline_run_fail_secs: 300,
                 offline_stream_ttl_secs: 86400,
                 offline_stream_maxlen: 1000,

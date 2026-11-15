@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   descriptionAssetSrc,
+  extractMarkdownSource,
   hasStoredDescriptionContent,
   isStoredHtmlEmpty,
   isStoredHtmlEmptyIgnoring,
@@ -501,5 +502,51 @@ describe("entity preview without any label", () => {
     const html = renderableHtml('<entity-reference-component entity_name="issue"></entity-reference-component>');
     expect(html).toContain('class="page-entity-preview"');
     expect(html).toContain('data-entity-name="issue"');
+  });
+});
+
+describe("extractMarkdownSource (NEWPIDASH-232)", () => {
+  it("extracts markdown from a <p>-wrapped raw markdown body", () => {
+    const md = extractMarkdownSource("<p>## Summary</p><p>Hello <strong>world</strong></p>");
+    // Proper HTML with <strong> should not be treated as markdown-wrapped
+    expect(md).toBeNull();
+  });
+
+  it("extracts a heading wrapped in <p>", () => {
+    const source = extractMarkdownSource("<p>## Summary</p><p>Hello **world**</p>");
+    expect(source).toBe("## Summary\n\nHello **world**");
+  });
+
+  it("extracts lists and code fences", () => {
+    const source = extractMarkdownSource("<p>- item one<br>- item two</p><p>```python<br>print(1)<br>```</p>");
+    expect(source).toBe("- item one\n- item two\n\n```python\nprint(1)\n```");
+  });
+
+  it("extracts tables and links", () => {
+    const source = extractMarkdownSource(
+      "<p>| A | B |<br>|---|---|<br>| 1 | 2 |</p><p>[link](https://example.com)</p>"
+    );
+    expect(source).toContain("| A | B |");
+    expect(source).toContain("[link](https://example.com)");
+  });
+
+  it("extracts bold/italic and inline code", () => {
+    const source = extractMarkdownSource("<p>This is **bold** and *italic* and `code`</p>");
+    expect(source).toContain("**bold**");
+    expect(source).toContain("*italic*");
+    expect(source).toContain("`code`");
+  });
+
+  it("returns null for proper HTML that already has formatting", () => {
+    expect(extractMarkdownSource("<h2>Title</h2><p>Hello <strong>world</strong></p>")).toBeNull();
+    expect(extractMarkdownSource("<ul><li>one</li></ul>")).toBeNull();
+    expect(extractMarkdownSource("<p>Hello</p>")).toBeNull();
+    expect(extractMarkdownSource("<p></p>")).toBeNull();
+    expect(extractMarkdownSource("")).toBeNull();
+  });
+
+  it("returns null when no DOMParser exists", () => {
+    vi.stubGlobal("DOMParser", undefined);
+    expect(extractMarkdownSource("<p>## hi</p>")).toBeNull();
   });
 });

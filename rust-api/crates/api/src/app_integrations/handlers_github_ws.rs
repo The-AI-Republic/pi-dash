@@ -1460,6 +1460,8 @@ async fn upsert_pat_account(
                 workspace_integration_id: Set(Some(*wi_id)),
                 status: Set("connected".to_owned()),
                 verified_at: Set(Some(stamped)),
+                suspended_at: Set(None),
+                last_checked_at: Set(None),
                 last_check_error: Set(String::new()),
                 metadata: Set(metadata),
             }

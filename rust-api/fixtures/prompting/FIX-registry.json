@@ -2,8 +2,8 @@
   "bugs": [],
   "data": {
     "fragments": {
-      "assembled_len": 55046,
-      "assembled_sha256": "064c13b177d595a08990d9ea617e8a14200e50b36fa205373b8766cd758a0c0f",
+      "assembled_len": 55780,
+      "assembled_sha256": "c22d97d534bb0dbd0b7b9ee26a340c0559d559aed47ebb52ed810a34ca962cb2",
       "fragment_count": 14,
       "fragments_in_order": [
         "01_intro.md",
@@ -334,8 +334,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 36908,
-          "body_sha256": "e49708d2bf7acfe55af0efe387dd21c77cdea5e4c9c6549cc1b9c78fa2e3d287",
+          "body_len": 37875,
+          "body_sha256": "26e6fb3d3da160b5fb5acbb136e16c8393c9b633f152a703597217025ce1e4ed",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -521,8 +521,8 @@
         {
           "allows_personal_override": true,
           "allows_workspace_override": true,
-          "body_len": 2656,
-          "body_sha256": "b46f3cb3b01ef31903a1113b65180027a6d54db3ddddd0abaa27cd7b3c90830d",
+          "body_len": 2846,
+          "body_sha256": "850141000a44e6facc157c6e1282e7d263647d4c89cdaabe563f62c9ef495108",
           "customizable": "overridable",
           "is_locked": false,
           "is_overridable": true,
@@ -568,9 +568,9 @@
     }
   },
   "fixture_id": "FIX-registry",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django). NEWPIDASH-177: ported_from bumped to f92fe3c072cb57dee09aa7348a0bd3dc549d7881 \u2014 PDASHOSS01-350 added 14 lines to Django pidash-cli.md (#3067) and the mirror+hashes were synced in #3068; only pidash-cli.md differs between 7d64d46ad and f92fe3c07 in prompting/. PDASHOSS01-276: pidash-cli body_len/body_sha256 recomputed over the Rust mirror with the 4-line scheduled-run yield block added (the same block the Django half, #943, adds to apps/api pidash-cli.md); ported_from is unchanged until that half lands.",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django). NEWPIDASH-177: ported_from bumped to f92fe3c072cb57dee09aa7348a0bd3dc549d7881 \u2014 PDASHOSS01-350 added 14 lines to Django pidash-cli.md (#3067) and the mirror+hashes were synced in #3068; only pidash-cli.md differs between 7d64d46ad and f92fe3c07 in prompting/. PDASHOSS01-276: pidash-cli body_len/body_sha256 recomputed over the Rust mirror with the 4-line scheduled-run yield block added (the same block the Django half, #943, adds to apps/api pidash-cli.md); ported_from is unchanged until that half lands. NEWPIDASH-208: ported_from bumped to cc00fc6949466dd390e8ff622057589a592a93be \u2014 PDASHOSS01-352/351 and PDASHOSS01-276 drift (envelope with total_count/next_page_results and scheduled-run yield block) updated pidash-cli.md to 36925 bytes / 54c7088c; CI provisions the Django prompting tree at ported_from, so the stale 1567f8bc (35917 bytes) caused mirror diverged and registry mismatch. NEWPIDASH-260: pidash-cli (Rust) and fragments hardened with pipefail + --allow-empty guard; body_len 36925->37469 and assembled_len 55046->55780 recomputed over Rust mirrors; Django mirrors pending PDASHOSS01.",
   "notes": [],
-  "ported_from": "1567f8bc5cab9f840c0b645dce1edc819bc4b553",
+  "ported_from": "cc00fc6949466dd390e8ff622057589a592a93be",
   "trace": [
     "prompting/registry.py:26 (SECTIONS_DIR), 28-56 (tiers), 62-66 (MAX_SECTION_BODY_LENGTH), 102-147 (_parse_front_matter), 150-161 (_load_registry), 166-178 (REGISTRY/get_section/all_sections)",
     "prompting/fragments/__init__.py:37-55 (FRAGMENT_GLOB, fragment_paths, assemble)"
