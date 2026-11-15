@@ -473,6 +473,7 @@ surface_snapshot! {
     jobs::TaskMessage,
     jobs::Verdict,
     jobs::WorkerConfig,
+    jobs::append_event,
     jobs::bounce_issue_no_eligible_runner,
     jobs::complete_project_move_handoff_live,
     jobs::create_and_dispatch_run,

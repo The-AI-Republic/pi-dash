@@ -425,6 +425,7 @@ pidash_sdk::jobs::TRACK_EVENT_TASK
 pidash_sdk::jobs::TaskMessage
 pidash_sdk::jobs::Verdict
 pidash_sdk::jobs::WorkerConfig
+pidash_sdk::jobs::append_event
 pidash_sdk::jobs::bounce_issue_no_eligible_runner
 pidash_sdk::jobs::complete_project_move_handoff_live
 pidash_sdk::jobs::create_and_dispatch_run
