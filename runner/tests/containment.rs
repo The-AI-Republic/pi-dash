@@ -58,22 +58,31 @@ async fn cleanup_kills_backgrounded_and_setsid_processes() {
         eprintln!("SKIP: cgroup backend unavailable on this host");
         return;
     }
-    let (pid, child) = spawn_leaky_agent(
-        BackendKind::Cgroup,
-        "sleep 3600 & setsid nohup sleep 3600 >/dev/null 2>&1 & exit 0",
-    )
-    .await;
+    let pid_dir = tempfile::tempdir().expect("tempdir for pid files");
+    let bg_pid_file = pid_dir.path().join("bg.pid");
+    let ss_pid_file = pid_dir.path().join("setsid.pid");
+    let script = format!(
+        "sleep 3600 & echo $! > {} ; setsid nohup sleep 3600 >/dev/null 2>&1 & echo $! > {} ; exit 0",
+        bg_pid_file.display(),
+        ss_pid_file.display(),
+    );
+    let (pid, child) = spawn_leaky_agent(BackendKind::Cgroup, &script).await;
     group.move_pid(Some(pid));
     let mut child = child;
     let _ = child.wait().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
+    let bg_pid = read_pid_file(&bg_pid_file);
+    let ss_pid = read_pid_file(&ss_pid_file);
+    assert!(
+        pid_alive(bg_pid),
+        "backgrounded sleep must be alive pre-cleanup"
+    );
+    assert!(pid_alive(ss_pid), "setsid sleep must be alive pre-cleanup");
     group.cleanup().await;
+    assert_dead(bg_pid, "backgrounded sleep must die with the run cgroup").await;
+    assert_dead(ss_pid, "setsid sleep must die with the run cgroup").await;
     // The sleeps died with the cgroup. The cgroup dir is gone; check
-    // the unit is empty by confirming rmdir happened (members raced it
-    // is fine — cleanup logs the count). The behavioral assert: no
-    // stray `sleep 3600` processes from this test survive. Count via
-    // /proc scan keyed on the script marker is racy, so instead assert
-    // the cgroup directory no longer exists.
+    // the unit is empty by confirming rmdir happened.
     let dir = self_cgroup_base().join(format!("pidash-run-{run_id}"));
     assert!(!dir.exists(), "run cgroup must be removed after cleanup");
 }
@@ -148,20 +157,47 @@ async fn process_group_cleanup_kills_backgrounded_child() {
     // already exited here (normal-end shape); the live-agent shape is
     // covered by the cgroup test above.
     let backend = group.backend_kind();
-    let (pid, mut child) = spawn_leaky_agent(backend, "sleep 3600 & exit 0").await;
+    let pid_dir = tempfile::tempdir().expect("tempdir for pid file");
+    let bg_pid_file = pid_dir.path().join("bg.pid");
+    let script = format!("sleep 3600 & echo $! > {} ; exit 0", bg_pid_file.display());
+    let (pid, mut child) = spawn_leaky_agent(backend, &script).await;
     group.move_pid(Some(pid));
     let _ = child.wait().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
+    let bg_pid = read_pid_file(&bg_pid_file);
+    assert!(
+        pid_alive(bg_pid),
+        "backgrounded sleep must be alive pre-cleanup"
+    );
     group.cleanup().await;
     // The backgrounded sleep shared the agent's process group; it must
     // be dead. (A setsid'd child escapes the process-group backend —
     // the documented limit — so this test only backgrounds.)
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_dead(
+        bg_pid,
+        "backgrounded sleep must die with the agent's process group",
+    )
+    .await;
+}
+
+/// Read a pid captured via `echo $! > file` in a spawned script.
+fn read_pid_file(path: &std::path::Path) -> u32 {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("read pid file {}", path.display()));
+    raw.trim()
+        .parse::<u32>()
+        .unwrap_or_else(|_| panic!("parse pid from {}", path.display()))
+}
+
+/// Poll until `pid` is dead (ESRCH or zombie), failing after ~5s.
+async fn assert_dead(pid: u32, msg: &str) {
+    for _ in 0..50 {
         if !pid_alive(pid) {
-            break;
+            return;
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    panic!("{msg} (pid {pid} still alive after cleanup)");
 }
 
 /// Start-up sweep: a cgroup left by a lost daemon is emptied and

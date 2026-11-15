@@ -3839,14 +3839,16 @@ impl AssignWorker {
             },
             self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model, &mut guard),
         );
-        scope.await?;
+        // Cleanup runs even when the run fails: a failed run must not
+        // leave its processes (or its parity-stack hook) behind.
+        let result = scope.await;
         // Containment cleanup runs after the run's terminal report has
         // been sent: empty the unit, then execute a run-end hook the
         // run opted into (parity-stack teardown), outside the unit.
         // `workspace` is None when workspace resolution never produced
         // one; then there is no hook to run either.
         run_cleanup(guard).await;
-        Ok(())
+        result
     }
 
     async fn handle_assign_inner(
