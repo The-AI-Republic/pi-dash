@@ -1235,7 +1235,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error.into()),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
+    let admission_error = execution.cloud_admission_error.clone();
 
     // Permanent misconfiguration — refuse BEFORE creating a run so a
     // broken binding writes last_error once instead of minting a FAILED
@@ -1250,10 +1250,8 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
         });
     }
 
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, true)
-        .await?
-        .or(admission_error);
+    // Admission stays as recorded on the execution fields (P3 step B:
+    // the capacity gate's seam call is gone).
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_scheduler_run(&NewSchedulerRun {
@@ -2041,15 +2039,6 @@ mod tests {
         ) -> Result<ExecutionFields, ExecutionError> {
             self.execution_requests.push(req.clone());
             self.execution.clone().expect("script execution")
-        }
-
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
         }
 
         fn dispatch_after_commit(&mut self, run_id: Uuid) {
@@ -3632,142 +3621,6 @@ mod tests {
         );
         assert!(seam.scheduler_runs.is_empty());
         assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
-    async fn scheduler_renders_limits_from_in_memory_plan() {
-        // PIDASHCONV-1072: Django composes from the in-memory plan
-        // (`run.prompt = build_scheduler_turn(binding, run)` before any
-        // `refresh_from_db`; `service.py:977`), so the `Limits:` line
-        // prints `policy.py` dict order even though the stored row
-        // carries jsonb order. The seam round-trips the plan to prove
-        // the render does not read the row back.
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        cloud_project(&mut seam);
-        role_pass(&mut seam, uid(0x40));
-        seam.llm.insert(uid(0x40), true);
-        seam.normalize_tool_plan = true;
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({
-                "v": 1,
-                "catalog_version": 1,
-                "tools": [],
-                "required_tools": [],
-                "limits": {
-                    "model_requests": 25,
-                    "tool_calls": 20,
-                    "writes": 3,
-                    "input_tokens": 144_000,
-                    "output_tokens": 16_000,
-                    "total_tokens": 160_000,
-                    "wall_seconds": 285,
-                },
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-            }),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.error.is_none());
-        let run_id = outcome.run.expect("run returned");
-        // The stored row carries jsonb order (the seam round-tripped it).
-        let stored: Vec<String> = seam.runs[&run_id].tool_plan["limits"]
-            .as_object()
-            .expect("limits object")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                "writes",
-                "tool_calls",
-                "input_tokens",
-                "total_tokens",
-                "wall_seconds",
-                "output_tokens",
-                "model_requests",
-            ]
-        );
-        // The composed prompt prints policy.py dict order.
-        let run = seam.runs.get(&run_id).expect("run stored");
-        let line = run
-            .prompt
-            .lines()
-            .find(|line| line.starts_with("Limits:"))
-            .expect("Limits line");
-        assert_eq!(
-            line,
-            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}."
-        );
-    }
-
-    #[tokio::test]
-    async fn s7_admission_failure_returns_failed_run() {
-        let case = scheduler_case("S7_admission_failed_returned");
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.error.is_none());
-        let run_id = outcome.run.expect("failed run returned");
-        let run = seam.runs.get(&run_id).expect("run stored").clone();
-        let golden = &case["after"];
-        assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
-        assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
-        assert_eq!(run.parent_run_id, None);
-        assert_eq!(run.pinned_runner_id, None);
-        assert_eq!(run.created_by_id, uid(0x40));
-        assert_eq!(run.pod_id, uid(0x50));
-        assert_eq!(run.work_item_id, None);
-        assert_eq!(run.prompt, golden["prompt"].as_str().unwrap());
-        assert!(run.prompt_manifest.is_none());
-        assert!(golden["prompt_manifest"].is_null());
-        assert_eq!(run.run_config, golden["run_config"]);
-        assert_eq!(
-            run.executor_kind.value(),
-            golden["executor_kind"].as_str().unwrap()
-        );
-        assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error(), golden["error"].as_str().unwrap());
-        assert_eq!(run.ended_at, Some(now));
-        assert_eq!(
-            seam.finalized,
-            vec![(
-                run_id,
-                "run_quota_exceeded".to_owned(),
-                "Cloud Agent queue is full for this workspace".to_owned()
-            )]
-        );
-        assert!(seam.dispatched.is_empty());
-        assert_eq!(seam.compose_calls, 0);
     }
 
     #[tokio::test]

@@ -47,7 +47,7 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+    CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
     ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
     PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
 };
@@ -58,7 +58,6 @@ use pidash_services::orchestration::entries::{
 };
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_types::dispatch::AgentExecutorKind;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -603,17 +602,6 @@ where
         req: &ExecutionRequest,
     ) -> Result<ExecutionFields, ExecutionError> {
         self.store.execution_fields(req).await
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        self.store
-            .lock_cloud_creation_capacity(workspace_id, executor_kind, automatic)
-            .await
     }
 
     fn dispatch_after_commit(&mut self, run_id: Uuid) {

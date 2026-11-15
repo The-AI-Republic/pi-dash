@@ -192,17 +192,16 @@ pub(crate) mod test_support {
     use pidash_services::domain::identity::AgentUserCollisionError;
     use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use pidash_services::orchestration::creation::{
-        AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
-        ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue,
-        NewAgentRun, NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle,
-        RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+        CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+        ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun,
+        NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
+        RunnerView, StateView, STATE_SELECT_SQL,
     };
     use pidash_services::orchestration::entries::{
         BindingView, EntriesSeam, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
         WorkspaceView, PRIOR_STATE_SELECT_SQL,
     };
     use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
-    use pidash_types::dispatch::AgentExecutorKind;
     use serde_json::Value;
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -325,14 +324,6 @@ pub(crate) mod test_support {
             _req: &ExecutionRequest,
         ) -> Result<ExecutionFields, ExecutionError> {
             unreachable!("lazy seam method is unreachable on this path")
-        }
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _w: Uuid,
-            _k: AgentExecutorKind,
-            _a: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            unreached()
         }
         fn dispatch_after_commit(&mut self, _id: Uuid) {
             unreachable!("lazy seam method is unreachable on this path")
