@@ -22,7 +22,7 @@ def _stamp_existing_projects_software(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0177_git_provider_app_columns"),
+        ("db", "0178_ticker_failure_disarm_reasons"),
     ]
 
     operations = [

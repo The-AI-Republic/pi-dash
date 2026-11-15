@@ -13,7 +13,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("runner", "0039_issue_assigned_runner"),
+        ("runner", "0041_backfill_failure_reason"),
     ]
 
     operations = [
