@@ -61,7 +61,6 @@ import { PageRowConnected } from "./PageRowConnected.js";
 import { PageNestedMoveDialog } from "./PageNestedMoveDialog.js";
 import { PageTree } from "./PageTree.js";
 import { pageDeleteKnownCount, pageDiscoveryRows, pageTreeRoots, type PageNestedRow } from "../lib/pageNested.js";
-import { edition, isPageMoveEnabled } from "../../../core/edition/index.js";
 import { registerCommands, registerPalettePages } from "../../../shared/commands/index.js";
 import { buildPageJumpCommand } from "../palette/pageJumpCommands.js";
 import { projectPagesJumpPage } from "../palette/pageJumpPage.js";
@@ -201,7 +200,9 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const role = roles.data?.[projectId] ?? null;
   const viewerIsAdmin = isProjectAdmin(role);
   const canCreate = isProjectAuthorized(role);
-  const canMovePages = isPageMoveEnabled(edition);
+  // Only a project admin moves pages to another project; the row builder
+  // still hides the entry on a locked page (PAGE-017).
+  const canMovePages = viewerIsAdmin;
   const canStar = isProjectAuthorized(role);
   const canManageFeatures = isProjectAdmin(role);
   const refreshing = pages.isFetching && !pages.isPending && rows.length > 0;

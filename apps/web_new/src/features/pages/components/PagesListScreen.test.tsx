@@ -1013,11 +1013,21 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
     expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
   });
 
-  it("carries no move entry in the community build", async () => {
-    harness.pages = [makePageRow({ name: "No move" })];
+  it("offers a project admin the move to another project", async () => {
+    harness.pages = [makePageRow({ name: "Admin move" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Admin move" }));
+    expect(screen.getByRole("menuitem", { name: "Move to project…" })).toBeInTheDocument();
+  });
+
+  it("keeps the move from a member, even on a page they own", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 15 };
+    harness.pages = [makePageRow({ name: "No move", owned_by: PAGES_USER_ID })];
     renderScreen();
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for No move" }));
+    expect(screen.getByRole("menuitem", { name: "Lock" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
   });
 });

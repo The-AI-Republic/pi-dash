@@ -63,6 +63,7 @@ pub mod issue_assignment;
 pub mod issues;
 pub mod issues_move;
 pub(crate) mod issues_move_creation;
+pub mod pages;
 pub mod projects;
 pub mod relations;
 pub mod tokens;

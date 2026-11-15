@@ -7,9 +7,10 @@
 // the display toggles, the hosted markup copy (PAGE-044, editors only),
 // the history shortcut, the sub-page entry, duplication for members and
 // above, shelve/restore, visibility and delete for the owner or an admin,
+// the cross-project move for a project admin on an unlocked page (PAGE-017)
 // and the hosted export entry (PAGE-074) once someone wires it. The list
-// row menu owns new-tab, copy-link, lock and move — they never appear
-// here. The marker renders the shelved stamp as a dated header line.
+// row menu owns new-tab, copy-link and lock — they never appear here. The
+// marker renders the shelved stamp as a dated header line.
 
 import type { MenuAction } from "@pidash/kit";
 
@@ -21,6 +22,7 @@ import {
   PAGE_ACTION_DUPLICATE,
   PAGE_ACTION_MAKE_PRIVATE,
   PAGE_ACTION_MAKE_PUBLIC,
+  PAGE_ACTION_MOVE,
   PAGE_ACTION_RESTORE,
 } from "./pageActions.js";
 import { pageDisplayMenuItems } from "./pageDisplayMenu.js";
@@ -54,6 +56,8 @@ export interface PageDetailMenuHandlers {
   onExport?: (() => void) | undefined;
   /** Creates a child page; absent for guests and on shelved pages (PAGE-084). */
   onAddSubPage?: (() => void) | undefined;
+  /** Opens the cross-project move; absent unless an admin views an unlocked page (PAGE-017). */
+  onMoveToProject?: (() => void) | undefined;
 }
 
 /** Menu entries for the detail header, in the order the oracle pins them. */
@@ -90,6 +94,9 @@ export function pageDetailMenuItems(
     } else {
       entries.push({ label: PAGE_ACTION_DELETE, onSelect: handlers.onRequestDelete });
     }
+  }
+  if (handlers.onMoveToProject !== undefined) {
+    entries.push({ label: PAGE_ACTION_MOVE, onSelect: handlers.onMoveToProject });
   }
   if (handlers.onExport !== undefined) {
     entries.push({ label: PAGE_EXPORT_ITEM, onSelect: handlers.onExport });

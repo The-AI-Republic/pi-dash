@@ -156,10 +156,17 @@ describe("pageRowActions", () => {
     expect(entries.map((entry) => entry.label)).toContain(PAGE_ACTION_MOVE_TO);
   });
 
-  it("offers the cross-project move only where the edition enables it", () => {
+  it("offers the cross-project move only to a project admin", () => {
     expect(labels(OWNER)).not.toContain(PAGE_ACTION_MOVE);
     expect(labels({ ...OWNER, move: true })).toContain(PAGE_ACTION_MOVE);
+    expect(labels({ ...MEMBER, move: true })).not.toContain(PAGE_ACTION_MOVE);
     expect(PAGE_ACTION_MOVE).toBe("Move to project…");
+  });
+
+  it("hides the cross-project move on a locked page", () => {
+    const entries = labels({ ...OWNER, move: true, locked: true });
+    expect(entries).toContain(PAGE_ACTION_UNLOCK);
+    expect(entries).not.toContain(PAGE_ACTION_MOVE);
   });
 
   it("keeps a member's menu free of every state switch", () => {

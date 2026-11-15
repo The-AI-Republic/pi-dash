@@ -4,7 +4,7 @@
 // Oracle scenarios (NEWFRONT-313): pages header quick-create, the
 // form-based creation dialog, the per-row favorite star, and the row
 // overflow/context menu actions (new tab, copy link, duplicate,
-// visibility, lock, shelve/restore, delete) plus the community move pin.
+// visibility, lock, shelve/restore, delete) plus the cross-project move.
 // Rows: PAGE-007–PAGE-017.
 //
 // List isolation comes from scratch projects created in-spec (the seed
@@ -26,6 +26,8 @@ import {
   serverMovePageStatus,
   serverPageAccessStatus,
   serverPageArchive,
+  serverPageLock,
+  serverPatchPageParent,
   serverPagesRowEnableGuestViewAll,
   serverPagesRowFlags,
   serverPagesRowList,
@@ -162,10 +164,7 @@ test(
 );
 
 test(
-  specTitle(
-    ["PAGE-007", "PAGE-009"],
-    "guests see no create control, no stars, and a reduced row menu"
-  ),
+  specTitle(["PAGE-007", "PAGE-009"], "guests see no create control, no stars, and a reduced row menu"),
   { tag: specTags(["PAGE-007", "PAGE-009"]) },
   async ({ driver, seed, browser }) => {
     const session = await ownerSession(seed);
@@ -192,10 +191,7 @@ test(
 );
 
 test(
-  specTitle(
-    ["PAGE-008"],
-    "creation dialog validates the title, then creates with visibility and mark"
-  ),
+  specTitle(["PAGE-008"], "creation dialog validates the title, then creates with visibility and mark"),
   { tag: specTags(["PAGE-008"]) },
   async ({ driver, seed }) => {
     const session = await ownerSession(seed);
@@ -428,10 +424,7 @@ test(
 );
 
 test(
-  specTitle(
-    ["PAGE-013"],
-    "visibility toggle hides on shelved pages and the server refuses non-owners"
-  ),
+  specTitle(["PAGE-013"], "visibility toggle hides on shelved pages and the server refuses non-owners"),
   { tag: specTags(["PAGE-013"]) },
   async ({ driver, seed }) => {
     const session = await ownerSession(seed);
@@ -611,9 +604,7 @@ test(
     await driver.pagesRowMenuClick("Delete");
     await expect.poll(() => driver.pagesRowDeleteModalVisible(), { timeout: 15_000 }).toBe(true);
     await driver.pagesRowDeleteModalConfirm();
-    await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).toBe(
-      listUrl(seed, projectId)
-    );
+    await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).toBe(listUrl(seed, projectId));
     expect(await serverPagesRowList(seed.workspaceSlug, projectId, session)).toEqual([]);
   }
 );
@@ -651,9 +642,7 @@ test(
       expect(await peer.driver.pagesRowDetailNotFoundVisible()).toBe(true);
       await peer.driver.pagesRowDetailNotFoundBackToList();
       // The recovery link lands on the list with a trailing slash.
-      await expect.poll(() => peer.driver.currentUrlPath(), { timeout: 30_000 }).toBe(
-        `${listUrl(seed, projectId)}/`
-      );
+      await expect.poll(() => peer.driver.currentUrlPath(), { timeout: 30_000 }).toBe(`${listUrl(seed, projectId)}/`);
       await peer.driver.pagesRowOpenList(seed.workspaceSlug, projectId, "shelved");
       expect(await peer.driver.pagesRowTitles()).toEqual([]);
     } finally {
@@ -663,26 +652,53 @@ test(
 );
 
 test(
-  specTitle(["PAGE-017"], "community tree carries no move affordance or endpoint"),
+  specTitle(["PAGE-017"], "admin moves a page and its sub-page into another project"),
   { tag: specTags(["PAGE-017"]) },
   async ({ driver, seed }) => {
     const session = await ownerSession(seed);
-    const projectId = await scratchProject(seed, session, "movepin");
-    const targetId = await scratchProject(seed, session, "movetarget");
+    const projectId = await scratchProject(seed, session, "movefrom");
+    const targetId = await scratchProject(seed, session, "moveto");
     const name = `Move Me ${stamp()}`;
     const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, name);
+    const childId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${name} child`);
+    await serverPatchPageParent(seed.workspaceSlug, projectId, childId, pageId, session);
+
+    // The project admin's row menu offers the move (PDASHOSS01-347).
     await driver.openAuthenticated(listUrl(seed, projectId), sessionBrowserCookies(session));
     await driver.pagesRowOpenList(seed.workspaceSlug, projectId);
-
     await driver.pagesRowOpenMenu(name);
-    expect(await driver.pagesRowMenuItems()).not.toContain("Move");
-    await driver.pagesRowOpenDetail(seed.workspaceSlug, projectId, pageId);
-    await driver.pagesRowDetailOpenOptions();
-    expect(await driver.pagesRowMenuItems()).not.toContain("Move");
-    expect(await driver.pagesRowDetailMoveVisible()).toBe(false);
+    expect((await driver.pagesRowMenuItems()).some((item) => /^Move to project/i.test(item.trim()))).toBe(true);
 
-    // The community backend carries no move route either.
-    expect(await serverMovePageStatus(seed.workspaceSlug, projectId, pageId, targetId, session)).toBe(404);
+    // The route names its refusal and moves the whole subtree on success;
+    // the page keeps its id under the target project.
+    const same = await serverMovePageStatus(seed.workspaceSlug, projectId, pageId, projectId, session);
+    expect(same).toBe(400);
+    expect(await serverMovePageStatus(seed.workspaceSlug, projectId, pageId, targetId, session)).toBe(204);
+    expect((await serverPagesRowFlags(seed.workspaceSlug, targetId, pageId, session)).name).toBe(name);
+    expect((await serverPagesRowFlags(seed.workspaceSlug, targetId, childId, session)).name).toBe(`${name} child`);
+    const left = (await serverPagesRowList(seed.workspaceSlug, projectId, session)).map((row) => row.id);
+    expect(left).not.toContain(pageId);
+    expect(left).not.toContain(childId);
+  }
+);
+
+test(
+  specTitle(["PAGE-017"], "a locked page carries no move entry and the route refuses it"),
+  { tag: specTags(["PAGE-017"]) },
+  async ({ driver, seed }) => {
+    const session = await ownerSession(seed);
+    const projectId = await scratchProject(seed, session, "movelock");
+    const targetId = await scratchProject(seed, session, "movelockto");
+    const name = `Locked Move ${stamp()}`;
+    const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, name);
+    await serverPageLock(seed.workspaceSlug, projectId, pageId, session);
+
+    await driver.openAuthenticated(listUrl(seed, projectId), sessionBrowserCookies(session));
+    await driver.pagesRowOpenList(seed.workspaceSlug, projectId);
+    await driver.pagesRowOpenMenu(name);
+    expect((await driver.pagesRowMenuItems()).some((item) => /^Move to project/i.test(item.trim()))).toBe(false);
+
+    expect(await serverMovePageStatus(seed.workspaceSlug, projectId, pageId, targetId, session)).toBe(400);
     expect((await serverPagesRowFlags(seed.workspaceSlug, projectId, pageId, session)).name).toBe(name);
   }
 );

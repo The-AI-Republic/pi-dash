@@ -3,14 +3,14 @@
 // See the LICENSE file for details.
 // Row state writes (parity/specs/pages.md §2.3, §2.4, §3.8, §11.1,
 // PAGE-013–PAGE-017): visibility, lock, shelve/restore, deletion and the
-// cloud-only cross-project move. Each capability has exactly one helper so
+// cross-project move. Each capability has exactly one helper so
 // the list row and the detail header (PAGE-057–059) drive the same write
 // with different chrome. Optimistic mutations patch the one collection and
 // the detail cache, roll back on refusal, notify with the pinned copy and
 // publish the protocol event through the shared realtime hub — the
 // collaboration channel the old app used to keep other viewers in step.
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   archivePage,
   deletePage,
@@ -28,6 +28,7 @@ import { getAppClient } from "../../../core/api/client.js";
 import { applyOptimisticUpdate } from "../../../core/query/optimistic.js";
 import { getRealtimeHub } from "../../../core/query/realtime.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
+import { sidebarKeys } from "../../sidebar/index.js";
 import {
   PAGE_ARCHIVED_TITLE,
   PAGE_ARCHIVE_FAILED_TITLE,
@@ -44,7 +45,9 @@ import {
   PAGE_VISIBILITY_PUBLIC_SUFFIX,
   PAGE_VISIBILITY_SUFFIX,
 } from "../lib/pageActions.js";
+import { movedSubtreeIds, pageMoveErrorMessage } from "../lib/pageProjectMove.js";
 import { pageKeys } from "./keys.js";
+import { pageForestKey, type PageForest } from "./treeQueries.js";
 
 /** Topic the pages area publishes state changes on. */
 export const PAGES_REALTIME_TOPIC = "pages";
@@ -299,32 +302,101 @@ export function usePageDeleteWrite(target: PageRowTarget): {
   };
 }
 
-/** Move one page into another project (PAGE-017, cloud only). */
+/**
+ * Drop a moved page and every sub-page the caller has read from the source
+ * project's caches: the collection, both forest walks and each cached child
+ * list. Child lists hung under a moved page and the moved pages' detail
+ * reads go entirely; the server moved the whole live subtree, so none of
+ * them belongs to the source project any more.
+ */
+export function dropMovedPages(
+  queryClient: QueryClient,
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string
+): Set<string> {
+  const listKey = pageKeys.list(workspaceSlug, projectId);
+  const forestKeys = [pageForestKey(workspaceSlug, projectId, false), pageForestKey(workspaceSlug, projectId, true)];
+  const childrenScope = [...pageKeys.all(workspaceSlug), "children", projectId] as const;
+  const childLists = queryClient.getQueriesData<PageRowData[]>({ queryKey: childrenScope });
+
+  const known: PageRowData[] = [...(queryClient.getQueryData<PageRowData[]>(listKey) ?? [])];
+  for (const key of forestKeys) known.push(...(queryClient.getQueryData<PageForest>(key)?.rows ?? []));
+  for (const [, rows] of childLists) known.push(...(rows ?? []));
+  const moved = movedSubtreeIds(known, pageId);
+  const keep = <T extends { id: string }>(rows: readonly T[] | undefined): T[] | undefined =>
+    rows?.filter((row) => !moved.has(row.id));
+
+  queryClient.setQueryData<PageRowData[] | undefined>(listKey, (rows) => keep(rows));
+  for (const key of forestKeys) {
+    queryClient.setQueryData<PageForest | undefined>(key, (forest) =>
+      forest === undefined ? forest : { ...forest, rows: keep(forest.rows) ?? [] }
+    );
+  }
+  for (const [key, rows] of childLists) {
+    // The child key is [...scope, parentId, live|archived].
+    const parentId = key[childrenScope.length];
+    if (typeof parentId === "string" && moved.has(parentId)) {
+      queryClient.removeQueries({ queryKey: key, exact: true });
+    } else {
+      queryClient.setQueryData<PageRowData[] | undefined>(key, keep(rows));
+    }
+  }
+  for (const id of moved) {
+    queryClient.removeQueries({ queryKey: pageKeys.detail(workspaceSlug, projectId, id), exact: true });
+  }
+  return moved;
+}
+
+export interface PageMoveOptions {
+  /** Runs once the server has moved the page, before the source caches drop. */
+  onMoved?: (targetProjectId: string) => void;
+}
+
+interface PageMoveVariables {
+  targetProjectId: string;
+  onMoved: ((targetProjectId: string) => void) | undefined;
+}
+
+/**
+ * Move one page, with its sub-pages, into another project (PAGE-017,
+ * PDASHOSS01-347). The row stays put until the server confirms; then the
+ * subtree leaves this project's caches, the target's reads refresh and the
+ * caller can follow the page (its id is unchanged). A refusal names the
+ * server's reason, e.g. a page locked since the menu opened.
+ */
 export function usePageMoveWrite(target: PageRowTarget): {
   pending: boolean;
-  move: (newProjectId: string) => void;
+  move: (targetProjectId: string, options?: PageMoveOptions) => void;
 } {
   const cache = useRowCache(target);
-  const mutation = useMutation<void, Error, string>({
-    mutationFn: (newProjectId) =>
+  const mutation = useMutation<void, Error, PageMoveVariables>({
+    mutationFn: ({ targetProjectId }) =>
       movePageToProject(getAppClient(), target.workspaceSlug, target.projectId, target.page.id, {
-        new_project_id: newProjectId,
+        project_id: targetProjectId,
       }),
-    onSuccess: () => {
-      cache.drop();
+    onSuccess: (_data, { targetProjectId, onMoved }) => {
+      onMoved?.(targetProjectId);
+      dropMovedPages(cache.queryClient, target.workspaceSlug, target.projectId, target.page.id);
       notifySuccess(PAGE_MOVED_TITLE);
       publish(target, PAGE_EVENT_MOVED);
+      // The target's collection gains the page and the server dropped any
+      // favourite in the source project, so both reads refresh.
+      void cache.queryClient.invalidateQueries({ queryKey: pageKeys.all(target.workspaceSlug) });
+      void cache.queryClient.invalidateQueries({ queryKey: sidebarKeys.favorites(target.workspaceSlug) });
     },
-    onError: () => {
-      notifyError(PAGE_MOVE_FAILED_TITLE);
+    onError: (error) => {
+      const reason = pageMoveErrorMessage(error);
+      if (reason === undefined) notifyError(PAGE_MOVE_FAILED_TITLE);
+      else notifyError(PAGE_MOVE_FAILED_TITLE, reason);
+      cache.invalidate();
     },
-    onSettled: cache.invalidate,
   });
   return {
     pending: mutation.isPending,
-    move: (newProjectId) => {
+    move: (targetProjectId, options) => {
       if (mutation.isPending) return;
-      mutation.mutate(newProjectId);
+      mutation.mutate({ targetProjectId, onMoved: options?.onMoved });
     },
   };
 }

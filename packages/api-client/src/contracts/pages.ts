@@ -341,14 +341,20 @@ export async function removePageFavorite(
 }
 
 /**
- * Move a page into another project (PAGE-017). Cloud editions serve the
- * route; the community build has no route at all (404). The caller gates
- * the affordance on the edition flag.
+ * Body of the cross-project page move (PAGE-017): the target project's id.
+ * The page keeps its id; it and its live sub-pages leave the source project.
  */
 export interface PageMoveInput {
-  new_project_id: string;
+  project_id: string;
 }
 
+/**
+ * POST .../pages/<id>/move/ — move a page (and its sub-pages) into another
+ * project of the same workspace. Answers 204 with no body. Refusals carry
+ * `{"error": "<reason>"}` (400/403/404): a locked page, a caller who is not
+ * an admin of the source project or cannot write to the target, an
+ * archived or foreign target, or the source project itself as the target.
+ */
 export async function movePageToProject(
   client: ApiClient,
   slug: string,
