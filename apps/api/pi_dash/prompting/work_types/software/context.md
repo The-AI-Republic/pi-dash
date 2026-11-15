@@ -1,5 +1,5 @@
 ---
-key: repo-context
+key: software.context
 title: Repository context
 customizable: locked
 ---
@@ -14,7 +14,7 @@ Repository:
 {% endif %}
 {% else %}
 - Work in the runner's configured working directory. Do not clone or touch any other path.
-- This may be an ordinary folder, not a Git repository. Execute the task normally; do not require Git setup, commits, or a PR for non-coding work.
+- This may be an ordinary folder, not a Git repository. A Git repository is optional for this task: execute it normally, and do not require Git setup, commits, or a PR for non-coding work. Do not initialize a repository or demand a repository URL merely to perform the task.
 {% endif %}
 {% if code_reviews %}
 

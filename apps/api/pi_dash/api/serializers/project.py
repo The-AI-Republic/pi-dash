@@ -34,6 +34,19 @@ def _validate_default_agent_executor(data) -> None:
 
 
 
+def _validate_default_work_type(data) -> None:
+    """``default_work_type`` must name a registered work type (or be blank —
+    ``Project.save`` resolves the default at creation)."""
+    work_type = data.get("default_work_type")
+    if work_type:
+        from pi_dash.prompting.work_types import WORK_TYPES
+
+        if work_type not in WORK_TYPES:
+            raise serializers.ValidationError(
+                {"default_work_type": f"unknown work type; expected one of {sorted(WORK_TYPES)}"}
+            )
+
+
 class ProjectCreateSerializer(BaseSerializer):
     """
     Serializer for creating projects with workspace validation.
@@ -113,6 +126,7 @@ class ProjectCreateSerializer(BaseSerializer):
             "base_branch",
             "default_agent_executor",
             "dedicated_runner_lost_action",
+            "default_work_type",
         ]
 
         read_only_fields = [
@@ -127,6 +141,7 @@ class ProjectCreateSerializer(BaseSerializer):
 
     def validate(self, data):
         _validate_default_agent_executor(data)
+        _validate_default_work_type(data)
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 
@@ -271,6 +286,7 @@ class ProjectSerializer(BaseSerializer):
 
     def validate(self, data):
         _validate_default_agent_executor(data)
+        _validate_default_work_type(data)
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 
