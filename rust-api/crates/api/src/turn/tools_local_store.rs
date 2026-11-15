@@ -1917,6 +1917,7 @@ impl ToolStore for PgToolStore {
                 row,
                 Some(*actor_id),
                 assignable_for,
+                &chrono_tz::UTC,
             )
             .await
             .map_err(|_| StoreError::Db("runner row render failed".to_owned()))?;
