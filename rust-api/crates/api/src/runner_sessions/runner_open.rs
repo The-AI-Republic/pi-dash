@@ -201,23 +201,17 @@ const REAP_FINALIZE_COLUMNS: [&str; 6] = [
     "error_details",
 ];
 /// The hello `SET` order with a capabilities change (model
-/// field-definition order, `capabilities` first).
-const HELLO_COLUMNS_WITH_CAPS: [&str; 6] = [
+/// field-definition order, `capabilities` first). NEWPIDASH-262
+/// removes last_heartbeat_at: a poll is the only heartbeat.
+const HELLO_COLUMNS_WITH_CAPS: [&str; 5] = [
     "capabilities",
     "os",
     "arch",
     "runner_version",
     "dev_metadata",
-    "last_heartbeat_at",
 ];
 /// The hello `SET` order without one.
-const HELLO_COLUMNS_BARE: [&str; 5] = [
-    "os",
-    "arch",
-    "runner_version",
-    "dev_metadata",
-    "last_heartbeat_at",
-];
+const HELLO_COLUMNS_BARE: [&str; 4] = ["os", "arch", "runner_version", "dev_metadata"];
 
 // ---------------------------------------------------------------------------
 // Small helpers
