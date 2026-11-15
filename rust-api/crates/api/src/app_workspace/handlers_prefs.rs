@@ -3729,8 +3729,12 @@ async fn sidebar_prefs_patch(
         if !is_python_truthy(key) {
             continue;
         };
-        // The lookup has NO user filter (`:88`, ported bug): a member can
-        // match another user's row. Non-string keys stringify
+        // Old bug fix (NEWPIDASH-267, DIFF-33; PB-0771, PB-0860): Django's
+        // `filter(key, slug).first()` (`:88`, default `-created_at` order,
+        // NO user filter) rewrites whichever member most recently
+        // auto-created the key. Scoped to the requesting user here
+        // (`user=request.user`), like the neighboring user-properties
+        // endpoint. Non-string keys stringify
         // (`CharField.get_prep_value`) and miss.
         let key_text = py_str(key);
         let found: Option<(Uuid, bool, f64)> = workspace_user_preferences::Entity::find()
@@ -3746,6 +3750,7 @@ async fn sidebar_prefs_patch(
             )
             .filter(workspace_user_preferences::Column::Key.eq(key_text))
             .filter(workspaces::Column::Slug.eq(slug.clone()))
+            .filter(workspace_user_preferences::Column::UserId.eq(user_id))
             .filter(workspace_user_preferences::Column::DeletedAt.is_null())
             .order_by_desc(workspace_user_preferences::Column::CreatedAt)
             .into_tuple()
