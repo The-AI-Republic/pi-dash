@@ -2858,9 +2858,14 @@ async fn bulk_destroy(
 }
 
 /// `EstimatePointEndpoint.create` (`estimate/base.py:153-168`): falsy
-/// key or value → the required 400 (note `key=0` fails); otherwise an
-/// unvalidated ORM insert answering 200 with the point shape. No
-/// estimate-existence check (the FK decides → the `IntegrityError` 400).
+/// key or value → the required 400 (note `key=0` fails); otherwise a
+/// Django-shape ORM insert answering 200 with the point shape, plus the
+/// `EstimatePointSerializer.validate()` 20-char value cap
+/// (NEWPIDASH-275, DIFF-32: Django never runs the serializer here, so an
+/// overlong value is stored with 200 while bulk-create and point-update
+/// answer 400; Rust enforces the same cap and answers the identical
+/// `non_field_errors` 400, storing nothing). No estimate-existence
+/// check (the FK decides → the `IntegrityError` 400).
 async fn point_create(
     State(state): State<AppState>,
     Path((slug, project_raw, estimate_raw)): Path<(String, String, String)>,
@@ -2897,6 +2902,15 @@ async fn point_create(
         Some(raw) => python_str(raw),
         None => String::new(),
     };
+    // NEWPIDASH-275 / DIFF-32 (old bug fix): enforce the
+    // `EstimatePointSerializer.validate()` 20-char value cap on the
+    // coerced `value` that the bulk-create and point-update paths already
+    // run (`estimate.py:21-27`). Django single-create skips the
+    // serializer (`base.py:155-168`), so it stores an overlong value with
+    // 200; the refusal is byte-identical to the enforcing paths' 400.
+    if let Some(errors) = ser::estimate_point_validate(false, Some(value.as_str())) {
+        return Ok(json_response(StatusCode::BAD_REQUEST, errors.to_string()));
+    }
     let db = sea_conn(&pool);
     let workspace = proj_entity::Entity::find_by_id(project_id)
         .select_only()

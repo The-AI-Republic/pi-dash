@@ -222,6 +222,51 @@ def test_point_create_missing_key_400(world):
     assert resp.json() == {"error": "Key and value are required"}
 
 
+def test_point_create_long_value_diff32(world, db):
+    # DIFF-32 (NEWPIDASH-275, old bug fix): Django
+    # `EstimatePointEndpoint.create` never runs
+    # `EstimatePointSerializer.validate()`, so POSTing `{key: 9,
+    # value: "x"*21}` stores the overlong value with 200, while
+    # bulk-create and point-update answer 400. Rust enforces the same
+    # 20-char cap on single-create and answers the identical
+    # `non_field_errors` 400, storing nothing.
+    client, _, ws, project = world.full_stack()
+    created = _make_estimate(client, ws, project)
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/"
+        f"{created['id']}/estimate-points/",
+        json={"key": 9, "value": "x" * 21})
+    assert resp.status_code == expect("DIFF-32", django=200, rust=400)
+    if resp.status_code == 400:
+        assert resp.json() == {
+            "non_field_errors": ["Value can't be more than 20 characters"]}
+    else:
+        assert_keys(resp.json(), POINT_KEYS, "point-create-long-django")
+        assert resp.json()["key"] == 9
+        assert resp.json()["value"] == "x" * 21
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM estimate_points "
+            "WHERE estimate_id=%s AND key=9 AND value=%s",
+            (created["id"], "x" * 21))
+        assert cur.fetchone()["n"] == expect("DIFF-32", django=1, rust=0)
+
+
+def test_point_create_boundary_20_200(world):
+    # The 20-char boundary holds on both backends: a 20-char value is
+    # accepted with 200 and the stored point shape.
+    client, _, ws, project = world.full_stack()
+    created = _make_estimate(client, ws, project)
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/"
+        f"{created['id']}/estimate-points/",
+        json={"key": 8, "value": "x" * 20})
+    assert resp.status_code == 200
+    assert_keys(resp.json(), POINT_KEYS, "point-create-boundary-20")
+    assert resp.json()["key"] == 8
+    assert resp.json()["value"] == "x" * 20
+
+
 def test_point_partial_update(world):
     client, _, ws, project = world.full_stack()
     created = _make_estimate(client, ws, project)
