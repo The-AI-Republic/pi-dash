@@ -1336,7 +1336,7 @@ pub struct FinalizeCall {
 /// (`iteration_limit`); `Failed` classifies on its message, with
 /// `code` as the `exc.code` attribute override (`tasks.py:206`) —
 /// `Some` (even empty) wins, `None` falls back to the classify code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InvokeError {
     Timeout,
     UsageLimit(UsageLimitExceeded),
@@ -1344,10 +1344,22 @@ pub enum InvokeError {
 }
 
 /// A generic model failure: message plus optional `.code`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `status`/`body_json` carry the provider HTTP detail when the
+/// failure came from an HTTP error response (the
+/// `ModelHTTPError(status_code, model_name, body)` analog):
+/// `status` is the HTTP status and `body_json` the parsed error
+/// body when it was JSON. The run-model request wrapper
+/// ([`RunModelRequestSeam`]) inspects them to decide retries and
+/// error-code mapping; CE leaves them `None` for non-HTTP
+/// failures and the drive classifies on `message` exactly as
+/// before (byte-for-byte).
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelFailure {
     pub code: Option<String>,
     pub message: String,
+    pub status: Option<u16>,
+    pub body_json: Option<Box<Value>>,
 }
 
 impl std::fmt::Display for ModelFailure {
@@ -1409,12 +1421,117 @@ pub trait ExecuteSeams: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Overlay seams: pre-invoke run hook + run-model request wrapper
+// (PIDASHCONV-1741, PIDASHCONV-1726 prerequisite)
+// ---------------------------------------------------------------------------
+
+/// Run context for the pre-invoke hook: the run id (to append run
+/// events) plus the creator user id (to resolve the creator's lane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreInvokeRun {
+    pub run_id: Uuid,
+    pub creator_id: Uuid,
+}
+
+/// Overlay seam for the pre-invoke run hook (PIDASHCONV-1741).
+///
+/// Called by [`drive_execute`] between `resolve_model_for_run` and
+/// the `model_started` append, with the run's context, so a
+/// deployment can append run events that must precede `model_started`
+/// (the cloud free-allowance warning). Best-effort: never fails the
+/// run — implementations swallow their own errors, exactly like
+/// Django's `_warn_if_allowance_low` which never raises. CE is a
+/// no-op (byte-for-byte).
+///
+/// Boxed futures keep the trait object-safe behind
+/// `Arc<dyn PreInvokeRunHookSeam>` (the toolsets precedent);
+/// payloads stay in the overlay — this seam carries only identity.
+pub trait PreInvokeRunHookSeam: Send + Sync + std::fmt::Debug {
+    fn before_model_started(
+        &self,
+        run: &PreInvokeRun,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let _ = run;
+        Box::pin(async {})
+    }
+}
+
+/// CE pre-invoke hook: no-op.
+#[derive(Debug)]
+pub struct NoPreInvokeRunHook;
+
+impl PreInvokeRunHookSeam for NoPreInvokeRunHook {}
+
+/// What [`RunModelRequestSeam::handle_failure`] decides for one
+/// failed [`ExecuteSeams::invoke_model`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunModelFailureAction {
+    /// Retry the invocation after the delay (the wrapper's
+    /// backoff; attempts are already counted by the drive).
+    Retry(std::time::Duration),
+    /// Stop retrying and fail the run with this error (typically
+    /// the original, or an error-code-mapped variant).
+    Return(InvokeError),
+}
+
+/// Overlay seam for the run-model request wrapper (PIDASHCONV-1741).
+///
+/// Mirrors Django's `FreeLaneModel.request`: consulted per model
+/// invocation, given the invoke-once path
+/// ([`ExecuteSeams::invoke_model`]). The default prepares the
+/// invocation unchanged and never retries (`Return` the original
+/// error); the overlay's implementation clamps per-request
+/// `max_tokens`, retries retryable provider HTTP failures with its
+/// own backoff, and maps terminal failures (appending events and
+/// setting the run's error code) — without OSS matching model
+/// names or baking in plan/quota logic. The seam receives the
+/// resolved model/lane (via the [`ModelInvocation`]) and the
+/// creator id, never a model-name string to match.
+///
+/// The drive owns the execution timeout (wrapping the whole retry
+/// loop) and the invoke-once call; this seam owns only the
+/// policy. Boxed futures keep it object-safe behind
+/// `Arc<dyn RunModelRequestSeam>`.
+pub trait RunModelRequestSeam: Send + Sync + std::fmt::Debug {
+    /// Prepare one invocation before invoke-once (e.g. clamp
+    /// `model_settings.max_tokens`). CE returns it unchanged.
+    fn prepare_invocation(
+        &self,
+        _creator_id: Uuid,
+        invocation: ModelInvocation,
+    ) -> Pin<Box<dyn Future<Output = ModelInvocation> + Send + '_>> {
+        Box::pin(async move { invocation })
+    }
+
+    /// Decide retry vs terminal for one failed invoke-once call.
+    /// `attempt` counts retries taken so far (0 on first failure).
+    /// CE returns the original error (`Return`).
+    fn handle_failure(
+        &self,
+        _creator_id: Uuid,
+        _invocation: &ModelInvocation,
+        error: InvokeError,
+        _attempt: u32,
+    ) -> Pin<Box<dyn Future<Output = RunModelFailureAction> + Send + '_>> {
+        Box::pin(async move { RunModelFailureAction::Return(error) })
+    }
+}
+
+/// CE run-model request wrapper: invoke-once, no
+/// retry/clamp/error-code mapping (byte-for-byte).
+#[derive(Debug)]
+pub struct PassthroughRunModelRequestSeam;
+
+impl RunModelRequestSeam for PassthroughRunModelRequestSeam {}
+
+// ---------------------------------------------------------------------------
 // Errors: the try-region boundary
 // ---------------------------------------------------------------------------
 
 /// A failure inside the Python `try:` region (`tasks.py:134-208`).
 /// Every variant maps to a terminal run write plus an outcome — the
 /// region never propagates, mirroring the `except` ladder.
+#[derive(Debug)]
 pub enum TryError {
     /// `resolve_current_tool_names` raised (`RequiredToolUnavailable`):
     /// the generic path with the exception's own `.code`.
@@ -2224,11 +2341,13 @@ async fn report_extra_toolsets_unavailable(
     }
 }
 
-/// One model execution (`runtime.py:18-76`): resolve the model, resolve
-/// the extra toolsets, append `model_started`, resolve the limits,
-/// build the invocation, invoke under the execution timeout, and
-/// normalize the usage report. Returns the structured output plus the
-/// `llm_model`/`usage` updates pair.
+/// One model execution (`runtime.py:18-76`): resolve the model, call
+/// the pre-invoke run hook, resolve the extra toolsets, append
+/// `model_started`, resolve the limits, build the invocation, invoke
+/// through the run-model request wrapper under the execution timeout,
+/// and normalize the usage report. Returns the structured output plus
+/// the `llm_model`/`usage` updates pair.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive_execute<S: ExecuteSeams>(
     seams: &S,
     pool: &PgPool,
@@ -2236,6 +2355,8 @@ pub async fn drive_execute<S: ExecuteSeams>(
     ctx: &RunContext,
     current_tools: Vec<String>,
     toolsets: &dyn CloudAgentToolsetsSeam,
+    hook: &dyn PreInvokeRunHookSeam,
+    request_seam: &dyn RunModelRequestSeam,
 ) -> Result<(CloudAgentOutput, String, Value), TryError> {
     let resolved = match seams.resolve_model_for_run(ctx.created_by_id).await {
         Ok(resolved) => resolved,
@@ -2245,6 +2366,16 @@ pub async fn drive_execute<S: ExecuteSeams>(
         }
         Err(ResolveError::Model(error)) => return Err(TryError::Resolve(error)),
     };
+    // Pre-invoke run hook (PIDASHCONV-1741): between resolve and
+    // `model_started`, exactly where Django's
+    // `_warn_if_allowance_low` runs inside `resolve_model_for_run`
+    // before the `model_started` append — so any event the hook
+    // appends (free_allowance_low) precedes `model_started`.
+    hook.before_model_started(&PreInvokeRun {
+        run_id: ctx.id,
+        creator_id: ctx.created_by_id,
+    })
+    .await;
     let model = resolved.model;
     let model_name = model_name_for(&model);
     // Deployment-provided toolsets (`runtime.py:29-37`): the run's own
@@ -2286,14 +2417,43 @@ pub async fn drive_execute<S: ExecuteSeams>(
         usage_limits,
         extra.toolsets,
     );
+    // Run-model request wrapper (PIDASHCONV-1741): the invoke-once
+    // path (`seams.invoke_model`) sits underneath the wrapper's
+    // retry policy. The execution timeout wraps the whole retry
+    // loop (including backoff sleeps), exactly like Django's
+    // `asyncio.timeout` around `agent.run` (wrapper retries inside).
+    // CE (`PassthroughRunModelRequestSeam`) prepares unchanged and
+    // never retries, so this is byte-for-byte with the old single
+    // invoke.
+    let invocation = request_seam
+        .prepare_invocation(ctx.created_by_id, invocation)
+        .await;
     let timeout = std::time::Duration::from_secs(cloud.execution_timeout_secs.max(0) as u64);
-    let (output, raw_usage) =
-        match tokio::time::timeout(timeout, seams.invoke_model(invocation)).await {
-            Err(_) => return Err(TryError::Timeout),
-            Ok(Err(InvokeError::Timeout)) => return Err(TryError::Timeout),
-            Ok(Err(error)) => return Err(TryError::Invoke(error)),
-            Ok(Ok(pair)) => pair,
-        };
+    let invoked = async {
+        let mut attempt: u32 = 0;
+        loop {
+            match seams.invoke_model(invocation.clone()).await {
+                Ok(pair) => return Ok(pair),
+                Err(error) => match request_seam
+                    .handle_failure(ctx.created_by_id, &invocation, error, attempt)
+                    .await
+                {
+                    RunModelFailureAction::Retry(delay) => {
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    RunModelFailureAction::Return(mapped) => return Err(mapped),
+                },
+            }
+        }
+    };
+    let (output, raw_usage) = match tokio::time::timeout(timeout, invoked).await {
+        Err(_) => return Err(TryError::Timeout),
+        Ok(Err(InvokeError::Timeout)) => return Err(TryError::Timeout),
+        Ok(Err(error)) => return Err(TryError::Invoke(error)),
+        Ok(Ok(pair)) => pair,
+    };
     let usage = seams
         .normalize_usage(usage_report(&raw_usage))
         .await
@@ -2305,6 +2465,7 @@ pub async fn drive_execute<S: ExecuteSeams>(
 /// tool refresh, model, settle. Returns the task's return string as
 /// [`RunOutcome`]; guard-region or terminal-write failures propagate
 /// as [`RunError`].
+#[allow(clippy::too_many_arguments)]
 pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
     seams: &S,
     pool: &PgPool,
@@ -2313,6 +2474,8 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
     now: DateTime<Utc>,
     sample_backoff: &(dyn Fn(i64, i64) -> i64 + Send + Sync),
     toolsets: &dyn CloudAgentToolsetsSeam,
+    hook: &dyn PreInvokeRunHookSeam,
+    request_seam: &dyn RunModelRequestSeam,
 ) -> Result<RunOutcome, RunError> {
     if claim_run(pool, cloud, run_id, now, sample_backoff).await? != ClaimOutcome::Claimed {
         return Ok(RunOutcome::Ignored);
@@ -2395,7 +2558,18 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
         cancel_run(seams, ctx.id, &ctx.cancel_reason).await?;
         return Ok(RunOutcome::Cancelled);
     }
-    match run_try_region(seams, pool, cloud, &ctx, project, toolsets).await {
+    match run_try_region(
+        seams,
+        pool,
+        cloud,
+        &ctx,
+        project,
+        toolsets,
+        hook,
+        request_seam,
+    )
+    .await
+    {
         Ok(done) => apply_try_done(seams, ctx.id, done).await,
         Err(error) => apply_try_error(seams, ctx.id, error).await,
     }
@@ -2406,6 +2580,7 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
 /// `project` is the guard's resolution, threaded through: re-resolving
 /// here could only repeat the guard's answer (same context), and a
 /// selected-but-null leg never reaches the region at all.
+#[allow(clippy::too_many_arguments)]
 async fn run_try_region<S: ExecuteSeams>(
     seams: &S,
     pool: &PgPool,
@@ -2413,6 +2588,8 @@ async fn run_try_region<S: ExecuteSeams>(
     ctx: &RunContext,
     project: ProjectRef,
     toolsets: &dyn CloudAgentToolsetsSeam,
+    hook: &dyn PreInvokeRunHookSeam,
+    request_seam: &dyn RunModelRequestSeam,
 ) -> Result<TryDone, TryError> {
     // `github_available_for_project` with the async binding probe
     // spelled out: the kill switch short-circuits without touching the
@@ -2466,8 +2643,17 @@ async fn run_try_region<S: ExecuteSeams>(
     let current_tools =
         resolve_current_tool_names(&ctx.tool_plan, cloud, github_available, linked_pr)
             .map_err(TryError::Tools)?;
-    let (output, llm_model, usage) =
-        drive_execute(seams, pool, cloud, ctx, current_tools, toolsets).await?;
+    let (output, llm_model, usage) = drive_execute(
+        seams,
+        pool,
+        cloud,
+        ctx,
+        current_tools,
+        toolsets,
+        hook,
+        request_seam,
+    )
+    .await?;
     if !cloud_agent_is_configured(cloud) {
         return Ok(TryDone::Disabled);
     }
@@ -2646,6 +2832,7 @@ pub fn parse_run_agent_arg(job: &JobRow) -> Result<Uuid, String> {
 /// retry policy set). Like the assistant tasks, this builds the table
 /// without flipping the live worker: the domain gate flips ownership
 /// after the proxy pass.
+#[allow(clippy::too_many_arguments)]
 pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
     registry: &mut Registry,
     pool: PgPool,
@@ -2653,11 +2840,15 @@ pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
     managed: ManagedRunnerSettings,
     seams: Arc<S>,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    hook: Arc<dyn PreInvokeRunHookSeam>,
+    request_seam: Arc<dyn RunModelRequestSeam>,
 ) {
     let run_seams = seams.clone();
     let run_pool = pool.clone();
     let run_cloud = cloud.clone();
     let run_toolsets = toolsets.clone();
+    let run_hook = hook.clone();
+    let run_request = request_seam.clone();
     registry.register(
         RUN_CLOUD_AGENT_TASK,
         Arc::new(move |job: JobRow| {
@@ -2665,6 +2856,8 @@ pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
             let pool = run_pool.clone();
             let cloud = run_cloud.clone();
             let toolsets = run_toolsets.clone();
+            let hook = run_hook.clone();
+            let request_seam = run_request.clone();
             let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
                 Box::pin(async move {
                     let run_id = match parse_run_agent_arg(&job) {
@@ -2681,6 +2874,8 @@ pub fn register_execute_tasks<S: ExecuteSeams + 'static>(
                         now,
                         &sample,
                         toolsets.as_ref(),
+                        hook.as_ref(),
+                        request_seam.as_ref(),
                     )
                     .await
                     {
@@ -2926,6 +3121,8 @@ mod tests {
         resolved: ResolvedRunModel,
         resolve_err: Mutex<Option<ResolveError>>,
         invoke: Mutex<Option<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
+        invoke_queue:
+            Mutex<std::collections::VecDeque<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
         invocations: Mutex<Vec<ModelInvocation>>,
     }
 
@@ -2945,6 +3142,7 @@ mod tests {
                 },
                 resolve_err: Mutex::new(None),
                 invoke: Mutex::new(None),
+                invoke_queue: Mutex::new(std::collections::VecDeque::new()),
                 invocations: Mutex::new(Vec::new()),
             }
         }
@@ -2989,6 +3187,9 @@ mod tests {
             invocation: ModelInvocation,
         ) -> Result<(CloudAgentOutput, RawUsage), InvokeError> {
             self.invocations.lock().unwrap().push(invocation);
+            if let Some(next) = self.invoke_queue.lock().unwrap().pop_front() {
+                return next;
+            }
             self.invoke.lock().unwrap().take().expect("invoke scripted")
         }
     }
@@ -3010,6 +3211,8 @@ mod tests {
             django_managed_settings(),
             Arc::new(FakeSeams::new()),
             Arc::new(NoExtraToolsets),
+            Arc::new(NoPreInvokeRunHook),
+            Arc::new(PassthroughRunModelRequestSeam),
         );
         for task in [
             RUN_CLOUD_AGENT_TASK,
@@ -3671,6 +3874,8 @@ mod tests {
             &ctx,
             Vec::new(),
             &NoExtraToolsets,
+            &NoPreInvokeRunHook,
+            &PassthroughRunModelRequestSeam,
         )
         .await
         .expect_err("missing config");
@@ -3689,6 +3894,8 @@ mod tests {
             &ctx,
             Vec::new(),
             &NoExtraToolsets,
+            &NoPreInvokeRunHook,
+            &PassthroughRunModelRequestSeam,
         )
         .await
         .expect_err("crypto missing");
@@ -3708,6 +3915,8 @@ mod tests {
             &ctx,
             Vec::new(),
             &NoExtraToolsets,
+            &NoPreInvokeRunHook,
+            &PassthroughRunModelRequestSeam,
         )
         .await
         .expect_err("seam failure");
@@ -3723,11 +3932,403 @@ mod tests {
             &ctx,
             Vec::new(),
             &NoExtraToolsets,
+            &NoPreInvokeRunHook,
+            &PassthroughRunModelRequestSeam,
         )
         .await
         .expect_err("lazy pool fails at the event write");
         assert!(matches!(error, TryError::Db(_)));
         assert!(seams.invocations.lock().unwrap().is_empty());
+    }
+
+    /// PIDASHCONV-1741: CE seams are byte-for-byte passthrough.
+    /// `prepare` returns the invocation unchanged (even a >8192
+    /// `max_tokens` passes through), `handle_failure` returns the
+    /// original error, and the hook is a no-op — so the existing
+    /// execute suite cannot distinguish CE from pre-seam behavior.
+    #[tokio::test]
+    async fn ce_seams_are_byte_for_byte_passthrough() {
+        let cloud = django_cloud_settings();
+        let ctx = run_ctx();
+        let invocation = build_invocation(
+            &ctx,
+            ModelRef::Anthropic {
+                model: "claude-x".to_owned(),
+            },
+            RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
+            Vec::new(),
+            &cloud,
+            usage_limits_for(&ctx.tool_plan, &cloud).unwrap(),
+            Vec::new(),
+        );
+        let mut large = invocation.clone();
+        large.model_settings.max_tokens = 9000;
+        let seam = PassthroughRunModelRequestSeam;
+        let prepared = seam
+            .prepare_invocation(ctx.created_by_id, large.clone())
+            .await;
+        assert_eq!(prepared, large, "CE prepare must not clamp");
+        let http_failure = InvokeError::Failed(ModelFailure {
+            code: None,
+            message: "status_code: 429, model_name: m, body: busy".to_owned(),
+            status: Some(429),
+            body_json: Some(Box::new(json!({"error": {"code": "free_lane_busy"}}))),
+        });
+        match seam
+            .handle_failure(ctx.created_by_id, &large, http_failure.clone(), 0)
+            .await
+        {
+            RunModelFailureAction::Return(inner) => {
+                assert_eq!(inner, http_failure, "CE handle must return original");
+            }
+            RunModelFailureAction::Retry(_) => panic!("CE never retries"),
+        }
+        // Hook CE is a no-op and never fails.
+        NoPreInvokeRunHook
+            .before_model_started(&PreInvokeRun {
+                run_id: ctx.id,
+                creator_id: ctx.created_by_id,
+            })
+            .await;
+    }
+
+    /// Test fake for the pre-invoke hook: records the run context
+    /// and, when a pool is present, appends a `free_allowance_low`
+    /// stand-in (best-effort, swallowing errors — the overlay
+    /// contract). The stand-in stands in for the cloud payload;
+    /// OSS carries only identity.
+    #[derive(Debug, Clone, Default)]
+    struct RecordingHook {
+        seen: Arc<Mutex<Vec<PreInvokeRun>>>,
+        pool: Option<PgPool>,
+        max_events: i64,
+    }
+
+    impl PreInvokeRunHookSeam for RecordingHook {
+        fn before_model_started(
+            &self,
+            run: &PreInvokeRun,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let seen = self.seen.clone();
+            let pool = self.pool.clone();
+            let max_events = self.max_events;
+            let run_copy = *run;
+            Box::pin(async move {
+                seen.lock().unwrap().push(run_copy);
+                if let Some(pool) = pool {
+                    let _ = crate::dispatch::append_event(
+                        &pool,
+                        max_events,
+                        run_copy.run_id,
+                        "free_allowance_low",
+                        Some(serde_json::json!({"message": "Free allowance low: test"})),
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                }
+            })
+        }
+    }
+
+    /// Gateway error code from a parsed body (the
+    /// `_gateway_payload` JSON leg, test-only): top-level `code`
+    /// or nested `error.code`.
+    fn gateway_code(body_json: &Option<Box<Value>>) -> Option<String> {
+        let value = body_json.as_deref()?;
+        if let Some(code) = value.get("code").and_then(Value::as_str) {
+            return Some(code.to_owned());
+        }
+        value
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    /// Fake overlay stand-in for PIDASHCONV-1726: OpenHub-bound iff
+    /// the lane credential is `Direct` (never a model-name match),
+    /// clamps `max_tokens` to 8192, retries 429/503 twice with
+    /// short test delays (production uses 2s/6s), and maps 402
+    /// `free_quota_exhausted` to `openhub_free_quota_exhausted`
+    /// (appending the event when a pool is present). This is the
+    /// proof that the OSS seams suffice without forking OSS.
+    #[derive(Debug)]
+    struct FakeFreeLaneRequestSeam {
+        pool: Option<PgPool>,
+        max_events: i64,
+        prepares: Arc<Mutex<Vec<ModelInvocation>>>,
+        failure_attempts: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl FakeFreeLaneRequestSeam {
+        fn new() -> Self {
+            Self {
+                pool: None,
+                max_events: 0,
+                prepares: Arc::new(Mutex::new(Vec::new())),
+                failure_attempts: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl RunModelRequestSeam for FakeFreeLaneRequestSeam {
+        fn prepare_invocation(
+            &self,
+            _creator_id: Uuid,
+            invocation: ModelInvocation,
+        ) -> Pin<Box<dyn Future<Output = ModelInvocation> + Send + '_>> {
+            let prepares = self.prepares.clone();
+            Box::pin(async move {
+                let mut prepared = invocation;
+                if matches!(prepared.key, RunModelKey::Direct(_))
+                    && prepared.model_settings.max_tokens > 8192
+                {
+                    prepared.model_settings.max_tokens = 8192;
+                }
+                prepares.lock().unwrap().push(prepared.clone());
+                prepared
+            })
+        }
+
+        fn handle_failure(
+            &self,
+            _creator_id: Uuid,
+            invocation: &ModelInvocation,
+            error: InvokeError,
+            attempt: u32,
+        ) -> Pin<Box<dyn Future<Output = RunModelFailureAction> + Send + '_>> {
+            let pool = self.pool.clone();
+            let max_events = self.max_events;
+            let run_id = invocation.run_id;
+            let bound = matches!(invocation.key, RunModelKey::Direct(_));
+            let failure_attempts = self.failure_attempts.clone();
+            Box::pin(async move {
+                failure_attempts.lock().unwrap().push(attempt);
+                if !bound {
+                    return RunModelFailureAction::Return(error);
+                }
+                let InvokeError::Failed(failure) = &error else {
+                    return RunModelFailureAction::Return(error);
+                };
+                if matches!(failure.status, Some(429) | Some(503)) && attempt < 2 {
+                    return RunModelFailureAction::Retry(std::time::Duration::from_millis(1));
+                }
+                if failure.status == Some(402)
+                    && gateway_code(&failure.body_json).as_deref() == Some("free_quota_exhausted")
+                {
+                    if let Some(pool) = &pool {
+                        let _ = crate::dispatch::append_event(
+                            pool,
+                            max_events,
+                            run_id,
+                            "free_quota_exhausted",
+                            Some(serde_json::json!({"error": "openhub_free_quota_exhausted"})),
+                            chrono::Utc::now(),
+                        )
+                        .await;
+                    }
+                    let body_json = failure.body_json.clone();
+                    return RunModelFailureAction::Return(InvokeError::Failed(ModelFailure {
+                        code: Some("openhub_free_quota_exhausted".to_owned()),
+                        message: "Daily free limit reached, resets at 2026-01-01.".to_owned(),
+                        status: Some(402),
+                        body_json,
+                    }));
+                }
+                RunModelFailureAction::Return(error)
+            })
+        }
+    }
+
+    /// PIDASHCONV-1741: the hook runs between resolve and the
+    /// `model_started` write. On the lazy pool the drive stops at
+    /// the `model_started` append (`TryError::Db`); the recording
+    /// hook must already have been called with the run's context,
+    /// and the wrapper must not have been consulted (it sits after
+    /// the append, before invoke).
+    #[tokio::test]
+    async fn pre_invoke_hook_runs_before_model_started_write() {
+        let cloud = django_cloud_settings();
+        let ctx = run_ctx();
+        let seams = FakeSeams::new();
+        let hook = RecordingHook::default();
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+            &hook,
+            &PassthroughRunModelRequestSeam,
+        )
+        .await
+        .expect_err("lazy pool fails at the event write");
+        assert!(matches!(error, TryError::Db(_)));
+        let seen = hook.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "hook must run before the write");
+        assert_eq!(seen[0].run_id, ctx.id);
+        assert_eq!(seen[0].creator_id, ctx.created_by_id);
+        assert!(
+            seams.invocations.lock().unwrap().is_empty(),
+            "no invoke on a failed append"
+        );
+    }
+
+    /// PIDASHCONV-1741: the fake overlay drives all four behaviors
+    /// through the seams alone (direct policy calls, no DB): clamp
+    /// applies only to the `Direct` lane, 429/503 retry twice then
+    /// stop, 402 maps to the overlay code, BYOK passes through.
+    #[tokio::test]
+    async fn fake_overlay_implements_all_four_via_seams_only() {
+        let cloud = django_cloud_settings();
+        let ctx = run_ctx();
+        let creator = ctx.created_by_id;
+        let seam = FakeFreeLaneRequestSeam::new();
+        // Clamp: Direct + 9000 -> 8192; Byok + 9000 -> 9000.
+        let direct = build_invocation(
+            &ctx,
+            ModelRef::OpenAICompatible {
+                model: "hub-model".to_owned(),
+                base_url: "https://gateway.example.com".to_owned(),
+            },
+            RunModelKey::Direct("token".to_owned()),
+            Vec::new(),
+            &cloud,
+            usage_limits_for(&ctx.tool_plan, &cloud).unwrap(),
+            Vec::new(),
+        );
+        let mut direct_large = direct.clone();
+        direct_large.model_settings.max_tokens = 9000;
+        let prepared = seam.prepare_invocation(creator, direct_large).await;
+        assert_eq!(prepared.model_settings.max_tokens, 8192);
+        let byok = build_invocation(
+            &ctx,
+            ModelRef::Anthropic {
+                model: "claude-x".to_owned(),
+            },
+            RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
+            Vec::new(),
+            &cloud,
+            usage_limits_for(&ctx.tool_plan, &cloud).unwrap(),
+            Vec::new(),
+        );
+        let mut byok_large = byok.clone();
+        byok_large.model_settings.max_tokens = 9000;
+        let prepared_byok = seam.prepare_invocation(creator, byok_large.clone()).await;
+        assert_eq!(
+            prepared_byok.model_settings.max_tokens, 9000,
+            "BYOK never clamped"
+        );
+        // Retry: 429/503 on attempt 0 and 1 -> Retry, attempt 2 -> Return.
+        for attempt in [0, 1] {
+            let error = InvokeError::Failed(ModelFailure {
+                code: None,
+                message: "busy".to_owned(),
+                status: Some(429),
+                body_json: Some(Box::new(json!({"error": {"code": "free_lane_busy"}}))),
+            });
+            assert!(matches!(
+                seam.handle_failure(creator, &direct, error, attempt).await,
+                RunModelFailureAction::Retry(_)
+            ));
+        }
+        let error = InvokeError::Failed(ModelFailure {
+            code: None,
+            message: "busy".to_owned(),
+            status: Some(503),
+            body_json: None,
+        });
+        assert!(matches!(
+            seam.handle_failure(creator, &direct, error.clone(), 2).await,
+            RunModelFailureAction::Return(ref mapped) if mapped == &error
+        ));
+        // 402 map: gateway code -> overlay code.
+        let exhausted = InvokeError::Failed(ModelFailure {
+            code: None,
+            message: "status_code: 402".to_owned(),
+            status: Some(402),
+            body_json: Some(Box::new(
+                json!({"error": {"code": "free_quota_exhausted", "resets_at": "2026-01-01T00:00:00Z"}}),
+            )),
+        });
+        match seam.handle_failure(creator, &direct, exhausted, 0).await {
+            RunModelFailureAction::Return(InvokeError::Failed(failure)) => {
+                assert_eq!(
+                    failure.code.as_deref(),
+                    Some("openhub_free_quota_exhausted")
+                );
+                assert_eq!(failure.status, Some(402));
+            }
+            other => panic!("402 must map, got {other:?}"),
+        }
+        // Non-gateway 402 and BYOK pass through unchanged.
+        let other_402 = InvokeError::Failed(ModelFailure {
+            code: None,
+            message: "wallet".to_owned(),
+            status: Some(402),
+            body_json: Some(Box::new(json!({"error": {"code": "other"}}))),
+        });
+        assert!(matches!(
+            seam.handle_failure(creator, &direct, other_402.clone(), 0).await,
+            RunModelFailureAction::Return(ref mapped) if mapped == &other_402
+        ));
+        let busy = InvokeError::Failed(ModelFailure {
+            code: None,
+            message: "busy".to_owned(),
+            status: Some(429),
+            body_json: None,
+        });
+        assert!(matches!(
+            seam.handle_failure(creator, &byok, busy.clone(), 0).await,
+            RunModelFailureAction::Return(ref mapped) if mapped == &busy
+        ));
+    }
+
+    /// PIDASHCONV-1741: CE classification ignores HTTP detail
+    /// (byte-for-byte) while an overlay-mapped code wins. A codeless
+    /// 429 `ModelFailure` still classifies `provider_error`; with
+    /// `Some("openhub_free_quota_exhausted")` it finalizes that
+    /// code (the `getattr(exc, "code")` analog).
+    #[tokio::test]
+    async fn http_detail_does_not_change_ce_classification() {
+        let run_id = Uuid::new_v4();
+        let seams = FakeSeams::new();
+        let outcome = apply_try_error(
+            &seams,
+            run_id,
+            TryError::Invoke(InvokeError::Failed(ModelFailure {
+                code: None,
+                message: "status_code: 429".to_owned(),
+                status: Some(429),
+                body_json: Some(Box::new(json!({"error": {"code": "free_lane_busy"}}))),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RunOutcome::Failed);
+        assert_eq!(
+            seams.calls()[0].updates["error_code"],
+            json!("provider_error")
+        );
+        let seams = FakeSeams::new();
+        let outcome = apply_try_error(
+            &seams,
+            run_id,
+            TryError::Invoke(InvokeError::Failed(ModelFailure {
+                code: Some("openhub_free_quota_exhausted".to_owned()),
+                message: "Daily free limit reached.".to_owned(),
+                status: Some(402),
+                body_json: Some(Box::new(json!({"error": {"code": "free_quota_exhausted"}}))),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RunOutcome::Failed);
+        assert_eq!(
+            seams.calls()[0].updates["error_code"],
+            json!("openhub_free_quota_exhausted")
+        );
     }
 
     #[tokio::test]
@@ -3757,6 +4358,8 @@ mod tests {
             TryError::Invoke(InvokeError::Failed(ModelFailure {
                 code: None,
                 message: "model refused: safety refusal".to_owned(),
+                status: None,
+                body_json: None,
             })),
         )
         .await
@@ -3775,6 +4378,8 @@ mod tests {
                 TryError::Invoke(InvokeError::Failed(ModelFailure {
                     code: code.clone(),
                     message: "plain boom".to_owned(),
+                    status: None,
+                    body_json: None,
                 })),
             )
             .await
@@ -3791,6 +4396,8 @@ mod tests {
             TryError::Invoke(InvokeError::Failed(ModelFailure {
                 code: None,
                 message: "call failed: sk-abcdefghijklmnop rest".to_owned(),
+                status: None,
+                body_json: None,
             })),
         )
         .await
@@ -4324,6 +4931,9 @@ mod tests {
             llm_ok: bool,
             resolved: ResolvedRunModel,
             invoke: Mutex<Option<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
+            invoke_queue: Mutex<
+                std::collections::VecDeque<Result<(CloudAgentOutput, RawUsage), InvokeError>>,
+            >,
             invocations: Mutex<Vec<ModelInvocation>>,
             pool: PgPool,
         }
@@ -4341,6 +4951,7 @@ mod tests {
                         key: RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
                     },
                     invoke: Mutex::new(None),
+                    invoke_queue: Mutex::new(std::collections::VecDeque::new()),
                     invocations: Mutex::new(Vec::new()),
                     pool,
                 }
@@ -4461,6 +5072,9 @@ mod tests {
                 invocation: ModelInvocation,
             ) -> Result<(CloudAgentOutput, RawUsage), InvokeError> {
                 self.invocations.lock().unwrap().push(invocation);
+                if let Some(next) = self.invoke_queue.lock().unwrap().pop_front() {
+                    return next;
+                }
                 self.invoke.lock().unwrap().take().expect("invoke scripted")
             }
         }
@@ -4891,9 +5505,18 @@ mod tests {
             let seams = LiveSeams::new(pool.clone());
             let cloud = cloud_on();
             let ctx = fetch_run_context(&pool, run_id).await.expect("context");
-            let error = drive_execute(&seams, &pool, &cloud, &ctx, Vec::new(), &NoExtraToolsets)
-                .await
-                .expect_err("corrupt limits fail");
+            let error = drive_execute(
+                &seams,
+                &pool,
+                &cloud,
+                &ctx,
+                Vec::new(),
+                &NoExtraToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
+            )
+            .await
+            .expect_err("corrupt limits fail");
             assert!(
                 matches!(error, TryError::Limits(_)),
                 "generic-path limit error"
@@ -4909,6 +5532,192 @@ mod tests {
                     .await
                     .expect("events");
             assert_eq!(kinds, vec!["model_started".to_owned()]);
+            teardown(&pool, &graph).await;
+        }
+
+        /// PIDASHCONV-1741: the drive retries through the request
+        /// seam until success, clamps `max_tokens`, and the hook's
+        /// event precedes `model_started` — the free-lane behaviors
+        /// end to end over the live drive (fake overlay via seams
+        /// only, no OSS fork).
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execute_retries_and_orders_events_through_seams() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "execretry").await;
+            let now = Utc::now();
+            let run_id = seed_run(
+                &pool,
+                &graph,
+                "running",
+                "cloud_agent",
+                now,
+                Some(now),
+                None,
+                "do it",
+                json!({"tools": []}),
+                None,
+            )
+            .await;
+            let mut seams = LiveSeams::new(pool.clone());
+            seams.resolved = ResolvedRunModel {
+                model: ModelRef::OpenAICompatible {
+                    model: "hub-model".to_owned(),
+                    base_url: "https://gateway.example.com".to_owned(),
+                },
+                key: RunModelKey::Direct("token".to_owned()),
+            };
+            {
+                let mut queue = seams.invoke_queue.lock().unwrap();
+                queue.push_back(Err(InvokeError::Failed(ModelFailure {
+                    code: None,
+                    message: "status_code: 429".to_owned(),
+                    status: Some(429),
+                    body_json: Some(Box::new(json!({"error": {"code": "free_lane_busy"}}))),
+                })));
+                queue.push_back(Ok((
+                    sample_output(Outcome::Completed),
+                    RawUsage {
+                        fields: Map::new(),
+                        input_tokens: None,
+                        output_tokens: None,
+                        total_tokens: None,
+                    },
+                )));
+            }
+            let mut cloud = cloud_on();
+            cloud.max_output_tokens_per_request = 9000;
+            let hook = RecordingHook {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                pool: Some(pool.clone()),
+                max_events: cloud.max_events,
+            };
+            let request = FakeFreeLaneRequestSeam {
+                pool: Some(pool.clone()),
+                max_events: cloud.max_events,
+                prepares: Arc::new(Mutex::new(Vec::new())),
+                failure_attempts: Arc::new(Mutex::new(Vec::new())),
+            };
+            let ctx = fetch_run_context(&pool, run_id).await.expect("context");
+            let (output, llm_model, _usage) = drive_execute(
+                &seams,
+                &pool,
+                &cloud,
+                &ctx,
+                Vec::new(),
+                &NoExtraToolsets,
+                &hook,
+                &request,
+            )
+            .await
+            .expect("retry then succeed");
+            assert_eq!(output.outcome(), Outcome::Completed);
+            assert_eq!(llm_model, "hub-model");
+            let invocations = seams.invocations.lock().unwrap().clone();
+            assert_eq!(invocations.len(), 2, "one retry through the seam");
+            for invocation in &invocations {
+                assert_eq!(
+                    invocation.model_settings.max_tokens, 8192,
+                    "clamped through the seam"
+                );
+            }
+            let kinds: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM agent_run_event WHERE agent_run_id = $1 ORDER BY seq",
+            )
+            .bind(run_id)
+            .fetch_all(&pool)
+            .await
+            .expect("events");
+            assert_eq!(
+                kinds,
+                vec!["free_allowance_low".to_owned(), "model_started".to_owned()],
+                "allowance-low must precede model_started"
+            );
+            teardown(&pool, &graph).await;
+        }
+
+        /// PIDASHCONV-1741: a 402 `free_quota_exhausted` through
+        /// the request seam appends its event and fails with the
+        /// overlay code (no OSS fork).
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execute_maps_402_through_request_seam() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "exec402").await;
+            let now = Utc::now();
+            let run_id = seed_run(
+                &pool,
+                &graph,
+                "running",
+                "cloud_agent",
+                now,
+                Some(now),
+                None,
+                "do it",
+                json!({"tools": []}),
+                None,
+            )
+            .await;
+            let mut seams = LiveSeams::new(pool.clone());
+            seams.resolved = ResolvedRunModel {
+                model: ModelRef::OpenAICompatible {
+                    model: "hub-model".to_owned(),
+                    base_url: "https://gateway.example.com".to_owned(),
+                },
+                key: RunModelKey::Direct("token".to_owned()),
+            };
+            {
+                let mut queue = seams.invoke_queue.lock().unwrap();
+                queue.push_back(Err(InvokeError::Failed(ModelFailure {
+                    code: None,
+                    message: "status_code: 402".to_owned(),
+                    status: Some(402),
+                    body_json: Some(Box::new(json!({"error": {"code": "free_quota_exhausted", "resets_at": "2026-01-01T00:00:00Z"}}))),
+                })));
+            }
+            let cloud = cloud_on();
+            let request = FakeFreeLaneRequestSeam {
+                pool: Some(pool.clone()),
+                max_events: cloud.max_events,
+                prepares: Arc::new(Mutex::new(Vec::new())),
+                failure_attempts: Arc::new(Mutex::new(Vec::new())),
+            };
+            let ctx = fetch_run_context(&pool, run_id).await.expect("context");
+            let error = drive_execute(
+                &seams,
+                &pool,
+                &cloud,
+                &ctx,
+                Vec::new(),
+                &NoExtraToolsets,
+                &NoPreInvokeRunHook,
+                &request,
+            )
+            .await
+            .expect_err("402 fails");
+            let TryError::Invoke(InvokeError::Failed(failure)) = error else {
+                panic!("expected mapped 402, got {error:?}");
+            };
+            assert_eq!(
+                failure.code.as_deref(),
+                Some("openhub_free_quota_exhausted")
+            );
+            assert_eq!(seams.invocations.lock().unwrap().len(), 1);
+            let kinds: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM agent_run_event WHERE agent_run_id = $1 ORDER BY seq",
+            )
+            .bind(run_id)
+            .fetch_all(&pool)
+            .await
+            .expect("events");
+            assert_eq!(
+                kinds,
+                vec![
+                    "model_started".to_owned(),
+                    "free_quota_exhausted".to_owned()
+                ],
+                "quota event after model_started"
+            );
             teardown(&pool, &graph).await;
         }
 
@@ -5096,6 +5905,8 @@ mod tests {
                 now,
                 &sample,
                 &NoExtraToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
             )
             .await
             .expect("drive");
@@ -5250,6 +6061,8 @@ mod tests {
                 now,
                 &sample,
                 &GatewayToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
             )
             .await
             .expect("drive");
@@ -5310,10 +6123,19 @@ mod tests {
             )));
             let cloud = cloud_on();
             let sample = |lo: i64, _hi: i64| lo;
-            let outcome =
-                drive_run_cloud_agent(&seams, &pool, &cloud, run_id, now, &sample, &OutageToolsets)
-                    .await
-                    .expect("drive");
+            let outcome = drive_run_cloud_agent(
+                &seams,
+                &pool,
+                &cloud,
+                run_id,
+                now,
+                &sample,
+                &OutageToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
+            )
+            .await
+            .expect("drive");
             assert_eq!(outcome, RunOutcome::Completed);
             let invocations = seams.invocations.lock().unwrap().clone();
             assert_eq!(invocations.len(), 1);
@@ -5366,9 +6188,18 @@ mod tests {
             let seams = LiveSeams::new(pool.clone());
             let cloud = cloud_on();
             let ctx = fetch_run_context(&pool, run_id).await.expect("context");
-            let error = drive_execute(&seams, &pool, &cloud, &ctx, Vec::new(), &PanicToolsets)
-                .await
-                .expect_err("corrupt limits fail");
+            let error = drive_execute(
+                &seams,
+                &pool,
+                &cloud,
+                &ctx,
+                Vec::new(),
+                &PanicToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
+            )
+            .await
+            .expect_err("corrupt limits fail");
             assert!(
                 matches!(error, TryError::Limits(_)),
                 "generic-path limit error"
@@ -5408,6 +6239,8 @@ mod tests {
                 now,
                 &sample,
                 &NoExtraToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
             )
             .await
             .expect("disabled drive");
@@ -5446,6 +6279,8 @@ mod tests {
                 now,
                 &sample,
                 &NoExtraToolsets,
+                &NoPreInvokeRunHook,
+                &PassthroughRunModelRequestSeam,
             )
             .await
             .expect("unauthorized drive");

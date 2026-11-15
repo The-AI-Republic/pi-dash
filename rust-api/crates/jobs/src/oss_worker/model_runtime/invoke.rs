@@ -103,6 +103,8 @@ pub async fn invoke(
                 InvokeError::Failed(ModelFailure {
                     code: None,
                     message: error.to_string(),
+                    status: None,
+                    body_json: None,
                 })
             })?;
             let ciphertext = gate_row(row.as_ref()).map_err(InvokeError::Failed)?;
@@ -110,6 +112,8 @@ pub async fn invoke(
                 InvokeError::Failed(ModelFailure {
                     code: failure.code,
                     message: failure.message,
+                    status: None,
+                    body_json: None,
                 })
             })?
         }
@@ -170,6 +174,18 @@ pub async fn invoke(
         Err(LoopError::Failed(message)) => Err(InvokeError::Failed(ModelFailure {
             code: None,
             message,
+            status: None,
+            body_json: None,
+        })),
+        Err(LoopError::ProviderHttp {
+            message,
+            status,
+            body_json,
+        }) => Err(InvokeError::Failed(ModelFailure {
+            code: None,
+            message,
+            status: Some(status),
+            body_json,
         })),
     }
 }
@@ -183,6 +199,8 @@ fn gate_row(row: Option<&crate::oss_worker::execute_seams::LlmRow>) -> Result<&[
     let missing = || ModelFailure {
         code: Some(CODE_LLM_CONFIG_MISSING.to_owned()),
         message: MSG_NO_PROVIDER.to_owned(),
+        status: None,
+        body_json: None,
     };
     let Some(row) = row else {
         return Err(missing());
@@ -234,6 +252,8 @@ async fn creator_of(pool: &sqlx::PgPool, run_id: Uuid) -> Result<Uuid, InvokeErr
             InvokeError::Failed(ModelFailure {
                 code: None,
                 message: error.to_string(),
+                status: None,
+                body_json: None,
             })
         })?;
     match row {
@@ -241,6 +261,8 @@ async fn creator_of(pool: &sqlx::PgPool, run_id: Uuid) -> Result<Uuid, InvokeErr
         None => Err(InvokeError::Failed(ModelFailure {
             code: None,
             message: "AgentRun matching query does not exist.".to_owned(),
+            status: None,
+            body_json: None,
         })),
     }
 }

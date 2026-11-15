@@ -61,8 +61,8 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value};
 
 use super::provider::{
-    generate_tool_call_id, Finish, HistoryMessage, Lane, ParsedResponse, RequestPart, ResponsePart,
-    RetryContent, ToolArgs, ToolCall, WireTool,
+    generate_tool_call_id, Finish, HistoryMessage, Lane, ParsedResponse, ProviderError,
+    RequestPart, ResponsePart, RetryContent, ToolArgs, ToolCall, WireTool,
 };
 use super::schemas::ToolSchema;
 use super::usage::{LimitBreach, ProviderTable, RequestUsage, RunUsage};
@@ -182,6 +182,17 @@ pub enum LoopError {
     Timeout,
     /// Anything else: provider, exhaustion, filter, tool-fatal.
     Failed(String),
+    /// A provider HTTP failure with its status and parsed body
+    /// (the `ModelHTTPError(status_code, model_name, body)`
+    /// analog, PIDASHCONV-1741): the run-model request wrapper
+    /// inspects `status`/`body_json` to decide retries and
+    /// error-code mapping. `message` is the same `str(exc)` text
+    /// `Failed` carries, so CE classification is unchanged.
+    ProviderHttp {
+        message: String,
+        status: u16,
+        body_json: Option<Box<Value>>,
+    },
 }
 
 impl LoopError {
@@ -218,7 +229,19 @@ pub async fn run_loop<E: ToolExecutor>(
         };
         let response = match super::provider::complete(config.client, &turn).await {
             Ok(response) => response,
-            Err(error) => return Err(LoopError::failed(error.message(config.lane))),
+            Err(error) => {
+                let message = error.message(config.lane);
+                return Err(match error {
+                    ProviderError::Http {
+                        status, body_json, ..
+                    } => LoopError::ProviderHttp {
+                        message,
+                        status,
+                        body_json: body_json.map(Box::new),
+                    },
+                    _ => LoopError::failed(message),
+                });
+            }
         };
         state.usage.incr(&response.usage);
         state.usage.requests += 1;
@@ -1561,6 +1584,7 @@ mod tests {
     fn failed_message(error: LoopError) -> String {
         match error {
             LoopError::Failed(message) => message,
+            LoopError::ProviderHttp { message, .. } => message,
             LoopError::UsageLimit(message) => panic!("expected Failed, got UsageLimit: {message}"),
             LoopError::Timeout => panic!("expected Failed, got Timeout"),
         }
