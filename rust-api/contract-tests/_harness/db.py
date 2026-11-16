@@ -1103,7 +1103,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
                 false, 'UTC', false,
                 '', '', 0,
                 0, false, false, 'fail_to_backlog',
-                0, '', 0, now(), now())
+                0, '', 0, now(), now(), '')
             """,
             (pid, name, NETWORK_SECRET, identifier, workspace_id, created_by_id),
         )
