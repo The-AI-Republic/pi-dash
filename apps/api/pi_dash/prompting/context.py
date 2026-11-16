@@ -268,7 +268,7 @@ def _actor_label(actor) -> str:
 def _comment_author_label(comment) -> str:
     """Render an audience-friendly speaker label for a comment.
 
-    Bot comments are flattened to a single ``Pi Dash Agent`` label so the
+    Bot comments are flattened to a single ``Pi Dash Bot`` label so the
     agent reading its own prior posts immediately recognizes them as
     self-authored. Explicit speaker metadata wins over the authenticated
     actor because agent CLI comments may be submitted with a human token.
@@ -290,7 +290,7 @@ def _comment_author_label(comment) -> str:
     if actor is None:
         return "Unknown"
     if getattr(actor, "is_bot", False):
-        return "AI agent: Pi Dash Agent"
+        return "AI agent: Pi Dash Bot"
     return f"Human: {actor_label}"
 
 
