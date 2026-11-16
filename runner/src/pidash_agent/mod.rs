@@ -1,4 +1,4 @@
-//! The built-in agent engine that ships with the CLI (design
+//! The Pi Dash Agent engine that ships with the CLI (design
 //! `.ai_design/built_engine_as_runner/design.md` §4.5).
 //!
 //! The engine is the open-source OpenAI Codex binary, unmodified, renamed to

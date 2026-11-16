@@ -48,14 +48,14 @@ enum Launch {
 }
 
 /// The machine-level engine profile local chat runs on.
-pub struct EngineChatProfile {
+pub struct PidashAgentChatProfile {
     pub(crate) sessions: ChatRegistry,
     pub(crate) approvals: ApprovalRouter,
     config: RunnerConfig,
     launch: Launch,
 }
 
-impl EngineChatProfile {
+impl PidashAgentChatProfile {
     /// The profile of a daemon whose dev machine is `machine_id` (the id
     /// approvals are recorded under; nil before the first sign-in).
     pub fn new(machine_id: Option<Uuid>) -> Self {
@@ -80,7 +80,7 @@ impl EngineChatProfile {
                 working_dir: PathBuf::new(),
             },
             agent: AgentSection {
-                kind: AgentKind::Engine,
+                kind: AgentKind::PidashAgent,
             },
             codex: Default::default(),
             claude_code: Default::default(),
@@ -107,9 +107,9 @@ impl EngineChatProfile {
     /// installed, no model profile yet — the reason code leads the message).
     fn prepared(&self) -> Result<RunnerConfig> {
         match &self.launch {
-            Launch::Daemon => crate::engine::agent::prepare(&self.config),
+            Launch::Daemon => crate::pidash_agent::agent::prepare(&self.config),
             #[cfg(test)]
-            Launch::Fixed { binary, codex_home } => Ok(crate::engine::agent::engine_runner_config(
+            Launch::Fixed { binary, codex_home } => Ok(crate::pidash_agent::agent::engine_runner_config(
                 &self.config,
                 binary,
                 codex_home,
@@ -152,7 +152,7 @@ pub(crate) fn resolve_engine_chat_folder(
     runner_dirs: &[(String, PathBuf)],
 ) -> Result<PathBuf> {
     let Some(raw) = cwd.filter(|s| !s.is_empty()) else {
-        anyhow::bail!("chat on the built-in engine needs an absolute chat folder (`cwd`)");
+        anyhow::bail!("chat on the Pi Dash Agent needs an absolute chat folder (`cwd`)");
     };
     let requested = PathBuf::from(raw);
     if !requested.is_absolute() {
@@ -175,7 +175,7 @@ pub(crate) fn resolve_engine_chat_folder(
         let dir = canonical_for_compare(dir);
         if folder.starts_with(&dir) {
             anyhow::bail!(
-                "chat folder {} is inside runner {runner:?}'s working dir ({}); chat on the built-in engine must use a folder outside every task folder",
+                "chat folder {} is inside runner {runner:?}'s working dir ({}); chat on the Pi Dash Agent must use a folder outside every task folder",
                 folder.display(),
                 dir.display()
             );
@@ -234,8 +234,8 @@ mod tests {
 
     #[test]
     fn the_profile_is_the_engine_with_no_project() {
-        let p = EngineChatProfile::new(None);
-        assert_eq!(p.config().agent.kind, AgentKind::Engine);
+        let p = PidashAgentChatProfile::new(None);
+        assert_eq!(p.config().agent.kind, AgentKind::PidashAgent);
         assert!(p.config().project_slug.is_none());
         assert_eq!(p.config().runner_id, Uuid::nil());
     }

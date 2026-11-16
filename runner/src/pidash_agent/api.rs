@@ -1,4 +1,4 @@
-//! The server contract of the built-in engine (design §4.3, §5, §8), in one
+//! The server contract of the Pi Dash Agent (design §4.3, §5, §8), in one
 //! place so the client and the server PR stay aligned.
 //!
 //! | Call | Auth | Request | Response |
@@ -6,7 +6,7 @@
 //! | `POST /api/v1/auth/device/start/` | none | `{"scope": "engine"}` (engine-only grant) | as for a normal grant |
 //! | `POST /api/v1/auth/device/token/` (engine grant) | `Authorization: Bearer <mt_>` | `{"device_code"}` | `{"engine_credential": {"token": "ec_…", "expires_at"}, "engine_sign_in_state"}` |
 //! | `POST /api/v1/auth/device/token/`, `POST /api/v1/auth/machine-token/` (normal sign-in) | as today | as today | may also carry `engine_credential` (and `engine_sign_in_state`) |
-//! | `GET /api/v1/runner/engine/profile/` | `Authorization: Bearer <mt_>` | — | [`EngineProfile`] |
+//! | `GET /api/v1/runner/engine/profile/` | `Authorization: Bearer <mt_>` | — | [`PidashAgentProfile`] |
 //! | `POST /api/v1/runner/engine/model-token/` | `Authorization: Bearer <ec_>` | `{}` | [`ModelTokenResponse`]; errors `{"reason_code", "detail"?}` |
 //! | `POST /api/v1/runner/engine/credential/revoke/` | `Authorization: Bearer <mt_>` | `{}` | 2xx (401 = already gone) |
 //! | `GET /api/v1/runner/dev-machines/<id>/` | `Authorization: Bearer <mt_>` | — | [`MachinePayload`]: the pause state and this machine's runner rows in the token's workspace (revoked rows included) |
@@ -56,7 +56,7 @@ pub mod reason {
 
 /// The engine credential as the server issues it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IssuedEngineCredential {
+pub struct IssuedPidashAgentCredential {
     pub token: String,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
@@ -87,8 +87,8 @@ where
 
 /// Body of a redeemed engine-only grant.
 #[derive(Debug, Clone, Deserialize)]
-pub struct EngineGrantResponse {
-    pub engine_credential: IssuedEngineCredential,
+pub struct PidashAgentGrantResponse {
+    pub engine_credential: IssuedPidashAgentCredential,
     #[serde(default, deserialize_with = "lenient_sign_in_state")]
     pub engine_sign_in_state: Option<EngineSignInState>,
 }
@@ -96,7 +96,7 @@ pub struct EngineGrantResponse {
 /// One poll of an engine-only grant (RFC 8628).
 #[derive(Debug)]
 pub enum GrantPoll {
-    Granted(EngineGrantResponse),
+    Granted(PidashAgentGrantResponse),
     /// `authorization_pending`: not approved yet.
     Pending,
     /// `slow_down`: not approved yet, and poll 5 s less often.
@@ -105,7 +105,7 @@ pub enum GrantPoll {
 
 /// `GET /api/v1/runner/engine/profile/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineProfile {
+pub struct PidashAgentProfile {
     pub available: bool,
     #[serde(default)]
     pub lane: String,
@@ -146,9 +146,9 @@ pub struct MachinePayload {
 
 impl MachinePayload {
     /// The pause state, when the body carries it.
-    pub fn pause(&self) -> Option<EnginePause> {
+    pub fn pause(&self) -> Option<PidashAgentPause> {
         let paused_by_owner = self.engine_paused_by_owner?;
-        Some(EnginePause {
+        Some(PidashAgentPause {
             paused_by_owner,
             auto_pause_reason: self
                 .engine_auto_pause_reason
@@ -161,7 +161,7 @@ impl MachinePayload {
 /// The machine's engine pause state (design §8): the owner's switch and the
 /// server's automatic reason, kept apart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EnginePause {
+pub struct PidashAgentPause {
     pub paused_by_owner: bool,
     pub auto_pause_reason: Option<String>,
 }
@@ -176,7 +176,7 @@ pub struct MachineRunnerRow {
     pub workspace_slug: String,
     #[serde(default)]
     pub project_identifier: String,
-    /// `"engine"` for a built-in engine runner.
+    /// `"engine"` for a Pi Dash Agent runner.
     #[serde(default)]
     pub agent_kind: String,
     /// `desktop_bundled` marks an engine runner too (the stored value kept
@@ -201,7 +201,7 @@ impl MachineRunnerRow {
 
 /// An engine call the server refused.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum EngineApiError {
+pub enum PidashAgentApiError {
     /// The server answered with a reason code.
     #[error("{reason_code} (HTTP {status}){}", detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
     Refused {
@@ -214,7 +214,7 @@ pub enum EngineApiError {
     Other(String),
 }
 
-impl EngineApiError {
+impl PidashAgentApiError {
     pub(crate) fn is_workspace_auth_failure(&self) -> bool {
         matches!(self, Self::Refused { status: 401 | 403, reason_code, .. } if workspace_auth_code(reason_code))
     }
@@ -247,9 +247,9 @@ struct ErrorBody {
     detail: Option<String>,
 }
 
-/// Map a non-2xx answer to an [`EngineApiError`]. A 401 without a code is
+/// Map a non-2xx answer to an [`PidashAgentApiError`]. A 401 without a code is
 /// an engine credential the server no longer accepts.
-fn refused(status: StatusCode, body: &str) -> EngineApiError {
+fn refused(status: StatusCode, body: &str) -> PidashAgentApiError {
     let parsed: Option<ErrorBody> = serde_json::from_str(body).ok();
     let (code, detail) = match parsed {
         Some(b) => (
@@ -270,7 +270,7 @@ fn refused(status: StatusCode, body: &str) -> EngineApiError {
             format!("http_{}", status.as_u16())
         }
     });
-    EngineApiError::Refused {
+    PidashAgentApiError::Refused {
         status: status.as_u16(),
         reason_code,
         detail,
@@ -279,12 +279,12 @@ fn refused(status: StatusCode, body: &str) -> EngineApiError {
 
 /// HTTP client for the engine endpoints.
 #[derive(Clone)]
-pub struct EngineApi {
+pub struct PidashAgentApi {
     http: reqwest::Client,
     cloud_url: String,
 }
 
-impl EngineApi {
+impl PidashAgentApi {
     pub fn new(cloud_url: &str) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -301,19 +301,19 @@ impl EngineApi {
 
     async fn json<T: for<'de> Deserialize<'de>>(
         resp: reqwest::Response,
-    ) -> Result<T, EngineApiError> {
+    ) -> Result<T, PidashAgentApiError> {
         let status = resp.status();
         let body = resp
             .text()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         if !status.is_success() {
             return Err(refused(status, &body));
         }
-        serde_json::from_str(&body).map_err(|e| EngineApiError::Other(unparsable(&e)))
+        serde_json::from_str(&body).map_err(|e| PidashAgentApiError::Other(unparsable(&e)))
     }
 
-    async fn empty(resp: reqwest::Response) -> Result<(), EngineApiError> {
+    async fn empty(resp: reqwest::Response) -> Result<(), PidashAgentApiError> {
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -323,14 +323,14 @@ impl EngineApi {
     }
 
     /// The model profile, with the daemon (machine) credential.
-    pub async fn profile(&self, machine_token: &str) -> Result<EngineProfile, EngineApiError> {
+    pub async fn profile(&self, machine_token: &str) -> Result<PidashAgentProfile, PidashAgentApiError> {
         let resp = self
             .http
             .get(self.url(PROFILE_PATH))
             .bearer_auth(machine_token)
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         Self::json(resp).await
     }
 
@@ -338,7 +338,7 @@ impl EngineApi {
     pub async fn model_token(
         &self,
         engine_credential: &str,
-    ) -> Result<ModelTokenResponse, EngineApiError> {
+    ) -> Result<ModelTokenResponse, PidashAgentApiError> {
         let resp = self
             .http
             .post(self.url(MODEL_TOKEN_PATH))
@@ -346,13 +346,13 @@ impl EngineApi {
             .json(&serde_json::json!({}))
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         Self::json(resp).await
     }
 
     /// Revoke this machine's engine credential (`logout --engine`). A 401
     /// means there was nothing left to revoke.
-    pub async fn revoke_credential(&self, machine_token: &str) -> Result<(), EngineApiError> {
+    pub async fn revoke_credential(&self, machine_token: &str) -> Result<(), PidashAgentApiError> {
         let resp = self
             .http
             .post(self.url(CREDENTIAL_REVOKE_PATH))
@@ -360,7 +360,7 @@ impl EngineApi {
             .json(&serde_json::json!({}))
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             return Ok(());
         }
@@ -375,7 +375,7 @@ impl EngineApi {
         machine_token: &str,
         dev_machine_id: Uuid,
         paused: bool,
-    ) -> Result<MachinePayload, EngineApiError> {
+    ) -> Result<MachinePayload, PidashAgentApiError> {
         let resp = self
             .http
             .patch(self.url(&dev_machine_path(dev_machine_id)))
@@ -383,7 +383,7 @@ impl EngineApi {
             .json(&serde_json::json!({ "engine_paused_by_owner": paused }))
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -401,26 +401,26 @@ impl EngineApi {
         &self,
         machine_token: &str,
         dev_machine_id: Uuid,
-    ) -> Result<MachinePayload, EngineApiError> {
+    ) -> Result<MachinePayload, PidashAgentApiError> {
         let resp = self
             .http
             .get(self.url(&dev_machine_path(dev_machine_id)))
             .bearer_auth(machine_token)
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         Self::json(resp).await
     }
 
     /// Start an engine-only device grant.
-    pub async fn start_engine_grant(&self) -> Result<serde_json::Value, EngineApiError> {
+    pub async fn start_engine_grant(&self) -> Result<serde_json::Value, PidashAgentApiError> {
         let resp = self
             .http
             .post(self.url(DEVICE_START_PATH))
             .json(&serde_json::json!({ "scope": ENGINE_GRANT_SCOPE }))
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         Self::json(resp).await
     }
 
@@ -431,7 +431,7 @@ impl EngineApi {
         &self,
         device_code: &str,
         machine_token: &str,
-    ) -> Result<GrantPoll, EngineApiError> {
+    ) -> Result<GrantPoll, PidashAgentApiError> {
         let resp = self
             .http
             .post(self.url(DEVICE_TOKEN_PATH))
@@ -439,16 +439,16 @@ impl EngineApi {
             .json(&serde_json::json!({ "device_code": device_code }))
             .send()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         let status = resp.status();
         let body = resp
             .text()
             .await
-            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+            .map_err(|e| PidashAgentApiError::Other(e.to_string()))?;
         if status.is_success() {
             return serde_json::from_str(&body)
                 .map(GrantPoll::Granted)
-                .map_err(|e| EngineApiError::Other(unparsable(&e)));
+                .map_err(|e| PidashAgentApiError::Other(unparsable(&e)));
         }
         let err = refused(status, &body);
         match err.reason_code() {
@@ -465,21 +465,21 @@ mod tests {
 
     #[test]
     fn unparsable_bodies_are_not_quoted_and_unknown_states_are_tolerated() {
-        let e = serde_json::from_str::<EngineGrantResponse>(
+        let e = serde_json::from_str::<PidashAgentGrantResponse>(
             r#"{"engine_credential": {"token": 42, "secret": "ec_do_not_print"}}"#,
         )
         .unwrap_err();
         let msg = unparsable(&e);
         assert!(!msg.contains("ec_do_not_print"), "{msg}");
-        let e = serde_json::from_str::<EngineGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
+        let e = serde_json::from_str::<PidashAgentGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
             .unwrap_err();
         assert!(!unparsable(&e).contains("ec_x"));
 
-        let p: EngineProfile =
+        let p: PidashAgentProfile =
             serde_json::from_str(r#"{"available": true, "engine_sign_in_state": "something_new"}"#)
                 .unwrap();
         assert_eq!(p.engine_sign_in_state, None);
-        let p: EngineProfile =
+        let p: PidashAgentProfile =
             serde_json::from_str(r#"{"available": true, "engine_sign_in_state": null}"#).unwrap();
         assert_eq!(p.engine_sign_in_state, None);
     }
@@ -516,7 +516,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             p.pause(),
-            Some(EnginePause {
+            Some(PidashAgentPause {
                 paused_by_owner: false,
                 auto_pause_reason: Some(reason::WALLET_EMPTY.into())
             })
@@ -537,14 +537,14 @@ mod tests {
 
     #[test]
     fn profile_parses_the_documented_shape() {
-        let p: EngineProfile = serde_json::from_str(
+        let p: PidashAgentProfile = serde_json::from_str(
             r#"{"available":true,"lane":"openhub","base_url":"https://gw/v1","model":"gpt-5.5",
                 "reason_code":"","engine_sign_in_state":"active"}"#,
         )
         .unwrap();
         assert!(p.available);
         assert_eq!(p.engine_sign_in_state, Some(EngineSignInState::Active));
-        let p: EngineProfile =
+        let p: PidashAgentProfile =
             serde_json::from_str(r#"{"available":false,"reason_code":"engine_disabled"}"#).unwrap();
         assert_eq!(p.reason_code, reason::ENGINE_DISABLED);
     }

@@ -574,7 +574,7 @@ mod tests {
     fn stage_archive_tree(top: &Path, version: &str, windows: bool, linux: bool) -> PathBuf {
         let dir = top.join("engine").join(version);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(crate::engine::binary_name(windows)), b"new engine").unwrap();
+        fs::write(dir.join(crate::pidash_agent::binary_name(windows)), b"new engine").unwrap();
         for helper in super::helper_names(windows, linux) {
             fs::write(dir.join(helper), b"helper").unwrap();
         }
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn losing_a_rename_race_to_a_complete_install_is_success() {
         let tmp = tempfile::tempdir().unwrap();
-        let binary = crate::engine::binary_name(false);
+        let binary = crate::pidash_agent::binary_name(false);
         let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false, false);
         // Another installer's rename landed after our pre-check.
         let dest = tmp.path().join("root").join("0.153.4");
@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn a_failed_rename_onto_an_incomplete_dir_is_still_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let binary = crate::engine::binary_name(false);
+        let binary = crate::pidash_agent::binary_name(false);
         let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false, false);
         let dest = tmp.path().join("root").join("0.153.4");
         fs::create_dir_all(&dest).unwrap();
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn a_rename_into_an_empty_slot_installs() {
         let tmp = tempfile::tempdir().unwrap();
-        let binary = crate::engine::binary_name(false);
+        let binary = crate::pidash_agent::binary_name(false);
         let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false, false);
         let root = tmp.path().join("root");
         fs::create_dir_all(&root).unwrap();

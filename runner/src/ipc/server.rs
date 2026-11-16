@@ -327,7 +327,7 @@ impl IpcServer {
                 self.remove_local(&runner).await?;
                 Ok(Response::Ack)
             }
-            // ---- Built-in engine (IPC v6, PIDESKAPP-121) ----------------
+            // ---- Pi Dash Agent (IPC v6, PIDESKAPP-121) ----------------
             Request::EngineModelToken => match self.spawn_ctx.engine.model_token().await {
                 Ok(t) => Ok(Response::EngineModelToken {
                     token: t.token,
@@ -358,7 +358,7 @@ impl IpcServer {
             Request::EngineRunnerRemove { runner } => {
                 // Revoke in the cloud first, preserving the runner's row
                 // and history, then remove its local block. The task
-                // folder is kept (built-in engine design §11).
+                // folder is kept (Pi Dash Agent design §11).
                 let (runner_id, token) = self.spawn_ctx.engine_runner_for_removal(&runner)?;
                 crate::cloud::runners::revoke_runner(
                     &self.spawn_ctx.cloud_url(),
@@ -377,7 +377,7 @@ impl IpcServer {
                 self.spawn_ctx.set_engine_settings(task_root).await?,
             )),
             // Local chat (PDASHOSS01-159, IPC v4). The desktop host drives
-            // the built-in engine directly over this socket — never through
+            // the Pi Dash Agent directly over this socket — never through
             // the Pi Dash chat relay. Streamed `Response::Chat*` frames are
             // written onto `buf` mid-call (same pattern as StatusSubscribe);
             // the terminal frame is returned. See `super::chat`. With no
@@ -730,7 +730,7 @@ fn restore_secrets(
     {
         merged_cli
             .engine_credential
-            .get_or_insert_with(crate::config::schema::EngineCredential::default)
+            .get_or_insert_with(crate::config::schema::PidashAgentCredential::default)
             .token = ec.token.clone();
         if merged_cli
             .engine_credential
@@ -791,10 +791,10 @@ fn redact_json_for_ipc(value: &mut serde_json::Value) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::config::schema::{CliSection, Config, EngineCredential, WorkspaceCredential};
+    use crate::config::schema::{CliSection, Config, PidashAgentCredential, WorkspaceCredential};
     use crate::daemon::supervisor::RunnerSpawnCtx;
     use crate::daemon::workspace_tokens::WorkspaceTokens;
-    use crate::engine::test_server::{self, Handler};
+    use crate::pidash_agent::test_server::{self, Handler};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn daemon_with(
@@ -841,7 +841,7 @@ mod tests {
         CliSection {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
-            engine_credential: engine.then(|| EngineCredential {
+            engine_credential: engine.then(|| PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
             }),
@@ -866,11 +866,11 @@ mod tests {
         let (_tmp, paths) = daemon_with(cli(true), &server.url).await;
 
         // What `pidash __engine model-token` prints.
-        let token = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let token = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap();
         assert_eq!(token, "gw_token");
-        let again = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let again = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap();
         assert_eq!(again, "gw_token");
@@ -895,7 +895,7 @@ mod tests {
         let handler: Handler = Arc::new(|_| (500, String::new()));
         let server = test_server::start(handler).await;
         let (_tmp, paths) = daemon_with(cli(false), &server.url).await;
-        let err = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let err = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("engine_sign_in_required"), "{err}");
@@ -905,7 +905,7 @@ mod tests {
     // ---- Local chat on the daemon's engine profile (design §12.1) -------
 
     use crate::config::schema::{AgentSection, DaemonConfig, RunnerConfig, WorkspaceSection};
-    use crate::ipc::engine_chat::EngineChatProfile;
+    use crate::ipc::pidash_agent_chat::PidashAgentChatProfile;
 
     /// A fake `pidash-agent-engine app-server`: records the folder it was
     /// started in under `$CODEX_HOME/cwd`, then answers one turn.
@@ -992,7 +992,7 @@ sleep 1
             &paths,
             &insts.iter().collect::<Vec<_>>(),
         );
-        spawn_ctx.local_chat = Arc::new(EngineChatProfile::for_tests(engine, codex_home.clone()));
+        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(engine, codex_home.clone()));
         let server = IpcServer {
             path: paths.ipc_socket_path(),
             primary_state: crate::daemon::state::StateHandle::new(Config {
@@ -1273,7 +1273,7 @@ sleep 1
             Response::EngineStatus(st) => assert_eq!(st.paused_by_owner, Some(true)),
             other => panic!("unexpected {other:?}"),
         }
-        let sent = server.requests_to(&crate::engine::api::dev_machine_path(machine_id));
+        let sent = server.requests_to(&crate::pidash_agent::api::dev_machine_path(machine_id));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].json()["engine_paused_by_owner"], true);
     }
@@ -1315,7 +1315,7 @@ sleep 1
                         token: "mt_gamma_secret".into(),
                     },
                 ],
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_secret_live".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),

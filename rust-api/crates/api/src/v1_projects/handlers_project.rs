@@ -2946,7 +2946,7 @@ pub async fn create_project_inner(
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
         work_type: work_type.as_deref(),
-        managed_enabled: state.settings().managed_runner.enabled,
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -3470,7 +3470,7 @@ pub async fn patch_project_inner(
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
         work_type: work_type.as_deref(),
-        managed_enabled: state.settings().managed_runner.enabled,
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,

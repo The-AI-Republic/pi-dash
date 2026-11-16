@@ -2016,7 +2016,7 @@ async fn release_pin_inner(
     if !guards::can_cancel_run(&facts) {
         return not_found();
     }
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent {
+    if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
         return json_response(StatusCode::CONFLICT, EXECUTOR_NOT_LOCAL_BODY.to_owned());
     }
     let mut tx = match pool.begin().await {

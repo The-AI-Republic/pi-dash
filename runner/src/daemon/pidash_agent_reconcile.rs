@@ -13,7 +13,7 @@
 //!   re-added, with a folder allocated as in design §10;
 //!   A row the user removed on this computer only (`runner remove
 //!   --local-only`, or offline) is tombstoned and not re-added
-//!   ([`crate::engine::tombstones`]);
+//!   ([`crate::pidash_agent::tombstones`]);
 //! - the machine's engine pause state is cached for `Hello` and
 //!   `pidash engine status`.
 //!
@@ -33,7 +33,7 @@ use crate::cli::runner_ops::{ApplyEnrollOptions, apply_enroll_response};
 use crate::cloud::http::EnrollResponse;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON};
 use crate::daemon::supervisor::RunnerSpawnCtx;
-use crate::engine::api::MachineRunnerRow;
+use crate::pidash_agent::api::MachineRunnerRow;
 
 /// How often the daemon reconciles (design §5).
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -127,7 +127,7 @@ impl RunnerSpawnCtx {
         // With no workspace read at all there is no view to prune from.
         let complete = complete && any_read;
         if let Err(e) =
-            crate::engine::tombstones::prune(&self.paths, &read_workspaces, complete, &live)
+            crate::pidash_agent::tombstones::prune(&self.paths, &read_workspaces, complete, &live)
         {
             tracing::warn!("pruning engine runner tombstones failed: {e:#}");
         }
@@ -151,11 +151,11 @@ impl RunnerSpawnCtx {
         // tombstone before it strips the block, so a block missing from
         // this config always has its tombstone in this read, even when
         // the removal landed during the machine GET.
-        let tombstones = crate::engine::tombstones::load(&self.paths);
+        let tombstones = crate::pidash_agent::tombstones::load(&self.paths);
         for row in rows.iter().filter(|r| r.is_engine()) {
             let block = cfg.runners.iter().find(|b| b.runner_id == row.id);
             match block {
-                Some(b) if row.is_revoked() && b.agent.kind == AgentKind::Engine => {
+                Some(b) if row.is_revoked() && b.agent.kind == AgentKind::PidashAgent => {
                     match self.remove_engine_block(row.id, &b.name).await {
                         Ok(()) => report.removed.push(b.name.clone()),
                         Err(e) => report.failed.push(format!("{}: {e:#}", b.name)),
@@ -229,7 +229,7 @@ impl RunnerSpawnCtx {
         if cfg.runners.len() >= MAX_RUNNERS_PER_DAEMON {
             anyhow::bail!("this computer already hosts {MAX_RUNNERS_PER_DAEMON} runners");
         }
-        let working_dir = crate::engine::workdir::allocate_engine_folder(
+        let working_dir = crate::pidash_agent::workdir::allocate_engine_folder(
             &self.paths,
             &ws,
             &row.project_identifier,
@@ -259,7 +259,7 @@ impl RunnerSpawnCtx {
             &self.cloud_url(),
             ApplyEnrollOptions {
                 working_dir: Some(working_dir),
-                agent_kind: AgentKind::Engine,
+                agent_kind: AgentKind::PidashAgent,
                 model: None,
                 reasoning_effort: None,
             },
@@ -278,17 +278,17 @@ impl RunnerSpawnCtx {
     /// old version is still in use or failed to go, so the next tick tries
     /// again.
     pub(crate) fn cleanup_old_engine_versions(&self) -> bool {
-        let Some(engine) = crate::engine::locate::resolved() else {
+        let Some(engine) = crate::pidash_agent::locate::resolved() else {
             return true;
         };
         let busy = self.running_instances().iter().any(|i| {
             i.state.rx_in_flight.borrow().is_some()
                 || i.chat_active.load(std::sync::atomic::Ordering::SeqCst)
         });
-        match crate::engine::cleanup::cleanup_after_start(
+        match crate::pidash_agent::cleanup::cleanup_after_start(
             engine,
             busy,
-            crate::engine::cleanup::dir_in_use_by_a_process,
+            crate::pidash_agent::cleanup::dir_in_use_by_a_process,
         ) {
             None => !busy,
             Some(Ok(out)) => {
@@ -315,11 +315,11 @@ impl RunnerSpawnCtx {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, CliSection, Config, DaemonConfig, EngineCredential, RunnerConfig,
+        AgentSection, CliSection, Config, DaemonConfig, PidashAgentCredential, RunnerConfig,
         WorkspaceSection,
     };
     use crate::daemon::workspace_tokens::WorkspaceTokens;
-    use crate::engine::test_server::{self, Handler};
+    use crate::pidash_agent::test_server::{self, Handler};
     use crate::util::paths::Paths;
 
     fn paths(root: &std::path::Path) -> Paths {
@@ -335,7 +335,7 @@ mod tests {
         CliSection {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
-            engine_credential: Some(EngineCredential {
+            engine_credential: Some(PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: None,
             }),
@@ -352,7 +352,7 @@ mod tests {
             pod_id: None,
             workspace: WorkspaceSection { working_dir },
             agent: AgentSection {
-                kind: AgentKind::Engine,
+                kind: AgentKind::PidashAgent,
             },
             codex: Default::default(),
             claude_code: Default::default(),
@@ -391,7 +391,7 @@ mod tests {
             &[],
         );
         ctx.engine =
-            crate::engine::manager::EngineManager::new(Some(url), paths.clone(), tokens, None);
+            crate::pidash_agent::manager::PidashAgentManager::new(Some(url), paths.clone(), tokens, None);
         ctx
     }
 
@@ -444,7 +444,7 @@ mod tests {
             ],
         })
         .to_string();
-        let path = crate::engine::api::dev_machine_path(machine_id);
+        let path = crate::pidash_agent::api::dev_machine_path(machine_id);
         let handler: Handler = Arc::new(move |req| {
             if req.path == path && req.method == "GET" {
                 assert_eq!(req.bearer(), Some("mt_acme"));
@@ -477,7 +477,7 @@ mod tests {
             .iter()
             .find(|r| r.runner_id == readd_id)
             .unwrap();
-        assert_eq!(api.agent.kind, AgentKind::Engine);
+        assert_eq!(api.agent.kind, AgentKind::PidashAgent);
         assert_eq!(api.project_slug.as_deref(), Some("API"));
         assert_eq!(
             api.workspace.working_dir,
@@ -512,7 +512,7 @@ mod tests {
         let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let row = serde_json::json!({"id": block.runner_id, "name": block.name,
             "workspace_slug": "acme", "project_identifier": "WEB", "agent_kind": "engine"});
-        let path = crate::engine::api::dev_machine_path(machine_id);
+        let path = crate::pidash_agent::api::dev_machine_path(machine_id);
         let live_h = live.clone();
         let handler: Handler = Arc::new(move |req| {
             if req.path == path && req.method == "GET" {
@@ -547,7 +547,7 @@ mod tests {
                 .runners
                 .is_empty()
         );
-        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+        assert!(crate::pidash_agent::tombstones::load(&paths).contains(&block.runner_id));
 
         let ctx = ctx(&paths, &server.url, machine_id);
         // The live row is not re-added while the tombstone stands.
@@ -561,12 +561,12 @@ mod tests {
                 .runners
                 .is_empty()
         );
-        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+        assert!(crate::pidash_agent::tombstones::load(&paths).contains(&block.runner_id));
 
         // Once the server no longer lists the row as live, the tombstone goes.
         live.store(false, std::sync::atomic::Ordering::SeqCst);
         ctx.reconcile_engine_runners().await;
-        assert!(crate::engine::tombstones::load(&paths).is_empty());
+        assert!(crate::pidash_agent::tombstones::load(&paths).is_empty());
     }
 
     /// `remove --local-only` on workspace beta's runner, then `auth logout
@@ -583,7 +583,7 @@ mod tests {
         block.workspace_slug = Some("beta".into());
         let row = serde_json::json!({"id": block.runner_id, "name": block.name,
             "workspace_slug": "beta", "project_identifier": "WEB", "agent_kind": "engine"});
-        let path = crate::engine::api::dev_machine_path(machine_id);
+        let path = crate::pidash_agent::api::dev_machine_path(machine_id);
         let handler: Handler = Arc::new(move |req| {
             if req.path != path || req.method != "GET" {
                 return (404, String::new());
@@ -613,7 +613,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+        assert!(crate::pidash_agent::tombstones::load(&paths).contains(&block.runner_id));
 
         // Signed out of beta: only acme is read, beta's tombstone stays.
         let acme_only = ctx_signed_in(&paths, &server.url, machine_id, cli());
@@ -621,7 +621,7 @@ mod tests {
             acme_only.reconcile_engine_runners().await,
             ReconcileReport::default()
         );
-        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+        assert!(crate::pidash_agent::tombstones::load(&paths).contains(&block.runner_id));
 
         // Signed in to beta again: its live row is still not re-added.
         let signed_in = ctx_signed_in(&paths, &server.url, machine_id, both);
@@ -635,7 +635,7 @@ mod tests {
                 .runners
                 .is_empty()
         );
-        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+        assert!(crate::pidash_agent::tombstones::load(&paths).contains(&block.runner_id));
     }
 
     /// A `remove --local-only` that lands while reconcile waits on the
@@ -650,7 +650,7 @@ mod tests {
         let block = engine_block("builtin-h-acme-web", "WEB", tmp.path().join("tasks/web"));
         let row = serde_json::json!({"id": block.runner_id, "name": block.name,
             "workspace_slug": "acme", "project_identifier": "WEB", "agent_kind": "engine"});
-        let path = crate::engine::api::dev_machine_path(machine_id);
+        let path = crate::pidash_agent::api::dev_machine_path(machine_id);
         let removed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (paths_h, removed_h, id) = (paths.clone(), removed.clone(), block.runner_id);
         let handler: Handler = Arc::new(move |req| {
@@ -659,7 +659,7 @@ mod tests {
             }
             // What `runner remove --local-only` does: tombstone, then strip.
             if !removed_h.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                crate::engine::tombstones::add(&paths_h, id, Some("acme")).unwrap();
+                crate::pidash_agent::tombstones::add(&paths_h, id, Some("acme")).unwrap();
                 crate::config::file::mutate_config(&paths_h, |c| {
                     c.runners.retain(|r| r.runner_id != id);
                     Ok(())
@@ -686,7 +686,7 @@ mod tests {
                 .runners
                 .is_empty()
         );
-        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+        assert!(crate::pidash_agent::tombstones::load(&paths).contains(&block.runner_id));
     }
 
     #[tokio::test]
@@ -696,7 +696,7 @@ mod tests {
         paths.ensure().unwrap();
         seed(&paths, "http://127.0.0.1:9", vec![]);
         let id = Uuid::new_v4();
-        crate::engine::tombstones::add(&paths, id, Some("acme")).unwrap();
+        crate::pidash_agent::tombstones::add(&paths, id, Some("acme")).unwrap();
         let resp = EnrollResponse {
             runner_id: id,
             runner_name: "builtin-h-acme-web".into(),
@@ -719,14 +719,14 @@ mod tests {
             "http://127.0.0.1:9",
             ApplyEnrollOptions {
                 working_dir: Some(tmp.path().join("tasks/web")),
-                agent_kind: AgentKind::Engine,
+                agent_kind: AgentKind::PidashAgent,
                 model: None,
                 reasoning_effort: None,
             },
         )
         .await
         .unwrap();
-        assert!(crate::engine::tombstones::load(&paths).is_empty());
+        assert!(crate::pidash_agent::tombstones::load(&paths).is_empty());
     }
 
     #[tokio::test]

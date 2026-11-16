@@ -28,6 +28,11 @@ use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_types::agent_runs::AgentExecutorKind;
 
+use crate::run_creation::execution::{
+    execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
+    ExecutionFieldsError, ExecutionInputs, ProjectScope,
+};
+
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
     CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
@@ -36,10 +41,6 @@ use crate::orchestration::creation::{
     RunView, RunnerView, StateView, TickerBudget,
 };
 use crate::prompting::{composer, context};
-use crate::run_creation::execution::{
-    execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
-    ExecutionFieldsError, ExecutionInputs, ProjectScope,
-};
 
 use super::issues_move::CreationDeps;
 use super::txn::TxnConn;
@@ -719,8 +720,8 @@ fn twin_map_execution_fields(
     fields: crate::run_creation::execution::ExecutionFields,
 ) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
-        AgentExecutorKind::CloudAgent => Some(None),
-        AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
+        AgentExecutorKind::RetiredCloudRun => Some(None),
+        AgentExecutorKind::PidashAgent => Some(fields.pinned_runner_id),
         AgentExecutorKind::LocalRunner => None,
     };
     ServiceExecutionFields {
@@ -1355,7 +1356,7 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: json!({"other": 1, "code": "old"}),
             tool_plan: json!({"tools": ["a"]}),
             trigger: "state_transition".to_owned(),
@@ -1395,7 +1396,7 @@ mod tests {
         let view = twin_map_run_view(&inserted).expect("map run view");
         assert_eq!(view.id, run_id);
         assert_eq!(view.status, DbAgentRunStatus::Queued);
-        assert_eq!(view.executor_kind, AgentExecutorKind::CloudAgent);
+        assert_eq!(view.executor_kind, AgentExecutorKind::RetiredCloudRun);
         assert_eq!(view.work_item_id, Some(issue));
         assert_eq!(view.phase_kind, "implement");
         assert_eq!(view.trigger, "state_transition");
