@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 
+use super::task_xml::render_task_xml;
 use crate::util::paths::Paths;
 
 const TASK_NAME: &str = "PiDash";
@@ -15,13 +16,39 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     paths.ensure()?;
     let exe = std::env::current_exe().context("resolving current pidash.exe path")?;
     let exe = validate_exe_path(&exe)?;
-    let task_run = format!("\"{exe}\" __run");
-    run_schtasks(&[
-        "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", &task_run, "/F",
-    ])
-    .await?;
+    // PIDESKAPP-236: restart the daemon after a crash via task XML
+    // (`<RestartOnFailure>`). `schtasks /SC ONLOGON` has no restart
+    // setting, so a daemon that exits (e.g. pipe squatted) stayed down
+    // until the next logon. XML gives us restart interval/count.
+    if let Err(xml_err) = install_via_xml(exe).await {
+        tracing::warn!(
+            "task XML install failed ({xml_err:#}), falling back to ONLOGON schtasks"
+        );
+        let task_run = format!("\"{exe}\" __run");
+        run_schtasks(&[
+            "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", &task_run, "/F",
+        ])
+        .await?;
+    }
     println!("installed Windows scheduled task {TASK_NAME}");
     Ok(())
+}
+
+async fn install_via_xml(exe: &str) -> Result<()> {
+    let sid = pidash_ipc::pipe_id::current_user_sid()
+        .context("resolving current user SID for scheduled task")?;
+    let xml = render_task_xml(exe, &sid);
+    // schtasks /XML expects a file; write a per-install temp file.
+    let tmp = std::env::temp_dir().join(format!("pidash-task-{}.xml", uuid::Uuid::new_v4()));
+    tokio::fs::write(&tmp, xml)
+        .await
+        .with_context(|| format!("writing task XML to {:?}", tmp))?;
+    let tmp_str = tmp
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("temp task path is not valid UTF-8: {:?}", tmp))?;
+    let result = run_schtasks(&["/Create", "/TN", TASK_NAME, "/XML", tmp_str, "/F"]).await;
+    let _ = tokio::fs::remove_file(&tmp).await;
+    result.map(|_| ())
 }
 
 pub async fn enable_and_start() -> Result<()> {

@@ -149,6 +149,12 @@ impl Paths {
         self.runtime_dir.join("pidash.sock")
     }
 
+    /// Owner-only file holding the random Windows pipe ID (PIDESKAPP-236).
+    /// See `pidash_ipc::pipe_id::pipe_id_path`.
+    pub fn pipe_id_path(&self) -> PathBuf {
+        self.runtime_dir.join("pipe-id")
+    }
+
     /// The `<data_dir>/runtime` socket a pre-PDASHOSS01-230 daemon used when
     /// its service unit exported the default data dir, or `None` when that
     /// is already `ipc_socket_path()` (isolated installs, hosts without an

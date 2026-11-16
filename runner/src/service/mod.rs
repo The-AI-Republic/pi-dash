@@ -8,6 +8,7 @@ pub mod launchd;
 pub mod reload;
 #[cfg(target_os = "linux")]
 pub mod systemd;
+pub mod task_xml;
 #[cfg(windows)]
 pub mod windows;
 
