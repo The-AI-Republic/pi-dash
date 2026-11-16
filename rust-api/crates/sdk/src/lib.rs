@@ -946,6 +946,19 @@ pub mod db {
     pub use pidash_db::DbConfig;
 }
 
+/// OpenHub assistant-model catalog (NEWPIDASH-302): the enabled
+/// `openhub` rows and the default, read from the OSS-owned
+/// `rust_runner_model_catalog` table. The overlay (cloud) calls these
+/// instead of copying the query.
+pub mod runner_models {
+    pub use pidash_api::runner_models::guards::CATALOG_AGENTS;
+    pub use pidash_api::runner_models::guards::KNOWN_AGENTS;
+    pub use pidash_api::runner_models::guards::OPENHUB_AGENT;
+    pub use pidash_api::runner_models::openhub_default_model;
+    pub use pidash_api::runner_models::openhub_enabled_rows;
+    pub use pidash_db::entity::rust_runner_model_catalog;
+}
+
 /// Test-only helpers shared with the overlay. Empty: the seed
 /// imports no test-only items; OVL-03 (PIDASHCONV-1541)..OVL-07
 /// (PIDASHCONV-1545) add what the overlay harness needs.

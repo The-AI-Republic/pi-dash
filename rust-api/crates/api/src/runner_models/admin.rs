@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Instance-admin catalog CRUD (NEWPIDASH-169).
+//! Instance-admin catalog CRUD (NEWPIDASH-169, NEWPIDASH-302).
 //!
 //! `GET /api/instances/runner-models/` — every row (including disabled
 //! ones, so the god-mode table can toggle them back), grouped by agent
@@ -15,6 +15,8 @@
 //! signed-in non-admin is 403. Setting `is_preselected` clears it on
 //! the agent's other rows in the same transaction. Deleting a model
 //! never touches runners (their model lives in their own config).
+//! Deleting an `openhub` row does not rewrite user connections — they
+//! fall back to the default via `openhub_model_for` (NEWPIDASH-302).
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
@@ -100,6 +102,11 @@ async fn create_model(
     let (_, pool) = actor_admin(&state, extension).await?;
     let parsed = parse_json_body(&body)?;
     let validated = super::guards::validate_create(&parsed).map_err(Denial::BadRequest)?;
+    // OpenHub rows are assistant models: the slug is what OpenHub resolves,
+    // so it must match OpenHub exactly (the form says this; the gateway
+    // surfaces a typo as a runtime error). No extra server check here beyond
+    // non-empty (guards) — the catalog cannot validate slugs against
+    // OpenHub's own catalog.
     let db = pidash_db::sea_orm_connection(&pool);
 
     // Duplicate (agent, model): the unique index would answer 500, so
@@ -182,8 +189,9 @@ async fn patch_model(
     };
     let (_, pool) = actor_admin(&state, extension).await?;
     let parsed = parse_json_body(&body)?;
-    let validated = super::guards::validate_patch(&parsed).map_err(Denial::BadRequest)?;
-
+    // Validate after the row is loaded so the openhub rule (no
+    // reasoning_efforts) sees the row's agent; the agent-agnostic check
+    // would let an openhub PATCH add efforts.
     let db = pidash_db::sea_orm_connection(&pool);
     let existing = catalog_table::Entity::find_by_id(row_id)
         .one(&db)
@@ -192,6 +200,8 @@ async fn patch_model(
     let Some(existing) = existing else {
         return Err(Denial::NotFound);
     };
+    let validated = super::guards::validate_patch_for_agent(Some(existing.agent.as_str()), &parsed)
+        .map_err(Denial::BadRequest)?;
 
     // Duplicate check on a model rename (same agent, another row's model).
     if let Some(model) = &validated.model {

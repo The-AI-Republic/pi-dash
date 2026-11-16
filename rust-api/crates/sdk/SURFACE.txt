@@ -806,6 +806,12 @@ pidash_sdk::read::workspace_of
 pidash_sdk::read::workspace_row
 pidash_sdk::read::workspace_seed_emit
 pidash_sdk::read::workspace_slug
+pidash_sdk::runner_models::CATALOG_AGENTS
+pidash_sdk::runner_models::KNOWN_AGENTS
+pidash_sdk::runner_models::OPENHUB_AGENT
+pidash_sdk::runner_models::openhub_default_model
+pidash_sdk::runner_models::openhub_enabled_rows
+pidash_sdk::runner_models::rust_runner_model_catalog
 pidash_sdk::startup::BuiltWorker
 pidash_sdk::startup::CorsConfig
 pidash_sdk::startup::EdgeFlags

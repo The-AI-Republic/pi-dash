@@ -35,6 +35,14 @@ describe("agent list", () => {
       "Muse Code",
     ]);
   });
+
+  it("never offers the openhub catalog group (NEWPIDASH-302)", () => {
+    // openhub is a catalog group for the assistant, not a runner agent.
+    expect(RUNNER_AGENTS).not.toContain("openhub");
+    expect(MODEL_CHOICES).not.toHaveProperty("openhub");
+    expect(AGENT_LABELS).not.toHaveProperty("openhub");
+    expect(PRESELECTED_MODEL).not.toHaveProperty("openhub");
+  });
 });
 
 describe("Claude Code catalog (RUN-049)", () => {
