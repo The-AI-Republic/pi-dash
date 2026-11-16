@@ -105,8 +105,13 @@ def section_path(key: str) -> Path:
 
 
 def test_mirrors_are_byte_identical_to_sources():
-    sources = sorted(SECTIONS_DIR.glob("*.md"))
-    assert len(sources) == 38
+    # P3 step B deleted the 15 cloud-* sections from the Rust mirror;
+    # the Django tree still carries them. Every other section mirrors
+    # byte for byte, with no extras.
+    sources = sorted(
+        path for path in SECTIONS_DIR.glob("*.md") if not path.name.startswith("cloud-")
+    )
+    assert len(sources) == 23
     for source in sources:
         mirror = MIRROR_DIR / source.name
         assert mirror.is_file(), f"mirror missing for {source.name}"
@@ -138,7 +143,7 @@ def test_fixture_registry_matches_sources():
     fixture = json.loads((FIXTURES_DIR / "FIX-registry.json").read_text())
     assert fixture["bugs"] == []
     entries = fixture["data"]["registry"]["sections"]
-    assert fixture["data"]["registry"]["section_count"] == 45 == len(entries)
+    assert fixture["data"]["registry"]["section_count"] == 30 == len(entries)
     for entry in entries:
         body = section_body(section_path(entry["key"]))
         assert len(body) == entry["body_len"], entry["key"]
