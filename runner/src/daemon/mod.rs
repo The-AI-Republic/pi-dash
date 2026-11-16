@@ -4,6 +4,7 @@ pub mod pidash_agent_ops;
 pub(crate) mod pidash_agent_reconcile;
 pub mod machine_control;
 pub mod observability;
+pub mod receipt;
 pub mod reconnect_triggers;
 mod run_event_mirror;
 pub mod run_queue;
